@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fnmatch
 import hashlib
 import json
 import sys
@@ -29,13 +30,60 @@ def _arguments() -> argparse.Namespace:
     )
     parser.add_argument("--edition", choices=SUPPORTED_DND_EDITIONS, default="2014")
     parser.add_argument("--locale", default="en")
+    parser.add_argument(
+        "--include",
+        action="append",
+        default=[],
+        metavar="GLOB",
+        help="Run only relative paths matching this case-insensitive glob; repeatable",
+    )
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="GLOB",
+        help="Skip relative paths matching this case-insensitive glob; repeatable",
+    )
     parser.add_argument("--no-ocr", action="store_true")
     parser.add_argument("--ocr-scale", type=float, default=2.0)
+    parser.add_argument(
+        "--document-cache",
+        type=Path,
+        help=(
+            "Optional shared, content-addressed normalized-document cache. "
+            "Campaign databases and exported packages remain isolated per --home."
+        ),
+    )
     parser.add_argument("--fail-on-warning", action="store_true")
+    parser.add_argument(
+        "--portable-roundtrip",
+        action="store_true",
+        help=(
+            "Compile each complete private source catalog with build-time semantic "
+            "resolution, export it, import it into an isolated MCP home, and require "
+            "an identical re-export"
+        ),
+    )
+    parser.add_argument(
+        "--portable-target-home",
+        type=Path,
+        help=(
+            "Isolated receiver home for --portable-roundtrip; defaults to a sibling "
+            "of --home"
+        ),
+    )
     parser.add_argument(
         "--run-id",
         default="default",
         help="Logical run id; use a new value to exercise caches without idempotent replay",
+    )
+    parser.add_argument(
+        "--addon-output-dir",
+        type=Path,
+        help=(
+            "Write each complete private addon package to this directory after "
+            "its isolated public-MCP round trip succeeds"
+        ),
     )
     parser.add_argument("--output", type=Path)
     return parser.parse_args()
@@ -43,9 +91,8 @@ def _arguments() -> argparse.Namespace:
 
 def _key(relative_path: str, *, run_id: str = "default") -> str:
     slug = ascii_slug(Path(relative_path).stem)
-    digest_input = relative_path if run_id == "default" else f"{relative_path}\0{run_id}"
-    digest = hashlib.sha256(digest_input.encode("utf-8")).hexdigest()[:10]
-    return f"regression.{slug[:120] or 'rulebook'}.{digest}"
+    digest = hashlib.sha256(relative_path.encode("utf-8")).hexdigest()[:10]
+    return f"user.rulebook.{slug[:120] or 'rulebook'}.{digest}"
 
 
 async def _call(server: Any, name: str, arguments: dict[str, Any]) -> Any:
@@ -56,6 +103,16 @@ async def _call(server: Any, name: str, arguments: dict[str, Any]) -> Any:
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
     root = args.root.expanduser().resolve()
     home = args.home.expanduser().resolve()
+    document_cache = (
+        args.document_cache.expanduser().resolve() if args.document_cache else None
+    )
+    addon_output_dir = (
+        args.addon_output_dir.expanduser().resolve()
+        if args.addon_output_dir
+        else None
+    )
+    if addon_output_dir is not None:
+        addon_output_dir.mkdir(parents=True, exist_ok=True)
     config = McpConfig.from_environment()
     config = McpConfig(
         home=home,
@@ -69,6 +126,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         module_import_roots=(),
         rule_ocr_enabled=not args.no_ocr,
         rule_ocr_scale=args.ocr_scale,
+        document_cache_dir=document_cache,
     )
     server = create_server(config)
     campaign = await _call(
@@ -94,16 +152,68 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         "rule_import",
         {"campaign_id": campaign["id"], "action": "discover"},
     )
-    documents = discovery["result"]["documents"]
+    discovered_documents = discovery["result"]["documents"]
+    documents = [
+        document
+        for document in discovered_documents
+        if _matches_includes(str(document["relative_path"]), args.include)
+        and not _matches_includes(str(document["relative_path"]), args.exclude, empty=False)
+    ]
+    target_server: Any | None = None
+    target_campaign: dict[str, Any] | None = None
+    target_home: Path | None = None
+    if args.portable_roundtrip:
+        target_home = (
+            args.portable_target_home.expanduser().resolve()
+            if args.portable_target_home
+            else home.with_name(f"{home.name}-portable-target")
+        )
+        if target_home == home:
+            raise ValueError("portable target home must differ from the source MCP home")
+        target_config = McpConfig(
+            home=target_home,
+            database_url=None,
+            chroma_url=None,
+            chroma_path_override=None,
+            dnd_skills_dir=config.dnd_skills_dir,
+            modulegen_skills_dir=config.modulegen_skills_dir,
+            auto_seed_rules=False,
+            rule_import_roots=(),
+            module_import_roots=(),
+            rule_ocr_enabled=not args.no_ocr,
+            rule_ocr_scale=args.ocr_scale,
+            document_cache_dir=document_cache,
+        )
+        target_server = create_server(target_config)
+        target_campaign = await _call(
+            target_server,
+            "campaign_create",
+            {
+                "name": f"Portable rulebook receiver [{_run_token(args.run_id)}]",
+                "edition": args.edition,
+                "locale": args.locale,
+                "idempotency_key": (
+                    f"rulebook-portable-target-campaign-{_run_token(args.run_id)}"
+                ),
+            },
+        )
     report: dict[str, Any] = {
         "root": str(root),
         "home": str(home),
+        "document_cache": str(document_cache) if document_cache else None,
         "edition": args.edition,
         "run_id": args.run_id,
         "document_count": len(documents),
+        "discovered_document_count": len(discovered_documents),
+        "include": list(args.include),
+        "exclude": list(args.exclude),
         "documents": [],
         "errors": [],
+        "portable_roundtrip": args.portable_roundtrip,
+        "portable_target_home": str(target_home) if target_home else None,
+        "addon_output_dir": str(addon_output_dir) if addon_output_dir else None,
     }
+    release_components: list[dict[str, Any]] = []
     started = perf_counter()
     for index, document in enumerate(documents, start=1):
         relative_path = str(document["relative_path"])
@@ -114,6 +224,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         item_started = perf_counter()
         print(f"[{index}/{len(documents)}] {relative_path}", file=sys.stderr, flush=True)
         try:
+            publication_id, authority = _publication_metadata(relative_path)
             staged = await _call(
                 server,
                 "rule_import",
@@ -126,8 +237,8 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                         "title": Path(relative_path).stem,
                         "edition": args.edition,
                         "locale": args.locale,
-                        "publication_id": source_key,
-                        "authority": "supplement",
+                        "publication_id": publication_id,
+                        "authority": authority,
                     },
                     "idempotency_key": f"regression-stage-{id_key}",
                 },
@@ -161,6 +272,19 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 },
             )
             source_id = ingested["result"]["source"]["id"]
+            statblock_recovery: dict[str, Any] | None = None
+            if target_server is not None and args.edition == "2014":
+                recovery_response = await _call(
+                    server,
+                    "rule_import",
+                    {
+                        "campaign_id": campaign["id"],
+                        "action": "recover_statblocks",
+                        "payload": {"job_id": job_id},
+                        "idempotency_key": f"regression-recover-catalog-{id_key}",
+                    },
+                )
+                statblock_recovery = recovery_response["result"]
             extracted = await _call(
                 server,
                 "rule_import",
@@ -172,6 +296,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 },
             )
             candidates = extracted["result"]["candidates"]
+            inventory = extracted["result"]["inventory"]
             hits = await _call(
                 server,
                 "rule_search",
@@ -181,6 +306,32 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     "top_k": 1,
                 },
             )
+            portable: dict[str, Any] | None = None
+            if target_server is not None and target_campaign is not None:
+                portable = await _portable_roundtrip(
+                    source_server=server,
+                    source_campaign_id=str(campaign["id"]),
+                    target_server=target_server,
+                    target_campaign_id=str(target_campaign["id"]),
+                    source_id=source_id,
+                    source_key=source_key,
+                    job_id=job_id,
+                    candidates=candidates,
+                    relative_path=relative_path,
+                    edition=args.edition,
+                    run_id=args.run_id,
+                    id_key=id_key,
+                    addon_output_dir=addon_output_dir,
+                )
+                release_components.append(
+                    {
+                        "kind": "rule_pack",
+                        "id": portable["pack_id"],
+                        "version": portable["version"],
+                        "checksum": portable["package_checksum"],
+                        "optional": False,
+                    }
+                )
             report["documents"].append(
                 {
                     "relative_path": relative_path,
@@ -194,13 +345,63 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     "metadata": inspection["metadata"],
                     "candidate_count": len(candidates),
                     "candidate_kinds": _kind_counts(candidates),
+                    "candidate_catalog": [
+                        {
+                            "id": item["id"],
+                            "kind": item["kind"],
+                            "name": item["name"],
+                            "page_start": item.get("page_start"),
+                            "page_end": item.get("page_end"),
+                            "execution_state": item.get("execution_state"),
+                        }
+                        for item in candidates
+                    ],
+                    "content_inventory": {
+                        key: value
+                        for key, value in inventory.items()
+                        if key != "ledger"
+                    },
+                    "statblock_recovery": statblock_recovery,
                     "source_scoped_search_hit": bool(hits),
+                    "portable": portable,
                     "seconds": round(perf_counter() - item_started, 3),
                 }
             )
+            print(
+                f"[OK {index}/{len(documents)}] {relative_path} "
+                f"({perf_counter() - item_started:.1f}s)",
+                file=sys.stderr,
+                flush=True,
+            )
         except Exception as error:  # regression harness must report every book
+            message = f"{type(error).__name__}: {error}"
             report["errors"].append(
-                {"relative_path": relative_path, "error": f"{type(error).__name__}: {error}"}
+                {"relative_path": relative_path, "error": message}
+            )
+            print(
+                f"[FAIL {index}/{len(documents)}] {relative_path}: {message}",
+                file=sys.stderr,
+                flush=True,
+            )
+    if (
+        target_server is not None
+        and target_campaign is not None
+        and release_components
+        and len(release_components) == len(documents)
+    ):
+        try:
+            release = await _portable_release_check(
+                source_server=server,
+                source_campaign_id=str(campaign["id"]),
+                target_server=target_server,
+                target_campaign_id=str(target_campaign["id"]),
+                components=release_components,
+                run_id=args.run_id,
+            )
+            report["release"] = release
+        except Exception as error:
+            report["errors"].append(
+                {"relative_path": "<release_manifest>", "error": f"{type(error).__name__}: {error}"}
             )
     report["seconds"] = round(perf_counter() - started, 3)
     report["passed"] = not report["errors"] and len(report["documents"]) == len(documents)
@@ -215,6 +416,570 @@ def _kind_counts(candidates: list[dict[str, Any]]) -> dict[str, int]:
     return dict(sorted(result.items()))
 
 
+def _matches_includes(
+    relative_path: str,
+    patterns: list[str],
+    *,
+    empty: bool = True,
+) -> bool:
+    """Match user-facing include globs consistently across host filesystems."""
+
+    folded_path = relative_path.casefold()
+    return empty if not patterns else any(
+        fnmatch.fnmatch(folded_path, pattern.casefold()) for pattern in patterns
+    )
+
+
+async def _portable_roundtrip(
+    *,
+    source_server: Any,
+    source_campaign_id: str,
+    target_server: Any,
+    target_campaign_id: str,
+    source_id: str,
+    source_key: str,
+    job_id: str,
+    candidates: list[dict[str, Any]],
+    relative_path: str,
+    edition: str,
+    run_id: str,
+    id_key: str,
+    addon_output_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Compile the entire reviewed catalog and round-trip its self-contained addon."""
+
+    chunks: list[dict[str, Any]] = []
+    while True:
+        chunk_response = await _call(
+            source_server,
+            "rule_pack_query",
+            {
+                "view": "source_chunks",
+                "payload": {
+                    "source_id": source_id,
+                    "limit": 200,
+                    "offset": len(chunks),
+                },
+            },
+        )
+        page = list(chunk_response["result"])
+        chunks.extend(page)
+        if len(page) < 200:
+            break
+    if not chunks:
+        raise RuntimeError("indexed source has no chunk available for a portable probe")
+    pack_id = _portable_pack_id(relative_path, run_id=run_id)
+    version = "1.0.0"
+    title = Path(relative_path).stem
+    extracted_candidates = list(candidates)
+    if not extracted_candidates:
+        catalog_chunks = [
+            (index, chunk)
+            for index, chunk in enumerate(chunks)
+            if str(chunk.get("content") or "").strip()
+        ]
+        if not catalog_chunks:
+            raise RuntimeError("indexed source has no nonempty chunk for its catalog")
+        candidates = []
+        for index, chunk in catalog_chunks:
+            content = " ".join(str(chunk.get("content") or "").split())
+            heading = " > ".join(
+                str(item).strip()
+                for item in chunk.get("heading_path") or []
+                if str(item).strip()
+            )
+            ordinal = int(chunk.get("ordinal", index) or 0)
+            digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:12]
+            candidates.append(
+                {
+                    "kind": "feature",
+                    "artifact": {
+                        "id": f"{pack_id}.source-chunk-{ordinal:04d}-{digest}",
+                        "kind": "feature",
+                        "card": {
+                            "name": (
+                                f"Source section {ordinal + 1}: {heading}"
+                                if heading
+                                else f"Source section {ordinal + 1}: {title}"
+                            )[:240]
+                        },
+                        "application_state": "catalog_only",
+                        # No specialized candidate does not prove descriptive
+                        # content. Bind every nonempty source chunk to its own
+                        # build-time direct Agent ruling so tables and novel
+                        # procedures cannot disappear behind one sample probe.
+                        "mechanical_scope": "mechanical",
+                        "source_chunk_ids": [chunk["id"]],
+                    },
+                }
+            )
+        draft_response = await _call(
+            source_server,
+            "rule_pack_compile",
+            {
+                "action": "from_source",
+                "payload": {
+                    "source_id": source_id,
+                    "manifest": {
+                        "id": pack_id,
+                        "version": version,
+                        "title": title,
+                        "namespace": pack_id,
+                        "system_id": "dnd5e",
+                        "editions": [edition],
+                        "dependencies": [],
+                        "conflicts": [],
+                        "capabilities": [],
+                        "content_kinds": ["feature"],
+                    },
+                    "artifacts": [item["artifact"] for item in candidates],
+                    "provenance": {
+                        "distribution": "private",
+                        "regression_only": False,
+                        "source_key": source_key,
+                        "complete_catalog": True,
+                        "source_catalog_fallback": (
+                            "per_chunk_source_bound_agent_ruling"
+                        ),
+                        "source_catalog_artifact_count": len(candidates),
+                        "empty_source_chunk_count": len(chunks) - len(catalog_chunks),
+                    },
+                },
+            },
+        )
+        draft_response = {"result": {"draft": draft_response["result"]}}
+    else:
+        reviewed = await _call(
+            source_server,
+            "rule_import",
+            {
+                "campaign_id": source_campaign_id,
+                "action": "review",
+                "payload": {
+                    "job_id": job_id,
+                    "decisions": [
+                        {
+                            "id": candidate["id"],
+                            "review_status": "accepted",
+                        }
+                        for candidate in candidates
+                    ],
+                },
+                "idempotency_key": f"regression-review-all-{id_key}",
+            },
+        )
+        if any(
+            item["review_status"] != "accepted"
+            for item in reviewed["result"]["candidates"]
+        ):
+            raise RuntimeError("full candidate catalog was not accepted")
+        draft_response = await _call(
+            source_server,
+            "rule_import",
+            {
+                "campaign_id": source_campaign_id,
+                "action": "compile",
+                "payload": {
+                    "job_id": job_id,
+                    "manifest": {
+                        "id": pack_id,
+                        "version": version,
+                        "title": title,
+                        "namespace": pack_id,
+                        "system_id": "dnd5e",
+                        "editions": [edition],
+                        "dependencies": [],
+                        "conflicts": [],
+                        "capabilities": [],
+                        "content_kinds": sorted(_kind_counts(candidates)),
+                    },
+                    "provenance": {
+                        "distribution": "private",
+                        "regression_only": False,
+                        "source_key": source_key,
+                        "complete_catalog": True,
+                    },
+                },
+                "idempotency_key": f"regression-compile-all-{id_key}",
+            },
+        )
+    draft = draft_response["result"]["draft"]
+    if draft["status"] != "validated":
+        raise RuntimeError(f"portable probe draft was not validated: {draft['status']}")
+    export_response = await _call(
+        source_server,
+        "rule_pack_query",
+        {
+            "view": "package",
+            "payload": {
+                "campaign_id": source_campaign_id,
+                "pack_id": pack_id,
+                "version": version,
+                "metadata": {
+                    "distribution": "private",
+                    "regression_only": False,
+                },
+                "include_package": True,
+            },
+        },
+    )
+    exported = export_response["result"]
+    package = exported["package"]
+    addon_components = [package]
+    preset_export: dict[str, Any] | None = None
+    preset_summary: dict[str, Any] = {
+        "cards": 0,
+        "failures": [],
+        "complete": True,
+        "deferred": 0,
+        "dependent_actor_templates": [],
+    }
+    if any(candidate.get("kind") == "statblock" for candidate in candidates):
+        preset_response = await _call(
+            source_server,
+            "rule_pack_query",
+            {
+                "view": "preset_package",
+                "payload": {
+                    "campaign_id": source_campaign_id,
+                    "pack_id": pack_id,
+                    "version": version,
+                    "portable_id": f"{pack_id}.actors",
+                    "allow_partial": True,
+                    "metadata": {
+                        "distribution": "private",
+                        "license": "user-supplied",
+                    },
+                    "include_package": True,
+                },
+            },
+        )
+        preset_summary = dict(preset_response["result"]["summary"])
+        if preset_response["result"].get("package") is not None:
+            preset_export = preset_response["result"]
+            addon_components.append(preset_export["package"])
+        if (
+            preset_summary.get("complete") is not True
+            or int(preset_summary.get("deferred", 0) or 0) != 0
+            or list(preset_summary.get("failures") or [])
+        ):
+            raise RuntimeError(
+                "actor preset export is incomplete: "
+                f"deferred={preset_summary.get('deferred', 0)}, "
+                f"failures={preset_summary.get('failures', [])}"
+            )
+    addon_id = f"{pack_id}.addon"
+    classification = _addon_classification(relative_path)
+    addon_response = await _call(
+        source_server,
+        "rule_pack_query",
+        {
+            "view": "addon_package",
+            "payload": {
+                "campaign_id": source_campaign_id,
+                "portable_id": addon_id,
+                "version": version,
+                "manifest": {
+                    "id": addon_id,
+                    "version": version,
+                    "system_id": "dnd5e",
+                    "title": title,
+                    "editions": [edition],
+                    "classification": classification,
+                    "content_summary": _kind_counts(candidates),
+                    "activation": {
+                        "rule_policy": "branch",
+                        "preset_policy": "library" if preset_export else "none",
+                        "module_policy": "none",
+                    },
+                },
+                "components": addon_components,
+                "metadata": {
+                    "title": title,
+                    "distribution": "private",
+                    "license": "user-supplied",
+                    "source_path": relative_path,
+                    "complete_source": True,
+                },
+                "include_package": True,
+            },
+        },
+    )
+    addon = addon_response["result"]["package"]
+    readiness = dict(addon["payload"]["manifest"]["resolution_readiness"])
+    if (
+        readiness.get("complete") is not True
+        or readiness.get("first_use_compilation_required") is not False
+        or list(readiness.get("unresolved") or [])
+    ):
+        raise RuntimeError("addon escaped with incomplete build-time resolution")
+    addon_output_path = None
+    if addon_output_dir is not None:
+        output_name = (
+            f"{ascii_slug(Path(relative_path).stem) or 'rulebook'}-"
+            f"{hashlib.sha256(relative_path.encode('utf-8')).hexdigest()[:10]}"
+            ".addon.sagasmith.json"
+        )
+        addon_output_path = addon_output_dir / output_name
+        addon_output_path.write_text(
+            json.dumps(addon, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    import_response = await _call(
+        target_server,
+        "rule_import",
+        {
+            "campaign_id": target_campaign_id,
+            "action": "import_addon",
+            "payload": {"addon": addon},
+            "idempotency_key": f"regression-addon-import-{id_key}",
+        },
+    )
+    imported = import_response["result"]
+    if imported["installed"] is not True or imported["activated"] is not False:
+        raise RuntimeError("addon import did not stop at the installed/inactive boundary")
+    if any(item["status"] != "installed" for item in imported["components"]):
+        raise RuntimeError("addon global components were not installed")
+    profile_response = await _call(
+        target_server,
+        "campaign_rules",
+        {"campaign_id": target_campaign_id, "action": "get_profile"},
+    )
+    activated_response = await _call(
+        target_server,
+        "campaign_rules",
+        {
+            "campaign_id": target_campaign_id,
+            "action": "set_addon",
+            "payload": {"addon_id": addon_id, "version": version},
+            "expected_revision": profile_response["result"]["campaign_revision"],
+            "idempotency_key": (
+                f"regression-addon-enable-{id_key}-"
+                f"r{profile_response['result']['campaign_revision']}"
+            ),
+        },
+    )
+    if activated_response["result"]["activation"]["enabled"] is not True:
+        raise RuntimeError("addon did not activate its exact branch lock")
+    campaign_response = await _call(
+        target_server,
+        "campaign_query",
+        {"view": "get", "payload": {"campaign_id": target_campaign_id}},
+    )
+    disabled_response = await _call(
+        target_server,
+        "campaign_rules",
+        {
+            "campaign_id": target_campaign_id,
+            "action": "set_addon",
+            "payload": {
+                "addon_id": addon_id,
+                "version": version,
+                "enabled": False,
+            },
+            "expected_revision": campaign_response["result"]["revision"],
+            "idempotency_key": (
+                f"regression-addon-disable-{id_key}-"
+                f"r{campaign_response['result']['revision']}"
+            ),
+        },
+    )
+    if disabled_response["result"]["activation"]["enabled"] is not False:
+        raise RuntimeError("addon did not release its branch lock")
+    reexport_response = await _call(
+        target_server,
+        "rule_pack_query",
+        {
+            "view": "package",
+            "payload": {
+                "campaign_id": target_campaign_id,
+                "pack_id": pack_id,
+                "version": version,
+                "metadata": {
+                    "distribution": "private",
+                    "regression_only": False,
+                },
+                "include_package": True,
+            },
+        },
+    )
+    reexported = reexport_response["result"]["package"]
+    if reexported != package:
+        raise RuntimeError("portable package changed after cross-instance re-export")
+    addon_detail = await _call(
+        target_server,
+        "rule_pack_query",
+        {
+            "view": "addon",
+            "payload": {
+                "campaign_id": target_campaign_id,
+                "addon_id": addon_id,
+                "version": version,
+                "include_package": True,
+            },
+        },
+    )
+    if addon_detail["result"]["package"] != addon:
+        raise RuntimeError("portable addon changed after cross-instance import")
+    imported_sources = await _call(
+        target_server,
+        "rule_pack_query",
+        {"view": "sources", "payload": {"edition": edition}},
+    )
+    imported_source_ids = [
+        str(item["id"])
+        for item in imported_sources["result"]
+        if item.get("source_key") == source_key
+    ]
+    if not imported_source_ids or source_id in imported_source_ids:
+        raise RuntimeError("portable addon did not materialize fresh source identities")
+    return {
+        "pack_id": pack_id,
+        "version": version,
+        "package_checksum": package["checksum"],
+        "definition_checksum": package["metadata"]["definition_checksum"],
+        "package_artifact": exported["artifact"],
+        "addon_id": addon_id,
+        "addon_checksum": addon["checksum"],
+        "resolution_readiness": readiness,
+        "addon_artifact": addon_response["result"]["artifact"],
+        "addon_output": str(addon_output_path) if addon_output_path else None,
+        "catalog_artifacts": len(candidates),
+        "actor_presets": preset_summary["cards"],
+        "deferred_actor_presets": preset_summary.get("deferred", 0),
+        "dependent_actor_templates": preset_summary.get(
+            "dependent_actor_templates", []
+        ),
+        "preset_failures": preset_summary.get("failures", []),
+        "target_source_ids": imported_source_ids,
+        "fresh_source_ids": True,
+        "draft_status": "validated",
+        "installed": True,
+        "activated": True,
+        "deactivated": True,
+        "addon_reexport_identical": True,
+        "reexport_identical": True,
+    }
+
+
+async def _portable_release_check(
+    *,
+    source_server: Any,
+    source_campaign_id: str,
+    target_server: Any,
+    target_campaign_id: str,
+    components: list[dict[str, Any]],
+    run_id: str,
+) -> dict[str, Any]:
+    release_id = f"dnd5e.regression.books-release.{_run_token(run_id)}"
+    release_response = await _call(
+        source_server,
+        "rule_pack_query",
+        {
+            "view": "release",
+            "payload": {
+                "campaign_id": source_campaign_id,
+                "portable_id": release_id,
+                "version": "1.0.0",
+                "components": components,
+                "metadata": {
+                    "title": "Private rulebook regression release",
+                    "distribution": "private",
+                    "regression_only": True,
+                },
+                "include_manifest": True,
+            },
+        },
+    )
+    released = release_response["result"]
+    inspect_response = await _call(
+        target_server,
+        "rule_import",
+        {
+            "campaign_id": target_campaign_id,
+            "action": "inspect_release",
+            "payload": {"release_manifest": released["release_manifest"]},
+        },
+    )
+    inspected = inspect_response["result"]
+    if inspected["authority"] != "manifest_only":
+        raise RuntimeError("release manifest unexpectedly gained runtime authority")
+    if inspected["auto_install"] is not False or inspected["auto_activate"] is not False:
+        raise RuntimeError("release inspection crossed an install or activation boundary")
+    if any(item["local_status"] != "installed" for item in inspected["components"]):
+        raise RuntimeError("release receiver does not contain every installed rule package")
+    if any(
+        item["portable_checksum_status"] != "match" for item in inspected["components"]
+    ):
+        raise RuntimeError("release component envelope checksum mismatch")
+    return {
+        "id": release_id,
+        "version": "1.0.0",
+        "checksum": inspected["release"]["checksum"],
+        "artifact": released["artifact"],
+        "component_count": len(inspected["components"]),
+        "authority": inspected["authority"],
+        "auto_install": inspected["auto_install"],
+        "auto_activate": inspected["auto_activate"],
+        "all_components_installed": True,
+        "all_envelope_checksums_match": True,
+    }
+
+
+def _portable_pack_id(relative_path: str, *, run_id: str) -> str:
+    digest = hashlib.sha256(relative_path.encode("utf-8")).hexdigest()[:12]
+    slug = ascii_slug(Path(relative_path).stem)[:80] or "rulebook"
+    return f"dnd5e.addon.rulebook.{slug}.{digest}"
+
+
+def _publication_metadata(relative_path: str) -> tuple[str, str]:
+    """Return a stable publication identity and its standard-rule authority."""
+
+    folded = relative_path.casefold().replace("’", "'")
+    publications = (
+        ("player's handbook", "phb2014", "core"),
+        ("dungeon master's guide", "dmg2014", "core"),
+        ("monster manual", "mm2014", "core"),
+        ("eberron - rising from the last war", "erlw2014", "supplement"),
+        ("elemental evil player's companion", "eepc2014", "supplement"),
+        ("guildmasters' guide to ravnica", "ggr2014", "supplement"),
+        ("mordenkainen's tome of foes", "mtof2014", "supplement"),
+        ("sword coast adventurer's guide", "scag2014", "supplement"),
+        ("tasha's cauldron of everything", "tcoe2014", "supplement"),
+        ("the tortle package", "tortle2014", "supplement"),
+        ("volo's guide to monsters", "vgm2014", "supplement"),
+        ("wayfinders guide to eberron", "wgte2014", "supplement"),
+        ("xanathar's guide to everything", "xgte2014", "supplement"),
+    )
+    for needle, publication_id, authority in publications:
+        if needle in folded:
+            return publication_id, authority
+    slug = ascii_slug(Path(relative_path).stem) or "user-source"
+    return f"user-{slug[:100]}", "supplement"
+
+
+def _addon_classification(relative_path: str) -> str:
+    folded = relative_path.casefold()
+    if any(
+        title in folded
+        for title in (
+            "player's handbook",
+            "dungeon master's guide",
+            "monster manual",
+        )
+    ):
+        return "official_core"
+    if "blood hunter" in folded or "nlrme" in folded:
+        return "third_party"
+    if "school of geometry" in folded:
+        return "homebrew"
+    if "\\uo\\" in f"\\{folded}" or folded.startswith("uo\\"):
+        return "playtest"
+    if "wayfinder's guide" in folded or "wayfinders guide" in folded:
+        return "official_legacy"
+    return "official_supplement"
+
+
 def _run_token(run_id: str) -> str:
     return hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:12]
 
@@ -226,7 +991,10 @@ def main() -> int:
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered + "\n", encoding="utf-8")
-    print(rendered)
+    # PowerShell commonly gives redirected Python processes a legacy code page.
+    # The report is Unicode JSON, so write bytes explicitly instead of losing
+    # valid source text (for example non-breaking spaces) at the final print.
+    sys.stdout.buffer.write((rendered + "\n").encode("utf-8"))
     return 0 if report["passed"] else 1
 
 

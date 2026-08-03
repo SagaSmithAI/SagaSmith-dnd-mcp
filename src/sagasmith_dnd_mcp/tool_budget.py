@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-TOOL_BUDGET_VERSION = "2026-08-portable-content-v22"
+TOOL_BUDGET_VERSION = "2026-08-build-time-resolution-v29"
 
 # Captured before the conservative facade consolidation.  Keep this historical
 # baseline so a lower tool count cannot conceal a larger aggregate input schema.
@@ -18,11 +18,11 @@ TARGET_CORE_TOOL_COUNT = 13
 # arbitrary string. Version 6 adds 14 bytes for the generic, action-bound
 # combat_hp_change(save_damage) settlement. Version 7 adds 15 bytes for the
 # source-bound combat_choice(execute_plan) action without another public tool.
-# Version 8 adds the first-use combat_choice(compile_solution) action while
-# keeping the same public and core tool counts.
-# Version 9 deliberately adds one DM-only, cross-phase content_solution tool.
-# This keeps reusable recipe compilation separate from character replacement
-# and from paid combat settlement.
+# Version 8's paid-use solution-authoring action is retired; portable addon
+# resolution is now completed before release.
+# Version 9 added the DM-only content_solution tool. Build-time resolution now
+# limits that authoring/migration facade to Lobby; Play and Combat consume only
+# already-reviewed cards and direct source-bound ruling contracts.
 # Version 10 adds the hard-standard sustain_spell action to the existing common
 # action facade; no public or core tool is added.
 # Version 11 adds the hard-standard resolve_death_trigger action to the existing
@@ -52,9 +52,20 @@ TARGET_CORE_TOOL_COUNT = 13
 # change during memory_change(upsert). Version 22 adds portable actor-card and
 # module-package actions to five existing facades. Public/core tool counts and
 # phase limits stay fixed; the 97-byte schema increase remains below baseline.
-TARGET_INPUT_SCHEMA_BYTES = 51_700
+# Version 23 adds rule_import(import_package/inspect_release) plus package and
+# release views to existing facades. Versions 24-25 add self-contained addon
+# import, export, inspection, and branch activation to the same compact
+# facades. The 60-byte schema increase adds no public/core tool and keeps the
+# aggregate below the pre-consolidation baseline. Version 26 adds the actor
+# preset-package view to the existing rule-pack query facade, so normalized
+# creature cards can travel inside an addon without another public tool.
+# Version 27 adds the batch statblock-recovery action to rule_import. It reuses
+# the existing facade and adds 21 bytes without changing any tool/profile count.
+# Version 28 makes an omitted rule_seed_bundled limit mean complete coverage;
+# the nullable compatibility parameter adds 30 bytes and no public tool.
+TARGET_INPUT_SCHEMA_BYTES = 51_864
 PROFILE_TOOL_LIMITS = {
     "lobby": 63,
-    "play": 49,
-    "combat": 48,
+    "play": 48,
+    "combat": 47,
 }

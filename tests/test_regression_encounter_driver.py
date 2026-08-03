@@ -2462,12 +2462,12 @@ def test_source_extra_damage_ruling_binds_exact_agent_passive_and_application() 
             }
         },
     }
-    with pytest.raises(ValueError, match="persisted first-use attack solution"):
-        _source_extra_damage_rulings(
-            [declaration],
-            participant_ids=[actor["id"], "target-1"],
-            actors={actor["id"]: unresolved_actor},
-        )
+    direct_only = _source_extra_damage_rulings(
+        [declaration],
+        participant_ids=[actor["id"], "target-1"],
+        actors={actor["id"]: unresolved_actor},
+    )
+    assert direct_only[actor["id"]][0]["solution_plan_fingerprint"] == ""
 
     different_excerpt = PERYTON_DIVE_ATTACK.replace("(2d8)", "(12d8)")
     different_actor = {

@@ -156,6 +156,68 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                 ("edition",),
             )
         ],
+        "addons": [
+            _variant(("addon_id", "branch_id", "campaign_id"), ("campaign_id",))
+        ],
+        "addon": [
+            _variant(
+                ("addon_id", "campaign_id", "include_package", "version"),
+                ("campaign_id", "addon_id", "version"),
+            )
+        ],
+        "addon_package": [
+            _variant(
+                (
+                    "campaign_id",
+                    "components",
+                    "include_package",
+                    "manifest",
+                    "metadata",
+                    "portable_id",
+                    "version",
+                ),
+                ("campaign_id", "portable_id", "version", "manifest", "components"),
+            )
+        ],
+        "preset_package": [
+            _variant(
+                (
+                    "allow_partial",
+                    "campaign_id",
+                    "include_package",
+                    "metadata",
+                    "pack_id",
+                    "portable_id",
+                    "version",
+                ),
+                ("campaign_id", "pack_id", "version", "portable_id"),
+            )
+        ],
+        "package": [
+            _guide(
+                (
+                    "campaign_id",
+                    "include_package",
+                    "metadata",
+                    "pack_id",
+                    "version",
+                ),
+                ("campaign_id", "pack_id", "version"),
+            )
+        ],
+        "release": [
+            _guide(
+                (
+                    "campaign_id",
+                    "components",
+                    "include_manifest",
+                    "metadata",
+                    "portable_id",
+                    "version",
+                ),
+                ("campaign_id", "portable_id", "version", "components"),
+            )
+        ],
     },
     "campaign_rules": {
         "get_profile": [_guide(())],
@@ -172,6 +234,12 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
             )
         ],
         "remove_pack": [_guide(("pack_id",), ("pack_id",))],
+        "set_addon": [
+            _variant(
+                ("addon_id", "enabled", "options", "version"),
+                ("addon_id", "version"),
+            )
+        ],
         "core_relock": [
             _variant(
                 (
@@ -1105,6 +1173,15 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
     },
     "rule_import": {
         "discover": [_variant(())],
+        "import_addon": [
+            _variant(("addon", "artifact", "source_path"))
+        ],
+        "import_package": [
+            _variant(("artifact", "package", "source_path"))
+        ],
+        "inspect_release": [
+            _variant(("artifact", "release_manifest", "source_path"))
+        ],
         "stage": [
             _variant(
                 (
@@ -1129,6 +1206,9 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                 ("agent_fill", "job_id", "name", "page_number"),
                 ("job_id", "name"),
             )
+        ],
+        "recover_statblocks": [
+            _variant(("job_id", "page_numbers"), ("job_id",))
         ],
         "ingest": [
             _variant(("acknowledge_warnings", "job_id"), ("job_id",))
@@ -1374,12 +1454,6 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
         ],
         "on_hit_ruling": [
             _variant(("choice_id", "selection"), ("choice_id", "selection"))
-        ],
-        "compile_solution": [
-            _variant(
-                ("agent_ruling", "application_id", "resolution_plan"),
-                ("application_id", "resolution_plan", "agent_ruling"),
-            )
         ],
         "execute_plan": [
             _variant(("commitment",), ("commitment",))

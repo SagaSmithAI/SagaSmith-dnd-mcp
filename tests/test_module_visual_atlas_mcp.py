@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -390,6 +391,7 @@ def test_module_statblock_ocr_recovery_supports_text_only_agent(
     )
     active_layout = [layout]
     ocr_calls = 0
+    ocr_sources: list[Path] = []
 
     def extract_layout(
         provider: RapidOcrProvider,
@@ -399,6 +401,7 @@ def test_module_statblock_ocr_recovery_supports_text_only_agent(
     ) -> list[OcrPageLayout]:
         nonlocal ocr_calls
         ocr_calls += 1
+        ocr_sources.append(Path(path))
         return [active_layout[0]]
 
     monkeypatch.setattr(RapidOcrProvider, "extract_layout", extract_layout)
@@ -515,6 +518,15 @@ def test_module_statblock_ocr_recovery_supports_text_only_agent(
         assert recovered["requires_agent_fill"] is False
 
         active_layout[0] = multiattack_layout
+        # A page layout is cached for one immutable source revision.  Advance
+        # the source mtime to model a replaced PDF before changing the mocked
+        # provider output; repeated reviews of the same revision reuse OCR.
+        cached_source = ocr_sources[-1]
+        source_stat = cached_source.stat()
+        os.utime(
+            cached_source,
+            ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns + 1_000_000_000),
+        )
         preview_arguments = {
             **arguments,
             "payload": {
@@ -582,6 +594,6 @@ def test_module_statblock_ocr_recovery_supports_text_only_agent(
                 ],
             }
         ]
-        assert ocr_calls == 3
+        assert ocr_calls == 2
 
     asyncio.run(exercise())

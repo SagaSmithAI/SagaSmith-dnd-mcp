@@ -815,7 +815,7 @@ def test_standard_statblock_rejects_damaged_spell_names_before_persist(
     asyncio.run(exercise())
 
 
-def test_standard_statblock_rejects_unimplemented_weapon_riders_before_persist(
+def test_standard_statblock_prefills_source_specific_weapon_rider_ruling(
     tmp_path: Path,
 ) -> None:
     import_root = tmp_path / "rules"
@@ -881,27 +881,141 @@ def test_standard_statblock_rejects_unimplemented_weapon_riders_before_persist(
             },
         )
 
-        with pytest.raises(
-            ToolError,
-            match=(
-                "standard rule statblock requires engine implementation:"
-                " Club: on-hit effect requires DM settlement"
-            ),
-        ):
-            await _call(
-                server,
-                "character_create_from",
-                {
-                    "mode": "statblock",
-                    "payload": {
-                        "campaign_id": campaign["id"],
-                        "source_id": ingested["source_id"],
-                        "name": "Rejected Unsupported Commoner",
-                        "character_type": "monster",
-                    },
-                    "idempotency_key": "reject-unsupported-commoner",
+        created = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "statblock",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "source_id": ingested["source_id"],
+                    "name": "Source-bound Commoner",
+                    "character_type": "monster",
                 },
-            )
+                "idempotency_key": "source-bound-commoner",
+            },
+        )
+        club = next(
+            item
+            for item in created["character"]["sheet"]["inventory"]["items"]
+            if item["name"] == "Club"
+        )
+        requirement = club["ruling_requirements"][0]
+        assert requirement["default_resolver"] == "agent"
+        assert requirement["policy_ref"] == "actor_card.import.v1"
+        assert "grappled" in requirement["source_excerpt"]
+        assert created["statblock"]["settlement"] == "mixed"
+
+    asyncio.run(exercise())
+
+
+def test_standard_statblock_prefills_open_multiattack_as_direct_agent_ruling(
+    tmp_path: Path,
+) -> None:
+    import_root = tmp_path / "rules"
+    import_root.mkdir()
+    source_path = import_root / "open-multiattack.md"
+    source_path.write_text(
+        COMMONER.replace(
+            "###### Actions",
+            (
+                "###### Actions\n\n"
+                "***Multiattack.*** The commoner makes two attacks and can ring "
+                "its alarm bell before, between, or after them."
+            ),
+        ),
+        encoding="utf-8",
+    )
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        rule_import_roots=(import_root,),
+        auto_seed_rules=False,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Direct Multiattack ruling",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        staged = await _call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "stage",
+                "payload": {
+                    "source_path": str(source_path),
+                    "source_key": "mm/open-multiattack",
+                    "title": "Open Multiattack",
+                    "edition": "2014",
+                    "publication_id": "mm2014",
+                },
+                "idempotency_key": "stage",
+            },
+        )
+        await _call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "inspect",
+                "payload": {"job_id": staged["job"]["id"]},
+                "idempotency_key": "inspect",
+            },
+        )
+        ingested = await _call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "ingest",
+                "payload": {"job_id": staged["job"]["id"]},
+                "idempotency_key": "ingest",
+            },
+        )
+
+        created = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "statblock",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "source_id": ingested["source_id"],
+                    "name": "Open Multiattack Commoner",
+                    "character_type": "monster",
+                },
+                "idempotency_key": "create",
+            },
+        )
+        multiattack = next(
+            item
+            for item in created["character"]["sheet"]["content"]["activities"]
+            if item["name"] == "Multiattack"
+        )
+        assert multiattack["choices"]["manual_ruling"] == {
+            "kind": "descriptive_activity",
+            "default_resolver": "agent",
+            "source_excerpt": (
+                "The commoner makes two attacks and can ring its alarm bell "
+                "before, between, or after them."
+            ),
+        }
+        assert multiattack["mechanic_refs"] == [
+            "dnd5e.core.action.multiattack_choice"
+        ]
+        assert created["statblock"]["settlement"] == "mixed"
 
     asyncio.run(exercise())
 

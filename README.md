@@ -16,7 +16,7 @@
   63/49/48。预算测试同时锁定聚合输入 schema 为 51,700 字节，低于合并前
   92 个工具的 56,611 字节基线。
 - **服务端执行门禁** — 未暴露工具即使通过 `exposure_call` 指定名称也会被拒绝；权限不是提示词约定。
-- **规则与自设内容分界** — 已注册的标准规则 mechanic 由版本锁定的引擎实现执行；标准卡缺少结果实现时会在付款前要求补引擎，不能降级成自设解释。未注册的模组或自设角色卡在首次真实使用前由 Agent 依据精确来源编译一次，服务端校验证据并把带版本的解决方案保存回该卡，后续复用且不重复解释原文。
+- **规则与自设内容分界** — 已注册的标准规则 mechanic 由版本锁定的引擎实现执行；标准卡缺少结果实现时会在付款前要求补引擎，不能降级成自设解释。未注册的模组或自设角色卡必须在导入、构建或写卡事务内依据精确来源写入直接 Agent ruling 或受校验的通用计划；正式使用只执行已经保存的边界，不再临时补内容方案。
 
 ## 运行结构
 
@@ -43,7 +43,7 @@ flowchart TB
   artifacts/modules/      # editable generated modules before import
   artifacts/rulebooks/    # content-addressed staged user books
   artifacts/normalized-rulebooks/ # verified normalization/OCR caches
-  artifacts/portable-packages/ # exported actor/module/preset packages
+  artifacts/portable-packages/ # actor/module/preset/rule packages and release manifests
 ```
 
 客户端不应直接写 SQLite、ChromaDB 或 artifact 目录。所有写入通过 MCP，确保迁移、revision、幂等、权限与 audit receipt 使用同一过程边界。
@@ -185,6 +185,16 @@ warning，ingest 就必须由 DM 显式传入 `acknowledge_warnings=true`。检�
 
 导入文本本身不会自动变成可执行规则。只有通过 mechanic IR 和 provider 校验的部分参与结算。2014/2024 核心引擎也封装为不可变内置 core pack；campaign 和 Snapshot 锁定精确版本、checksum 与依赖，恢复时缺少任何包都会拒绝物化状态。
 
+冷启动 seed 不再使用文件数截断：它必须覆盖 Skills 随附的 2,032 个 SRD
+Markdown 文件和 42 个来源分区，并在 `rule_seed_status` 中报告 missing/stale
+coverage。商业 PHB/DMG/MM 与扩展书只从用户白名单目录生成 private addon，原文
+和生成包不会进入仓库。
+
+内置 SRD 条目和私有 addon 都执行同一发布门禁：结构化授予、已注册内核机制、
+纯描述及怪物/法术等内容专属的来源绑定 Agent 裁定在构建时即写入。标准行动经济、
+资源支付、攻击、伤害及缺失来源事实仍由引擎严格处理；内容专属散文可以由 Agent
+依据持久 clause 在当前 DM 窗口裁定，但不得首次触发时创建或改写 resolution。
+
 规则 profile/pack 写入要求最新 `expected_revision` 和稳定 `idempotency_key`。`campaign_rules(action="explain")` 给出当前 branch lock、fingerprint、mechanic ids 与引用；rule receipt 保留结算时使用的不可变证据。
 
 ### 模组与战斗空间
@@ -211,6 +221,48 @@ preset PC，再由 `module_query(view="package")` 导出自包含 module pack。
 关联。`module_import(action="import_package")` 在目标 campaign 重新走 Core ingest、
 生成新 actor id 并恢复关联。模组包不是 Snapshot：它不包含 progress、world state、
 memory、actor knowledge、random stream 或 branch DAG。
+
+扩展规则包通过现有 facade 跨安装迁移：在 Lobby 由 DM 调用
+`rule_pack_query(view="package")` 导出；包内包含 manifest、catalog artifacts、
+mechanic IR、provenance 和完整索引来源。本地 `source_id`/`chunk_id` 会改写为
+稳定 `source_key`/`chunk_key`，接收端再通过
+`rule_import(action="import_package")` 创建新本地来源 id 并重绑所有引用及
+resolution-plan fingerprint。导入结果只会成为 validated inactive draft；它不会
+自动 install，也不会修改 campaign rule profile。依赖必须固定精确 version 与
+`metadata.definition_checksum`；该哈希不受两端本地 UUID 或 private/shareable 发布
+元数据影响。独立 rule pack 与组合 addon 一样必须携带
+`resolution_policy=build_time_complete` 及与接收端复算完全一致的 readiness；导出、
+导入和安装三个入口都会拒绝缺失、过期或仍含 deferred 语义的包。缺失依赖会显式
+返回，checksum 冲突则拒绝导入。
+
+整书构建先用 `rule_import(action="recover_statblocks")` 批量恢复可证明的角色卡，
+再用 `rule_pack_query(view="preset_package", allow_partial=true)` 生成已就绪的
+preset 组件。`allow_partial` 只允许某个 source-bound 角色模板留在显式待审清单；
+完整来源、全部机械候选和每个延迟原因仍必须进入 rule pack/report，不能把 OCR
+失败伪装成完整卡。启用 addon 后，catalog-only statblock 的
+`selection_requirements` 会明确指向
+`character_create_from(mode="statblock")`，由引擎从本地重绑后的 source citation
+和 chunk ids 做确定性恢复。
+
+整书预设构建会在发布前消除版式歧义。显式 `Actions for Type …` 会拆成多张
+独立 actor card，禁止把不同变体的动作合进一张卡；只在 `edition=2014`、
+`publication_id=mm2014` 与唯一名称同时成立时，Monster Manual 条目才可复用
+同一身份的内置 SRD 卡，并把被复用卡的 version/checksum 写入审计元数据。
+OCR 可由清晰能力分数恢复损坏的冗余 modifier，也可在六个分数完整且其余五个
+标签唯一确定列位时补一个标签；它不能补缺失分数或改变范围。受损标题仅可由
+同页唯一的既有审核卡取代。所有这类结果都在 preset/addon 导出前固定，不能留到
+角色第一次行动时由 Agent 猜测。
+如果整书没有任何专用候选，驱动器也不会只抽一个“描述性样本”：每个非空 chunk
+分别生成来源绑定的构建期 Agent ruling。候选提取器还会把掷骰流程、编号随机效果表
+和裁定指导列入机械审核队列，因此像大规模随机魔法效果表不会再以 descriptive
+状态绕过发布门禁。
+
+一个商业扩展若还包含预设角色/怪物和冒险资产，应分别发布 `rule_pack`、
+`preset_pack` 与 `module_pack`，再用
+`rule_pack_query(view="release")` 生成薄 `release_manifest`。目标端用
+`rule_import(action="inspect_release")` 按完整 envelope checksum 检查组件和本地状态；manifest 本身没有导入、
+安装或启用权限。`metadata.distribution="shareable"` 的规则包必须明确提供 license
+与 attribution；默认导出是 `private`。
 
 ### Skills、resources 与 prompts
 
@@ -262,11 +314,34 @@ ruff check .
 $env:PYTHONPATH = "$PWD\src;$PWD\..\sagasmith-core\src;$PWD\..\sagasmith-dnd\src"
 python scripts\smoke_seed.py --home C:\tmp\sagasmith-dnd-smoke-01
 
-# 对白名单目录中的全部 PDF/Markdown/text 跑公开 staged facade 回归
+# 对白名单目录中的全部 PDF/Markdown/text 跑公开 staged facade 回归；
+# 再把每个来源约束的私有描述性探针迁移到隔离实例并逐字节复导出
 python scripts\regression_rulebooks.py C:\path\to\DnD-Books\5e\Books `
   --home C:\tmp\sagasmith-dnd-rulebook-regression `
+  --run-id full-portable-v1 `
+  --portable-roundtrip `
+  --portable-target-home C:\tmp\sagasmith-dnd-rulebook-receiver `
   --output C:\tmp\sagasmith-dnd-rulebook-report.json
+
+# 修复后只重跑匹配的文档；glob 大小写不敏感并可重复传入
+python scripts\regression_rulebooks.py C:\path\to\DnD-Books\5e\Books `
+  --home C:\tmp\sagasmith-dnd-rulebook-regression `
+  --run-id focused-v2 `
+  --include "*Sword Coast*.pdf" `
+  --output C:\tmp\sagasmith-dnd-focused-report.json
+
+# 对已经脱离原始 PDF 的一组 addon 做一次全新实例总验收；整个导入、启用、
+# catalog 暴露、停用和精确重导出过程仍只调用公开 MCP 工具
+python scripts\regression_addons.py C:\private\core-addons C:\private\book-addons `
+  --home C:\tmp\sagasmith-dnd-addon-cold-start `
+  --run-id all-private-addons-v1 `
+  --output C:\tmp\sagasmith-dnd-addon-audit.json
 ```
+
+便携回归只编译 `catalog_only`、`mechanical_scope=descriptive`、
+`regression_only=true` 的私有探针，不把未经 Agent/DM 审核的候选宣称为可执行规则。
+接收端必须产生新的 source id，导入状态必须保持 validated inactive，且不能自动 install
+或 activate；完整目录还会生成无运行时权限的 release manifest 并核对每个 envelope checksum。
 
 Smoke seed 创建两个 PC、一个 NPC、相互隔离的 actor knowledge、一个见证事件、受审计的钱包变更和基线 Snapshot。
 

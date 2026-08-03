@@ -1049,6 +1049,16 @@ def test_rulebook_import_source_bound_pack_and_noncombat_settlement(tmp_path: Pa
                         }
                     ],
                 },
+                "artifacts": [
+                    {
+                        "id": "dnd5e.xgte.tool_synergy.source-note",
+                        "kind": "feature",
+                        "card": {"name": "Tool Synergy Source Note"},
+                        "application_state": "catalog_only",
+                        "mechanical_scope": "descriptive",
+                        "source_chunk_ids": [chunk_id],
+                    }
+                ],
                 "mechanics": [
                     {
                         "id": "dnd5e.xgte.tool_synergy.advantage",
@@ -1072,6 +1082,12 @@ def test_rulebook_import_source_bound_pack_and_noncombat_settlement(tmp_path: Pa
             },
         )
         assert draft["status"] == "validated"
+        assert draft["artifacts"][0]["semantic_resolution"] == {
+            "status": "resolved",
+            "mode": "descriptive",
+            "first_use_compilation_required": False,
+            "clause_ids": [draft["artifacts"][0]["rule_clauses"][0]["id"]],
+        }
         citation = draft["mechanics"][0]["citations"][0]
         assert citation["source_id"] == imported["source_id"]
         assert citation["source_checksum"] == staged["checksum"]

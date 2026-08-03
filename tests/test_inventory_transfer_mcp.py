@@ -94,9 +94,20 @@ def test_inventory_transfer_facade_is_authorized_atomic_and_directional(tmp_path
                 "payload": {
                     "item": {
                         "id": "party-torch",
-                        "name": "Torch",
-                        "kind": "equipment",
+                        "name": "Storm Brand",
+                        "kind": "weapon",
                         "quantity": 1,
+                        "mechanics": {
+                            "category": "martial",
+                            "attack_type": "melee",
+                            "attack_ability": "strength",
+                            "damage_formula": "1d8",
+                            "damage_type": "slashing",
+                            "properties": [],
+                            "on_hit_effect": (
+                                "On a hit, the brand invokes its source-defined storm mark."
+                            ),
+                        },
                     }
                 },
                 "expected_revision": campaign["revision"],
@@ -247,7 +258,11 @@ def test_inventory_transfer_facade_is_authorized_atomic_and_directional(tmp_path
                 "idempotency_key": "withdraw-torch",
             },
         )
-        assert _item(withdrew["character"], "party-torch")["quantity"] == 1
+        withdrawn_item = _item(withdrew["character"], "party-torch")
+        assert withdrawn_item["quantity"] == 1
+        assert withdrawn_item["ruling_requirements"][0]["policy_ref"] == (
+            "actor_card.import.v1"
+        )
         assert all(item["id"] != "party-torch" for item in withdrew["party"]["inventory"]["items"])
 
         campaign = await _call(

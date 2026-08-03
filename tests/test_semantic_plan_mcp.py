@@ -239,12 +239,6 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
                 },
             }
         ]
-        first_use_activity_plan = beast_sheet["content"]["activities"][0].pop(
-            "resolution_plan"
-        )
-        first_use_activity_plan["schema_version"] = 2
-        first_use_activity_plan["trigger_filter"] = {}
-        beast_sheet["content"]["activities"][0].pop("choices")
         spell_plan_id = "module.prism-chamber.chromatic-spark"
         beast_sheet["content"]["spells"] = [
             {
@@ -334,11 +328,6 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
                 },
             }
         ]
-        first_use_spell_plan = beast_sheet["content"]["spells"][0].pop(
-            "resolution_plan"
-        )
-        first_use_spell_plan["schema_version"] = 2
-        first_use_spell_plan["trigger_filter"] = {}
         beast = await _call(
             server,
             "character_sheet_replace",
@@ -420,55 +409,6 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
                 "idempotency_key": "start",
             },
         )
-        needs_compilation = await _raw(
-            server,
-            "combat_use_activity",
-            {
-                "campaign_id": campaign["id"],
-                "actor_id": beast["id"],
-                "activity_id": "prismatic-pulse",
-                "expected_revision": started["campaign_revision"],
-                "idempotency_key": "needs-compilation",
-            },
-        )
-        assert needs_compilation["result"]["payment_required"] is False
-        assert needs_compilation["result"]["semantic_solution"] == {
-            "status": "compilation_required",
-            "source_card_id": "prismatic-pulse",
-            "source_card_kind": "monster_action",
-            "required_action": "content_solution(compile)",
-            "character_revision": beast["revision"],
-        }
-        compiled_activity = await _call(
-            server,
-            "content_solution",
-            {
-                "campaign_id": campaign["id"],
-                "actor_id": beast["id"],
-                "action": "compile",
-                "source_card_id": "prismatic-pulse",
-                "source_card_kind": "monster_action",
-                "payload": {
-                    "resolution_plan": first_use_activity_plan,
-                    "agent_ruling": {
-                        "default_resolver": "agent",
-                        "ruling_kind": "module_specific_procedure",
-                        "decision": (
-                            "Store the quoted pulse as this monster action's "
-                            "reusable solution."
-                        ),
-                        "reason": (
-                            "The exact module clause defines its save, damage, "
-                            "and success treatment."
-                        ),
-                    },
-                },
-                "expected_revision": beast["revision"],
-                "idempotency_key": "compile-pulse",
-            },
-        )
-        beast = compiled_activity["character"]
-        assert compiled_activity["solution"]["source_card_fingerprint"]
         pending = await _raw(
             server,
             "combat_use_activity",
@@ -634,55 +574,6 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
                 },
             )
             revision = ended["campaign_revision"]
-        spell_needs_compilation = await _raw(
-            server,
-            "combat_cast_spell",
-            {
-                "campaign_id": campaign["id"],
-                "actor_id": beast["id"],
-                "spell_id": "chromatic-spark",
-                "expected_revision": revision,
-                "idempotency_key": "spell-needs-compilation",
-            },
-        )
-        assert spell_needs_compilation["result"]["payment_required"] is False
-        assert spell_needs_compilation["result"]["semantic_solution"][
-            "status"
-        ] == "compilation_required"
-        beast_before_spell = await _call(
-            server,
-            "character_get",
-            {"character_id": beast["id"]},
-        )
-        compiled_spell = await _call(
-            server,
-            "content_solution",
-            {
-                "campaign_id": campaign["id"],
-                "actor_id": beast["id"],
-                "action": "compile",
-                "source_card_id": "chromatic-spark",
-                "source_card_kind": "spell",
-                "payload": {
-                    "resolution_plan": first_use_spell_plan,
-                    "agent_ruling": {
-                        "default_resolver": "agent",
-                        "ruling_kind": "generic_spell_effect",
-                        "decision": (
-                            "Store the quoted Chromatic Spark effect as its "
-                            "reusable solution."
-                        ),
-                        "reason": (
-                            "The exact module text defines its damage and "
-                            "condition duration."
-                        ),
-                    },
-                },
-                "expected_revision": beast_before_spell["revision"],
-                "idempotency_key": "compile-spell",
-            },
-        )
-        assert compiled_spell["solution"]["source_card_fingerprint"]
         spell_pending = await _raw(
             server,
             "combat_cast_spell",
@@ -975,6 +866,44 @@ def test_content_solution_accepts_only_exact_active_rule_chunk_evidence(
         assert compiled["solution"]["source_fingerprint"]
         assert compiled["solution"]["source_card_fingerprint"]
 
+        current = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        await _call(
+            server,
+            "game_phase",
+            {
+                "campaign_id": campaign["id"],
+                "action": "set",
+                "tool_profile": "play",
+                "expected_revision": current["revision"],
+                "idempotency_key": "enter-play",
+            },
+        )
+        with pytest.raises(Exception, match="only available during lobby"):
+            await _call(
+                server,
+                "content_solution",
+                {
+                    **arguments,
+                    "idempotency_key": "runtime-recompile",
+                },
+            )
+        queried = await _call(
+            server,
+            "content_solution",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": actor["id"],
+                "action": "query",
+                "source_card_id": "moon-ribbon-feature",
+                "source_card_kind": "feature",
+            },
+        )
+        assert queried["status"] == "compiled"
+
     asyncio.run(exercise())
 
 
@@ -1196,9 +1125,6 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
         wielder_sheet["inventory"]["equipment_slots"]["main_hand"] = (
             "binding-blade"
         )
-        first_use_plan = wielder_sheet["inventory"]["items"][0].pop(
-            "resolution_plan"
-        )
         wielder_sheet["content"]["features"] = [
             {
                 "id": "ward-lore",
@@ -1371,71 +1297,13 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
                 "idempotency_key": "attack",
             },
         )
-        required_solution = attacked["result"]["semantic_solution"]
-        assert required_solution["status"] == "compilation_required"
-        assert required_solution["required_action"] == (
-            "combat_choice(compile_solution)"
-        )
-        compile_payload = {
-            "application_id": required_solution["application_id"],
-            "resolution_plan": first_use_plan,
-            "agent_ruling": {
-                "default_resolver": "agent",
-                "ruling_kind": "module_specific_procedure",
-                "decision": (
-                    "Compile the quoted binding effect into a reusable "
-                    "item solution."
-                ),
-                "reason": (
-                    "The exact source clause has a deterministic "
-                    "condition and trigger."
-                ),
-            },
-        }
-        invalid_payload = deepcopy(compile_payload)
-        invalid_payload["resolution_plan"]["citations"][0][
-            "source_excerpt"
-        ] = "An invented rule that is absent from the managed source."
-        with pytest.raises(Exception, match="is not present"):
-            await _call(
-                server,
-                "combat_choice",
-                {
-                    "campaign_id": campaign["id"],
-                    "actor_id": wielder["id"],
-                    "action": "compile_solution",
-                    "payload": invalid_payload,
-                    "expected_revision": attacked["campaign_revision"],
-                    "idempotency_key": "reject-invented-source",
-                },
-            )
-        compile_arguments = {
-            "campaign_id": campaign["id"],
-            "actor_id": wielder["id"],
-            "action": "compile_solution",
-            "payload": compile_payload,
-            "expected_revision": attacked["campaign_revision"],
-            "idempotency_key": "compile-first-use",
-        }
-        compiled = await _call(
-            server,
-            "combat_choice",
-            compile_arguments,
-        )
-        assert await _call(
-            server,
-            "combat_choice",
-            compile_arguments,
-        ) == compiled
-        semantic = compiled["result"]["semantic_plan"]
+        semantic = attacked["result"]["semantic_plan"]
         contract = semantic["contract"]
-        assert compiled["status"] == "compiled"
+        assert attacked["status"] == "pending_ruling"
+        assert semantic["status"] == "payment_recorded"
         assert semantic["application_id"]
         assert contract["plan_id"] == plan_id
         assert contract["trigger_filter"]["weapon_id"] == "binding-blade"
-        assert attacked["result"]["semantic_solution"]["status"] == (
-            "compilation_required"
-        )
         agent_ruling = {
             "application_id": semantic["application_id"],
             "default_resolver": "agent",
@@ -1473,7 +1341,7 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
                     "payload": {
                         "commitment": wrong_target_commitment,
                     },
-                    "expected_revision": compiled["campaign_revision"],
+                    "expected_revision": attacked["campaign_revision"],
                     "idempotency_key": "wrong-target-settle",
                 },
             )
@@ -1485,7 +1353,7 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
                 "actor_id": wielder["id"],
                 "action": "execute_plan",
                 "payload": {"commitment": commitment},
-                "expected_revision": compiled["campaign_revision"],
+                "expected_revision": attacked["campaign_revision"],
                 "idempotency_key": "settle",
             },
         )
@@ -1503,10 +1371,10 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
             {"character_id": wielder["id"]},
         )
         stored_item = wielder_after["sheet"]["inventory"]["items"][0]
-        assert stored_item["resolution_solution"]["plan_fingerprint"] == (
+        assert stored_item["resolution_plan"]["fingerprint"] == (
             contract["plan_fingerprint"]
         )
-        assert stored_item["resolution_solution"]["source_card_fingerprint"]
+        assert "resolution_solution" not in stored_item
         assert all(
             item.get("id") != semantic["application_id"]
             for item in settled["combat"].get("pending", [])

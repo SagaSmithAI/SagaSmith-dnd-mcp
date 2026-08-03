@@ -13,9 +13,192 @@ from sagasmith_core import (
     RapidOcrProvider,
 )
 from sagasmith_core.rules import RuleService
+from sagasmith_dnd.statblocks import parse_2014_statblock
 
 from sagasmith_dnd_mcp.config import McpConfig
-from sagasmith_dnd_mcp.server import create_server
+from sagasmith_dnd_mcp.server import (
+    _bounded_ocr_heading_equivalent,
+    _bundled_mm2014_actor_card,
+    _matching_statblock_recovery_pair,
+    _merge_statblock_discoveries,
+    _noisy_ocr_heading_equivalent,
+    _ocr_fact_key,
+    _select_preferred_statblock_reviews,
+    _statblock_mechanical_identity,
+    _valid_statblock_heading,
+    create_server,
+)
+
+
+def test_bounded_ocr_heading_equivalence_allows_one_glyph_only() -> None:
+    assert _bounded_ocr_heading_equivalent("0INOLOTH", "OINOLOTH")
+    assert _bounded_ocr_heading_equivalent("Jarad Von Savo", "JARAD VOD SAVO")
+    assert not _bounded_ocr_heading_equivalent("Imp", "Ink")
+    assert not _bounded_ocr_heading_equivalent("Female Steeder", "Male Steeder")
+
+
+def test_bundled_mm_actor_reuse_is_book_bound_and_requires_one_match() -> None:
+    cards = [
+        {"id": "actor.tiger", "payload": {"name": "Tiger"}},
+        {"id": "actor.drider", "payload": {"name": "Drider"}},
+    ]
+
+    matched = _bundled_mm2014_actor_card(
+        name="llGER",
+        edition="2014",
+        publication_id="mm2014",
+        cards=cards,
+    )
+
+    assert matched == cards[0]
+    assert matched is not cards[0]
+    assert _bundled_mm2014_actor_card(
+        name="Tiger",
+        edition="2014",
+        publication_id="vgm2014",
+        cards=cards,
+    ) is None
+    assert _bundled_mm2014_actor_card(
+        name="Tiger",
+        edition="2024",
+        publication_id="mm2014",
+        cards=cards,
+    ) is None
+    assert _bundled_mm2014_actor_card(
+        name="Tiger",
+        edition="2014",
+        publication_id="mm2014",
+        cards=[*cards, {"id": "actor.tiger.duplicate", "payload": {"name": "Tiger"}}],
+    ) is None
+
+
+def test_noisy_review_heading_match_requires_visible_ocr_damage() -> None:
+    assert _noisy_ocr_heading_equivalent("I FOM01,HAN", "Fomorian")
+    assert _noisy_ocr_heading_equivalent("ARCANALOT>< IN SIGIL", "Arcanaloth")
+    assert not _noisy_ocr_heading_equivalent("Veteran", "Veteran")
+    assert not _noisy_ocr_heading_equivalent("Veteran", "Vermin")
+
+
+def test_statblock_discovery_unions_ocr_only_siblings() -> None:
+    merged = _merge_statblock_discoveries(
+        [{"name": "VELOCIRAPTOR"}],
+        primary_provider="pdf-text-layout",
+        secondary=[{"name": "VELOCIRAPTOR"}, {"name": "QUETZALCOATLUS"}],
+        secondary_provider="rapidocr",
+    )
+
+    assert [(item["name"], provider) for item, provider in merged] == [
+        ("VELOCIRAPTOR", "pdf-text-layout"),
+        ("QUETZALCOATLUS", "rapidocr"),
+    ]
+    assert _ocr_fact_key("any álignment") == _ocr_fact_key("any alignment")
+
+
+def test_statblock_corroboration_can_select_a_later_exact_scale_pair() -> None:
+    first = {"critical_facts": {"name": "Deer", "fields": {"Languages": "-"}}}
+    later = {"critical_facts": {"name": "Deer", "fields": {}}}
+
+    pair = _matching_statblock_recovery_pair(
+        [(2.5, first), (3.0, later), (3.5, later)]
+    )
+
+    assert pair is not None
+    assert [item[0] for item in pair] == [3.0, 3.5]
+
+
+def test_preset_export_selects_one_strongest_review_per_source_card() -> None:
+    selected = _select_preferred_statblock_reviews(
+        [
+            {
+                "id": "zariel-v6",
+                "page_number": 181,
+                "review_mode": "layout_ocr",
+                "observation": "Text-only layout OCR v6 recovered Zari El.",
+                "normalized_content": "# ZARI EL\n\nold",
+            },
+            {
+                "id": "zariel-v10",
+                "page_number": 181,
+                "review_mode": "layout_ocr",
+                "observation": "Text-only layout OCR v10 recovered Zariel.",
+                "normalized_content": "# ZARIEL\n\ncomplete",
+            },
+            {
+                "id": "hungry-indexed-filled",
+                "page_number": 233,
+                "review_mode": "indexed_text",
+                "observation": "indexed",
+                "normalized_content": "# THE HUNGRY\n\nindexed",
+                "agent_statblock_fill": {"resolution_plans": []},
+            },
+            {
+                "id": "hungry-visual",
+                "page_number": 233,
+                "review_mode": "visual",
+                "observation": "visual",
+                "normalized_content": "# The Hungry\n\ncomplete visual review",
+            },
+            {
+                "id": "female-steeder",
+                "page_number": 239,
+                "review_mode": "layout_text",
+                "observation": "layout",
+                "normalized_content": "# FEMALE STEEDER\n\ncomplete",
+            },
+            {
+                "id": "male-steeder",
+                "page_number": 239,
+                "review_mode": "layout_text",
+                "observation": "layout",
+                "normalized_content": "# MALE STEEDER\n\ncomplete",
+            },
+            {
+                "id": "ocr-debris",
+                "page_number": 237,
+                "review_mode": "layout_ocr",
+                "observation": "layout",
+                "normalized_content": "# i\u00b7\n\nnot an actor identity",
+            },
+        ]
+    )
+
+    assert {item["id"] for item in selected} == {
+        "zariel-v10",
+        "hungry-visual",
+        "female-steeder",
+        "male-steeder",
+    }
+    assert _valid_statblock_heading("Ox") is True
+    assert _valid_statblock_heading("i\u00b7") is False
+
+
+def test_statblock_mechanical_identity_matches_corrected_ocr_heading() -> None:
+    body = """
+*Medium undead, lawful evil*
+
+**Armor Class** 16
+**Hit Points** 45 (6d8 + 18)
+**Speed** 30 ft.
+
+| STR | DEX | CON | INT | WIS | CHA |
+|---:|---:|---:|---:|---:|---:|
+| 18 (+4) | 12 (+1) | 17 (+3) | 6 (-2) | 9 (-1) | 10 (+0) |
+
+**Challenge** 3 (700 XP)
+
+## Actions
+
+***Longsword.*** Melee Weapon Attack: +6 to hit, reach 5 ft., one target.
+Hit: 8 (1d8 + 4) slashing damage.
+"""
+    damaged = parse_2014_statblock(f'# • • "-\n{body}', source_key="damaged")
+    reviewed = parse_2014_statblock(
+        f"# SWORD WRAITH WARRIOR\n{body}", source_key="reviewed"
+    )
+
+    assert _statblock_mechanical_identity(damaged) == (
+        _statblock_mechanical_identity(reviewed)
+    )
 
 
 def test_rule_import_discovers_nested_allowlisted_rulebooks(tmp_path: Path) -> None:
@@ -106,6 +289,7 @@ def test_rule_import_renders_a_checksum_bound_review_page(
                     "source_key": "review",
                     "title": "Review",
                     "edition": "2014",
+                    "publication_id": "srd2014",
                 },
                 "idempotency_key": "stage",
             },
@@ -192,6 +376,19 @@ def test_rule_import_renders_a_checksum_bound_review_page(
         assert validation["default_dm_resolver"] == "agent"
         assert validation["settlement"] == "automatic"
         assert validation["ruling_requirements"] == []
+        with pytest.raises(Exception, match="indexed_text is reserved"):
+            await server.call_tool(
+                "rule_import",
+                {
+                    **review_arguments,
+                    "payload": {
+                        **review_arguments["payload"],
+                        "review_mode": "indexed_text",
+                        "evidence_chunk_ids": ["caller-controlled"],
+                    },
+                    "idempotency_key": "reject-public-indexed-text",
+                },
+            )
 
         _, created = await server.call_tool(
             "character_create_from",
@@ -265,8 +462,9 @@ def test_rule_import_renders_a_checksum_bound_review_page(
             "default_resolver": "engine",
             "ruling_kind": "standard_rule",
             "parser_authoritative": True,
-            "allowed_resolutions": ["engine"],
-            "multiattack_options": [
+                "allowed_resolutions": ["engine"],
+                "source_bound_rulings": [],
+                "multiattack_options": [
                 {
                     "activity_id": "multiattack-activity",
                     "source_excerpt": (
@@ -342,8 +540,7 @@ def test_rule_import_renders_a_checksum_bound_review_page(
                     "idempotency_key": "reject-standard-rule-agent-fill",
                 },
             )
-        with pytest.raises(Exception, match="requires engine implementation"):
-            await server.call_tool(
+            _, direct_ruling_response = await server.call_tool(
                 "rule_import",
                 {
                     "campaign_id": campaign["id"],
@@ -356,12 +553,24 @@ def test_rule_import_renders_a_checksum_bound_review_page(
                             "The hunter attacks and shouts a command.",
                         ),
                         "observation": (
-                            "Reviewed an unsupported printed standard-rule composition."
+                            "Reviewed an exact source-specific composition for a "
+                            "build-time Agent ruling boundary."
                         ),
                     },
-                    "idempotency_key": "reject-unimplemented-standard-rule",
+                    "idempotency_key": "direct-ruling-standard-source-content",
                 },
             )
+            direct_validation = direct_ruling_response["result"]["validation"]
+            assert direct_ruling_response["result"]["review"][
+                "agent_statblock_fill"
+            ] is None
+            assert direct_validation["default_dm_resolver"] == "agent"
+            assert direct_validation["agent_fill_requirements"][
+                "source_bound_rulings"
+            ] == ["Multiattack: Multiattack composition requires a DM ruling"]
+            assert direct_validation["agent_fill_requirements"][
+                "allowed_resolutions"
+            ] == ["engine", "agent_dm_adjudication"]
 
         _, engine_actor_response = await server.call_tool(
             "character_create_from",
@@ -819,8 +1028,6 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
             [2.0]
             if embedded_text and not corrupt_embedded_text
             else [2.0, 3.0]
-            if corrupt_embedded_text
-            else [2.0, 2.5]
         )
         assert result["recovery"]["evidence"]["text_only"] is True
         assert result["recovery"]["evidence"]["matching_heading_count"] == 2
@@ -843,6 +1050,21 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
             "WIS",
             "CHA",
         ]
+        batch_arguments = {
+            "campaign_id": campaign["id"],
+            "action": "recover_statblocks",
+            "payload": {"job_id": job_id, "page_numbers": [1]},
+            "idempotency_key": "recover-catalog",
+        }
+        _, batch = await server.call_tool("rule_import", batch_arguments)
+        _, batch_replay = await server.call_tool("rule_import", batch_arguments)
+        assert batch_replay == batch
+        assert batch["result"]["status"] == "complete"
+        assert batch["result"]["complete_pages"] == [1]
+        assert [item["name"] for item in batch["result"]["recovered"]] == [
+            "COMMONER"
+        ]
+        assert batch["result"]["failures"] == []
         if embedded_text:
             with pytest.raises(Exception, match="unsupported .* payload fields"):
                 await server.call_tool(

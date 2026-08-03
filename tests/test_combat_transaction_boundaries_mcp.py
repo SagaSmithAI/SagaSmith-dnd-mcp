@@ -6,15 +6,7 @@ from copy import deepcopy
 from pathlib import Path
 
 import pytest
-from sagasmith_dnd.character_schema import (
-    default_character_sheet,
-    validate_character_sheet,
-)
-from sagasmith_dnd.content_solution import build_content_solution
-from sagasmith_dnd.resolution_plan import (
-    compile_resolution_plan,
-    resolution_plan_template,
-)
+from sagasmith_dnd.character_schema import default_character_sheet
 
 import sagasmith_dnd_mcp.server as server_module
 from sagasmith_dnd_mcp.config import McpConfig
@@ -220,52 +212,7 @@ def test_agent_source_damage_is_authorized_and_settled_in_one_attack(
                 }
             },
         }
-        compiled_plan = compile_resolution_plan(
-            {
-                "schema_version": 2,
-                "id": "custom.peryton.dive-attack",
-                "source_card_id": "dive-attack-passive",
-                "source_card_kind": "feature",
-                "trigger": "attack.after_hit",
-                "trigger_filter": {"hit": True},
-                "slots": {},
-                "steps": [
-                    {
-                        "id": "extra-damage",
-                        "op": "damage.apply",
-                        "args": {
-                            "target_ids": ["semantic-target"],
-                            "expression": "2d8",
-                            "damage_type": "piercing",
-                            "source": "Dive Attack",
-                            "critical": True,
-                        },
-                    }
-                ],
-                "citations": [
-                    {
-                        "source": "unit-test",
-                        "source_ref": {"chunk_id": "unit-test"},
-                        "source_excerpt": source_excerpt,
-                    }
-                ],
-            }
-        )
-        source_feature["resolution_plan"] = resolution_plan_template(compiled_plan)
         attacker_sheet["content"]["features"] = [source_feature]
-        attacker_sheet = validate_character_sheet(attacker_sheet)
-        source_feature = attacker_sheet["content"]["features"][0]
-        source_feature["resolution_solution"] = build_content_solution(
-            compiled_plan,
-            source_card=source_feature,
-            application_id="content:feature:peryton-dive-test",
-            agent_ruling={
-                "default_resolver": "agent",
-                "ruling_kind": "agent_dm_adjudication",
-                "decision": "Persist the exact Dive Attack extra-damage solution.",
-                "reason": "The source card records the condition and damage dice.",
-            },
-        )
         attacker_sheet["content"]["activities"] = [
             {
                 "id": "peryton-multiattack",
@@ -358,7 +305,7 @@ def test_agent_source_damage_is_authorized_and_settled_in_one_attack(
             "application_id": "peryton:dive:round-1",
             "feature_id": "dive-attack-passive",
             "target_actor_ids": [target["id"]],
-            "solution_plan_fingerprint": compiled_plan.fingerprint,
+            "solution_plan_fingerprint": "",
             "source_excerpt": source_excerpt,
             "damage_expression": "2d8",
             "damage_type": "weapon",
@@ -954,7 +901,7 @@ def test_battle_cry_uses_engine_settlement_and_persists_daily_use(
                         "requires_hearing": True,
                     }
                 },
-            }
+            },
         ]
         war_chief = await _call(
             server,
@@ -1038,7 +985,7 @@ def test_battle_cry_uses_engine_settlement_and_persists_daily_use(
     asyncio.run(exercise())
 
 
-def test_descriptive_activity_requires_compilation_before_payment(
+def test_custom_activity_is_prefilled_with_agent_ruling_before_payment(
     tmp_path: Path,
 ) -> None:
     async def exercise() -> None:
@@ -1070,7 +1017,21 @@ def test_descriptive_activity_requires_compilation_before_payment(
                         "source_excerpt": source_excerpt,
                     }
                 },
-            }
+            },
+            {
+                "id": "resolved-lightning-breath-action",
+                "name": "Resolved Lightning Breath",
+                "source_key": "addon-review:dragon",
+                "description": source_excerpt,
+                "activation": {"type": "action", "cost": 1},
+                "choices": {
+                    "manual_ruling": {
+                        "kind": "descriptive_activity",
+                        "default_resolver": "agent",
+                        "source_excerpt": source_excerpt,
+                    }
+                },
+            },
         ]
         actor = await _call(
             server,
@@ -1081,6 +1042,14 @@ def test_descriptive_activity_requires_compilation_before_payment(
                 "sheet": sheet,
                 "idempotency_key": "actor",
             },
+        )
+        stored_activity = next(
+            item
+            for item in actor["sheet"]["content"]["features"]
+            if item["id"] == "lightning-breath-action"
+        )
+        assert stored_activity["ruling_requirements"][0]["policy_ref"] == (
+            "actor_card.import.v1"
         )
         outside = await _call_raw(
             server,
@@ -1124,10 +1093,11 @@ def test_descriptive_activity_requires_compilation_before_payment(
         assert ruled["status"] == "pending_ruling"
         assert ruled["result"]["payment_required"] is False
         assert ruled["result"]["semantic_solution"] == {
-            "status": "compilation_required",
+            "status": "ruling_ready",
             "source_card_id": "lightning-breath-action",
             "source_card_kind": "feature",
-            "required_action": "content_solution(compile)",
+            "required_action": "agent_dm_adjudication",
+            "first_use_compilation_required": False,
             "character_revision": actor["revision"],
         }
         current = started["combat"]["combatants"][
@@ -1137,10 +1107,31 @@ def test_descriptive_activity_requires_compilation_before_payment(
         actor_after = await _call(server, "character_get", {"character_id": actor["id"]})
         assert actor_after["revision"] == actor["revision"]
 
+        resolved = await _call_raw(
+            server,
+            "combat_use_activity",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": actor["id"],
+                "activity_id": "resolved-lightning-breath-action",
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "resolved-breath",
+            },
+        )
+        assert resolved["status"] == "pending_ruling"
+        assert resolved["result"]["semantic_solution"] == {
+            "status": "ruling_ready",
+            "source_card_id": "resolved-lightning-breath-action",
+            "source_card_kind": "feature",
+            "required_action": "agent_dm_adjudication",
+            "first_use_compilation_required": False,
+            "character_revision": actor["revision"],
+        }
+
     asyncio.run(exercise())
 
 
-def test_custom_spell_requires_compilation_before_action_or_slot_payment(
+def test_custom_spell_is_prefilled_with_agent_ruling_before_payment(
     tmp_path: Path,
 ) -> None:
     async def exercise() -> None:
@@ -1223,6 +1214,14 @@ def test_custom_spell_requires_compilation_before_action_or_slot_payment(
                 "idempotency_key": "caster",
             },
         )
+        stored_spell = next(
+            item
+            for item in caster["sheet"]["content"]["spells"]
+            if item["id"] == "moon-ribbon"
+        )
+        assert stored_spell["ruling_requirements"][0]["policy_ref"] == (
+            "actor_card.import.v1"
+        )
         standard_pending = await _call_raw(
             server,
             "character_cast_spell",
@@ -1291,10 +1290,11 @@ def test_custom_spell_requires_compilation_before_action_or_slot_payment(
         assert pending["status"] == "pending_ruling"
         assert pending["result"]["payment_required"] is False
         assert pending["result"]["semantic_solution"] == {
-            "status": "compilation_required",
+            "status": "ruling_ready",
             "source_card_id": "moon-ribbon",
             "source_card_kind": "spell",
-            "required_action": "content_solution(compile)",
+            "required_action": "agent_dm_adjudication",
+            "first_use_compilation_required": False,
             "character_revision": caster["revision"],
         }
         current = started["combat"]["combatants"][

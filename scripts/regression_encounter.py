@@ -5112,6 +5112,16 @@ def _source_extra_damage_rulings(
         manual_ruling = dict(
             dict((feature or {}).get("choices") or {}).get("manual_ruling") or {}
         )
+        direct_requirement = next(
+            (
+                requirement
+                for requirement in (feature or {}).get("ruling_requirements") or []
+                if isinstance(requirement, dict)
+                and requirement.get("default_resolver") == "agent"
+                and str(requirement.get("source_excerpt") or "").strip()
+            ),
+            {},
+        )
 
         def compact(value: Any) -> str:
             return " ".join(str(value).split()).casefold()
@@ -5121,17 +5131,22 @@ def _source_extra_damage_rulings(
                 f"source extra-damage ruling {index} feature {feature_id!r} "
                 "is absent from the actor card"
             )
-        if (
-            manual_ruling.get("default_resolver") != "agent"
-            or manual_ruling.get("kind") != "descriptive_passive"
-        ):
+        direct_agent_ruling = bool(
+            manual_ruling.get("default_resolver") == "agent"
+            and str(manual_ruling.get("source_excerpt") or "").strip()
+        ) or bool(direct_requirement)
+        recorded_excerpt = str(
+            manual_ruling.get("source_excerpt")
+            or direct_requirement.get("source_excerpt")
+            or ""
+        )
+        if not direct_agent_ruling:
             raise ValueError(
                 f"source extra-damage ruling {index} feature {feature_id!r} "
-                "is not an Agent-owned descriptive passive"
+                "has no build-time Agent-ruling boundary"
             )
         if (
-            compact(source_excerpt)
-            != compact(manual_ruling.get("source_excerpt") or "")
+            compact(source_excerpt) != compact(recorded_excerpt)
             or compact(source_excerpt) != compact(feature.get("description") or "")
         ):
             raise ValueError(
@@ -5139,22 +5154,19 @@ def _source_extra_damage_rulings(
                 "Agent-owned passive excerpt"
             )
         resolution_plan = dict(feature.get("resolution_plan") or {})
-        resolution_solution = dict(feature.get("resolution_solution") or {})
         plan_fingerprint = str(resolution_plan.get("fingerprint") or "")
-        if (
+        if resolution_plan and (
             resolution_plan.get("schema_version") != 2
             or resolution_plan.get("source_card_id") != feature_id
             or resolution_plan.get("source_card_kind") not in {"feature", "trait"}
             or resolution_plan.get("trigger") != "attack.after_hit"
-            or resolution_solution.get("status") != "compiled"
-            or resolution_solution.get("plan_fingerprint") != plan_fingerprint
             or not plan_fingerprint
         ):
             raise ValueError(
                 f"source extra-damage ruling {index} feature {feature_id!r} "
-                "requires one persisted first-use attack solution"
+                "has an invalid build-time attack plan"
             )
-        if not any(
+        if resolution_plan and not any(
             isinstance(step, dict)
             and step.get("op") == "damage.apply"
             and "".join(
@@ -5165,7 +5177,7 @@ def _source_extra_damage_rulings(
         ):
             raise ValueError(
                 f"source extra-damage ruling {index} is not represented by "
-                "the persisted first-use attack solution"
+                "the build-time attack plan"
             )
         if (
             re.search(

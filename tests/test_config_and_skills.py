@@ -42,6 +42,36 @@ def test_config_owns_local_storage(tmp_path: Path) -> None:
     assert config.normalized_modules_dir.is_dir()
 
 
+def test_config_can_share_only_content_addressed_document_cache(tmp_path: Path) -> None:
+    shared = tmp_path / "shared-documents"
+    first = McpConfig(
+        home=tmp_path / "first-home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        document_cache_dir=shared,
+    )
+    second = McpConfig(
+        home=tmp_path / "second-home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        document_cache_dir=shared,
+    )
+
+    first.prepare()
+    second.prepare()
+
+    assert first.normalized_rulebooks_dir == second.normalized_rulebooks_dir
+    assert first.normalized_modules_dir == second.normalized_modules_dir
+    assert first.database_path != second.database_path
+    assert first.portable_packages_dir != second.portable_packages_dir
+
+
 def test_environment_config_has_separate_rule_and_module_import_roots(monkeypatch) -> None:
     monkeypatch.setenv(
         "SAGASMITH_DND_MCP_RULE_IMPORT_ROOTS", os.pathsep.join(("rules-a", "rules-b"))
@@ -52,6 +82,7 @@ def test_environment_config_has_separate_rule_and_module_import_roots(monkeypatc
     monkeypatch.setenv("SAGASMITH_DND_MCP_MODULE_OCR", "0")
     monkeypatch.setenv("SAGASMITH_DND_MCP_MODULE_OCR_SCALE", "1.5")
     monkeypatch.setenv("SAGASMITH_DND_MCP_BOUND_PRINCIPAL_ID", "trusted-user")
+    monkeypatch.setenv("SAGASMITH_DOCUMENT_CACHE_DIR", "shared-documents")
 
     config = McpConfig.from_environment()
 
@@ -60,6 +91,8 @@ def test_environment_config_has_separate_rule_and_module_import_roots(monkeypatc
     assert config.module_ocr_enabled is False
     assert config.module_ocr_scale == 1.5
     assert config.bound_principal_id == "trusted-user"
+    assert config.document_cache_dir is not None
+    assert config.document_cache_dir.name == "shared-documents"
 
 
 def test_default_rule_import_roots_include_the_dnd_skill_corpus(monkeypatch) -> None:
@@ -72,6 +105,49 @@ def test_default_rule_import_roots_include_the_dnd_skill_corpus(monkeypatch) -> 
         config.rule_import_roots[1]
         == (config.dnd_skills_dir / "full" / "skills" / "dnd-dm" / "srd").resolve()
     )
+
+
+def test_bundled_rule_seed_reports_complete_multilingual_corpus(tmp_path: Path) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        auto_seed_rules=True,
+    )
+
+    async def inspect_seed() -> None:
+        server = create_server(config)
+        _, status = await server.call_tool("rule_seed_status", {})
+        coverage = status["coverage"]
+
+        assert coverage["complete"] is True
+        assert coverage["expected_sources"] == 42
+        assert coverage["indexed_sources"] == 42
+        assert coverage["corpus"]["files"] == 2032
+        assert coverage["corpus"]["corpora"]["2014:zh"]["files"] == 991
+        source_keys = {item["source_key"] for item in status["sources"]}
+        assert "bundled:srd2014:en:10-monsters" in source_keys
+        assert "bundled:srd2014:zh:monsters-alt" in source_keys
+        assert "bundled:srd2024:en:dnd5esrd-333-364" in source_keys
+
+        _, response = await server.call_tool(
+            "rule_search",
+            {"query": "Tarrasque", "edition": "2014", "locale": "en", "top_k": 3},
+        )
+        monster_source_id = next(
+            item["id"]
+            for item in status["sources"]
+            if item["source_key"] == "bundled:srd2014:en:10-monsters"
+        )
+        assert any(
+            item["source_id"] == monster_source_id for item in response["result"]
+        )
+
+    asyncio.run(inspect_seed())
 
 
 def test_skill_catalog_reads_both_repositories(tmp_path: Path) -> None:
@@ -452,11 +528,11 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
             == PROFILE_TOOL_LIMITS
             == {
                 "lobby": 63,
-                "play": 49,
-                "combat": 48,
+                "play": 48,
+                "combat": 47,
             }
         )
-        assert schema_bytes == TARGET_INPUT_SCHEMA_BYTES == 51_700
+        assert schema_bytes == TARGET_INPUT_SCHEMA_BYTES == 51_864
         assert schema_bytes < BASELINE_INPUT_SCHEMA_BYTES
         by_name = {tool.name: tool for tool in tools}
         assert by_name["chase"].inputSchema["properties"]["action"]["enum"] == [
@@ -485,11 +561,15 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
         )
         assert by_name["rule_import"].inputSchema["properties"]["action"]["enum"] == [
             "discover",
+            "import_addon",
+            "import_package",
+            "inspect_release",
             "stage",
             "inspect",
-            "render_page",
-            "recover_statblock",
-            "ingest",
+                "render_page",
+                "recover_statblock",
+                "recover_statblocks",
+                "ingest",
             "review_statblock",
             "extract_candidates",
             "review",
@@ -507,7 +587,6 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
             "resolve",
             "resolve_defense",
             "on_hit_ruling",
-            "compile_solution",
             "execute_plan",
             "resolve_death_trigger",
         ]
@@ -606,7 +685,7 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
         assert capabilities["contract_version"] == "2026-07-phase-skill-plan-v8"
         assert capabilities["features"]["source_bound_hypnotic_pattern"] is True
         assert capabilities["features"][
-            "source_bound_first_use_content_solutions"
+            "build_time_content_resolution"
         ] is True
         assert capabilities["ruling_policy"] == {
             "default_dm_resolver": "agent",

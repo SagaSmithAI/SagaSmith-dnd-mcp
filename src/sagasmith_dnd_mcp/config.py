@@ -29,6 +29,7 @@ class McpConfig:
     module_ocr_enabled: bool = True
     module_ocr_scale: float = 2.0
     bound_principal_id: str | None = None
+    document_cache_dir: Path | None = None
 
     @classmethod
     def from_environment(cls) -> "McpConfig":
@@ -40,6 +41,7 @@ class McpConfig:
         raw_chroma_path = os.environ.get("CHROMA_DB_PATH")
         raw_rule_roots = os.environ.get("SAGASMITH_DND_MCP_RULE_IMPORT_ROOTS")
         raw_module_roots = os.environ.get("SAGASMITH_DND_MCP_MODULE_IMPORT_ROOTS")
+        raw_document_cache = os.environ.get("SAGASMITH_DOCUMENT_CACHE_DIR")
         rule_roots = (
             tuple(
                 Path(value).expanduser().resolve()
@@ -105,6 +107,11 @@ class McpConfig:
                 ).strip()
                 else None
             ),
+            document_cache_dir=(
+                Path(raw_document_cache).expanduser().resolve()
+                if raw_document_cache
+                else None
+            ),
         )
 
     @property
@@ -129,11 +136,13 @@ class McpConfig:
 
     @property
     def normalized_rulebooks_dir(self) -> Path:
-        return self.artifacts_dir / "normalized-rulebooks"
+        root = self.document_cache_dir or self.artifacts_dir
+        return root / "normalized-rulebooks"
 
     @property
     def normalized_modules_dir(self) -> Path:
-        return self.artifacts_dir / "normalized-modules"
+        root = self.document_cache_dir or self.artifacts_dir
+        return root / "normalized-modules"
 
     @property
     def module_assets_dir(self) -> Path:

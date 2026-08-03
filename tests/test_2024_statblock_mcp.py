@@ -26,6 +26,9 @@ CHA 6 (-2) | -2
 **Senses** Passive Perception 10
 **Languages** None
 **CR** 1/4 (XP 50; PB +2)
+
+## Actions
+**Bite.** *Melee Attack Roll:* +3, reach 5 ft., one target. *Hit:* 4 (1d6 + 1) Piercing damage.
 """
 
 
