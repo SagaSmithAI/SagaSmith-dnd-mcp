@@ -21,6 +21,7 @@ from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import (
     _bounded_ocr_heading_equivalent,
     _bundled_mm2014_actor_card,
+    _catalog_identity_is_evidenced,
     _matching_statblock_recovery_pair,
     _merge_statblock_discoveries,
     _noisy_ocr_heading_equivalent,
@@ -51,6 +52,24 @@ def test_bounded_ocr_heading_equivalence_allows_one_glyph_only() -> None:
     assert _bounded_ocr_heading_equivalent("0INOLOTH", "OINOLOTH")
     assert _bounded_ocr_heading_equivalent("Jarad Von Savo", "JARAD VOD SAVO")
     assert not _bounded_ocr_heading_equivalent("Imp", "Ink")
+
+
+def test_catalog_identity_can_span_ordered_sibling_headings_only() -> None:
+    evidence = (
+        "Channel Divinity: Twilight Sanctuary "
+        "Divine Domain Channel Divinity: Twilight Divine Domain Sanctuary "
+        "2nd-level Twilight Domain feature"
+    )
+
+    assert _catalog_identity_is_evidenced(
+        "Channel Divinity: Twilight Sanctuary", evidence
+    )
+    assert not _catalog_identity_is_evidenced(
+        "Channel Divinity: Solar Twilight Sanctuary", evidence
+    )
+    assert not _catalog_identity_is_evidenced(
+        "Sanctuary Twilight", evidence
+    )
     assert not _bounded_ocr_heading_equivalent("Female Steeder", "Male Steeder")
 
 

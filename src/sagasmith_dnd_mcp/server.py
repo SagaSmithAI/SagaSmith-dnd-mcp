@@ -883,6 +883,25 @@ def _compact_agent_evidence(value: Any) -> str:
     return compact_ascii_key(value)
 
 
+def _catalog_identity_is_evidenced(name: str, evidence: str) -> bool:
+    """Prove a reviewed identity across one or more split source headings.
+
+    PDF layout can split a printed title such as ``Channel Divinity: Twilight
+    Sanctuary`` into sibling headings.  A contiguous character check then
+    fails because their shared parent heading is repeated between the parts.
+    The caller places the leaf headings next to each other before their full
+    paths, which restores the printed title without ignoring arbitrary words.
+    """
+
+    normalized_name = "".join(
+        character for character in name.casefold() if character.isalnum()
+    )
+    normalized_evidence = "".join(
+        character for character in evidence.casefold() if character.isalnum()
+    )
+    return bool(normalized_name) and normalized_name in normalized_evidence
+
+
 def _bounded_edit_distance(left: str, right: str, *, limit: int) -> int:
     """Return an exact small edit distance without paying for unbounded OCR text."""
 
@@ -12470,8 +12489,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             if not source_text:
                 raise ValueError(f"additions[{index}] source chunks contain no indexed text")
+            heading_leaves = [
+                str((chunk.get("heading_path") or [""])[-1])
+                for chunk in source_chunks
+                if chunk.get("heading_path")
+            ]
             identity_evidence = " ".join(
                 [
+                    " ".join(heading_leaves),
                     *(
                         str(part)
                         for chunk in source_chunks
@@ -12480,15 +12505,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     source_text,
                 ]
             )
-            normalized_name = "".join(
-                character for character in name.casefold() if character.isalnum()
-            )
-            normalized_evidence = "".join(
-                character
-                for character in identity_evidence.casefold()
-                if character.isalnum()
-            )
-            if normalized_name not in normalized_evidence:
+            if not _catalog_identity_is_evidenced(name, identity_evidence):
                 raise ValueError(
                     f"additions[{index}].name is not evidenced by the referenced source chunks"
                 )
@@ -12627,7 +12644,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         ),
                     }
                     reviewed_candidate["artifact"] = (
-                        author_selection_card_from_candidate(reviewed_candidate)
+                        author_selection_card_from_candidate(
+                            reviewed_candidate,
+                            source_chunks_by_id=source_chunks_by_id,
+                        )
                     )
                     first_chunk_id = next(
                         (
@@ -39421,11 +39441,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "cantrip_choice": deepcopy(grants.get("cantrip_choice")),
                 }
             elif artifact_kind == "statblock":
+                dependent_template = deepcopy(
+                    dict(card.get("dependent_actor_template") or {})
+                )
                 selection_requirements = {
                     "fields": [
                         "source_id",
                         "chunk_ids",
                         "source_statblock_name",
+                        *(
+                            ["template_parameters"]
+                            if dependent_template
+                            else []
+                        ),
                     ],
                     "creation_tool": "character_create_from",
                     "creation_mode": "statblock",
@@ -39436,6 +39464,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         == "catalog_only"
                     ),
                     "normalization_authority": "engine",
+                    "dependent_actor_template": dependent_template,
                 }
             entry = {
                     "id": artifact["id"],
@@ -44215,6 +44244,34 @@ Useful bounded guidance:
             seen_source_checksums: set[str] = set()
             reviewed_source_names: set[str] = set()
 
+            def append_dependent_template(
+                *,
+                name: str,
+                source_text: str,
+                source_refs: list[str],
+                requirement: dict[str, Any],
+                artifact_id: str | None = None,
+            ) -> str:
+                normalized_name = " ".join(str(name).split())
+                source_checksum = hashlib.sha256(source_text.encode()).hexdigest()
+                if source_checksum in seen_source_checksums:
+                    return compact_ascii_key(normalized_name)
+                dependent_templates.append(
+                    {
+                        "name": normalized_name,
+                        "source_checksum": source_checksum,
+                        "source_refs": deepcopy(source_refs),
+                        "requirement": deepcopy(requirement),
+                        **(
+                            {"artifact_id": str(artifact_id)}
+                            if artifact_id
+                            else {}
+                        ),
+                    }
+                )
+                seen_source_checksums.add(source_checksum)
+                return compact_ascii_key(normalized_name)
+
             def append_preset_card(
                 *,
                 source_text: str,
@@ -44237,21 +44294,15 @@ Useful bounded guidance:
                 )
                 if template_requirement is not None:
                     heading = re.search(r"(?m)^#{1,6}\s+(.+?)\s*$", source_text)
-                    dependent_templates.append(
-                        {
-                            "name": (
-                                " ".join(heading.group(1).split())
-                                if heading is not None
-                                else source_identity
-                            ),
-                            "source_checksum": source_checksum,
-                            "source_refs": deepcopy(source_refs),
-                            "requirement": template_requirement,
-                        }
-                    )
-                    seen_source_checksums.add(source_checksum)
-                    return compact_ascii_key(
-                        str(dependent_templates[-1]["name"])
+                    return append_dependent_template(
+                        name=(
+                            " ".join(heading.group(1).split())
+                            if heading is not None
+                            else source_identity
+                        ),
+                        source_text=source_text,
+                        source_refs=source_refs,
+                        requirement=template_requirement,
                     )
                 parsed = parse_2014_statblock(
                     source_text,
@@ -44475,6 +44526,72 @@ Useful bounded guidance:
                     )
                     continue
                 source_text = str(card.get("normalized_content") or "").strip()
+                artifact_chunk_ids = list(
+                    dict.fromkeys(
+                        str(citation.get("chunk_id") or "")
+                        for citation in artifact.get("source_citations") or []
+                        if str(citation.get("chunk_id") or "")
+                    )
+                )
+                artifact_chunks = [
+                    chunk
+                    for chunk in indexed_source_chunks
+                    if str(chunk.get("id") or "") in artifact_chunk_ids
+                ]
+                if not artifact_chunks:
+                    normalized_card_name = compact_ascii_key(
+                        str(card.get("name") or "")
+                    )
+                    artifact_chunks = [
+                        chunk
+                        for chunk in indexed_source_chunks
+                        if normalized_card_name
+                        and any(
+                            compact_ascii_key(str(heading)) == normalized_card_name
+                            for heading in chunk.get("heading_path") or []
+                        )
+                    ]
+                raw_template_source = "\n\n".join(
+                    str(chunk.get("content") or "").strip()
+                    for chunk in sorted(
+                        artifact_chunks,
+                        key=lambda item: (
+                            int(item.get("ordinal") or 0),
+                            str(item.get("id") or ""),
+                        ),
+                    )
+                    if str(chunk.get("content") or "").strip()
+                )
+                if raw_template_source:
+                    raw_template_source = (
+                        f"# {str(card.get('name') or '').strip()}\n\n"
+                        f"{raw_template_source}"
+                    )
+                template_requirement = card.get("dependent_actor_template")
+                if not isinstance(template_requirement, dict):
+                    template_requirement = parameterized_statblock_requirements(
+                        source_text or raw_template_source
+                    )
+                if isinstance(template_requirement, dict):
+                    template_source = source_text or raw_template_source
+                    if not template_source:
+                        failures.append(
+                            {
+                                "artifact_id": artifact.get("id"),
+                                "error": "dependent actor template has no source text",
+                            }
+                        )
+                        continue
+                    append_dependent_template(
+                        name=str(card.get("name") or artifact.get("id") or ""),
+                        source_text=template_source,
+                        source_refs=[
+                            f"rule-pack:{pack_id}@{version}#artifact:{artifact['id']}"
+                        ],
+                        requirement=template_requirement,
+                        artifact_id=str(artifact.get("id") or ""),
+                    )
+                    continue
                 indexed_source_text = ""
                 if indexed_source_chunks:
                     try:
