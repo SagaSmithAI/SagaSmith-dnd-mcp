@@ -1652,6 +1652,56 @@ def _validated_species_proficiency_choices(
     return result
 
 
+def _validated_narrative_choices(
+    value: Any,
+    *,
+    groups: Any,
+) -> dict[str, list[str]]:
+    if not isinstance(groups, list):
+        raise RulesetUnavailableError("narrative choice groups are not executable")
+    if not groups:
+        if value not in (None, {}):
+            raise ValueError("content does not accept feature_choices")
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("feature_choices must be an object")
+    group_map: dict[str, dict[str, Any]] = {}
+    for raw_group in groups:
+        if not isinstance(raw_group, dict):
+            raise RulesetUnavailableError("narrative choice group is not executable")
+        group_id = str(raw_group.get("id") or "").strip()
+        group_key = group_id.casefold()
+        if not group_id or group_key in group_map:
+            raise RulesetUnavailableError(
+                "narrative choice group ids must be distinct"
+            )
+        group_map[group_key] = raw_group
+    supplied = {str(key).casefold(): raw for key, raw in value.items()}
+    if set(supplied) != set(group_map):
+        raise ValueError("feature_choices must answer every narrative choice group")
+    result: dict[str, list[str]] = {}
+    for group_key, group in group_map.items():
+        group_id = str(group["id"])
+        selected = _validated_distinct_choices(
+            supplied[group_key],
+            count=int(group.get("count", 0) or 0),
+            label=f"feature choice {group_id}",
+        )
+        option_map = {
+            str(item).strip().casefold(): str(item).strip()
+            for item in group.get("options", [])
+            if str(item).strip()
+        }
+        if len(option_map) != len(group.get("options", [])):
+            raise RulesetUnavailableError(
+                f"feature choice {group_id} options must be distinct and non-empty"
+            )
+        if any(item.casefold() not in option_map for item in selected):
+            raise ValueError(f"feature choice {group_id} is not an allowed option")
+        result[group_id] = [option_map[item.casefold()] for item in selected]
+    return result
+
+
 def _subclass_spell_grants(card: dict[str, Any]) -> list[dict[str, Any]]:
     """Normalize legacy domain lists and explicit subclass access grants."""
 
@@ -39913,6 +39963,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     fields.append("tools")
                 if list(grants.get("proficiency_choice_groups") or []):
                     fields.append("proficiency_choices")
+                if list(grants.get("narrative_choice_groups") or []):
+                    fields.append("feature_choices")
                 if int(grants.get("tool_expertise_choice_count", 0) or 0):
                     fields.append("tool_expertise")
                 if list(grants.get("size_options") or []):
@@ -39938,6 +39990,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     ),
                     "proficiency_choice_groups": deepcopy(
                         list(grants.get("proficiency_choice_groups") or [])
+                    ),
+                    "narrative_choice_groups": deepcopy(
+                        list(grants.get("narrative_choice_groups") or [])
                     ),
                     "tool_expertise_count": int(
                         grants.get("tool_expertise_choice_count", 0) or 0
@@ -40561,7 +40616,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             sheet.update(updated)
             return normalized
 
-        def feat_spell_match(
+        def content_spell_match(
             grant: dict[str, Any],
             *,
             artifact_id: str | None = None,
@@ -40595,11 +40650,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if len(matches) != 1:
                 reference = artifact_id or str(grant.get("name") or "spell")
                 raise RulesetUnavailableError(
-                    f"feat spell grant {reference!r} must resolve to exactly one active artifact"
+                    f"content spell grant {reference!r} must resolve to exactly one active artifact"
                 )
             return matches[0]
 
-        def materialize_feat_spell(
+        def materialize_content_spell(
             spell_match: tuple[str, str, dict[str, Any]],
             grant: dict[str, Any],
             *,
@@ -40618,7 +40673,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             resource_key = ""
             if free_casts:
                 resource_key = (
-                    f"feat_spell:{artifact_id}:{resource_discriminator}:{spell_id}"
+                    f"content_spell:{artifact_id}:{resource_discriminator}:{spell_id}"
                 )
                 if resource_key in sheet["resources"]:
                     raise ValueError("feat spell resource is already present")
@@ -40639,6 +40694,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ).casefold(),
                 "resource_key": resource_key or None,
                 "allow_slot_cast": grant.get("allow_slot_cast") is True,
+                "minimum_level": int(grant.get("minimum_level", 1) or 1),
+                "ritual_only": grant.get("ritual_only") is True,
             }
             access = spell_card.setdefault("access", {})
             current_sources = list(access.get("feature_casting_sources") or [])
@@ -40933,8 +40990,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             if spell_id in selected_spell_ids:
                                 raise ValueError("feat spell choices must be distinct")
                             selected_spell_ids.add(spell_id)
-                            spell_match = feat_spell_match(group, artifact_id=spell_id)
-                            materialize_feat_spell(
+                            spell_match = content_spell_match(group, artifact_id=spell_id)
+                            materialize_content_spell(
                                 spell_match,
                                 group,
                                 source_key=f"{source}: {feat_card.get('name') or feat_id}",
@@ -40988,8 +41045,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ):
                 grant = dict(raw_grant)
                 fixed_spell_grants.append(
-                    materialize_feat_spell(
-                        feat_spell_match(grant),
+                    materialize_content_spell(
+                        content_spell_match(grant),
                         grant,
                         source_key=f"{source}: {feat_card.get('name') or feat_id}",
                         resource_discriminator=f"fixed-{index}",
@@ -41662,6 +41719,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 selection.get("proficiency_choices"),
                 groups=grants.get("proficiency_choice_groups", []),
             )
+            narrative_choices = _validated_narrative_choices(
+                selection.get("feature_choices"),
+                groups=grants.get("narrative_choice_groups", []),
+            )
             grouped = [
                 option
                 for choices in proficiency_choices.values()
@@ -41858,51 +41919,65 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             cantrip_id = str(selection.get("cantrip_artifact_id") or "")
             cantrip_requirement = dict(grants.get("cantrip_choice") or {})
             if cantrip_requirement:
-                cantrip_match = next(
-                    (item for item in candidates if item[2].get("id") == cantrip_id), None
-                )
-                if cantrip_match is None:
-                    raise ValueError("species cantrip_artifact_id is not available")
-                cantrip_pack_id, cantrip_version, cantrip_artifact = cantrip_match
-                cantrip_card = deepcopy(dict(cantrip_artifact.get("card") or {}))
-                if (
-                    cantrip_artifact.get("kind") != "spell"
-                    or int(cantrip_card.get("level", -1)) != int(cantrip_requirement["level"])
-                    or str(cantrip_requirement["class"]).casefold()
-                    not in {str(item).casefold() for item in cantrip_card.get("classes", [])}
-                ):
-                    raise ValueError(
-                        "species cantrip choice does not meet its class and level rule"
-                    )
-                if any(item.get("id") == cantrip_id for item in sheet["content"]["spells"]):
-                    raise ValueError("species cantrip is already present")
-                cantrip_card.pop("classes", None)
-                cantrip_card["grant"] = {
-                    "source_type": "species",
-                    "source_key": selected_species,
-                    "method": "known",
+                class_name = str(cantrip_requirement.get("class") or "")
+                default_ability = {
+                    "artificer": "intelligence",
+                    "bard": "charisma",
+                    "cleric": "wisdom",
+                    "druid": "wisdom",
+                    "sorcerer": "charisma",
+                    "warlock": "charisma",
+                    "wizard": "intelligence",
+                }.get(class_name.casefold(), "")
+                normalized_cantrip_grant = {
+                    "level": int(cantrip_requirement.get("level", 0) or 0),
+                    "eligible_classes": [class_name],
+                    "method": str(cantrip_requirement.get("method") or "known"),
+                    "spellcasting_ability": str(
+                        cantrip_requirement.get("spellcasting_ability")
+                        or default_ability
+                    ).casefold(),
+                    "free_casts": int(cantrip_requirement.get("free_casts", 0) or 0),
+                    "recovers_on": cantrip_requirement.get("recovers_on"),
+                    "allow_slot_cast": cantrip_requirement.get("allow_slot_cast") is True,
+                    "minimum_level": int(
+                        cantrip_requirement.get("minimum_level", 1) or 1
+                    ),
+                    "ritual_only": cantrip_requirement.get("ritual_only") is True,
                 }
-                cantrip_card.setdefault("access", {})["known"] = True
-                cantrip_card["access"]["prepared"] = False
-                cantrip_card.update(
-                    id=cantrip_id,
-                    pack_id=cantrip_pack_id,
-                    pack_version=cantrip_version,
-                    rule_refs=list(cantrip_artifact.get("rule_refs") or []),
-                    mechanic_refs=list(cantrip_artifact.get("mechanic_refs") or []),
+                materialize_content_spell(
+                    content_spell_match(
+                        normalized_cantrip_grant,
+                        artifact_id=cantrip_id,
+                    ),
+                    normalized_cantrip_grant,
+                    source_key=selected_species,
+                    resource_discriminator="selected-cantrip",
                 )
-                sheet["content"]["spells"].append(cantrip_card)
             elif cantrip_id:
                 raise ValueError("species does not grant a cantrip choice")
+            fixed_species_spell_grants = []
+            for index, raw_grant in enumerate(grants.get("spell_grants", [])):
+                spell_grant = dict(raw_grant)
+                fixed_species_spell_grants.append(
+                    materialize_content_spell(
+                        content_spell_match(spell_grant),
+                        spell_grant,
+                        source_key=selected_species,
+                        resource_discriminator=f"fixed-{index}",
+                    )
+                )
             feature_choices = {
                 "languages": selected_languages,
                 "skills": selected_skills,
                 "tools": selected_tools,
                 "proficiency_choices": proficiency_choices,
+                "feature_choices": narrative_choices,
                 "tool_expertise": selected_tool_expertise,
                 "abilities": selected_abilities,
                 "size": selected_size,
                 "cantrip_artifact_id": cantrip_id,
+                "fixed_spell_grants": fixed_species_spell_grants,
             }
             for feature in grants.get("features", []):
                 feature_card = deepcopy(dict(feature))

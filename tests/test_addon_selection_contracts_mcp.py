@@ -12,6 +12,7 @@ from sagasmith_dnd.statblocks import parameterized_statblock_requirements
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import (
     _validated_additive_choices,
+    _validated_narrative_choices,
     _validated_species_ability_choices,
     _validated_species_proficiency_choices,
     create_server,
@@ -134,6 +135,26 @@ def test_species_cross_kind_proficiency_choices_are_bounded_and_typed() -> None:
         )
 
 
+def test_narrative_choices_preserve_bounded_agent_context_without_false_grants() -> None:
+    groups = [
+        {
+            "id": "psychic_glamour",
+            "count": 1,
+            "options": ["Insight", "Intimidation", "Performance", "Persuasion"],
+        }
+    ]
+
+    assert _validated_narrative_choices(
+        {"psychic_glamour": ["insight"]},
+        groups=groups,
+    ) == {"psychic_glamour": ["Insight"]}
+    with pytest.raises(ValueError, match="not an allowed option"):
+        _validated_narrative_choices(
+            {"psychic_glamour": ["Perception"]},
+            groups=groups,
+        )
+
+
 @pytest.mark.fresh_database
 def test_reviewed_addon_feat_materializes_bounded_spell_sources(tmp_path: Path) -> None:
     workspace = Path(__file__).resolve().parents[2]
@@ -219,6 +240,8 @@ def test_reviewed_addon_feat_materializes_bounded_spell_sources(tmp_path: Path) 
                             "free_casts": 0,
                             "recovers_on": None,
                             "allow_slot_cast": False,
+                            "minimum_level": 1,
+                            "ritual_only": False,
                         },
                         {
                             "id": "level_1_spell",
@@ -230,6 +253,8 @@ def test_reviewed_addon_feat_materializes_bounded_spell_sources(tmp_path: Path) 
                             "free_casts": 1,
                             "recovers_on": "long_rest",
                             "allow_slot_cast": False,
+                            "minimum_level": 1,
+                            "ritual_only": False,
                         },
                     ],
                 },
