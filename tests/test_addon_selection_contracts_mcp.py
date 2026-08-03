@@ -892,6 +892,57 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
             status="ready",
             references=["book:addon:p1"],
         )
+        species_artifact = {
+            "id": "dnd5e.addon.guild.species.marked-human",
+            "kind": "species",
+            "application_state": "selection_ready",
+            "mechanical_scope": "mechanical",
+            "execution_state": "engine_ready",
+            "semantic_resolution": {
+                "status": "resolved",
+                "mode": "static_grant",
+                "first_use_compilation_required": False,
+                "clause_ids": ["marked-human-spell-list"],
+            },
+            "rule_clauses": [
+                {
+                    "schema_version": 1,
+                    "id": "marked-human-spell-list",
+                    "title": "Marked Human spell list",
+                    "scope": "mechanical",
+                    "source_citations": [
+                        {
+                            "source": "book:addon",
+                            "source_ref": {"page": 3},
+                            "source_excerpt": "Aid is added to the marked spell list.",
+                        }
+                    ],
+                    "settlement": {
+                        "mode": "static_grant",
+                        "grant_refs": ["card.grants.spell_list_expansion"],
+                    },
+                }
+            ],
+            "card": {
+                "name": "Marked Human",
+                "base_species": "Human",
+                "grants": {
+                    "ability_score_increases": {"intelligence": 1},
+                    "size": "medium",
+                    "walk_speed": 30,
+                    "languages": ["Common"],
+                    "spell_list_expansion": ["Aid"],
+                    "features": [],
+                    "unresolved": [],
+                },
+            },
+            "rule_refs": ["book:addon:p3"],
+        }
+        species_artifact["selection_contract"] = build_selection_contract(
+            species_artifact,
+            status="ready",
+            references=["book:addon:p3"],
+        )
         subclass_artifact = {
             "id": "dnd5e.addon.guild.subclass.circle-of-spores",
             "kind": "subclass",
@@ -959,7 +1010,7 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
                     "editions": ["2014"],
                     "capabilities": [],
                 },
-                "artifacts": [artifact, subclass_artifact],
+                "artifacts": [artifact, species_artifact, subclass_artifact],
                 "mechanics": [],
             },
         )
@@ -1078,6 +1129,53 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
             "source_key": "wizard",
             "method": "spellbook",
         }
+
+        marked_character = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Marked Wizard",
+                "sheet": character_sheet,
+                "idempotency_key": "species-character",
+            },
+        )
+        marked = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": marked_character["id"],
+                "artifact_id": species_artifact["id"],
+                "selection": {},
+                "expected_revision": marked_character["revision"],
+                "idempotency_key": "species-apply",
+            },
+        )
+        assert marked["sheet"]["progression"]["species_grants"][
+            "spell_list_expansion"
+        ] == [
+            {
+                "artifact_id": "dnd5e.content.srd2014.spell.aid",
+                "name": "Aid",
+                "pack_id": "dnd5e.content.srd2014",
+                "pack_version": "1.20.0",
+            }
+        ]
+        marked_spell = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": marked_character["id"],
+                "artifact_id": "dnd5e.content.srd2014.spell.aid",
+                "selection": {"source_class": "Wizard", "method": "spellbook"},
+                "expected_revision": marked["revision"],
+                "idempotency_key": "species-expanded-spell",
+            },
+        )
+        assert any(
+            item["id"] == "dnd5e.content.srd2014.spell.aid"
+            for item in marked_spell["sheet"]["content"]["spells"]
+        )
 
         druid_sheet = default_character_sheet()
         druid_sheet["progression"]["level"] = 3

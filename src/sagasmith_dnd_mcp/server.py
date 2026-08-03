@@ -40743,6 +40743,47 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 **casting_source,
             }
 
+        def resolve_spell_list_expansion(
+            declared: Any,
+            *,
+            source_label: str,
+        ) -> tuple[list[dict[str, str]], str | None]:
+            if not isinstance(declared, list):
+                raise RulesetUnavailableError(
+                    f"{source_label} spell-list expansion is not executable"
+                )
+            resolved: list[dict[str, str]] = []
+            for raw_spell_name in declared:
+                spell_name = str(raw_spell_name).strip()
+                if not spell_name:
+                    raise RulesetUnavailableError(
+                        f"{source_label} spell-list expansion contains an empty spell"
+                    )
+                matches = [
+                    item
+                    for item in candidates
+                    if item[2].get("kind") == "spell"
+                    and str(
+                        dict(item[2].get("card") or {}).get("name") or ""
+                    ).casefold()
+                    == spell_name.casefold()
+                ]
+                if len(matches) != 1:
+                    return [], spell_name
+                spell_pack_id, spell_pack_version, spell_artifact = matches[0]
+                resolved.append(
+                    {
+                        "artifact_id": str(spell_artifact["id"]),
+                        "name": str(
+                            dict(spell_artifact.get("card") or {}).get("name")
+                            or spell_name
+                        ),
+                        "pack_id": spell_pack_id,
+                        "pack_version": spell_pack_version,
+                    }
+                )
+            return resolved, None
+
         def materialize_feat(
             feat_match: tuple[str, str, dict[str, Any]],
             feat_selection: dict[str, Any],
@@ -41606,48 +41647,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "background equipment references unknown inventory items: "
                         + ", ".join(missing_equipment)
                     )
-            declared_expansion = grants.get("spell_list_expansion", [])
-            if not isinstance(declared_expansion, list):
-                raise RulesetUnavailableError(
-                    "background spell-list expansion is not executable"
-                )
-            resolved_expansion: list[dict[str, str]] = []
-            for raw_spell_name in declared_expansion:
-                spell_name = str(raw_spell_name).strip()
-                if not spell_name:
-                    raise RulesetUnavailableError(
-                        "background spell-list expansion contains an empty spell"
-                    )
-                matches = [
-                    item
-                    for item in candidates
-                    if item[2].get("kind") == "spell"
-                    and str(dict(item[2].get("card") or {}).get("name") or "").casefold()
-                    == spell_name.casefold()
-                ]
-                if len(matches) != 1:
-                    return {
-                        **_ruling_status(
-                            "pending_ruling",
-                            "missing_or_conflicting_source_review",
-                        ),
-                        "reason": (
-                            "background spell-list expansion needs one exact active "
-                            f"spell artifact: {spell_name}"
-                        ),
-                    }
-                spell_pack_id, spell_pack_version, spell_artifact = matches[0]
-                resolved_expansion.append(
-                    {
-                        "artifact_id": str(spell_artifact["id"]),
-                        "name": str(
-                            dict(spell_artifact.get("card") or {}).get("name")
-                            or spell_name
-                        ),
-                        "pack_id": spell_pack_id,
-                        "pack_version": spell_pack_version,
-                    }
-                )
+            resolved_expansion, unresolved_spell_name = resolve_spell_list_expansion(
+                grants.get("spell_list_expansion", []),
+                source_label="background",
+            )
+            if unresolved_spell_name is not None:
+                return {
+                    **_ruling_status(
+                        "pending_ruling",
+                        "missing_or_conflicting_source_review",
+                    ),
+                    "reason": (
+                        "background spell-list expansion needs one exact active "
+                        f"spell artifact: {unresolved_spell_name}"
+                    ),
+                }
             sheet["progression"]["background"] = selected_background
             grants["languages"] = all_languages
             grants["spell_list_expansion"] = resolved_expansion
@@ -42057,6 +42071,24 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 if any(feature_choices.values()):
                     feature_card["choices"] = feature_choices
                 sheet["content"]["features"].append(feature_card)
+            resolved_expansion, unresolved_spell_name = resolve_spell_list_expansion(
+                grants.get("spell_list_expansion", []),
+                source_label="species",
+            )
+            if unresolved_spell_name is not None:
+                return {
+                    **_ruling_status(
+                        "pending_ruling",
+                        "missing_or_conflicting_source_review",
+                    ),
+                    "reason": (
+                        "species spell-list expansion needs one exact active "
+                        f"spell artifact: {unresolved_spell_name}"
+                    ),
+                }
+            sheet["progression"]["species_grants"] = {
+                "spell_list_expansion": resolved_expansion,
+            }
             sheet["progression"]["species"] = selected_species
         elif kind == "item":
             if selection:
