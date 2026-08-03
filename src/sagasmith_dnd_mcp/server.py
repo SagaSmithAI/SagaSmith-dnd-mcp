@@ -1369,6 +1369,50 @@ def _validated_distinct_choices(value: Any, *, count: int, label: str) -> list[s
     return normalized
 
 
+def _validated_additive_choices(
+    value: Any,
+    *,
+    count: int,
+    label: str,
+    fixed: Any,
+    options: Any,
+    allow_unlisted: bool = False,
+) -> tuple[list[str], list[str]]:
+    """Validate a choice grant without replacing or duplicating fixed grants."""
+
+    fixed_values = _validated_distinct_choices(
+        fixed,
+        count=len(fixed) if isinstance(fixed, list) else 0,
+        label=f"fixed {label}",
+    )
+    selected = _validated_distinct_choices(value, count=count, label=label)
+    fixed_keys = {item.casefold() for item in fixed_values}
+    if fixed_keys.intersection(item.casefold() for item in selected):
+        raise ValueError(f"{label} cannot duplicate a fixed grant")
+
+    if not isinstance(options, list):
+        raise RulesetUnavailableError(f"{label} options are not executable")
+    option_map: dict[str, str] = {}
+    for raw_option in options:
+        option = str(raw_option).strip()
+        if not option:
+            raise RulesetUnavailableError(f"{label} options contain an empty value")
+        option_key = option.casefold()
+        if option_key in option_map:
+            raise RulesetUnavailableError(f"{label} options must be distinct")
+        option_map[option_key] = option
+    if count and not option_map and not allow_unlisted:
+        raise RulesetUnavailableError(
+            f"{label} requires reviewed options or an explicit unrestricted choice"
+        )
+    if option_map:
+        if any(item.casefold() not in option_map for item in selected):
+            raise ValueError(f"{label} is not one of the allowed options")
+        selected = [option_map[item.casefold()] for item in selected]
+    combined = [*fixed_values, *selected]
+    return selected, combined
+
+
 def audit_dnd_addon_resolution_components(
     components: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -39455,6 +39499,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 selection_requirements = {
                     "fields": fields,
                     "language_count": int(choices.get("language_count", 0) or 0),
+                    "language_options": list(choices.get("language_options") or []),
+                    "allow_any_language": choices.get("allow_any_language") is True,
+                    "fixed_languages": list(grants.get("languages") or []),
                     "skill_proficiencies": list(card.get("skill_proficiencies") or []),
                     "ability_score_options": ability_options,
                     "allowed_ability_score_distributions": deepcopy(
@@ -39465,6 +39512,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     ),
                     "tool_choice_count": tool_choice_count,
                     "tool_options": list(choices.get("tool_options") or []),
+                    "fixed_tools": list(grants.get("tools") or []),
                     "equipment_package_options": sorted(equipment_packages),
                     "equipment_packages": equipment_packages,
                     "origin_feat_name": str(choices.get("origin_feat_name") or ""),
@@ -40638,16 +40686,26 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             grants = dict(card.get("background_grants") or {})
             requirements = dict(grants.get("choices") or {})
             language_count = int(requirements.get("language_count", 0) or 0)
-            selected_languages = [str(item).strip() for item in selection.get("languages", [])]
-            if len(selected_languages) != language_count or any(
-                not item for item in selected_languages
+            raw_languages = selection.get("languages")
+            if raw_languages is None:
+                raw_languages = []
+            if (
+                not isinstance(raw_languages, list)
+                or len(raw_languages) != language_count
+                or any(not str(item).strip() for item in raw_languages)
             ):
                 return {
                     "status": "pending_choice",
                     "reason": f"background requires exactly {language_count} language choices",
                 }
-            if len({item.casefold() for item in selected_languages}) != len(selected_languages):
-                raise ValueError("background language choices must be distinct")
+            selected_languages, all_languages = _validated_additive_choices(
+                raw_languages,
+                count=language_count,
+                label="background language",
+                fixed=grants.get("languages") or [],
+                options=requirements.get("language_options") or [],
+                allow_unlisted=requirements.get("allow_any_language") is True,
+            )
             ability_options = [
                 str(item).casefold()
                 for item in requirements.get("ability_score_options", [])
@@ -40668,18 +40726,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     source=f"{base_background} background",
                 )
             tool_choice_count = int(requirements.get("tool_choice_count", 0) or 0)
-            selected_tools = _validated_distinct_choices(
+            selected_tools, all_tools = _validated_additive_choices(
                 selection.get("tools"),
                 count=tool_choice_count,
-                label="background tools",
+                label="background tool",
+                fixed=grants.get("tools") or [],
+                options=requirements.get("tool_options") or [],
             )
-            tool_options = {
-                str(item).casefold(): str(item)
-                for item in requirements.get("tool_options", [])
-            }
-            if any(item.casefold() not in tool_options for item in selected_tools):
-                raise ValueError("background tool choice is not one of the allowed options")
-            selected_tools = [tool_options[item.casefold()] for item in selected_tools]
             if custom_skills_raw is None:
                 selected_skills = [
                     str(item).casefold() for item in card.get("skill_proficiencies", [])
@@ -40833,10 +40886,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         + ", ".join(missing_equipment)
                     )
             sheet["progression"]["background"] = selected_background
-            grants["languages"] = selected_languages
-            grants["tools"] = list(
-                dict.fromkeys([*list(grants.get("tools") or []), *selected_tools])
-            )
+            grants["languages"] = all_languages
+            grants["tools"] = all_tools
             grants["equipment_item_ids"] = equipment_item_ids
             grants["choices"] = {
                 **requirements,
@@ -40852,7 +40903,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 **grants,
             }
             sheet["traits"]["languages"] = list(
-                dict.fromkeys([*sheet["traits"]["languages"], *selected_languages])
+                dict.fromkeys([*sheet["traits"]["languages"], *all_languages])
             )
             sheet["traits"]["proficiencies"]["tools"] = list(
                 dict.fromkeys(

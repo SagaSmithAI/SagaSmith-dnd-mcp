@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from sagasmith_core.rule_packs import RulesetUnavailableError
 from sagasmith_dnd.character_schema import default_character_sheet
 from sagasmith_dnd.content_readiness import (
     build_catalog_review,
@@ -9,7 +10,7 @@ from sagasmith_dnd.content_readiness import (
 from sagasmith_dnd.statblocks import parameterized_statblock_requirements
 
 from sagasmith_dnd_mcp.config import McpConfig
-from sagasmith_dnd_mcp.server import create_server
+from sagasmith_dnd_mcp.server import _validated_additive_choices, create_server
 
 
 async def _call(server, name: str, arguments: dict):
@@ -30,6 +31,44 @@ def _review_decision(role: str, reviewer: str) -> dict:
         },
         "notes": "Verified against the exact source-bound actor template.",
     }
+
+
+def test_background_additive_choices_preserve_fixed_and_enforce_bounds() -> None:
+    selected, combined = _validated_additive_choices(
+        ["gObLiN"],
+        count=1,
+        label="background language",
+        fixed=["Common"],
+        options=["Goblin", "Vedalken"],
+    )
+    assert selected == ["Goblin"]
+    assert combined == ["Common", "Goblin"]
+
+    with pytest.raises(ValueError, match="not one of the allowed options"):
+        _validated_additive_choices(
+            ["Abyssal"],
+            count=1,
+            label="background language",
+            fixed=["Common"],
+            options=["Goblin", "Vedalken"],
+        )
+    with pytest.raises(ValueError, match="cannot duplicate a fixed grant"):
+        _validated_additive_choices(
+            ["common"],
+            count=1,
+            label="background language",
+            fixed=["Common"],
+            options=[],
+            allow_unlisted=True,
+        )
+    with pytest.raises(RulesetUnavailableError, match="reviewed options"):
+        _validated_additive_choices(
+            ["Smith's Tools"],
+            count=1,
+            label="background tool",
+            fixed=[],
+            options=[],
+        )
 
 
 @pytest.mark.fresh_database
