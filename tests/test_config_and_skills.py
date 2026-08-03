@@ -100,9 +100,13 @@ def test_environment_config_has_separate_rule_and_module_import_roots(monkeypatc
 
 def test_default_rule_import_roots_include_the_dnd_skill_corpus(monkeypatch) -> None:
     monkeypatch.delenv("SAGASMITH_DND_MCP_RULE_IMPORT_ROOTS", raising=False)
+    monkeypatch.delenv("SAGASMITH_DND_MCP_RULE_OCR_MODEL", raising=False)
+    monkeypatch.delenv("SAGASMITH_DND_MCP_MODULE_OCR_MODEL", raising=False)
 
     config = McpConfig.from_environment()
 
+    assert config.rule_ocr_model == "medium"
+    assert config.module_ocr_model == "medium"
     assert config.rule_import_roots[0].name == "DnD-Books"
     assert (
         config.rule_import_roots[1]

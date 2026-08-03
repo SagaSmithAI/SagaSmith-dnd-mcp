@@ -26,10 +26,10 @@ class McpConfig:
     module_import_roots: tuple[Path, ...] = ()
     rule_ocr_enabled: bool = True
     rule_ocr_scale: float = 2.0
-    rule_ocr_model: str = "small"
+    rule_ocr_model: str = "medium"
     module_ocr_enabled: bool = True
     module_ocr_scale: float = 2.0
-    module_ocr_model: str = "small"
+    module_ocr_model: str = "medium"
     bound_principal_id: str | None = None
     document_cache_dir: Path | None = None
 
@@ -89,7 +89,7 @@ class McpConfig:
                 os.environ.get("SAGASMITH_DND_MCP_RULE_OCR_SCALE", "2.0")
             ),
             rule_ocr_model=os.environ.get(
-                "SAGASMITH_DND_MCP_RULE_OCR_MODEL", "small"
+                "SAGASMITH_DND_MCP_RULE_OCR_MODEL", "medium"
             ),
             module_ocr_enabled=os.environ.get(
                 "SAGASMITH_DND_MCP_MODULE_OCR",
@@ -104,7 +104,7 @@ class McpConfig:
             ),
             module_ocr_model=os.environ.get(
                 "SAGASMITH_DND_MCP_MODULE_OCR_MODEL",
-                os.environ.get("SAGASMITH_DND_MCP_RULE_OCR_MODEL", "small"),
+                os.environ.get("SAGASMITH_DND_MCP_RULE_OCR_MODEL", "medium"),
             ),
             bound_principal_id=(
                 value.strip()
