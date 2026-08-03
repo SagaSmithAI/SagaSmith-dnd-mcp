@@ -829,6 +829,7 @@ SUPPORTED_FEATURE_SELECTION_KINDS = frozenset(
         "feat_grant",
         "favored_enemy",
         "eldritch_invocations_2024",
+        "feature_grants",
         "known_spell_grants",
         "language_grant",
         "magic_initiate",
@@ -862,6 +863,7 @@ SUPPORTED_FEATURE_SELECTION_REQUIREMENT_FIELDS = frozenset(
         "maximum_spell_level",
         "option_prerequisites",
         "option_artifact_ids",
+        "option_subtype",
         "options",
         "replacement_study_minutes",
         "repeatable_options",
@@ -40047,6 +40049,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             }
             repeat_due = new_level in repeatable_levels
             if kind == "feature" and (artifact_id not in present_features or repeat_due):
+                if str(card.get("feature_subtype") or "") == "selectable_option":
+                    continue
                 if str(card.get("name") or "").casefold() == "unarmored defense" and any(
                     str(item.get("name") or "").casefold() == "unarmored defense"
                     for item in feature_records
@@ -40269,6 +40273,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "class_name": str(card.get("class_name") or ""),
                     "subclass_name": str(card.get("subclass_name") or ""),
                     "minimum_level": int(card.get("minimum_level", 1) or 1),
+                    "feature_subtype": str(card.get("feature_subtype") or ""),
                     "unlock_levels": [
                         int(value) for value in card.get("unlock_levels", [])
                     ],
@@ -42452,6 +42457,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         elif kind in {"feature", "activity"}:
             if kind == "activity" and selection:
                 raise ValueError("activity content selection does not accept input fields")
+            if kind == "feature" and str(card.get("feature_subtype") or "") == (
+                "selectable_option"
+            ):
+                raise ValueError(
+                    "selectable feature options must be granted by their parent feature"
+                )
             section = "features" if kind == "feature" else "activities"
             existing_content = next(
                 (item for item in sheet["content"][section] if item.get("id") == artifact_id),
@@ -43045,6 +43056,104 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                                 }
                             )
                         selection[choice_field] = normalized_invocations
+                    elif requirements.get("kind") == "feature_grants":
+                        selected_options = _validated_distinct_choices(
+                            selection.get(choice_field),
+                            count=int(requirements.get("count", 0) or 0),
+                            label=f"feature {choice_field}",
+                        )
+                        option_names = {
+                            str(item).casefold(): str(item)
+                            for item in requirements.get("options", [])
+                        }
+                        option_ids = {
+                            str(key): str(value)
+                            for key, value in dict(
+                                requirements.get("option_artifact_ids") or {}
+                            ).items()
+                        }
+                        if set(option_ids) != set(option_names.values()):
+                            raise RulesetUnavailableError(
+                                "feature grant options need an exact artifact id mapping"
+                            )
+                        option_subtype = str(
+                            requirements.get("option_subtype") or "selectable_option"
+                        )
+                        prerequisite_map = dict(
+                            requirements.get("option_prerequisites") or {}
+                        )
+                        existing_ids = {
+                            str(item.get("id") or "")
+                            for item in sheet["content"]["features"]
+                        }
+                        normalized_options: list[str] = []
+                        for selected_option in selected_options:
+                            option_key = selected_option.casefold()
+                            if option_key not in option_names:
+                                raise ValueError("feature grant option is unavailable")
+                            option_name = option_names[option_key]
+                            option_id = option_ids[option_name]
+                            if option_id in existing_ids:
+                                raise ValueError("feature grant option is already known")
+                            prerequisite = dict(prerequisite_map.get(option_name) or {})
+                            if target is None or int(target.get("level", 0) or 0) < int(
+                                prerequisite.get("minimum_level", 1) or 1
+                            ):
+                                raise ValueError(
+                                    "feature grant option level prerequisite is not met"
+                                )
+                            option_match = next(
+                                (
+                                    item
+                                    for item in candidates
+                                    if str(item[2].get("id") or "") == option_id
+                                    and item[2].get("kind") == "feature"
+                                ),
+                                None,
+                            )
+                            if option_match is None:
+                                raise ValueError("feature grant artifact is unavailable")
+                            option_card = deepcopy(
+                                dict(option_match[2].get("card") or {})
+                            )
+                            if str(option_card.get("feature_subtype") or "") != (
+                                option_subtype
+                            ):
+                                raise ValueError(
+                                    "feature grant artifact has the wrong option subtype"
+                                )
+                            if str(option_card.get("class_name") or "").casefold() != (
+                                declared_class.casefold()
+                            ):
+                                raise ValueError(
+                                    "feature grant artifact belongs to another class"
+                                )
+                            for metadata_key in (
+                                "class_name",
+                                "subclass_name",
+                                "minimum_level",
+                                "feature_subtype",
+                                "selection_requirements",
+                                "selection_requirements_by_level",
+                                "mechanical_grants",
+                            ):
+                                option_card.pop(metadata_key, None)
+                            option_card["source_key"] = str(
+                                card.get("name") or artifact_id
+                            )
+                            option_card.update(
+                                id=option_id,
+                                pack_id=option_match[0],
+                                pack_version=option_match[1],
+                                rule_refs=list(option_match[2].get("rule_refs") or []),
+                                mechanic_refs=list(
+                                    option_match[2].get("mechanic_refs") or []
+                                ),
+                            )
+                            sheet["content"]["features"].append(option_card)
+                            existing_ids.add(option_id)
+                            normalized_options.append(option_name)
+                        selection[choice_field] = normalized_options
                     elif requirements.get("kind") == "feat_grant":
                         raw_feat_choice = selection.get(choice_field)
                         if not isinstance(raw_feat_choice, dict):

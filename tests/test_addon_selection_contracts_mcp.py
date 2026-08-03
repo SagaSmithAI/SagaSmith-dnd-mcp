@@ -1423,6 +1423,74 @@ def test_reviewed_addon_base_class_uses_bound_level_one_materializer(tmp_path: P
             status="ready",
             references=["book:addon:artificer:p3"],
         )
+        infusion_option = {
+            "id": "dnd5e.addon.artificer.feature.enhanced-defense",
+            "kind": "feature",
+            "application_state": "selection_ready",
+            "mechanical_scope": "descriptive",
+            "execution_state": "descriptive_ready",
+            "semantic_resolution": {
+                "status": "resolved",
+                "mode": "descriptive",
+                "first_use_compilation_required": False,
+            },
+            "card": {
+                "name": "Enhanced Defense",
+                "class_name": "Artificer",
+                "subclass_name": "",
+                "feature_subtype": "selectable_option",
+                "minimum_level": 1,
+                "description": "A learned artificer infusion.",
+                "selection_requirements": {},
+                "selection_requirements_by_level": {},
+                "mechanical_grants": {},
+            },
+            "rule_refs": ["book:addon:artificer:p4"],
+        }
+        infusion_option["selection_contract"] = build_selection_contract(
+            infusion_option,
+            status="ready",
+            references=["book:addon:artificer:p4"],
+        )
+        infusion_feature = {
+            "id": "dnd5e.addon.artificer.feature.infuse-item",
+            "kind": "feature",
+            "application_state": "selection_ready",
+            "mechanical_scope": "descriptive",
+            "execution_state": "descriptive_ready",
+            "semantic_resolution": {
+                "status": "resolved",
+                "mode": "descriptive",
+                "first_use_compilation_required": False,
+            },
+            "card": {
+                "name": "Infuse Item",
+                "class_name": "Artificer",
+                "subclass_name": "",
+                "minimum_level": 1,
+                "selection_requirements": {
+                    "field": "infusions",
+                    "kind": "feature_grants",
+                    "count": 1,
+                    "options": ["Enhanced Defense"],
+                    "option_artifact_ids": {
+                        "Enhanced Defense": infusion_option["id"],
+                    },
+                    "option_prerequisites": {
+                        "Enhanced Defense": {"minimum_level": 1},
+                    },
+                    "option_subtype": "selectable_option",
+                },
+                "selection_requirements_by_level": {},
+                "mechanical_grants": {},
+            },
+            "rule_refs": ["book:addon:artificer:p4"],
+        }
+        infusion_feature["selection_contract"] = build_selection_contract(
+            infusion_feature,
+            status="ready",
+            references=["book:addon:artificer:p4"],
+        )
         draft = await _call(
             server,
             "rule_pack_draft",
@@ -1436,7 +1504,12 @@ def test_reviewed_addon_base_class_uses_bound_level_one_materializer(tmp_path: P
                     "editions": ["2014"],
                     "capabilities": [],
                 },
-                "artifacts": [artifact, tool_feature],
+                "artifacts": [
+                    artifact,
+                    tool_feature,
+                    infusion_feature,
+                    infusion_option,
+                ],
                 "mechanics": [],
             },
         )
@@ -1535,6 +1608,35 @@ def test_reviewed_addon_base_class_uses_bound_level_one_materializer(tmp_path: P
         assert feature_applied["sheet"]["skills"]["history"]["proficiency"] == (
             "proficient"
         )
+        infused = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": character["id"],
+                "artifact_id": infusion_feature["id"],
+                "selection": {"infusions": ["Enhanced Defense"]},
+                "expected_revision": feature_applied["revision"],
+                "idempotency_key": "addon-infusion-apply",
+            },
+        )
+        enhanced_defense = next(
+            item
+            for item in infused["sheet"]["content"]["features"]
+            if item["id"] == infusion_option["id"]
+        )
+        assert enhanced_defense["source_key"] == "Infuse Item"
+        with pytest.raises(Exception, match="must be granted by their parent"):
+            await _call(
+                server,
+                "character_content_apply",
+                {
+                    "character_id": character["id"],
+                    "artifact_id": infusion_option["id"],
+                    "selection": {},
+                    "expected_revision": infused["revision"],
+                    "idempotency_key": "addon-infusion-direct-rejected",
+                },
+            )
 
     import asyncio
 
