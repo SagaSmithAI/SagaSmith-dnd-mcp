@@ -1298,6 +1298,8 @@ def test_reviewed_addon_base_class_uses_bound_level_one_materializer(tmp_path: P
                     "armor_proficiencies": ["light armor", "medium armor", "shields"],
                     "weapon_proficiencies": ["simple weapons"],
                     "tool_proficiencies": ["thieves' tools", "tinker's tools"],
+                    "tool_choice_count": 1,
+                    "tool_options": ["smith's tools", "weaver's tools"],
                     "skill_choice_count": 2,
                     "skill_options": ["arcana", "history", "investigation", "medicine"],
                 },
@@ -1362,7 +1364,10 @@ def test_reviewed_addon_base_class_uses_bound_level_one_materializer(tmp_path: P
             {
                 "character_id": character["id"],
                 "artifact_id": artifact["id"],
-                "selection": {"skills": ["arcana", "investigation"]},
+                "selection": {
+                    "skills": ["arcana", "investigation"],
+                    "tools": ["smith's tools"],
+                },
                 "expected_revision": character["revision"],
                 "idempotency_key": "addon-class-apply",
             },
@@ -1376,9 +1381,13 @@ def test_reviewed_addon_base_class_uses_bound_level_one_materializer(tmp_path: P
             "constitution",
             "intelligence",
         ]
+        assert applied["class_materialization"]["tool_proficiency_choices"] == [
+            "smith's tools"
+        ]
         assert applied["rule_receipts"][0]["mechanic_id"] == ("dnd5e.character.base_class.v1")
         assert applied["sheet"]["content"]["selections"][0]["selection"] == {
-            "skills": ["arcana", "investigation"]
+            "skills": ["arcana", "investigation"],
+            "tools": ["smith's tools"],
         }
 
     import asyncio

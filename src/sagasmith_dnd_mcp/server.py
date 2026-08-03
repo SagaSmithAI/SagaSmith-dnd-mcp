@@ -41388,12 +41388,24 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "status": "pending_choice",
                     "reason": "base class requires its reviewed skill choices",
                 }
+            tool_choice_count = int(
+                class_definition.get("tool_choice_count", 0) or 0
+            )
+            raw_tools = selection.get("tools", [])
+            if tool_choice_count and not isinstance(selection.get("tools"), list):
+                return {
+                    "status": "pending_choice",
+                    "reason": "base class requires its reviewed tool choices",
+                }
+            if not isinstance(raw_tools, list):
+                raise ValueError("base class tools selection must be an array")
             try:
                 class_result = initialize_base_class(
                     sheet,
                     class_name=str(card.get("name") or artifact_id),
                     class_definition=class_definition,
                     skill_choices=raw_skills,
+                    tool_choices=raw_tools,
                     source=f"{pack_id}@{version}:{artifact_id}",
                 )
             except CombatEngineError as error:
