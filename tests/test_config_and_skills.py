@@ -146,9 +146,7 @@ def test_bundled_rule_seed_reports_complete_multilingual_corpus(tmp_path: Path) 
             for item in status["sources"]
             if item["source_key"] == "bundled:srd2014:en:10-monsters"
         )
-        assert any(
-            item["source_id"] == monster_source_id for item in response["result"]
-        )
+        assert any(item["source_id"] == monster_source_id for item in response["result"])
 
     asyncio.run(inspect_seed())
 
@@ -201,8 +199,7 @@ def test_skill_catalog_supports_bounded_outline_section_and_search(tmp_path: Pat
     dnd.mkdir()
     modulegen.mkdir()
     (dnd / "SKILL.md").write_text(
-        "# D&D\n\n## Startup\n\nOpen an exposure.\n\n"
-        "## Turn Loop\n\nRead exact module evidence.\n",
+        "# D&D\n\n## Startup\n\nOpen an exposure.\n\n## Turn Loop\n\nRead exact module evidence.\n",
         encoding="utf-8",
     )
     catalog = SkillCatalog(dnd_root=dnd, modulegen_root=modulegen)
@@ -261,9 +258,7 @@ def test_skill_catalog_reuses_indexes_until_an_explicit_refresh(
         "dnd:references/two.md",
     ]
     with pytest.raises(LookupError, match="unknown skill asset"):
-        SkillCatalog(dnd_root=dnd, modulegen_root=modulegen).get_asset(
-            "dnd:../outside.md"
-        )
+        SkillCatalog(dnd_root=dnd, modulegen_root=modulegen).get_asset("dnd:../outside.md")
 
 
 def test_character_writes_store_raw_sheet_and_return_derived_view(tmp_path: Path) -> None:
@@ -400,9 +395,8 @@ def test_server_advertises_native_tools_list_changed(tmp_path: Path) -> None:
     )
     server = create_server(config)
 
-    capabilities = (
-        server._mcp_server.create_initialization_options()
-        .capabilities.model_dump(exclude_none=True)
+    capabilities = server._mcp_server.create_initialization_options().capabilities.model_dump(
+        exclude_none=True
     )
 
     assert capabilities["tools"]["listChanged"] is True
@@ -470,17 +464,13 @@ def test_machine_facade_contracts_reference_real_public_selectors(
         for tool_id, action_contracts in ACTION_PAYLOAD_CONTRACTS.items():
             assert tool_id in tools
             properties = tools[tool_id].inputSchema["properties"]
-            selector = next(
-                field for field in ("action", "view", "mode") if field in properties
-            )
+            selector = next(field for field in ("action", "view", "mode") if field in properties)
             public_values = set(properties[selector]["enum"])
             assert set(action_contracts) == public_values
             for variants in action_contracts.values():
                 assert variants
                 for variant in variants:
-                    assert set(variant["required_fields"]) <= set(
-                        variant["allowed_fields"]
-                    )
+                    assert set(variant["required_fields"]) <= set(variant["allowed_fields"])
                     assert isinstance(variant["additional_properties"], bool)
 
     asyncio.run(inspect_contracts())
@@ -489,10 +479,7 @@ def test_machine_facade_contracts_reference_real_public_selectors(
 def test_campaign_phase_uses_combat_as_the_only_effective_override() -> None:
     assert campaign_phase({}) == "lobby"
     assert campaign_phase({"game_phase": "play"}) == "play"
-    assert (
-        campaign_phase({"game_phase": "play", "combat": {"active": True}})
-        == "combat"
-    )
+    assert campaign_phase({"game_phase": "play", "combat": {"active": True}}) == "combat"
     with pytest.raises(ValueError, match="unsupported persisted campaign phase"):
         campaign_phase({"game_phase": "combat"})
 
@@ -525,17 +512,17 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
         assert BASELINE_PUBLIC_TOOL_COUNT == 92
         assert BASELINE_INPUT_SCHEMA_BYTES == 56_611
         assert len(CORE_TOOLS) == TARGET_CORE_TOOL_COUNT == 13
-        assert len(tools) == TARGET_PUBLIC_TOOL_COUNT == 84
+        assert len(tools) == TARGET_PUBLIC_TOOL_COUNT == 85
         assert (
             {phase: len(names) for phase, names in profile_catalog().items()}
             == PROFILE_TOOL_LIMITS
             == {
-                "lobby": 63,
-                "play": 48,
-                "combat": 47,
+                "lobby": 64,
+                "play": 49,
+                "combat": 48,
             }
         )
-        assert schema_bytes == TARGET_INPUT_SCHEMA_BYTES == 51_864
+        assert schema_bytes == TARGET_INPUT_SCHEMA_BYTES == 53_164
         assert schema_bytes < BASELINE_INPUT_SCHEMA_BYTES
         by_name = {tool.name: tool for tool in tools}
         assert by_name["chase"].inputSchema["properties"]["action"]["enum"] == [
@@ -552,16 +539,12 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
         ]
         assert (
             "rest"
-            not in by_name["character_state_change"]
-            .inputSchema["properties"]["action"]["enum"]
+            not in by_name["character_state_change"].inputSchema["properties"]["action"]["enum"]
         )
         assert not {
             "memory_add",
             "memory_resolve",
-        } & set(
-            by_name["character_state_change"]
-            .inputSchema["properties"]["action"]["enum"]
-        )
+        } & set(by_name["character_state_change"].inputSchema["properties"]["action"]["enum"])
         assert by_name["rule_import"].inputSchema["properties"]["action"]["enum"] == [
             "discover",
             "import_addon",
@@ -569,12 +552,13 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
             "inspect_release",
             "stage",
             "inspect",
-                "render_page",
-                "recover_statblock",
-                "recover_statblocks",
-                "ingest",
+            "render_page",
+            "recover_statblock",
+            "recover_statblocks",
+            "ingest",
             "review_statblock",
             "extract_candidates",
+            "augment_catalog",
             "review",
             "compile",
             "install",
@@ -600,9 +584,7 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
             "transaction_history",
             "transaction_receipt",
         ]
-        assert by_name["combat_common_action"].inputSchema["properties"]["action"][
-            "enum"
-        ] == [
+        assert by_name["combat_common_action"].inputSchema["properties"]["action"]["enum"] == [
             "dash",
             "disengage",
             "dodge",
@@ -678,18 +660,14 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
         assert capabilities["features"]["stable_campaign_fact_identity"] is True
         assert capabilities["features"]["atomic_continuity_commit"] is True
         assert capabilities["features"]["source_bound_dm_context_anchors"] is True
-        assert capabilities["features"][
-            "pinned_non_executable_module_evidence"
-        ] is True
+        assert capabilities["features"]["pinned_non_executable_module_evidence"] is True
         assert capabilities["features"]["skill_manifest_checksums"] is True
         assert capabilities["features"]["validated_module_runtime_manifest"] is True
         assert capabilities["features"]["shared_continuity_budget"] is True
         assert capabilities["features"]["continuity_diagnostics"] is True
         assert capabilities["contract_version"] == "2026-07-phase-skill-plan-v8"
         assert capabilities["features"]["source_bound_hypnotic_pattern"] is True
-        assert capabilities["features"][
-            "build_time_content_resolution"
-        ] is True
+        assert capabilities["features"]["build_time_content_resolution"] is True
         assert capabilities["ruling_policy"] == {
             "default_dm_resolver": "agent",
             "agent_adjudicates": [

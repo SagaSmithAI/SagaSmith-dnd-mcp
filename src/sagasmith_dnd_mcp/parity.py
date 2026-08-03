@@ -15,6 +15,7 @@ FULL_SKILL_CAPABILITIES: dict[str, frozenset[str]] = {
     ),
     "characters": frozenset(
         {
+            "addon_actor_instantiate",
             "character_ability_apply",
             "character_create_from",
             "character_query",

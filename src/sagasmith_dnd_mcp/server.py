@@ -428,15 +428,18 @@ from sagasmith_dnd.standard_spell_ids import (
 )
 from sagasmith_dnd.statblocks import (
     StatblockImportError,
+    apply_dependent_actor_template_variant,
     apply_reviewed_statblock_fill,
     apply_statblock_variant,
     area_save_damage_spec,
+    dependent_actor_template_solution_errors,
     discover_2014_statblock_names_from_layout,
     effective_statblock_rating,
     finalize_imported_actor_rulings,
     frightful_presence_spec,
     gazer_eye_ray_spec,
     legendary_action_spec,
+    materialize_parameterized_statblock_source,
     parameterized_statblock_requirements,
     parse_2014_statblock,
     parse_2024_statblock,
@@ -39396,7 +39399,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             elif artifact_kind == "feat":
                 requirements = deepcopy(dict(card.get("selection_requirements") or {}))
                 selection_requirements = {
-                    "fields": [requirements["field"]] if requirements.get("field") else [],
+                    "fields": [requirements["field"]]
+                    if requirements.get("field")
+                    else [],
                     "prerequisites": deepcopy(list(card.get("prerequisites") or [])),
                     "category": str(card.get("category") or ""),
                     "repeatable": bool(card.get("repeatable", False)),
@@ -39405,13 +39410,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             elif artifact_kind == "feature":
                 requirements = deepcopy(dict(card.get("selection_requirements") or {}))
                 selection_requirements = {
-                    "fields": [requirements["field"]] if requirements.get("field") else [],
+                    "fields": [requirements["field"]]
+                    if requirements.get("field")
+                    else [],
                     "class_name": str(card.get("class_name") or ""),
                     "subclass_name": str(card.get("subclass_name") or ""),
                     "minimum_level": int(card.get("minimum_level", 1) or 1),
-                    "unlock_levels": [int(value) for value in card.get("unlock_levels", [])],
+                    "unlock_levels": [
+                        int(value) for value in card.get("unlock_levels", [])
+                    ],
                     "repeatable_selection_levels": [
-                        int(value) for value in card.get("repeatable_selection_levels", [])
+                        int(value)
+                        for value in card.get("repeatable_selection_levels", [])
                     ],
                     "selection_requirements_by_level": deepcopy(
                         dict(card.get("selection_requirements_by_level") or {})
@@ -39433,53 +39443,92 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     fields.append("cantrip_artifact_id")
                 selection_requirements = {
                     "fields": fields,
-                    "base_species": str(card.get("base_species") or card.get("name") or ""),
+                    "base_species": str(
+                        card.get("base_species") or card.get("name") or ""
+                    ),
                     "language_count": int(grants.get("language_choice_count", 0) or 0),
                     "skill_count": int(grants.get("skill_choice_count", 0) or 0),
                     "tool_options": list(grants.get("tool_choices") or []),
-                    "ability_choice": deepcopy(dict(grants.get("ability_choice") or {})),
+                    "ability_choice": deepcopy(
+                        dict(grants.get("ability_choice") or {})
+                    ),
                     "cantrip_choice": deepcopy(grants.get("cantrip_choice")),
                 }
             elif artifact_kind == "statblock":
                 dependent_template = deepcopy(
                     dict(card.get("dependent_actor_template") or {})
                 )
-                selection_requirements = {
-                    "fields": [
-                        "source_id",
-                        "chunk_ids",
-                        "source_statblock_name",
-                        *(
-                            ["template_parameters"]
-                            if dependent_template
-                            else []
+                if dependent_template:
+                    solution = dict(dependent_template.get("solution") or {})
+                    selection_requirements = {
+                        "fields": [
+                            "owner_character_id",
+                            "name",
+                            "character_type",
+                            "player_name",
+                            "summary",
+                            "notes",
+                            *(
+                                ["owner_class_name"]
+                                if "owner_class_level"
+                                in set(solution.get("numeric_parameters") or [])
+                                else []
+                            ),
+                            *(
+                                ["casting_slot_level"]
+                                if "casting_slot_level"
+                                in set(solution.get("numeric_parameters") or [])
+                                else []
+                            ),
+                            *(
+                                ["template_variant"]
+                                if solution.get("variant_options")
+                                else []
+                            ),
+                        ],
+                        "creation_tool": "addon_actor_instantiate",
+                        "source_statblock_name": name,
+                        "source_resolution": "reviewed_addon_artifact",
+                        "normalization_authority": "engine",
+                        "runtime_ready": not dependent_actor_template_solution_errors(
+                            dependent_template
                         ),
-                    ],
-                    "creation_tool": "character_create_from",
-                    "creation_mode": "statblock",
-                    "source_statblock_name": name,
-                    "source_resolution": "source_citations",
-                    "build_time_actor_card_required": (
-                        str(artifact.get("application_state") or "")
-                        == "catalog_only"
-                    ),
-                    "normalization_authority": "engine",
-                    "dependent_actor_template": dependent_template,
-                }
+                        "dependent_actor_template": dependent_template,
+                    }
+                else:
+                    selection_requirements = {
+                        "fields": [
+                            "source_id",
+                            "chunk_ids",
+                            "source_statblock_name",
+                        ],
+                        "creation_tool": "character_create_from",
+                        "creation_mode": "statblock",
+                        "source_statblock_name": name,
+                        "source_resolution": "source_citations",
+                        "build_time_actor_card_required": (
+                            str(artifact.get("application_state") or "")
+                            == "catalog_only"
+                        ),
+                        "normalization_authority": "engine",
+                        "dependent_actor_template": {},
+                    }
             entry = {
-                    "id": artifact["id"],
-                    "kind": artifact_kind,
-                    "name": name,
-                    "pack_id": pack_id,
-                    "pack_version": version,
-                    "rule_refs": list(artifact.get("rule_refs") or []),
-                    "mechanic_refs": list(artifact.get("mechanic_refs") or []),
-                    "source_citations": deepcopy(list(artifact.get("source_citations") or [])),
-                    "selection_requirements": selection_requirements,
-                    "application_state": str(
-                        artifact.get("application_state") or "selection_ready"
-                    ),
-                }
+                "id": artifact["id"],
+                "kind": artifact_kind,
+                "name": name,
+                "pack_id": pack_id,
+                "pack_version": version,
+                "rule_refs": list(artifact.get("rule_refs") or []),
+                "mechanic_refs": list(artifact.get("mechanic_refs") or []),
+                "source_citations": deepcopy(
+                    list(artifact.get("source_citations") or [])
+                ),
+                "selection_requirements": selection_requirements,
+                "application_state": str(
+                    artifact.get("application_state") or "selection_ready"
+                ),
+            }
             if include_context:
                 entry["runtime_context"] = content_runtime_context(
                     pack_id,
@@ -39488,7 +39537,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
             result.append(entry)
         if include_context and len(result) != 1:
-            raise LookupError("exact content artifact is not available for this campaign")
+            raise LookupError(
+                "exact content artifact is not available for this campaign"
+            )
         return sorted(
             result,
             key=lambda item: (str(item["kind"]), str(item["name"]), str(item["id"])),
@@ -44087,9 +44138,13 @@ Useful bounded guidance:
         if view == "list":
             result = rule_pack_list(data.get("pack_id"))
         elif view == "inspect":
-            result = rule_pack_inspect(required(data, "pack_id"), required(data, "version"))
+            result = rule_pack_inspect(
+                required(data, "pack_id"), required(data, "version")
+            )
         elif view == "test":
-            result = rule_pack_test(required(data, "pack_id"), required(data, "version"))
+            result = rule_pack_test(
+                required(data, "pack_id"), required(data, "version")
+            )
         elif view == "content_catalog":
             result = content_catalog_list(
                 required(data, "campaign_id"),
@@ -44106,9 +44161,7 @@ Useful bounded guidance:
                 allowed={"edition", "artifact_id", "include_package"},
                 required_names=("edition",),
             )
-            edition = normalize_dnd_edition(
-                str(required(data, "edition"))
-            )
+            edition = normalize_dnd_edition(str(required(data, "edition")))
             package = (
                 build_srd2014_preset_pack(config.dnd_skills_dir)
                 if edition == "2014"
@@ -44124,7 +44177,9 @@ Useful bounded guidance:
                     if card["id"] == artifact_id
                 ]
                 if len(matches) != 1:
-                    raise ValueError("artifact_id is not present in the actor preset pack")
+                    raise ValueError(
+                        "artifact_id is not present in the actor preset pack"
+                    )
                 card = validate_dnd_actor_card(matches[0])
                 result = {
                     "card": card,
@@ -44253,6 +44308,12 @@ Useful bounded guidance:
                 artifact_id: str | None = None,
             ) -> str:
                 normalized_name = " ".join(str(name).split())
+                solution_errors = dependent_actor_template_solution_errors(requirement)
+                if solution_errors:
+                    raise ValueError(
+                        "dependent actor template is not runtime-ready: "
+                        + "; ".join(solution_errors)
+                    )
                 source_checksum = hashlib.sha256(source_text.encode()).hexdigest()
                 if source_checksum in seen_source_checksums:
                     return compact_ascii_key(normalized_name)
@@ -44262,11 +44323,7 @@ Useful bounded guidance:
                         "source_checksum": source_checksum,
                         "source_refs": deepcopy(source_refs),
                         "requirement": deepcopy(requirement),
-                        **(
-                            {"artifact_id": str(artifact_id)}
-                            if artifact_id
-                            else {}
-                        ),
+                        **({"artifact_id": str(artifact_id)} if artifact_id else {}),
                     }
                 )
                 seen_source_checksums.add(source_checksum)
@@ -44289,9 +44346,7 @@ Useful bounded guidance:
                         if existing_heading is not None
                         else source_identity
                     )
-                template_requirement = parameterized_statblock_requirements(
-                    source_text
-                )
+                template_requirement = parameterized_statblock_requirements(source_text)
                 if template_requirement is not None:
                     heading = re.search(r"(?m)^#{1,6}\s+(.+?)\s*$", source_text)
                     return append_dependent_template(
@@ -44358,9 +44413,7 @@ Useful bounded guidance:
             publication_id = str(source_info.get("publication_id") or "")
             bundled_core_cards = (
                 list(
-                    build_srd2014_preset_pack(config.dnd_skills_dir)["payload"][
-                        "cards"
-                    ]
+                    build_srd2014_preset_pack(config.dnd_skills_dir)["payload"]["cards"]
                 )
                 if edition == "2014" and publication_id == "mm2014"
                 else []
@@ -44368,7 +44421,9 @@ Useful bounded guidance:
             if import_job_id:
                 job = require_import_job(campaign_id, import_job_id, "rulebook")
                 if str(job.source_id or "") != str(source_info.get("source_id") or ""):
-                    raise ValueError("rule pack import job no longer matches its rule source")
+                    raise ValueError(
+                        "rule pack import job no longer matches its rule source"
+                    )
                 indexed_source_chunks = rules.source_chunks(str(job.source_id))
                 # A filled review is derived from an immutable base transcription
                 # and has the same normalized source checksum.  Prefer it so the
@@ -44393,14 +44448,12 @@ Useful bounded guidance:
                         reviewed_name = append_preset_card(
                             source_text=source_text,
                             source_identity=(
-                                f"rule-pack:{pack_id}@{version}#review:"
-                                f"{source_checksum[:16]}"
+                                f"rule-pack:{pack_id}@{version}#review:{source_checksum[:16]}"
                             ),
                             source_refs=[
                                 f"rule-pack:{pack_id}@{version}#page:{page_number}",
                                 (
-                                    f"rule-pack:{pack_id}@{version}#review:"
-                                    f"{source_checksum[:16]}"
+                                    f"rule-pack:{pack_id}@{version}#review:{source_checksum[:16]}"
                                 ),
                             ],
                             semantic_fill=(
@@ -44416,15 +44469,18 @@ Useful bounded guidance:
                         reviewed_parsed = parse_2014_statblock(
                             source_text,
                             source_key=(
-                                f"rule-pack:{pack_id}@{version}#review:"
-                                f"{source_checksum[:16]}"
+                                f"rule-pack:{pack_id}@{version}#review:{source_checksum[:16]}"
                             ),
                             rule_refs=[],
                         )
                         reviewed_mechanical_identities_by_page.setdefault(
                             page_number, set()
                         ).add(_statblock_mechanical_identity(reviewed_parsed))
-                    except (StatblockImportError, PortableContentError, ValueError) as error:
+                    except (
+                        StatblockImportError,
+                        PortableContentError,
+                        ValueError,
+                    ) as error:
                         failures.append(
                             {"artifact_id": review.get("id"), "error": str(error)}
                         )
@@ -44564,8 +44620,8 @@ Useful bounded guidance:
                 )
                 if raw_template_source:
                     raw_template_source = (
-                        f"# {str(card.get('name') or '').strip()}\n\n"
-                        f"{raw_template_source}"
+                        f"# {str(card.get('name') or '').strip()}"
+                        f"\n\n{raw_template_source}"
                     )
                 template_requirement = card.get("dependent_actor_template")
                 if not isinstance(template_requirement, dict):
@@ -44659,9 +44715,7 @@ Useful bounded guidance:
                     except StatblockImportError:
                         pass
                     else:
-                        identity = _statblock_mechanical_identity(
-                            unresolved_heading
-                        )
+                        identity = _statblock_mechanical_identity(unresolved_heading)
                         if any(
                             identity
                             in reviewed_mechanical_identities_by_page.get(
@@ -44678,7 +44732,11 @@ Useful bounded guidance:
                             f"rule-pack:{pack_id}@{version}#artifact:{artifact['id']}"
                         ],
                     )
-                except (StatblockImportError, PortableContentError, ValueError) as error:
+                except (
+                    StatblockImportError,
+                    PortableContentError,
+                    ValueError,
+                ) as error:
                     failures.append(
                         {"artifact_id": artifact.get("id"), "error": str(error)}
                     )
@@ -44687,7 +44745,8 @@ Useful bounded guidance:
                 raise ValueError(
                     "statblock preset compilation requires review: "
                     + "; ".join(
-                        f"{item['artifact_id']}: {item['error']}" for item in failures[:20]
+                        f"{item['artifact_id']}: {item['error']}"
+                        for item in failures[:20]
                     )
                 )
             if not cards and not dependent_templates and not allow_partial:
@@ -44719,9 +44778,7 @@ Useful bounded guidance:
                     "distribution": "private",
                     "license": "user-supplied",
                     "bundled_core_reuses": deepcopy(bundled_core_reuses),
-                    "reviewed_ocr_supersessions": deepcopy(
-                        reviewed_ocr_supersessions
-                    ),
+                    "reviewed_ocr_supersessions": deepcopy(reviewed_ocr_supersessions),
                     **requested_metadata,
                 },
                 dependencies=[
@@ -44904,7 +44961,11 @@ Useful bounded guidance:
             result = {
                 "artifact": artifact,
                 "components": deepcopy(release["dependencies"]),
-                **({"release_manifest": release} if data.get("include_manifest") is True else {}),
+                **(
+                    {"release_manifest": release}
+                    if data.get("include_manifest") is True
+                    else {}
+                ),
             }
         elif view == "sources":
             result = rules.sources(
@@ -44923,7 +44984,11 @@ Useful bounded guidance:
                 raise ValueError("payload.page must be a positive integer")
             query = str(data.get("query") or "").strip().casefold()
             limit = data.get("limit", 50)
-            if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
+            if (
+                isinstance(limit, bool)
+                or not isinstance(limit, int)
+                or not 1 <= limit <= 200
+            ):
                 raise ValueError("payload.limit must be an integer between 1 and 200")
             offset = data.get("offset", 0)
             if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
@@ -45422,6 +45487,361 @@ Useful bounded guidance:
         else:
             result = character_list(data.get("campaign_id"), principal_id)
         return facade_result(view, result)
+
+    def dependent_actor_source_text(
+        artifact: dict[str, Any],
+    ) -> tuple[str, list[str]]:
+        card = dict(artifact.get("card") or {})
+        source_text = str(card.get("normalized_content") or "").strip()
+        citations = [
+            dict(value)
+            for value in artifact.get("source_citations") or []
+            if isinstance(value, dict)
+        ]
+        source_refs = [
+            str(value) for value in artifact.get("rule_refs") or [] if str(value)
+        ]
+        if source_text:
+            return source_text, source_refs
+
+        chunk_keys = list(
+            dict.fromkeys(
+                str(
+                    citation.get("chunk_key")
+                    or dict(citation.get("source_ref") or {}).get("chunk_key")
+                    or ""
+                )
+                for citation in citations
+                if str(
+                    citation.get("chunk_key")
+                    or dict(citation.get("source_ref") or {}).get("chunk_key")
+                    or ""
+                )
+            )
+        )
+        source_keys = list(
+            dict.fromkeys(
+                str(citation.get("source_key") or "")
+                for citation in citations
+                if str(citation.get("source_key") or "")
+            )
+        )
+        if not chunk_keys or not source_keys:
+            raise ValueError(
+                "dependent actor template has no exact portable source text"
+            )
+        sources_by_key = {
+            str(source.get("source_key") or ""): source
+            for source in rules.sources(system_id=DND5E.id, include_retired=False)
+        }
+        selected_chunks: dict[str, dict[str, Any]] = {}
+        for source_key in source_keys:
+            source = sources_by_key.get(source_key)
+            if source is None:
+                continue
+            for chunk in rules.source_chunks(str(source["id"])):
+                key = str(chunk.get("key") or chunk.get("chunk_key") or "")
+                if key in chunk_keys:
+                    selected_chunks[key] = chunk
+        if set(selected_chunks) != set(chunk_keys):
+            raise ValueError("dependent actor template source chunks are unavailable")
+        rendered = []
+        for chunk_key in chunk_keys:
+            chunk = selected_chunks[chunk_key]
+            headings = [
+                str(value).strip()
+                for value in chunk.get("heading_path") or []
+                if str(value).strip()
+            ]
+            rendered.append(
+                "\n\n".join(
+                    value
+                    for value in (
+                        "\n".join(
+                            f"{'#' * min(6, index + 1)} {heading}"
+                            for index, heading in enumerate(headings)
+                        ),
+                        str(chunk.get("content") or "").strip(),
+                    )
+                    if value
+                )
+            )
+        source_text = "\n\n".join(value for value in rendered if value).strip()
+        if not source_text:
+            raise ValueError("dependent actor template source chunks contain no text")
+        return source_text, source_refs
+
+    def dependent_actor_numeric_parameters(
+        *,
+        owner: Any,
+        requirement: dict[str, Any],
+        owner_class_name: str,
+        casting_slot_level: Any,
+    ) -> tuple[dict[str, int], str | None]:
+        solution = dict(requirement.get("solution") or {})
+        expected = set(solution.get("numeric_parameters") or [])
+        owner_sheet = deepcopy(owner.sheet)
+        derived = derive_character_sheet(owner_sheet)
+        abilities = dict(derived.get("ability_modifiers") or {})
+        spellcasting = dict(derived.get("spellcasting") or {})
+        classes = [
+            dict(value)
+            for value in dict(owner_sheet.get("progression") or {}).get("classes") or []
+            if isinstance(value, dict)
+        ]
+        class_by_name = {
+            str(value.get("name") or "").strip().casefold(): value
+            for value in classes
+            if str(value.get("name") or "").strip()
+        }
+        source_class_names = [
+            str(value).strip().casefold()
+            for value in solution.get("owner_class_names") or []
+            if str(value).strip()
+        ]
+        reviewed_owner_class_name = (
+            str(requirement.get("owner_class_name") or "").strip().casefold()
+        )
+        if reviewed_owner_class_name:
+            source_class_names = [reviewed_owner_class_name]
+        selected_class_name = str(owner_class_name or "").strip().casefold()
+        if source_class_names:
+            if len(source_class_names) != 1:
+                raise ValueError(
+                    "dependent actor template has ambiguous source class evidence"
+                )
+            source_class = source_class_names[0]
+            if selected_class_name and selected_class_name != source_class:
+                raise ValueError(
+                    "owner_class_name conflicts with the reviewed source formula"
+                )
+            selected_class_name = source_class
+        if "owner_class_level" in expected:
+            if not selected_class_name:
+                if len(class_by_name) != 1:
+                    raise ValueError(
+                        "owner_class_name is required for a multiclass dependent actor"
+                    )
+                selected_class_name = next(iter(class_by_name))
+            if selected_class_name not in class_by_name:
+                raise ValueError(
+                    "owner does not have the class required by the template"
+                )
+
+        values: dict[str, int] = {}
+        for parameter in sorted(expected):
+            if parameter == "owner_class_level":
+                values[parameter] = int(class_by_name[selected_class_name]["level"])
+            elif parameter == "owner_proficiency_bonus":
+                values[parameter] = int(derived["proficiency_bonus"])
+            elif parameter == "owner_spell_attack_modifier":
+                if not spellcasting:
+                    raise ValueError(
+                        "owner has no spell attack modifier for this template"
+                    )
+                values[parameter] = int(spellcasting["attack_bonus"])
+            elif parameter == "owner_spell_save_dc":
+                if not spellcasting:
+                    raise ValueError("owner has no spell save DC for this template")
+                values[parameter] = int(spellcasting["save_dc"])
+            elif parameter.startswith("owner_") and parameter.endswith("_modifier"):
+                ability = parameter[len("owner_") : -len("_modifier")]
+                if ability == "spellcasting_ability":
+                    if not spellcasting:
+                        raise ValueError(
+                            "owner has no spellcasting ability for this template"
+                        )
+                    ability = str(spellcasting.get("ability") or "")
+                if ability not in abilities:
+                    raise ValueError(
+                        f"owner template ability {ability!r} is unavailable"
+                    )
+                values[parameter] = int(abilities[ability])
+            elif parameter == "casting_slot_level":
+                if (
+                    isinstance(casting_slot_level, bool)
+                    or not isinstance(casting_slot_level, int)
+                    or not 1 <= casting_slot_level <= 9
+                ):
+                    raise ValueError(
+                        "casting_slot_level must be an integer from 1 to 9"
+                    )
+                values[parameter] = casting_slot_level
+            else:
+                raise ValueError(
+                    f"dependent actor parameter {parameter!r} is unsupported"
+                )
+        if "casting_slot_level" not in expected and casting_slot_level is not None:
+            raise ValueError("casting_slot_level is not accepted by this template")
+        return values, selected_class_name or None
+
+    @mcp.tool()
+    def addon_actor_instantiate(
+        campaign_id: str,
+        artifact_id: str,
+        owner_character_id: str,
+        name: str | None = None,
+        character_type: Literal["npc", "monster"] = "monster",
+        player_name: str | None = None,
+        summary: str = "",
+        notes: dict[str, Any] | None = None,
+        owner_class_name: str | None = None,
+        casting_slot_level: int | None = None,
+        template_variant: str | None = None,
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Instantiate one enabled, reviewed addon actor template without evaluating prose."""
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        if not idempotency_key:
+            raise ValueError(
+                "idempotency_key is required for addon actor instantiation"
+            )
+        owner = characters.get(owner_character_id)
+        if owner.campaign_id != campaign_id:
+            raise ValueError("dependent actor owner belongs to another campaign")
+        matches = [
+            (pack_id, version, artifact)
+            for pack_id, version, artifact in available_content_artifacts(campaign_id)
+            if str(artifact.get("id") or "") == artifact_id
+        ]
+        if len(matches) != 1:
+            raise LookupError(
+                "dependent actor template is not uniquely available in this campaign"
+            )
+        pack_id, version, artifact = matches[0]
+        if str(artifact.get("kind") or "") != "statblock":
+            raise ValueError("addon actor instantiation requires a statblock artifact")
+        review_errors = catalog_review_errors(artifact)
+        if (
+            review_errors
+            or dict(artifact.get("catalog_review") or {}).get("status") != "approved"
+        ):
+            raise ValueError(
+                "dependent actor template needs approved source/catalog review: "
+                + "; ".join(review_errors or ["catalog review is not approved"])
+            )
+        card = deepcopy(dict(artifact.get("card") or {}))
+        requirement = deepcopy(dict(card.get("dependent_actor_template") or {}))
+        solution_errors = dependent_actor_template_solution_errors(requirement)
+        if solution_errors:
+            raise ValueError(
+                "dependent actor template is not runtime-ready: "
+                + "; ".join(solution_errors)
+            )
+        source_text, source_refs = dependent_actor_source_text(artifact)
+        numeric_parameters, selected_class_name = dependent_actor_numeric_parameters(
+            owner=owner,
+            requirement=requirement,
+            owner_class_name=str(owner_class_name or ""),
+            casting_slot_level=casting_slot_level,
+        )
+        preview_text, _ = materialize_parameterized_statblock_source(
+            source_text,
+            requirement,
+            numeric_parameters=numeric_parameters,
+            self_ability_modifiers={},
+            template_variant=template_variant,
+            allow_self_modifier_placeholders=True,
+        )
+        edition = campaign_rules_edition(campaign_id)
+        source_key = f"rule-pack:{pack_id}@{version}#artifact:{artifact_id}"
+        preview = parse_edition_statblock(
+            preview_text,
+            edition=edition,
+            source_key=source_key,
+            rule_refs=source_refs,
+            name=str(name or "").strip() or None,
+        )
+        self_modifiers = dict(
+            derive_character_sheet(preview.sheet).get("ability_modifiers") or {}
+        )
+        rendered_text, resolved_fields = materialize_parameterized_statblock_source(
+            source_text,
+            requirement,
+            numeric_parameters=numeric_parameters,
+            self_ability_modifiers=self_modifiers,
+            template_variant=template_variant,
+        )
+        parsed = parse_edition_statblock(
+            rendered_text,
+            edition=edition,
+            source_key=source_key,
+            rule_refs=source_refs,
+            name=str(name or "").strip() or None,
+        )
+        hydrated_sheet, spell_warnings = hydrate_statblock_spellcasting(
+            campaign_id,
+            parsed,
+            source_key=source_key,
+            rule_refs=source_refs,
+        )
+        require_standard_statblock_engine_support(
+            hydrated_sheet,
+            None,
+            statblock_warnings=(),
+            spell_warnings=spell_warnings,
+        )
+        sheet = apply_dependent_actor_template_variant(
+            hydrated_sheet,
+            requirement,
+            template_variant=template_variant,
+        )
+        sheet = finalize_actor_sheet_rulings(sheet, campaign_id)
+        if character_type not in NON_PLAYER_CHARACTER_TYPES:
+            raise ValueError("addon actor templates create only npc or monster actors")
+        actor_name = str(name or parsed.name).strip()
+        notes_value = deepcopy(notes or default_character_notes())
+        profile = notes_value.setdefault("profile", {})
+        receipt = {
+            "event": "addon.actor.instantiate",
+            "ruleset_fingerprint": effective_rule_context(campaign_id).fingerprint,
+            "artifact_id": artifact_id,
+            "pack_id": pack_id,
+            "pack_version": version,
+            "owner_character_id": owner.id,
+            "owner_character_revision": owner.revision,
+            "owner_class_name": selected_class_name,
+            "casting_slot_level": casting_slot_level,
+            "template_variant": (
+                str(template_variant).strip().casefold().replace(" ", "_")
+                if template_variant is not None
+                else None
+            ),
+            "numeric_parameters": numeric_parameters,
+            "resolved_fields": resolved_fields,
+            "reviewed_expression_hash": str(
+                dict(requirement["solution"])["reviewed_expression_hash"]
+            ),
+            "source_refs": source_refs,
+        }
+        provenance = "sagasmith:addon-actor-template:" + canonical_json(receipt)
+        existing_dm_notes = str(profile.get("dm_notes") or "").strip()
+        profile["dm_notes"] = "\n".join(
+            value for value in (existing_dm_notes, provenance) if value
+        )
+        character = character_create(
+            actor_name,
+            campaign_id,
+            character_type,
+            player_name,
+            str(summary or parsed.summary),
+            sheet,
+            notes_value,
+            principal_id,
+            f"{idempotency_key}:actor",
+        )
+        return {
+            "character": character,
+            "content_receipt": receipt,
+            "actor_knowledge_imported": False,
+            "next": (
+                "combat_join"
+                if authoritative_phase(campaign_id) == PROFILE_COMBAT
+                else None
+            ),
+        }
+
 
     @mcp.tool()
     def character_create_from(

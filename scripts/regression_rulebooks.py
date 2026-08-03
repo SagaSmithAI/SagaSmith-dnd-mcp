@@ -14,6 +14,7 @@ from time import perf_counter
 from typing import Any
 
 from sagasmith_core.text import ascii_slug
+from sagasmith_dnd.character_schema import default_character_sheet
 from sagasmith_dnd.core_content import (
     PACK_ID as SRD2014_PACK_ID,
 )
@@ -123,10 +124,7 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument(
         "--portable-target-home",
         type=Path,
-        help=(
-            "Isolated receiver home for --portable-roundtrip; defaults to a sibling "
-            "of --home"
-        ),
+        help=("Isolated receiver home for --portable-roundtrip; defaults to a sibling of --home"),
     )
     parser.add_argument(
         "--run-id",
@@ -159,14 +157,10 @@ async def _call(server: Any, name: str, arguments: dict[str, Any]) -> Any:
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
     root = args.root.expanduser().resolve()
     home = args.home.expanduser().resolve()
-    document_cache = (
-        args.document_cache.expanduser().resolve() if args.document_cache else None
-    )
+    document_cache = args.document_cache.expanduser().resolve() if args.document_cache else None
     catalog_manifest = _load_catalog_manifest(args.catalog_manifest)
     addon_output_dir = (
-        args.addon_output_dir.expanduser().resolve()
-        if args.addon_output_dir
-        else None
+        args.addon_output_dir.expanduser().resolve() if args.addon_output_dir else None
     )
     if addon_output_dir is not None:
         addon_output_dir.mkdir(parents=True, exist_ok=True)
@@ -253,9 +247,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 "name": f"Portable rulebook receiver [{_run_token(args.run_id)}]",
                 "edition": args.edition,
                 "locale": args.locale,
-                "idempotency_key": (
-                    f"rulebook-portable-target-campaign-{_run_token(args.run_id)}"
-                ),
+                "idempotency_key": (f"rulebook-portable-target-campaign-{_run_token(args.run_id)}"),
             },
         )
         await _enable_core_content_pack(
@@ -296,9 +288,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     for index, document in enumerate(documents, start=1):
         relative_path = str(document["relative_path"])
         source_key = _key(relative_path, run_id=args.run_id)
-        id_key = hashlib.sha256(
-            f"{relative_path}\0{args.run_id}".encode("utf-8")
-        ).hexdigest()[:16]
+        id_key = hashlib.sha256(f"{relative_path}\0{args.run_id}".encode("utf-8")).hexdigest()[:16]
         item_started = perf_counter()
         print(f"[{index}/{len(documents)}] {relative_path}", file=sys.stderr, flush=True)
         try:
@@ -375,15 +365,11 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                             "campaign_id": campaign["id"],
                             "action": "recover_statblocks",
                             "payload": {"job_id": job_id},
-                            "idempotency_key": (
-                                f"regression-recover-catalog-{id_key}"
-                            ),
+                            "idempotency_key": (f"regression-recover-catalog-{id_key}"),
                         },
                     )
                     statblock_recovery = recovery_response["result"]
-                    catalog_revision = int(
-                        statblock_recovery["job"]["revision"]
-                    )
+                    catalog_revision = int(statblock_recovery["job"]["revision"])
                 else:
                     statblock_recovery = {
                         "schema_version": 1,
@@ -426,9 +412,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 )
                 candidates = augmented["result"]["candidates"]
                 catalog_augmentation = {
-                    "added_candidate_ids": augmented["result"][
-                        "added_candidate_ids"
-                    ],
+                    "added_candidate_ids": augmented["result"]["added_candidate_ids"],
                     "added": len(additions),
                 }
             hits = await _call(
@@ -497,9 +481,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                         for item in candidates
                     ],
                     "content_inventory": {
-                        key: value
-                        for key, value in inventory.items()
-                        if key != "ledger"
+                        key: value for key, value in inventory.items() if key != "ledger"
                     },
                     "statblock_recovery": statblock_recovery,
                     "catalog_augmentation": catalog_augmentation,
@@ -516,9 +498,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             )
         except Exception as error:  # regression harness must report every book
             message = f"{type(error).__name__}: {error}"
-            report["errors"].append(
-                {"relative_path": relative_path, "error": message}
-            )
+            report["errors"].append({"relative_path": relative_path, "error": message})
             print(
                 f"[FAIL {index}/{len(documents)}] {relative_path}: {message}",
                 file=sys.stderr,
@@ -578,22 +558,17 @@ def _statblock_recovery_needed(
     """
 
     statblocks = [
-        candidate
-        for candidate in candidates
-        if str(candidate.get("kind") or "") == "statblock"
+        candidate for candidate in candidates if str(candidate.get("kind") or "") == "statblock"
     ]
     if not statblocks:
         return True
     chunks_by_id = {
-        str(chunk.get("id") or ""): str(chunk.get("content") or "")
-        for chunk in source_chunks
+        str(chunk.get("id") or ""): str(chunk.get("content") or "") for chunk in source_chunks
     }
     for candidate in statblocks:
         card = dict(dict(candidate.get("artifact") or {}).get("card") or {})
         normalized = str(
-            card.get("normalized_content")
-            or candidate.get("normalized_content")
-            or ""
+            card.get("normalized_content") or candidate.get("normalized_content") or ""
         ).strip()
         raw_source = "\n\n".join(
             chunks_by_id.get(str(chunk_id), "").strip()
@@ -601,9 +576,7 @@ def _statblock_recovery_needed(
             if chunks_by_id.get(str(chunk_id), "").strip()
         )
         probe = normalized or (
-            f"# {str(candidate.get('name') or '').strip()}\n\n{raw_source}"
-            if raw_source
-            else ""
+            f"# {str(candidate.get('name') or '').strip()}\n\n{raw_source}" if raw_source else ""
         )
         if parameterized_statblock_requirements(probe) is not None:
             continue
@@ -663,8 +636,7 @@ async def _enable_core_content_pack(
             },
             "expected_revision": revision,
             "idempotency_key": (
-                "rulebook-portable-core-activation-"
-                f"{_run_token(run_id)}-r{revision}"
+                f"rulebook-portable-core-activation-{_run_token(run_id)}-r{revision}"
             ),
         },
     )
@@ -722,8 +694,7 @@ def _catalog_document_review(
     }
     if unknown:
         raise ValueError(
-            f"catalog manifest entry for {relative_path} has unsupported fields: "
-            f"{sorted(unknown)}"
+            f"catalog manifest entry for {relative_path} has unsupported fields: {sorted(unknown)}"
         )
     return review
 
@@ -826,9 +797,7 @@ def _resolve_catalog_additions(
             )
         selectors = addition.get("source_selectors")
         if not isinstance(selectors, list) or not selectors:
-            raise ValueError(
-                f"catalog addition {index} for {relative_path} needs source_selectors"
-            )
+            raise ValueError(f"catalog addition {index} for {relative_path} needs source_selectors")
         chunk_ids: list[str] = []
         source_spans: list[dict[str, Any]] = []
         for selector_index, selector in enumerate(selectors):
@@ -836,9 +805,7 @@ def _resolve_catalog_additions(
                 raise ValueError(
                     f"source selector {selector_index} for {relative_path} must be an object"
                 )
-            matches = [
-                chunk for chunk in chunks if _source_selector_matches(chunk, selector)
-            ]
+            matches = [chunk for chunk in chunks if _source_selector_matches(chunk, selector)]
             match_all = selector.get("match_all", False)
             if not isinstance(match_all, bool):
                 raise ValueError("source selector match_all must be a boolean")
@@ -914,17 +881,11 @@ def _resolve_catalog_additions(
                         "source_chunk_id": chunk_id,
                         "start": start,
                         "end": end,
-                        "checksum": hashlib.sha256(
-                            exact_text.encode("utf-8")
-                        ).hexdigest(),
+                        "checksum": hashlib.sha256(exact_text.encode("utf-8")).hexdigest(),
                     }
                 )
         resolved.append(
-            {
-                key: addition[key]
-                for key in ("kind", "name", "card", "note")
-                if key in addition
-            }
+            {key: addition[key] for key in ("kind", "name", "card", "note") if key in addition}
             | {
                 "source_chunk_ids": list(dict.fromkeys(chunk_ids)),
                 "source_spans": source_spans,
@@ -967,9 +928,7 @@ def _review_spec_decisions(
             "note",
         }
         if unknown:
-            raise ValueError(
-                f"catalog decision {index} has unsupported fields: {sorted(unknown)}"
-            )
+            raise ValueError(f"catalog decision {index} has unsupported fields: {sorted(unknown)}")
         key = (_fold_text(rule.get("kind")), _fold_text(rule.get("name")))
         if not all(key):
             raise ValueError(f"catalog decision {index} has an invalid identity")
@@ -981,9 +940,7 @@ def _review_spec_decisions(
     matched: set[int] = set()
     for candidate in candidates:
         key = (_fold_text(candidate.get("kind")), _fold_text(candidate.get("name")))
-        heading_path = [
-            _fold_text(value) for value in candidate.get("source_heading_path") or []
-        ]
+        heading_path = [_fold_text(value) for value in candidate.get("source_heading_path") or []]
         matching_rules: list[tuple[int, dict[str, Any]]] = []
         for rule_index, rule in enumerate(rules):
             if key != (_fold_text(rule.get("kind")), _fold_text(rule.get("name"))):
@@ -999,15 +956,12 @@ def _review_spec_decisions(
                     exact_matches = expected_path == heading_path
                 else:
                     exact_matches = (
-                        expected_path == heading_path
-                        or expected_path == heading_path[-1:]
+                        expected_path == heading_path or expected_path == heading_path[-1:]
                     )
                 if not exact_matches:
                     continue
             contains = rule.get("source_heading_contains")
-            if contains is not None and _fold_text(contains) not in " > ".join(
-                heading_path
-            ):
+            if contains is not None and _fold_text(contains) not in " > ".join(heading_path):
                 continue
             matching_rules.append((rule_index, rule))
         if len(matching_rules) > 1:
@@ -1052,8 +1006,7 @@ def _review_spec_decisions(
         raise ValueError(
             "catalog manifest decisions matched no candidate: "
             + ", ".join(
-                f"{rules[index].get('kind')}:{rules[index].get('name')}"
-                for index in unmatched
+                f"{rules[index].get('kind')}:{rules[index].get('name')}" for index in unmatched
             )
         )
     expected = review_spec.get("expected_catalog")
@@ -1090,9 +1043,7 @@ def _review_spec_decisions(
         ]
         actual_counts = _kind_counts(accepted_candidates)
         normalized_expected = {
-            str(kind): count
-            for kind, count in sorted(expected_counts.items())
-            if count
+            str(kind): count for kind, count in sorted(expected_counts.items()) if count
         }
         if normalized_expected != actual_counts:
             raise ValueError(
@@ -1111,8 +1062,10 @@ def _matches_includes(
     """Match user-facing include globs consistently across host filesystems."""
 
     folded_path = relative_path.casefold()
-    return empty if not patterns else any(
-        fnmatch.fnmatch(folded_path, pattern.casefold()) for pattern in patterns
+    return (
+        empty
+        if not patterns
+        else any(fnmatch.fnmatch(folded_path, pattern.casefold()) for pattern in patterns)
     )
 
 
@@ -1179,9 +1132,7 @@ async def _portable_roundtrip(
         for index, chunk in catalog_chunks:
             content = " ".join(str(chunk.get("content") or "").split())
             heading = " > ".join(
-                str(item).strip()
-                for item in chunk.get("heading_path") or []
-                if str(item).strip()
+                str(item).strip() for item in chunk.get("heading_path") or [] if str(item).strip()
             )
             ordinal = int(chunk.get("ordinal", index) or 0)
             digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:12]
@@ -1233,9 +1184,7 @@ async def _portable_roundtrip(
                         "regression_only": False,
                         "source_key": source_key,
                         "complete_catalog": True,
-                        "source_catalog_fallback": (
-                            "per_chunk_source_bound_agent_ruling"
-                        ),
+                        "source_catalog_fallback": ("per_chunk_source_bound_agent_ruling"),
                         "source_catalog_artifact_count": len(candidates),
                         "empty_source_chunk_count": len(chunks) - len(catalog_chunks),
                     },
@@ -1470,9 +1419,7 @@ async def _portable_roundtrip(
         },
     )
     addon = addon_response["result"]["package"]
-    resolution_readiness = dict(
-        addon["payload"]["manifest"]["resolution_readiness"]
-    )
+    resolution_readiness = dict(addon["payload"]["manifest"]["resolution_readiness"])
     if (
         resolution_readiness.get("complete") is not True
         or resolution_readiness.get("first_use_compilation_required") is not False
@@ -1481,8 +1428,7 @@ async def _portable_roundtrip(
         raise RuntimeError("addon escaped with incomplete build-time resolution")
     addon_readiness = dict(addon["payload"]["manifest"].get("readiness") or {})
     if (
-        addon["payload"]["manifest"].get("readiness_policy")
-        != "build_time_complete"
+        addon["payload"]["manifest"].get("readiness_policy") != "build_time_complete"
         or addon_readiness.get("complete") is not True
     ):
         blockers = [
@@ -1543,6 +1489,96 @@ async def _portable_roundtrip(
     )
     if activated_response["result"]["activation"]["enabled"] is not True:
         raise RuntimeError("addon did not activate its exact branch lock")
+    dependent_actor_runtime_probes: list[dict[str, Any]] = []
+    for template_index, template in enumerate(
+        preset_summary.get("dependent_actor_templates") or []
+    ):
+        requirement = dict(template.get("requirement") or {})
+        solution = dict(requirement.get("solution") or {})
+        artifact_id = str(template.get("artifact_id") or "")
+        if not artifact_id or requirement.get("runtime_ready") is not True:
+            raise RuntimeError("dependent actor template is not runtime-ready")
+        numeric_parameters = set(solution.get("numeric_parameters") or [])
+        source_class_names = [
+            str(value).strip()
+            for value in solution.get("owner_class_names") or []
+            if str(value).strip()
+        ]
+        owner_class_name = str(requirement.get("owner_class_name") or "").strip()
+        if not owner_class_name and source_class_names:
+            if len(source_class_names) != 1:
+                raise RuntimeError("dependent actor template has ambiguous owner class")
+            owner_class_name = source_class_names[0].title()
+        if "owner_class_level" in numeric_parameters and not owner_class_name:
+            raise RuntimeError("dependent actor template lacks a reviewed owner_class_name binding")
+        owner_class_name = owner_class_name or "Wizard"
+        owner_sheet = default_character_sheet()
+        owner_sheet["edition"] = edition
+        owner_sheet["progression"]["level"] = 10
+        owner_sheet["progression"]["classes"] = [
+            {
+                "name": owner_class_name,
+                "level": 10,
+                "subclass": "",
+                "hit_die": 8,
+            }
+        ]
+        for ability in owner_sheet["abilities"].values():
+            ability["score"] = 18
+        owner_sheet["spellcasting"]["ability"] = "intelligence"
+        probe_key = f"{id_key}-{template_index}"
+        owner_response = await _call(
+            target_server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": target_campaign_id,
+                    "name": f"Addon template owner {probe_key}",
+                    "sheet": owner_sheet,
+                },
+                "idempotency_key": f"regression-addon-owner-{probe_key}",
+            },
+        )
+        instantiate_arguments = {
+            "campaign_id": target_campaign_id,
+            "artifact_id": artifact_id,
+            "owner_character_id": owner_response["result"]["id"],
+            "idempotency_key": f"regression-addon-actor-{probe_key}",
+            **({"casting_slot_level": 9} if "casting_slot_level" in numeric_parameters else {}),
+            **(
+                {"template_variant": str(solution["variant_options"][0])}
+                if solution.get("variant_options")
+                else {}
+            ),
+        }
+        actor_response = await _call(
+            target_server,
+            "addon_actor_instantiate",
+            instantiate_arguments,
+        )
+        actor_replay = await _call(
+            target_server,
+            "addon_actor_instantiate",
+            instantiate_arguments,
+        )
+        actor_result = actor_response
+        if (
+            actor_result["character"]["id"] != actor_replay["character"]["id"]
+            or actor_result.get("actor_knowledge_imported") is not False
+            or int(actor_result["character"]["sheet"]["combat"]["hp"]["max"]) < 1
+        ):
+            raise RuntimeError("dependent actor template runtime probe failed")
+        dependent_actor_runtime_probes.append(
+            {
+                "artifact_id": artifact_id,
+                "actor_id": actor_result["character"]["id"],
+                "owner_id": owner_response["result"]["id"],
+                "content_receipt": actor_result["content_receipt"],
+                "idempotent": True,
+                "actor_knowledge_imported": False,
+            }
+        )
     campaign_response = await _call(
         target_server,
         "campaign_query",
@@ -1561,8 +1597,7 @@ async def _portable_roundtrip(
             },
             "expected_revision": campaign_response["result"]["revision"],
             "idempotency_key": (
-                f"regression-addon-disable-{id_key}-"
-                f"r{campaign_response['result']['revision']}"
+                f"regression-addon-disable-{id_key}-r{campaign_response['result']['revision']}"
             ),
         },
     )
@@ -1630,9 +1665,8 @@ async def _portable_roundtrip(
         "catalog_artifacts": len(candidates),
         "actor_presets": preset_summary["cards"],
         "deferred_actor_presets": preset_summary.get("deferred", 0),
-        "dependent_actor_templates": preset_summary.get(
-            "dependent_actor_templates", []
-        ),
+        "dependent_actor_templates": preset_summary.get("dependent_actor_templates", []),
+        "dependent_actor_runtime_probes": dependent_actor_runtime_probes,
         "preset_failures": preset_summary.get("failures", []),
         "target_source_ids": imported_source_ids,
         "fresh_source_ids": True,
@@ -1691,9 +1725,7 @@ async def _portable_release_check(
         raise RuntimeError("release inspection crossed an install or activation boundary")
     if any(item["local_status"] != "installed" for item in inspected["components"]):
         raise RuntimeError("release receiver does not contain every installed rule package")
-    if any(
-        item["portable_checksum_status"] != "match" for item in inspected["components"]
-    ):
+    if any(item["portable_checksum_status"] != "match" for item in inspected["components"]):
         raise RuntimeError("release component envelope checksum mismatch")
     return {
         "id": release_id,

@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-TOOL_BUDGET_VERSION = "2026-08-build-time-resolution-v29"
+TOOL_BUDGET_VERSION = "2026-08-addon-actor-materializer-v30"
 
 # Captured before the conservative facade consolidation.  Keep this historical
 # baseline so a lower tool count cannot conceal a larger aggregate input schema.
 BASELINE_PUBLIC_TOOL_COUNT = 92
 BASELINE_INPUT_SCHEMA_BYTES = 56_611
 
-TARGET_PUBLIC_TOOL_COUNT = 84
+TARGET_PUBLIC_TOOL_COUNT = 85
 TARGET_CORE_TOOL_COUNT = 13
 # Combat transaction-history and receipt views make interrupted multi-call Agent
 # rulings publicly recoverable without another tool or direct storage access.
@@ -63,9 +63,12 @@ TARGET_CORE_TOOL_COUNT = 13
 # the existing facade and adds 21 bytes without changing any tool/profile count.
 # Version 28 makes an omitted rule_seed_bundled limit mean complete coverage;
 # the nullable compatibility parameter adds 30 bytes and no public tool.
-TARGET_INPUT_SCHEMA_BYTES = 51_864
+# Version 30 adds one DM-only, phase-safe addon actor materializer.  Its strict
+# typed inputs derive owner statistics server-side and keep the aggregate below
+# the historical 92-tool/56,611-byte baseline.
+TARGET_INPUT_SCHEMA_BYTES = 53_164
 PROFILE_TOOL_LIMITS = {
-    "lobby": 63,
-    "play": 48,
-    "combat": 47,
+    "lobby": 64,
+    "play": 49,
+    "combat": 48,
 }
