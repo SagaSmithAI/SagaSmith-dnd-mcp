@@ -14,6 +14,18 @@ from time import perf_counter
 from typing import Any
 
 from sagasmith_core.text import ascii_slug
+from sagasmith_dnd.core_content import (
+    PACK_ID as SRD2014_PACK_ID,
+)
+from sagasmith_dnd.core_content import (
+    PACK_VERSION as SRD2014_PACK_VERSION,
+)
+from sagasmith_dnd.core_content_2024 import (
+    PACK_ID as SRD2024_PACK_ID,
+)
+from sagasmith_dnd.core_content_2024 import (
+    PACK_VERSION as SRD2024_PACK_VERSION,
+)
 from sagasmith_dnd.editions import SUPPORTED_DND_EDITIONS
 
 from sagasmith_dnd_mcp.config import McpConfig
@@ -163,7 +175,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         chroma_path_override=None,
         dnd_skills_dir=config.dnd_skills_dir,
         modulegen_skills_dir=config.modulegen_skills_dir,
-        auto_seed_rules=False,
+        auto_seed_rules=True,
         rule_import_roots=(root,),
         module_import_roots=(),
         rule_ocr_enabled=not args.no_ocr,
@@ -220,7 +232,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             chroma_path_override=None,
             dnd_skills_dir=config.dnd_skills_dir,
             modulegen_skills_dir=config.modulegen_skills_dir,
-            auto_seed_rules=False,
+            auto_seed_rules=True,
             rule_import_roots=(),
             module_import_roots=(),
             rule_ocr_enabled=not args.no_ocr,
@@ -515,6 +527,14 @@ def _kind_counts(candidates: list[dict[str, Any]]) -> dict[str, int]:
     return dict(sorted(result.items()))
 
 
+def _core_content_dependency(edition: str) -> dict[str, str]:
+    if edition == "2014":
+        return {"id": SRD2014_PACK_ID, "version": SRD2014_PACK_VERSION}
+    if edition == "2024":
+        return {"id": SRD2024_PACK_ID, "version": SRD2024_PACK_VERSION}
+    raise ValueError(f"unsupported D&D edition: {edition}")
+
+
 def _load_catalog_manifest(path: Path | None) -> dict[str, Any]:
     if path is None:
         return {"version": 1, "documents": {}}
@@ -559,6 +579,7 @@ def _catalog_document_review(
         "decisions",
         "default_status",
         "expected_catalog",
+        "expected_counts",
     }
     if unknown:
         raise ValueError(
@@ -882,6 +903,29 @@ def _review_spec_decisions(
                 f"missing={sorted((expected_keys - accepted_keys).elements())}, "
                 f"unexpected={sorted((accepted_keys - expected_keys).elements())}"
             )
+    expected_counts = review_spec.get("expected_counts")
+    if expected_counts is not None:
+        if not isinstance(expected_counts, dict) or any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in expected_counts.values()
+        ):
+            raise ValueError("expected_counts must map content kinds to nonnegative integers")
+        accepted_candidates = [
+            candidate
+            for candidate, decision in zip(candidates, decisions, strict=True)
+            if decision["review_status"] == "accepted"
+        ]
+        actual_counts = _kind_counts(accepted_candidates)
+        normalized_expected = {
+            str(kind): count
+            for kind, count in sorted(expected_counts.items())
+            if count
+        }
+        if normalized_expected != actual_counts:
+            raise ValueError(
+                "catalog manifest expected_counts differs from the accepted catalog: "
+                f"expected={normalized_expected}, actual={actual_counts}"
+            )
     return decisions
 
 
@@ -1005,7 +1049,7 @@ async def _portable_roundtrip(
                         "namespace": pack_id,
                         "system_id": "dnd5e",
                         "editions": [edition],
-                        "dependencies": [],
+                        "dependencies": [_core_content_dependency(edition)],
                         "conflicts": [],
                         "capabilities": [],
                         "content_kinds": ["feature"],
@@ -1115,7 +1159,7 @@ async def _portable_roundtrip(
                         "namespace": pack_id,
                         "system_id": "dnd5e",
                         "editions": [edition],
-                        "dependencies": [],
+                        "dependencies": [_core_content_dependency(edition)],
                         "conflicts": [],
                         "capabilities": [],
                         "content_kinds": sorted(_kind_counts(candidates)),

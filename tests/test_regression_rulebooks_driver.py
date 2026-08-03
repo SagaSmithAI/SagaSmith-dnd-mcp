@@ -43,6 +43,14 @@ def test_publication_metadata_marks_only_core_dependencies_as_standard() -> None
     assert driver._publication_metadata(
         "D&D 5E - Xanathar's Guide to Everything.pdf"
     ) == ("xgte2014", "supplement")
+    assert driver._core_content_dependency("2014") == {
+        "id": "dnd5e.content.srd2014",
+        "version": "1.20.0",
+    }
+    assert driver._core_content_dependency("2024") == {
+        "id": "dnd5e.content.srd2024",
+        "version": "1.2.0",
+    }
 
 
 def test_include_globs_are_case_insensitive_and_optional() -> None:
@@ -98,6 +106,7 @@ def test_catalog_manifest_resolves_stable_sources_and_review_actions(tmp_path) -
                         "expected_catalog": [
                             {"kind": "subclass", "name": "Gunsmith"}
                         ],
+                        "expected_counts": {"subclass": 1},
                     }
                 },
             }
@@ -389,6 +398,9 @@ def test_portable_roundtrip_uses_public_facades_and_preserves_package() -> None:
     assert fallback_compile["provenance"]["source_catalog_artifact_count"] == 2
     assert fallback_compile["provenance"]["empty_source_chunk_count"] == 1
     assert "descriptive_fallback" not in fallback_compile["provenance"]
+    assert fallback_compile["manifest"]["dependencies"] == [
+        {"id": "dnd5e.content.srd2014", "version": "1.20.0"}
+    ]
     assert [name for name, _arguments in target.calls] == [
         "rule_import",
         "campaign_rules",
