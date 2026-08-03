@@ -41878,6 +41878,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 sheet["traits"]["size"] = str(grants.get("size") or selected_size)
             if int(grants.get("walk_speed", 0) or 0):
                 sheet["combat"]["speed"]["walk"] = int(grants["walk_speed"])
+            if int(grants.get("swim_speed", 0) or 0):
+                sheet["combat"]["speed"]["swim"] = int(grants["swim_speed"])
             if int(grants.get("darkvision_ft", 0) or 0):
                 sheet["traits"]["senses"]["darkvision"] = int(grants["darkvision_ft"])
             sheet["traits"]["languages"] = list(
