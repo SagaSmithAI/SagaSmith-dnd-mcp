@@ -948,8 +948,45 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
                             "casting_overrides": {
                                 "ignore_material_components": True
                             },
-                        }
+                        },
+                        {
+                            "name": "Nondetection",
+                            "level": 3,
+                            "eligible_classes": ["Wizard"],
+                            "method": "at_will",
+                            "spellcasting_ability": "intelligence",
+                            "free_casts": 0,
+                            "recovers_on": None,
+                            "allow_slot_cast": False,
+                            "minimum_level": 1,
+                            "ritual_only": False,
+                            "casting_overrides": {
+                                "ignore_material_components": True
+                            },
+                        },
+                        {
+                            "name": "Burning Hands",
+                            "level": 1,
+                            "eligible_classes": ["Wizard"],
+                            "method": "limited_use",
+                            "spellcasting_ability": "charisma",
+                            "free_casts": 1,
+                            "recovers_on": "long_rest",
+                            "allow_slot_cast": False,
+                            "minimum_level": 3,
+                            "ritual_only": False,
+                            "casting_overrides": {"fixed_cast_level": 2},
+                        },
                     ],
+                    "resources": {
+                        "species:marked-human:insight": {
+                            "label": "Marked Insight",
+                            "value": 1,
+                            "max": 1,
+                            "recovers_on": "short_rest",
+                            "source_key": "Marked Human",
+                        }
+                    },
                     "features": [],
                     "unresolved": [],
                 },
@@ -1190,6 +1227,26 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
         assert detect_magic["access"]["feature_casting_sources"][0][
             "casting_overrides"
         ] == {"ignore_material_components": True}
+        nondetection = next(
+            item
+            for item in marked["sheet"]["content"]["spells"]
+            if item["name"] == "Nondetection"
+        )
+        assert nondetection["access"]["at_will"] is True
+        assert nondetection["access"]["feature_casting_sources"][0]["method"] == (
+            "at_will"
+        )
+        burning_hands = next(
+            item
+            for item in marked["sheet"]["content"]["spells"]
+            if item["name"] == "Burning Hands"
+        )
+        assert burning_hands["access"]["feature_casting_sources"][0][
+            "casting_overrides"
+        ] == {"fixed_cast_level": 2}
+        assert marked["sheet"]["resources"]["species:marked-human:insight"][
+            "value"
+        ] == 1
         marked_spell = await _call(
             server,
             "character_content_apply",

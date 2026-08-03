@@ -41193,14 +41193,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             resource_discriminator: str,
         ) -> dict[str, Any]:
             method = str(grant.get("method") or "")
+            at_will = method == "at_will"
             spell_card = materialize_feature_spell(
                 spell_match,
                 method=method,
                 source_key=source_key,
+                at_will=at_will,
                 allow_existing=True,
             )
             spell_id = str(spell_match[2].get("id") or "")
             free_casts = int(grant.get("free_casts", 0) or 0)
+            if at_will and free_casts:
+                raise ValueError("an at-will content spell cannot have free casts")
             resource_key = ""
             if free_casts:
                 resource_key = (
@@ -42572,6 +42576,24 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         resource_discriminator=f"fixed-{index}",
                     )
                 )
+            for raw_resource_key, raw_resource in dict(
+                grants.get("resources") or {}
+            ).items():
+                resource_key = str(raw_resource_key).strip()
+                if not resource_key:
+                    raise ValueError("species resource grant has an empty key")
+                resource = deepcopy(dict(raw_resource))
+                resource["source_key"] = str(
+                    resource.get("source_key") or selected_species
+                )
+                existing = sheet["resources"].get(resource_key)
+                if existing is not None and existing != resource:
+                    raise ValueError(
+                        f"species resource grant conflicts with existing resource: "
+                        f"{resource_key}"
+                    )
+                if existing is None:
+                    sheet["resources"][resource_key] = resource
             feature_choices = {
                 "languages": selected_languages,
                 "skills": selected_skills,
