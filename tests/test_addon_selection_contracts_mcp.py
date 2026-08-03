@@ -222,3 +222,141 @@ def test_reviewed_addon_item_uses_bound_inventory_materializer(tmp_path: Path) -
     import asyncio
 
     asyncio.run(exercise())
+
+
+@pytest.mark.fresh_database
+def test_reviewed_addon_base_class_uses_bound_level_one_materializer(tmp_path: Path) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=workspace / "SagaSmith-module-gen-skills",
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Addon class", "idempotency_key": "addon-class-campaign"},
+        )
+        profile = await _call(
+            server,
+            "campaign_rule_profile_set",
+            {
+                "campaign_id": campaign["id"],
+                "edition": "2014",
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "addon-class-profile",
+            },
+        )
+        artifact = {
+            "id": "dnd5e.addon.artificer.class.artificer",
+            "kind": "class",
+            "application_state": "selection_ready",
+            "mechanical_scope": "descriptive",
+            "execution_state": "descriptive_ready",
+            "semantic_resolution": {
+                "status": "resolved",
+                "mode": "descriptive",
+                "first_use_compilation_required": False,
+            },
+            "card": {
+                "name": "Artificer",
+                "class_definition": {
+                    "hit_die": 8,
+                    "saving_throw_proficiencies": ["constitution", "intelligence"],
+                    "armor_proficiencies": ["light armor", "medium armor", "shields"],
+                    "weapon_proficiencies": ["simple weapons"],
+                    "tool_proficiencies": ["thieves' tools", "tinker's tools"],
+                    "skill_choice_count": 2,
+                    "skill_options": ["arcana", "history", "investigation", "medicine"],
+                },
+            },
+            "rule_refs": ["book:addon:artificer:p2"],
+        }
+        artifact["selection_contract"] = build_selection_contract(
+            artifact,
+            status="ready",
+            references=["book:addon:artificer:p2"],
+        )
+        draft = await _call(
+            server,
+            "rule_pack_draft",
+            {
+                "manifest": {
+                    "id": "dnd5e.addon.artificer",
+                    "version": "1.0.0",
+                    "title": "Reviewed Artificer",
+                    "namespace": "dnd5e.addon.artificer",
+                    "system_id": "dnd5e",
+                    "editions": ["2014"],
+                    "capabilities": [],
+                },
+                "artifacts": [artifact],
+                "mechanics": [],
+            },
+        )
+        assert draft["status"] == "validated", str(draft)
+        await _call(
+            server,
+            "rule_pack_install",
+            {"pack_id": "dnd5e.addon.artificer", "version": "1.0.0"},
+        )
+        await _call(
+            server,
+            "campaign_rule_pack_set",
+            {
+                "campaign_id": campaign["id"],
+                "pack_id": "dnd5e.addon.artificer",
+                "version": "1.0.0",
+                "expected_revision": profile["campaign_revision"],
+                "idempotency_key": "addon-class-activate",
+            },
+        )
+        sheet = default_character_sheet()
+        sheet["abilities"]["constitution"]["score"] = 14
+        character = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Class Tester",
+                "sheet": sheet,
+                "idempotency_key": "addon-class-character",
+            },
+        )
+
+        applied = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": character["id"],
+                "artifact_id": artifact["id"],
+                "selection": {"skills": ["arcana", "investigation"]},
+                "expected_revision": character["revision"],
+                "idempotency_key": "addon-class-apply",
+            },
+        )
+        assert applied["sheet"]["progression"]["classes"] == [
+            {"name": "Artificer", "level": 1, "subclass": "", "hit_die": 8}
+        ]
+        assert applied["sheet"]["combat"]["hp"]["max"] == 10
+        assert applied["sheet"]["skills"]["arcana"]["proficiency"] == "proficient"
+        assert applied["class_materialization"]["saving_throw_proficiencies"] == [
+            "constitution",
+            "intelligence",
+        ]
+        assert applied["rule_receipts"][0]["mechanic_id"] == (
+            "dnd5e.character.base_class.v1"
+        )
+        assert applied["sheet"]["content"]["selections"][0]["selection"] == {
+            "skills": ["arcana", "investigation"]
+        }
+
+    import asyncio
+
+    asyncio.run(exercise())

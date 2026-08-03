@@ -329,6 +329,7 @@ from sagasmith_dnd.progression import (
     apply_per_level_hit_point_bonus,
     award_experience,
     experience_status,
+    initialize_base_class,
     synchronize_class_feature_resources,
 )
 from sagasmith_dnd.random_stream import (
@@ -39521,6 +39522,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         spellbook_copy: dict[str, Any] | None = None
         subclass_spell_grants: list[dict[str, Any]] = []
         feature_spell_grants: list[dict[str, Any]] = []
+        class_materialization: dict[str, Any] | None = None
         replacing_feature_selection = False
         requested_method = str(selection.get("method") or "").strip().casefold()
         operation = (
@@ -39929,7 +39931,37 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             sheet["content"]["feats"].append(feat_card)
             return feat_card
 
-        if kind == "spell":
+        if kind == "class":
+            if phase != PROFILE_LOBBY:
+                raise CombatEngineError("base-class selection is available only during lobby setup")
+            class_definition = card.get("class_definition")
+            if not isinstance(class_definition, dict):
+                return {
+                    **_ruling_status(
+                        "pending_ruling",
+                        "missing_or_conflicting_source_review",
+                    ),
+                    "reason": "base class has no reviewed class_definition",
+                }
+            raw_skills = selection.get("skills")
+            if not isinstance(raw_skills, list):
+                return {
+                    "status": "pending_choice",
+                    "reason": "base class requires its reviewed skill choices",
+                }
+            try:
+                class_result = initialize_base_class(
+                    sheet,
+                    class_name=str(card.get("name") or artifact_id),
+                    class_definition=class_definition,
+                    skill_choices=raw_skills,
+                    source=f"{pack_id}@{version}:{artifact_id}",
+                )
+            except CombatEngineError as error:
+                raise ValueError(str(error)) from error
+            sheet = class_result.pop("sheet")
+            class_materialization = class_result
+        elif kind == "spell":
             if any(item.get("id") == artifact_id for item in sheet["content"]["spells"]):
                 raise ValueError("content spell is already present")
             try:
@@ -42005,7 +42037,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 **_ruling_status("pending_ruling", "agent_dm_adjudication"),
                 "reason": (f"{kind} is catalogued but needs an Agent-as-DM reviewed application"),
             }
-        if kind in {"subclass", "background", "species"}:
+        if kind in {"class", "subclass", "background", "species"}:
             if any(
                 item.get("artifact_id") == artifact_id for item in sheet["content"]["selections"]
             ):
@@ -42051,6 +42083,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             **(
                 {"feature_spell_grants": feature_spell_grants}
                 if feature_spell_grants
+                else {}
+            ),
+            **(
+                {"class_materialization": class_materialization}
+                if class_materialization is not None
                 else {}
             ),
             "content_context": runtime_context,
