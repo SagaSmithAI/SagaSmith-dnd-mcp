@@ -8,6 +8,10 @@ from pathlib import Path
 
 import pytest
 from sagasmith_core.portable import build_rule_pack
+from sagasmith_dnd.content_readiness import (
+    build_catalog_review,
+    build_selection_contract,
+)
 from sagasmith_dnd.resolution_plan import (
     compile_resolution_plan,
     resolution_plan_template,
@@ -15,10 +19,165 @@ from sagasmith_dnd.resolution_plan import (
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import (
+    audit_dnd_addon_readiness_components,
     audit_dnd_addon_resolution_components,
     create_server,
     finalize_dnd_addon_resolution_components,
 )
+
+
+def _passing_catalog_decisions() -> list[dict]:
+    checks = {
+        "identity": True,
+        "classification": True,
+        "entry_boundary": True,
+        "references": True,
+    }
+    return [
+        {
+            "role": "primary",
+            "reviewer": "deterministic:catalog-parser",
+            "method": "deterministic",
+            "checks": checks,
+            "notes": "Exact source entry passed structural validation.",
+        },
+        {
+            "role": "critic",
+            "reviewer": "deterministic:reference-auditor",
+            "method": "deterministic",
+            "checks": checks,
+            "notes": "Independent boundary and reference audit passed.",
+        },
+    ]
+
+
+def test_addon_readiness_recomputes_all_four_dimensions_from_content() -> None:
+    pack_id = "dnd5e.example.ready-addon"
+    source_text = "A harmless imported creature description."
+    source_hash = hashlib.sha256(source_text.encode()).hexdigest()
+    source_key = "example.ready-addon"
+    chunk_key = f"{source_key}/section-0/chunk-0-{source_hash[:16]}"
+    artifact = {
+        "id": f"{pack_id}.statblock.harmless",
+        "kind": "statblock",
+        "application_state": "catalog_only",
+        "mechanical_scope": "descriptive",
+        "execution_state": "descriptive_ready",
+        "card": {
+            "name": "Harmless",
+            "description": source_text,
+        },
+        "rule_clauses": [
+            {
+                "schema_version": 1,
+                "id": "description",
+                "title": "Harmless",
+                "scope": "descriptive",
+                "source_citations": [
+                    {
+                        "source": f"rule-source:{source_key}",
+                        "source_ref": {"chunk_key": chunk_key},
+                        "source_excerpt": source_text,
+                    }
+                ],
+                "settlement": {"mode": "descriptive"},
+            }
+        ],
+        "semantic_resolution": {
+            "status": "resolved",
+            "mode": "descriptive",
+            "first_use_compilation_required": False,
+            "clause_ids": ["description"],
+        },
+    }
+    artifact["catalog_review"] = build_catalog_review(
+        artifact,
+        decisions=_passing_catalog_decisions(),
+    )
+    artifact["selection_contract"] = build_selection_contract(
+        artifact,
+        status="not_applicable",
+    )
+    component = build_rule_pack(
+        portable_id=pack_id,
+        version="1.0.0",
+        system_id="dnd5e",
+        manifest={
+            "id": pack_id,
+            "version": "1.0.0",
+            "title": "Ready Addon",
+            "namespace": pack_id,
+            "system_id": "dnd5e",
+            "editions": ["2014"],
+            "dependencies": [],
+            "conflicts": [],
+            "capabilities": [],
+            "content_kinds": ["statblock"],
+        },
+        artifacts=[artifact],
+        mechanics=[],
+        provenance={"distribution": "private"},
+        sources=[
+            {
+                "source_key": source_key,
+                "title": "Ready Addon Source",
+                "edition": "2014",
+                "locale": "en",
+                "version": "1.0.0",
+                "publication_id": source_key,
+                "authority": "supplement",
+                "canonical_source_key": None,
+                "checksum": source_hash,
+                "metadata": {},
+                "sections": [
+                    {
+                        "ordinal": 0,
+                        "parent_ordinal": None,
+                        "level": 1,
+                        "title": "Harmless",
+                        "path": ["Harmless"],
+                        "content": source_text,
+                        "content_hash": source_hash,
+                        "start_offset": 0,
+                        "end_offset": len(source_text),
+                        "chunks": [
+                            {
+                                "key": chunk_key,
+                                "ordinal": 0,
+                                "heading_path": ["Harmless"],
+                                "content": source_text,
+                                "content_hash": source_hash,
+                                "token_count": 5,
+                                "metadata": {},
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+        metadata={"distribution": "private"},
+        dependencies=[],
+    )
+
+    report = audit_dnd_addon_readiness_components([component])
+
+    assert report["complete"] is True
+    assert report["source"]["verified_count"] == 1
+    assert report["catalog"]["reviewed_count"] == 1
+    assert report["selection"] == {
+        "applicable_count": 0,
+        "ready_count": 0,
+        "not_applicable_count": 1,
+        "complete": True,
+        "blockers": [],
+    }
+    assert report["runtime"]["modes"] == {"descriptive": 1}
+
+    stale = copy.deepcopy(component)
+    stale["payload"]["artifacts"][0]["card"]["name"] = "Changed"
+    stale_report = audit_dnd_addon_readiness_components([stale])
+    assert stale_report["catalog"]["complete"] is False
+    assert "stale" in stale_report["catalog"]["blockers"][0]["reason"]
 
 
 def test_addon_resolution_audit_ignores_items_without_semantic_effects() -> None:
