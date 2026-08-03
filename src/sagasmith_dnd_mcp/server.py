@@ -35567,11 +35567,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 for item in failures
                 if int(item.get("page_number") or 0) == page_number
             )
-            page_failures += sum(
-                1
-                for item in indexed_fallbacks
-                if int(item.get("page_number") or 0) == page_number
-            )
             for discovery, discovery_provider in discovery_items:
                 name = str(discovery["name"])
                 name_key = compact_ascii_key(name)
@@ -35666,9 +35661,42 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "validation": reviewed["validation"],
                     }
                 )
-            if page_failures == 0:
+            recovered_page_keys = {
+                (
+                    compact_ascii_key(str(item.get("name") or "")),
+                    int(item.get("page_number") or 0),
+                )
+                for item in recovered_items
+            }
+            unresolved_page_fallbacks = [
+                item
+                for item in indexed_fallbacks
+                if int(item.get("page_number") or 0) == page_number
+                and (
+                    compact_ascii_key(str(item.get("name") or "")),
+                    page_number,
+                )
+                not in recovered_page_keys
+            ]
+            if page_failures == 0 and not unresolved_page_fallbacks:
                 complete_pages.append(page_number)
 
+        recovered_keys = {
+            (
+                compact_ascii_key(str(item.get("name") or "")),
+                int(item.get("page_number") or 0),
+            )
+            for item in recovered_items
+        }
+        unresolved_indexed_fallbacks = [
+            item
+            for item in indexed_fallbacks
+            if (
+                compact_ascii_key(str(item.get("name") or "")),
+                int(item.get("page_number") or 0),
+            )
+            not in recovered_keys
+        ]
         recovery_summary = {
             "schema_version": 1,
             "selected_pages": selected_pages,
@@ -35676,6 +35704,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "recovered": recovered_items,
             "failures": failures,
             "indexed_fallbacks": indexed_fallbacks,
+            "unresolved_indexed_fallbacks": unresolved_indexed_fallbacks,
             "catalog_statblocks": len(catalog_statblocks),
             "indexed_text_reviews": sum(
                 1 for item in recovered_items if item["recovery_mode"] == "indexed_text"
@@ -35683,7 +35712,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "agent_review_required": sum(
                 1 for item in recovered_items if item["requires_agent_fill"]
             ),
-            "status": "complete" if not failures else "review_required",
+            "status": (
+                "complete"
+                if not failures and not unresolved_indexed_fallbacks
+                else "review_required"
+            ),
         }
         current = require_import_job(campaign_id, job_id, "rulebook")
         result_value = {
@@ -35982,50 +36015,29 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def validate_indexed_statblock_review(
         *,
         source_id: str,
+        page_number: int,
+        content: str,
+        parsed: Any,
         evidence_chunk_ids: list[str] | None,
     ) -> list[dict[str, Any]]:
-        """Bind deterministic statblock normalization to exact indexed chunks."""
+        """Prove a deterministic normalization against its exact source segment.
 
-        if not isinstance(evidence_chunk_ids, list) or not evidence_chunk_ids:
-            raise ValueError(
-                "indexed_text statblock review requires evidence_chunk_ids"
-            )
-        chunk_ids = [str(item).strip() for item in evidence_chunk_ids]
-        if (
-            any(not item for item in chunk_ids)
-            or len(chunk_ids) != len(set(chunk_ids))
-            or len(chunk_ids) > 500
-        ):
-            raise ValueError(
-                "indexed_text evidence_chunk_ids must contain 1 to 500 unique ids"
-            )
-        available = {
-            str(item["id"]): item for item in rules.source_chunks(source_id)
-        }
-        if any(item not in available for item in chunk_ids):
-            raise ValueError(
-                "indexed_text evidence chunks must all belong to the reviewed source"
-            )
-        selected = [available[item] for item in chunk_ids]
-        ordered = sorted(
-            selected,
-            key=lambda item: (
-                int(item.get("section_ordinal") or 0),
-                int(item.get("ordinal") or 0),
-            ),
+        ``indexed_text`` used to validate only ownership of the supplied chunk
+        ids.  A normalized card could therefore mix fields from adjacent
+        columns or creatures and still be labelled ``verified_indexed_text``.
+        Deterministic extraction receives the same fact, order, page, and entry
+        boundary checks as an Agent transcription; only the producer differs.
+        """
+
+        evidence, _ = validate_agent_text_statblock_review(
+            source_id=source_id,
+            page_number=page_number,
+            content=content,
+            parsed=parsed,
+            evidence_chunk_ids=evidence_chunk_ids,
+            evidence_exclusions=[],
         )
-        return [
-            {
-                "id": str(item["id"]),
-                "ordinal": int(item.get("ordinal") or 0),
-                "page_start": item.get("page_start"),
-                "page_end": item.get("page_end"),
-                "content_sha256": hashlib.sha256(
-                    str(item.get("content") or "").encode("utf-8")
-                ).hexdigest(),
-            }
-            for item in ordered
-        ]
+        return evidence
 
     @mcp.tool()
     def rule_statblock_review(
@@ -36182,6 +36194,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         elif review_mode == "indexed_text":
             text_evidence = validate_indexed_statblock_review(
                 source_id=job.source_id,
+                page_number=page_number,
+                content=content,
+                parsed=parsed,
                 evidence_chunk_ids=evidence_chunk_ids,
             )
             validated_evidence_exclusions = []

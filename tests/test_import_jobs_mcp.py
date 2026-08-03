@@ -15,6 +15,7 @@ from sagasmith_core import (
 from sagasmith_core.rules import RuleService
 from sagasmith_dnd.statblocks import parse_2014_statblock
 
+import sagasmith_dnd_mcp.server as server_module
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import (
     _bounded_ocr_heading_equivalent,
@@ -1050,6 +1051,37 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
             "WIS",
             "CHA",
         ]
+        recovered_content = str(result["recovery"]["normalized_content"])
+
+        def contaminated_inventory(
+            chunks: list[dict], *, source_title: str
+        ) -> dict:
+            del source_title
+            return {
+                "candidates": [
+                    {
+                        "id": "contaminated-commoner",
+                        "kind": "statblock",
+                        "name": "COMMONER",
+                        "page_start": 1,
+                        "page_end": 1,
+                        "execution_state": "review_ready",
+                        "normalized_content": recovered_content.replace(
+                            "| 10 (+0)", "| 23 (+6)", 1
+                        )
+                        + "\n\nGIANT APE Huge beast, unaligned.",
+                        "source_chunk_ids": [
+                            str(item["id"]) for item in chunks
+                        ],
+                    }
+                ]
+            }
+
+        monkeypatch.setattr(
+            server_module,
+            "extract_content_inventory",
+            contaminated_inventory,
+        )
         batch_arguments = {
             "campaign_id": campaign["id"],
             "action": "recover_statblocks",
@@ -1065,6 +1097,12 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
             "COMMONER"
         ]
         assert batch["result"]["failures"] == []
+        assert len(batch["result"]["indexed_fallbacks"]) == 1
+        assert batch["result"]["unresolved_indexed_fallbacks"] == []
+        assert batch["result"]["recovered"][0]["recovery_mode"] in {
+            "layout_text",
+            "layout_ocr",
+        }
         if embedded_text:
             with pytest.raises(Exception, match="unsupported .* payload fields"):
                 await server.call_tool(
