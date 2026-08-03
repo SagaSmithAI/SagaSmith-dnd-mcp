@@ -1316,6 +1316,32 @@ def _statblock_ocr_discovery_needed(
     return not discoveries or identity_count > len(discoveries)
 
 
+def _project_recovered_statblock_candidates(
+    candidates: list[dict[str, Any]],
+    recovered_candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Replace only pages that produced reviews, preserving other usable cards."""
+
+    recovered_pages = {
+        int(candidate.get("page_start") or 0) for candidate in recovered_candidates
+    }
+    retained = [
+        candidate
+        for candidate in candidates
+        if not (
+            candidate.get("kind") == "statblock"
+            and any(
+                page in recovered_pages
+                for page in range(
+                    int(candidate.get("page_start") or 0),
+                    int(candidate.get("page_end") or 0) + 1,
+                )
+            )
+        )
+    ]
+    return [*retained, *recovered_candidates]
+
+
 _STATBLOCK_INDEX_ENTRY_RE = re.compile(
     r"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9 '&(),\-]{1,100}?)"
     r"\s*\.{3,}\s*(\d{1,4})\b"
@@ -12725,21 +12751,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 }
             )
         if recovered_candidates:
-            candidates = [
-                candidate
-                for candidate in candidates
-                if not (
-                    candidate.get("kind") == "statblock"
-                    and any(
-                        page in complete_pages
-                        for page in range(
-                            int(candidate.get("page_start") or 0),
-                            int(candidate.get("page_end") or 0) + 1,
-                        )
-                    )
-                )
-            ]
-            candidates.extend(recovered_candidates)
+            candidates = _project_recovered_statblock_candidates(
+                candidates,
+                recovered_candidates,
+            )
             inventory["candidate_count"] = len(candidates)
             counts: dict[str, int] = {}
             for candidate in candidates:

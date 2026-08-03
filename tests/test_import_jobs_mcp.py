@@ -28,6 +28,7 @@ from sagasmith_dnd_mcp.server import (
     _merge_statblock_discoveries,
     _noisy_ocr_heading_equivalent,
     _ocr_fact_key,
+    _project_recovered_statblock_candidates,
     _select_preferred_statblock_reviews,
     _source_statblock_hint_additions,
     _source_statblock_recovery_hints,
@@ -216,6 +217,45 @@ def test_statblock_ocr_discovery_fills_empty_and_partially_paired_text_layers() 
         layout_blocks=[],
         page_has_usable_catalog_card=True,
     )
+
+
+def test_recovered_statblock_projection_preserves_unreviewed_usable_pages() -> None:
+    projected = _project_recovered_statblock_candidates(
+        [
+            {
+                "id": "steel-defender",
+                "kind": "statblock",
+                "page_start": 62,
+                "page_end": 62,
+            },
+            {
+                "id": "noisy-kalaraq",
+                "kind": "statblock",
+                "page_start": 307,
+                "page_end": 307,
+            },
+            {
+                "id": "other-feature",
+                "kind": "feature",
+                "page_start": 307,
+                "page_end": 307,
+            },
+        ],
+        [
+            {
+                "id": "reviewed-kalaraq",
+                "kind": "statblock",
+                "page_start": 307,
+                "page_end": 307,
+            }
+        ],
+    )
+
+    assert [item["id"] for item in projected] == [
+        "steel-defender",
+        "other-feature",
+        "reviewed-kalaraq",
+    ]
 
 
 def test_source_statblock_hints_skip_structural_page_headers() -> None:
