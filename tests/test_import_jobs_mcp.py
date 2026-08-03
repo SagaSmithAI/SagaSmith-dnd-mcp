@@ -835,14 +835,20 @@ def test_rule_import_renders_a_checksum_bound_review_page(
 
 
 @pytest.mark.parametrize(
-    ("embedded_text", "corrupt_embedded_text"),
-    [(True, False), (False, False), (True, True)],
+    ("embedded_text", "corrupt_embedded_text", "fallback_model"),
+    [
+        (True, False, False),
+        (False, False, False),
+        (True, True, False),
+        (False, False, True),
+    ],
 )
 def test_rule_import_recovers_statblock_for_text_only_agent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     embedded_text: bool,
     corrupt_embedded_text: bool,
+    fallback_model: bool,
 ) -> None:
     import_root = tmp_path / "imports"
     import_root.mkdir()
@@ -942,6 +948,15 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
         *,
         page_numbers: list[int] | None = None,
     ) -> list[OcrPageLayout]:
+        if fallback_model and provider.model_type == "small":
+            return [
+                OcrPageLayout(
+                    page_number=layout.page_number,
+                    width=layout.width,
+                    height=layout.height,
+                    blocks=(),
+                )
+            ]
         if not embedded_text and provider.scale == 3.0:
             return [
                 OcrPageLayout(
@@ -1035,6 +1050,14 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
         result = recovered["result"]
         assert result["page_number"] == 1
         assert result["provider"] == "rapidocr"
+        assert result["ocr_model"] == ("medium" if fallback_model else "small")
+        assert result["corroboration_models"] == (
+            ["medium", "medium"]
+            if fallback_model
+            else ["small"]
+            if embedded_text and not corrupt_embedded_text
+            else ["small", "small"]
+        )
         assert result["corroboration_mode"] == (
             "embedded_text"
             if embedded_text and not corrupt_embedded_text
@@ -1066,6 +1089,8 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
             "WIS",
             "CHA",
         ]
+        if fallback_model:
+            return
         recovered_content = str(result["recovery"]["normalized_content"])
 
         def contaminated_inventory(

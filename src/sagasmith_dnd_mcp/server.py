@@ -35641,37 +35641,50 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
         selected_layout = None
         selected_scale = None
+        selected_model = None
         recovered = None
         attempted_pages: list[int] = []
         primary_scale = float(getattr(provider, "scale", 2.0))
+        preferred_model = str(getattr(provider, "model_type", "small"))
+        recovery_models = [
+            preferred_model,
+            "medium" if preferred_model == "small" else "small",
+        ]
         recovery_scales = list(
             dict.fromkeys((primary_scale, 2.5, 3.0, 1.5, 3.5, 4.0, 2.0))
         )
-        for candidate in candidate_pages:
-            if candidate not in attempted_pages:
-                attempted_pages.append(candidate)
-            for scale in recovery_scales:
-                layout = cached_rapidocr_layout(
-                    source_path,
-                    candidate,
-                    scale=scale,
-                    preferred_provider=(
-                        provider if abs(scale - primary_scale) < 0.001 else None
-                    ),
-                    model_type=str(getattr(provider, "model_type", "small")),
-                )
-                try:
-                    candidate_recovery = recover_2014_statblock_from_ocr(
-                        layout.as_dict(),
-                        name=target_name,
-                        minimum_confidence=0.5,
+        for recovery_model in recovery_models:
+            for candidate in candidate_pages:
+                if candidate not in attempted_pages:
+                    attempted_pages.append(candidate)
+                for scale in recovery_scales:
+                    layout = cached_rapidocr_layout(
+                        source_path,
+                        candidate,
+                        scale=scale,
+                        preferred_provider=(
+                            provider
+                            if recovery_model == preferred_model
+                            and abs(scale - primary_scale) < 0.001
+                            else None
+                        ),
+                        model_type=recovery_model,
                     )
-                except StatblockImportError:
-                    continue
-                selected_layout = layout
-                selected_scale = scale
-                recovered = candidate_recovery
-                break
+                    try:
+                        candidate_recovery = recover_2014_statblock_from_ocr(
+                            layout.as_dict(),
+                            name=target_name,
+                            minimum_confidence=0.5,
+                        )
+                    except StatblockImportError:
+                        continue
+                    selected_layout = layout
+                    selected_scale = scale
+                    selected_model = recovery_model
+                    recovered = candidate_recovery
+                    break
+                if selected_layout is not None:
+                    break
             if selected_layout is not None:
                 break
         if selected_layout is None:
@@ -35680,6 +35693,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "on candidate pages " + ", ".join(str(value) for value in attempted_pages)
             )
         assert recovered is not None
+        assert selected_model is not None
         evidence = dict(recovered["evidence"])
         recovered_page = int(evidence["page_number"])
         page_text = extract_pdf_page_text(source_path, recovered_page)
@@ -35716,6 +35730,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         corroboration_mode = "dual_layout_ocr"
         assert selected_scale is not None
         corroboration_scales = [float(selected_scale)]
+        corroboration_models = [selected_model]
         corroborated = [
             {"field": label, "value": fact}
             for label, fact in corroboration_pairs
@@ -35745,52 +35760,74 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
             primary_fingerprint = _statblock_critical_fingerprint(critical_facts)
             secondary_scale = None
+            secondary_model = None
             secondary_failures: list[str] = []
-            secondary_recoveries: list[tuple[float, dict[str, Any]]] = []
-            for candidate_scale in (3.0, 2.5, 1.5, 3.5, 4.0, 2.0):
-                if abs(primary_scale - candidate_scale) < 0.01:
-                    continue
-                try:
-                    secondary_layout = cached_rapidocr_layout(
-                        source_path,
-                        recovered_page,
-                        scale=candidate_scale,
-                        preferred_provider=(
-                            provider
-                            if abs(candidate_scale - float(provider.scale)) < 0.001
-                            else None
-                        ),
-                        model_type=str(getattr(provider, "model_type", "small")),
+            secondary_recoveries: list[tuple[str, float, dict[str, Any]]] = []
+            for recovery_model in recovery_models:
+                for candidate_scale in (3.0, 2.5, 1.5, 3.5, 4.0, 2.0):
+                    if (
+                        recovery_model == selected_model
+                        and abs(float(selected_scale) - candidate_scale) < 0.01
+                    ):
+                        continue
+                    label = f"{recovery_model}@{candidate_scale:.1f}"
+                    try:
+                        secondary_layout = cached_rapidocr_layout(
+                            source_path,
+                            recovered_page,
+                            scale=candidate_scale,
+                            preferred_provider=(
+                                provider
+                                if recovery_model == preferred_model
+                                and abs(candidate_scale - float(provider.scale)) < 0.001
+                                else None
+                            ),
+                            model_type=recovery_model,
+                        )
+                        secondary = recover_2014_statblock_from_ocr(
+                            secondary_layout.as_dict(),
+                            name=target_name,
+                            minimum_confidence=0.5,
+                        )
+                    except StatblockImportError as exc:
+                        secondary_failures.append(f"{label}: {exc}")
+                        continue
+                    secondary_recoveries.append(
+                        (recovery_model, candidate_scale, secondary)
                     )
-                    secondary = recover_2014_statblock_from_ocr(
-                        secondary_layout.as_dict(),
-                        name=target_name,
-                        minimum_confidence=0.5,
-                    )
-                except StatblockImportError as exc:
-                    secondary_failures.append(f"{candidate_scale:.1f}: {exc}")
-                    continue
-                secondary_recoveries.append((candidate_scale, secondary))
-                if primary_fingerprint == _statblock_critical_fingerprint(
-                    dict(secondary["critical_facts"])
-                ):
-                    secondary_scale = candidate_scale
+                    if primary_fingerprint == _statblock_critical_fingerprint(
+                        dict(secondary["critical_facts"])
+                    ):
+                        secondary_model = recovery_model
+                        secondary_scale = candidate_scale
+                        break
+                    secondary_failures.append(f"{label}: critical facts disagree")
+                if secondary_scale is not None:
                     break
-                secondary_failures.append(
-                    f"{candidate_scale:.1f}: critical facts disagree"
-                )
             if secondary_scale is None:
-                matching_pair = _matching_statblock_recovery_pair(
-                    secondary_recoveries
+                matching_pair = next(
+                    (
+                        (left, right)
+                        for index, left in enumerate(secondary_recoveries)
+                        for right in secondary_recoveries[index + 1 :]
+                        if _statblock_critical_fingerprint(
+                            dict(left[2]["critical_facts"])
+                        )
+                        == _statblock_critical_fingerprint(
+                            dict(right[2]["critical_facts"])
+                        )
+                    ),
+                    None,
                 )
                 if matching_pair is None:
                     raise RuntimeError(
-                        "no independent layout OCR scale corroborated all critical "
+                        "no independent layout OCR model/scale corroborated all critical "
                         "statblock facts; " + "; ".join(secondary_failures)
                     )
-                (selected_scale, recovered), (secondary_scale, _corroboration) = (
-                    matching_pair
-                )
+                (
+                    (selected_model, selected_scale, recovered),
+                    (secondary_model, secondary_scale, _corroboration),
+                ) = matching_pair
                 evidence = dict(recovered["evidence"])
                 critical_facts = dict(recovered["critical_facts"])
                 corroboration_pairs = [
@@ -35815,7 +35852,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     for label, fact in corroboration_pairs
                 ]
                 corroboration_scales = [float(selected_scale)]
+                corroboration_models = [selected_model]
             corroboration_scales.append(secondary_scale)
+            assert secondary_model is not None
+            corroboration_models.append(secondary_model)
         observation = (
             f"Text-only layout OCR v{int(evidence['recovery_version'])} recovered "
             f"{target_name} from PDF page "
@@ -35830,9 +35870,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "attempted_pages": attempted_pages,
             "page_number": recovered_page,
             "provider": provider.name,
+            "ocr_model": selected_model,
             "recovery_scale": selected_scale,
             "corroboration_mode": corroboration_mode,
             "corroboration_scales": corroboration_scales,
+            "corroboration_models": corroboration_models,
             "corroborated_facts": corroborated,
             "observation": observation,
             "recovery": recovered,
@@ -37614,7 +37656,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 edition=profile.edition,
             )
             installed_manifest = dict(installed_pack.manifest)
-            if "readiness" in installed_manifest or "readiness_policy" in installed_manifest:
+            if (
+                "readiness" in installed_manifest
+                or "readiness_policy" in installed_manifest
+            ):
                 if installed_manifest.get("readiness_policy") != "build_time_complete":
                     raise RulesetUnavailableError(
                         "addon cannot be enabled until its four-dimensional review is complete"
