@@ -68,7 +68,7 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument(
         "--ocr-model",
         choices=("small", "medium"),
-        default="small",
+        default="medium",
         help=(
             "Preferred PP-OCRv6 profile. Statblock recovery automatically tries "
             "the other profile only when the preferred result cannot be verified."
