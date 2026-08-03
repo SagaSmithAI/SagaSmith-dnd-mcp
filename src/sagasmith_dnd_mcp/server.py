@@ -242,7 +242,11 @@ from sagasmith_dnd.content_import import (
     validate_selection_ready_artifacts,
 )
 from sagasmith_dnd.content_readiness import (
+    DND_SELECTION_MATERIALIZERS,
+    build_catalog_review,
+    build_selection_contract,
     catalog_review_errors,
+    content_fingerprint,
     selection_contract_errors,
     selection_input_errors,
 )
@@ -12182,33 +12186,144 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 candidate = candidates_by_id.get(str(decision.get("id") or ""))
                 if candidate is None:
                     continue
-                reviewed_candidate = {
-                    **candidate,
-                    "artifact": deepcopy(
-                        decision.get("artifact", candidate.get("artifact") or {})
-                    ),
-                }
-                first_chunk_id = next(
-                    (
-                        str(chunk_id)
-                        for chunk_id in candidate.get("source_chunk_ids") or []
-                        if str(chunk_id)
-                    ),
-                    "",
-                )
-                if not first_chunk_id:
+                raw_review_decision = decision.get("catalog_review_decision")
+                if not isinstance(raw_review_decision, dict):
                     raise ValueError(
-                        f"candidate {candidate.get('id')} has no source evidence"
+                        f"candidate {candidate.get('id')} acceptance requires "
+                        "catalog_review_decision"
                     )
-                canonical = rules.citation(
-                    first_chunk_id,
-                    source_id=job.source_id,
+                review_decision = deepcopy(raw_review_decision)
+                role = str(review_decision.get("role") or "")
+                current_artifact = deepcopy(dict(candidate.get("artifact") or {}))
+                current_review = dict(current_artifact.get("catalog_review") or {})
+                prior_decisions = list(current_review.get("decisions") or [])
+                has_primary = any(
+                    isinstance(item, dict) and item.get("role") == "primary"
+                    for item in prior_decisions
                 )
-                decision["artifact"] = artifact_with_direct_resolution(
-                    reviewed_candidate,
-                    citation_source=str(canonical["source"]),
-                    source_chunks_by_id=source_chunks_by_id,
-                )
+                if role == "primary":
+                    reviewed_candidate = {
+                        **candidate,
+                        "artifact": deepcopy(
+                            decision.get("artifact", candidate.get("artifact") or {})
+                        ),
+                    }
+                    first_chunk_id = next(
+                        (
+                            str(chunk_id)
+                            for chunk_id in candidate.get("source_chunk_ids") or []
+                            if str(chunk_id)
+                        ),
+                        "",
+                    )
+                    if not first_chunk_id:
+                        raise ValueError(
+                            f"candidate {candidate.get('id')} has no source evidence"
+                        )
+                    canonical = rules.citation(
+                        first_chunk_id,
+                        source_id=job.source_id,
+                    )
+                    artifact = artifact_with_direct_resolution(
+                        reviewed_candidate,
+                        citation_source=str(canonical["source"]),
+                        source_chunks_by_id=source_chunks_by_id,
+                    )
+                    kind = str(artifact.get("kind") or candidate.get("kind") or "")
+                    application_state = str(
+                        artifact.get("application_state")
+                        or candidate.get("application_state")
+                        or "catalog_only"
+                    )
+                    references = list(
+                        dict.fromkeys(
+                            [
+                                *[
+                                    str(value)
+                                    for value in artifact.get("rule_refs") or []
+                                    if str(value)
+                                ],
+                                *[
+                                    f"rule-source-chunk:{value}"
+                                    for value in candidate.get("source_chunk_ids") or []
+                                    if str(value)
+                                ],
+                            ]
+                        )
+                    )
+                    if (
+                        kind in DND_SELECTION_MATERIALIZERS
+                        and application_state == "selection_ready"
+                    ):
+                        artifact["selection_contract"] = build_selection_contract(
+                            artifact,
+                            status="ready",
+                            references=references,
+                        )
+                    elif kind in DND_SELECTION_MATERIALIZERS or kind == "class":
+                        artifact["selection_contract"] = build_selection_contract(
+                            artifact,
+                            status="blocked",
+                            references=references,
+                            blockers=[
+                                (
+                                    "reviewed card is not selection-ready"
+                                    if kind in DND_SELECTION_MATERIALIZERS
+                                    else "base-class materializer is not implemented"
+                                )
+                            ],
+                        )
+                    else:
+                        artifact["selection_contract"] = build_selection_contract(
+                            artifact,
+                            status="not_applicable",
+                            references=references,
+                        )
+                    artifact["catalog_review"] = build_catalog_review(
+                        artifact,
+                        decisions=[review_decision],
+                        status="needs_review",
+                    )
+                    decision["artifact"] = artifact
+                    decision["review_status"] = "needs_revision"
+                    decision["note"] = (
+                        "primary catalog review complete; independent critic or DM "
+                        "review required"
+                    )
+                elif role in {"critic", "dm"}:
+                    if not has_primary or current_review.get("status") != "needs_review":
+                        raise ValueError(
+                            f"candidate {candidate.get('id')} needs a primary catalog "
+                            "review before independent approval"
+                        )
+                    if "artifact" in decision:
+                        submitted = decision["artifact"]
+                        if not isinstance(submitted, dict):
+                            raise ValueError("candidate artifact must be an object")
+                        if submitted != current_artifact:
+                            if content_fingerprint(submitted) != content_fingerprint(
+                                current_artifact
+                            ):
+                                raise ValueError(
+                                    "independent review cannot change reviewed content"
+                                )
+                            raise ValueError(
+                                "independent review must not replace review contracts"
+                            )
+                    artifact = deepcopy(current_artifact)
+                    artifact["catalog_review"] = build_catalog_review(
+                        artifact,
+                        decisions=[*prior_decisions, review_decision],
+                        status="approved",
+                    )
+                    contract_errors = selection_contract_errors(artifact)
+                    if contract_errors:
+                        raise ValueError("; ".join(contract_errors))
+                    decision["artifact"] = artifact
+                else:
+                    raise ValueError(
+                        "catalog_review_decision.role must be primary, critic, or dm"
+                    )
         payload = {
             "job_id": job_id,
             "operation": "review",
@@ -37011,6 +37126,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         bound_artifacts: list[dict[str, Any]] = []
         for artifact in artifacts or []:
             raw_value = deepcopy(artifact)
+            reviewed_catalog = raw_value.pop("catalog_review", None)
+            reviewed_selection = raw_value.pop("selection_contract", None)
             chunk_ids = list(raw_value.get("source_chunk_ids", []) or [])
             if not chunk_ids:
                 raise ValueError("source-bound artifacts require source_chunk_ids")
@@ -37034,6 +37151,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 f"{citation['source']}#chunk:{citation['chunk_id']}" for citation in citations
             ]
             value["source_citations"] = citations
+            if isinstance(reviewed_catalog, dict) and isinstance(
+                reviewed_selection, dict
+            ):
+                value["selection_contract"] = build_selection_contract(
+                    value,
+                    status=str(reviewed_selection.get("status") or ""),
+                    references=list(reviewed_selection.get("references") or []),
+                    blockers=list(reviewed_selection.get("blockers") or []),
+                )
+                value["catalog_review"] = build_catalog_review(
+                    value,
+                    decisions=list(reviewed_catalog.get("decisions") or []),
+                    status="approved",
+                )
             bound_artifacts.append(value)
         source_metadata = dict(source.get("metadata") or {})
         bound_provenance = {
@@ -37091,7 +37222,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError("rule import job must be indexed before pack compilation")
         if job.state not in {"reviewed", "compiled", "validated", "failed"}:
             raise ValueError("all content candidates must be reviewed before pack compilation")
-        artifacts = compiled_artifacts_from_candidates(job.candidates, pack_id=pack_id)
+        artifacts = compiled_artifacts_from_candidates(
+            job.candidates,
+            pack_id=pack_id,
+            require_review_contracts=True,
+        )
         draft = rule_pack_draft_from_source(
             source_id=job.source_id,
             manifest=manifest,

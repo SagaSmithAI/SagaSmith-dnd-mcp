@@ -31,6 +31,21 @@ from sagasmith_dnd_mcp.server import (
 )
 
 
+def _catalog_review_decision(role: str, reviewer: str) -> dict:
+    return {
+        "role": role,
+        "reviewer": reviewer,
+        "method": "agent" if role != "dm" else "human",
+        "checks": {
+            "identity": True,
+            "classification": True,
+            "entry_boundary": True,
+            "references": True,
+        },
+        "notes": "Checked the exact candidate, entry boundaries, and source references.",
+    }
+
+
 def test_bounded_ocr_heading_equivalence_allows_one_glyph_only() -> None:
     assert _bounded_ocr_heading_equivalent("0INOLOTH", "OINOLOTH")
     assert _bounded_ocr_heading_equivalent("Jarad Von Savo", "JARAD VOD SAVO")
@@ -1345,6 +1360,9 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
                         {
                             "id": spark["id"],
                             "review_status": "accepted",
+                            "catalog_review_decision": _catalog_review_decision(
+                                "primary", "agent:extractor"
+                            ),
                             "artifact": {
                                 "kind": "spell",
                                 "application_state": "selection_ready",
@@ -1374,6 +1392,53 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
                     ],
                 },
                 "idempotency_key": "rule-job-review",
+            },
+        )
+        assert reviewed["job"]["state"] == "review_required"
+        assert next(
+            item for item in reviewed["candidates"] if item["id"] == spark["id"]
+        )["review_status"] == "needs_revision"
+        with pytest.raises(Exception, match="independent reviewer"):
+            await call(
+                server,
+                "rule_import",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "review",
+                    "payload": {
+                        "job_id": rule_job_id,
+                        "decisions": [
+                            {
+                                "id": spark["id"],
+                                "review_status": "accepted",
+                                "catalog_review_decision": _catalog_review_decision(
+                                    "critic", "agent:extractor"
+                                ),
+                            }
+                        ],
+                    },
+                    "idempotency_key": "rule-job-review-same-critic",
+                },
+            )
+        reviewed = await call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "review",
+                "payload": {
+                    "job_id": rule_job_id,
+                    "decisions": [
+                        {
+                            "id": spark["id"],
+                            "review_status": "accepted",
+                            "catalog_review_decision": _catalog_review_decision(
+                                "critic", "agent:critic"
+                            ),
+                        }
+                    ],
+                },
+                "idempotency_key": "rule-job-review-critic",
             },
         )
         assert reviewed["job"]["state"] == "reviewed"
@@ -1829,7 +1894,30 @@ def test_rule_review_rejects_clause_excerpts_not_in_the_cited_chunk(
         decision = {
             "id": candidate["id"],
             "review_status": "accepted",
+            "catalog_review_decision": _catalog_review_decision(
+                "primary", "agent:extractor"
+            ),
             "artifact": artifact,
+        }
+        await call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "review",
+                "payload": {
+                    "job_id": job_id,
+                    "decisions": [decision],
+                },
+                "idempotency_key": "review-inexact-primary",
+            },
+        )
+        critic_decision = {
+            "id": candidate["id"],
+            "review_status": "accepted",
+            "catalog_review_decision": _catalog_review_decision(
+                "critic", "agent:critic"
+            ),
         }
         with pytest.raises(Exception, match="not exact text"):
             await call(
@@ -1840,15 +1928,15 @@ def test_rule_review_rejects_clause_excerpts_not_in_the_cited_chunk(
                     "action": "review",
                     "payload": {
                         "job_id": job_id,
-                        "decisions": [decision],
+                        "decisions": [critic_decision],
                     },
-                    "idempotency_key": "review-inexact",
+                    "idempotency_key": "review-inexact-critic",
                 },
             )
         decision["artifact"]["rule_clauses"][0]["source_citations"][0][
             "source_excerpt"
         ] = exact_excerpt
-        reviewed = await call(
+        revised = await call(
             server,
             "rule_import",
             {
@@ -1858,7 +1946,21 @@ def test_rule_review_rejects_clause_excerpts_not_in_the_cited_chunk(
                     "job_id": job_id,
                     "decisions": [decision],
                 },
-                "idempotency_key": "review-exact",
+                "idempotency_key": "review-exact-primary",
+            },
+        )
+        assert revised["job"]["state"] == "review_required"
+        reviewed = await call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "review",
+                "payload": {
+                    "job_id": job_id,
+                    "decisions": [critic_decision],
+                },
+                "idempotency_key": "review-exact-critic",
             },
         )
         assert reviewed["job"]["state"] == "reviewed"
