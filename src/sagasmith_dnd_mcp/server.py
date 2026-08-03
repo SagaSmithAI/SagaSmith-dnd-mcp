@@ -1264,6 +1264,46 @@ def _merge_statblock_discoveries(
     return result
 
 
+_LAYOUT_STATBLOCK_IDENTITY_RE = re.compile(
+    r"(?i)^(?:Tiny|Small|Medium|Large|Huge|Gargantuan)\s*"
+    r"[A-Za-z][A-Za-z0-9 '/()\-]{0,120}?(?:,\s*.+)?$"
+)
+
+
+def _source_statblock_hint_additions(
+    discoveries: list[dict[str, Any]],
+    source_names: list[str],
+    *,
+    layout_blocks: list[dict[str, Any]],
+) -> list[str]:
+    """Use lower-authority headings only for unclaimed structural cards.
+
+    Artwork captions can share a page with real statblocks. Indexed source
+    hints therefore must not create an extra card once the positioned text
+    layer has already paired every size/type identity with a heading.
+    """
+
+    identity_count = sum(
+        bool(_LAYOUT_STATBLOCK_IDENTITY_RE.fullmatch(str(block.get("text") or "")))
+        for block in layout_blocks
+    )
+    discovered_names = [str(item.get("name") or "") for item in discoveries]
+    missing_slots = max(0, identity_count - len(discovered_names))
+    if missing_slots == 0:
+        return []
+    additions: list[str] = []
+    for source_name in source_names:
+        if any(
+            _bounded_ocr_heading_equivalent(source_name, discovered_name)
+            for discovered_name in discovered_names
+        ):
+            continue
+        additions.append(source_name)
+        if len(additions) >= missing_slots:
+            break
+    return additions
+
+
 _STATBLOCK_INDEX_ENTRY_RE = re.compile(
     r"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9 '&(),\-]{1,100}?)"
     r"\s*\.{3,}\s*(\d{1,4})\b"
@@ -37108,7 +37148,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "by_page": {},
         }
         source_text_hints = _source_statblock_recovery_hints(chunks)
-        source_text_proven_pages = set(source_text_hints["by_page"])
         source_text_hints["by_page"] = {
             page: [name for name in names if not usable_catalog_name(name)]
             for page, names in source_text_hints["by_page"].items()
@@ -37316,9 +37355,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             discovery_items = _merge_statblock_discoveries(
                 [
                     item
-                    for item in (
-                        [] if page_number in source_text_proven_pages else text_discoveries
-                    )
+                    for item in text_discoveries
                     if not usable_catalog_name(str(item.get("name") or ""))
                 ],
                 primary_provider=text_provider.name,
@@ -37370,7 +37407,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "printed-statblock-index",
                     )
                 )
-            for source_name in source_text_hints["by_page"].get(page_number, []):
+            source_hint_additions = _source_statblock_hint_additions(
+                text_discoveries,
+                source_text_hints["by_page"].get(page_number, []),
+                layout_blocks=list(text_layout.as_dict().get("blocks") or []),
+            )
+            for source_name in source_hint_additions:
                 if any(
                     _bounded_ocr_heading_equivalent(source_name, str(item["name"]))
                     for item, _provider in discovery_items

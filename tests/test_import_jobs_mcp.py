@@ -29,6 +29,7 @@ from sagasmith_dnd_mcp.server import (
     _noisy_ocr_heading_equivalent,
     _ocr_fact_key,
     _select_preferred_statblock_reviews,
+    _source_statblock_hint_additions,
     _source_statblock_recovery_hints,
     _statblock_index_recovery_hints,
     _statblock_mechanical_identity,
@@ -169,6 +170,25 @@ def test_statblock_discovery_unions_ocr_only_siblings() -> None:
         ("QUETZALCOATLUS", "rapidocr"),
     ]
     assert _ocr_fact_key("any álignment") == _ocr_fact_key("any alignment")
+
+
+def test_source_statblock_hints_fill_only_unclaimed_layout_identities() -> None:
+    identities = [
+        {"text": "Medium humanoid (changeling), any alignment"},
+        {"text": "Medium humanoid (kalashtar), any alignment"},
+    ]
+    discoveries = [{"name": "CHANGELING"}, {"name": "KALASHTAR"}]
+
+    assert _source_statblock_hint_additions(
+        discoveries,
+        ["AS A KALASHTAR"],
+        layout_blocks=identities,
+    ) == []
+    assert _source_statblock_hint_additions(
+        [],
+        ["RADIANT IDOL"],
+        layout_blocks=[{"text": "Large celestial, lawful evil"}],
+    ) == ["RADIANT IDOL"]
 
 
 def test_source_statblock_hints_skip_structural_page_headers() -> None:
