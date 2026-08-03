@@ -238,6 +238,42 @@ def test_expected_catalog_uses_reviewed_names_instead_of_damaged_ocr() -> None:
     assert decisions[0]["artifact"]["card"]["name"] == "Orc"
 
 
+def test_catalog_manifest_can_accept_only_fully_reviewed_content_kinds() -> None:
+    candidates = [
+        {
+            "id": kind,
+            "kind": kind,
+            "name": name,
+            "artifact": {"kind": kind, "card": {"name": name}},
+        }
+        for kind, name in (
+            ("feature", "Layout Heading"),
+            ("item", "Arcane Focus"),
+            ("statblock", "Iron Defender"),
+        )
+    ]
+
+    decisions = driver._review_spec_decisions(
+        candidates,
+        {
+            "default_status": "rejected",
+            "default_status_by_kind": {
+                "item": "accepted",
+                "statblock": "accepted",
+            },
+            "expected_counts": {"item": 1, "statblock": 1},
+        },
+        reviewer="agent:catalog",
+        method="agent",
+    )
+
+    assert [item["review_status"] for item in decisions] == [
+        "rejected",
+        "accepted",
+        "accepted",
+    ]
+
+
 def test_catalog_manifest_rejects_ambiguous_source_selectors() -> None:
     addition = {
         "kind": "subclass",

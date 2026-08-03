@@ -977,6 +977,7 @@ def _catalog_document_review(
         "additions",
         "decisions",
         "default_status",
+        "default_status_by_kind",
         "expected_catalog",
         "expected_counts",
         "expected_actor_names",
@@ -1226,6 +1227,21 @@ def _review_spec_decisions(
     default_status = str(review_spec.get("default_status") or "accepted")
     if default_status not in {"accepted", "rejected"}:
         raise ValueError("catalog manifest default_status must be accepted or rejected")
+    raw_defaults_by_kind = review_spec.get("default_status_by_kind") or {}
+    if not isinstance(raw_defaults_by_kind, dict):
+        raise ValueError("catalog manifest default_status_by_kind must be an object")
+    defaults_by_kind = {
+        _fold_text(kind): str(status)
+        for kind, status in raw_defaults_by_kind.items()
+    }
+    if any(not kind for kind in defaults_by_kind) or any(
+        status not in {"accepted", "rejected"}
+        for status in defaults_by_kind.values()
+    ):
+        raise ValueError(
+            "catalog manifest default_status_by_kind must map nonempty kinds "
+            "to accepted or rejected"
+        )
     decisions: list[dict[str, Any]] = []
     matched: set[int] = set()
     for candidate in candidates:
@@ -1259,7 +1275,11 @@ def _review_spec_decisions(
         rule = matching_rules[0][1] if matching_rules else {}
         if matching_rules:
             matched.add(matching_rules[0][0])
-        status = str(rule.get("status") or default_status)
+        status = str(
+            rule.get("status")
+            or defaults_by_kind.get(key[0])
+            or default_status
+        )
         if status not in {"accepted", "rejected"}:
             raise ValueError(f"catalog decision for {key} has invalid status {status}")
         decision: dict[str, Any] = {
