@@ -1348,6 +1348,78 @@ def _statblock_index_recovery_hints(
     }
 
 
+_STATBLOCK_STRUCTURAL_HEADING_KEYS = {
+    "actions",
+    "reactions",
+    "legendaryactions",
+    "mythicactions",
+    "bonusactions",
+    "str",
+    "dex",
+    "con",
+    "int",
+    "wis",
+    "cha",
+    "bestiary",
+    "daelkyr",
+    "dinosaurs",
+    "genericnpcs",
+    "homunculi",
+    "livingspells",
+    "overlords",
+    "quori",
+    "valenaranimals",
+}
+
+
+def _source_statblock_recovery_hints(
+    chunks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Derive exact-page identities from indexed statblock core chunks.
+
+    This path is deliberately text-only. It lets a visionless Agent recover a
+    digital rulebook without running neural OCR over pages whose indexed text
+    already proves the card identity and its AC/HP/Speed core.
+    """
+
+    by_page: dict[int, list[str]] = {}
+    seen_names: set[str] = set()
+    for chunk in chunks:
+        folded = " ".join(str(chunk.get("content") or "").split()).casefold()
+        if not all(label in folded for label in ("armor class", "hit points", "speed")):
+            continue
+        page_number = chunk.get("page_start")
+        if isinstance(page_number, bool) or not isinstance(page_number, int):
+            continue
+        name = ""
+        for raw_heading in reversed(list(chunk.get("heading_path") or [])):
+            heading = " ".join(str(raw_heading).split()).strip()
+            heading_key = compact_ascii_key(heading)
+            if (
+                not heading_key
+                or heading_key in _STATBLOCK_STRUCTURAL_HEADING_KEYS
+                or heading_key.startswith("chapter")
+                or re.match(r"^ch(?:apter)?\d", heading_key)
+                or not _valid_statblock_heading(heading)
+            ):
+                continue
+            name = heading
+            break
+        if not name:
+            continue
+        name_key = compact_ascii_key(name)
+        if name_key in seen_names:
+            continue
+        seen_names.add(name_key)
+        names = by_page.setdefault(page_number, [])
+        if not any(_bounded_ocr_heading_equivalent(name, item) for item in names):
+            names.append(name)
+    return {
+        "entry_count": sum(len(items) for items in by_page.values()),
+        "by_page": by_page,
+    }
+
+
 def _agent_evidence_supports_fact(
     fact: str,
     evidence: str,
@@ -36942,6 +37014,90 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             for item in inventory["candidates"]
             if item.get("kind") == "statblock"
         ]
+        chunks_by_id = {
+            str(chunk.get("id") or ""): str(chunk.get("content") or "")
+            for chunk in chunks
+        }
+        usable_catalog_ids: set[str] = set()
+        usable_catalog_names: list[str] = []
+        usable_catalog_pages: set[int] = set()
+        for candidate in catalog_statblocks:
+            card = dict(dict(candidate.get("artifact") or {}).get("card") or {})
+            normalized = str(
+                card.get("normalized_content")
+                or candidate.get("normalized_content")
+                or ""
+            ).strip()
+            raw_source = "\n\n".join(
+                chunks_by_id.get(str(chunk_id), "").strip()
+                for chunk_id in candidate.get("source_chunk_ids") or []
+                if chunks_by_id.get(str(chunk_id), "").strip()
+            )
+            probe = normalized or (
+                f"# {str(candidate.get('name') or '').strip()}\n\n{raw_source}"
+                if raw_source
+                else ""
+            )
+            usable = parameterized_statblock_requirements(probe) is not None
+            if normalized and raw_source and not usable:
+                try:
+                    normalized_card = parse_2014_statblock(
+                        normalized,
+                        source_key=str(candidate.get("id") or "catalog-statblock"),
+                        rule_refs=[],
+                    )
+                    source_card = parse_2014_statblock(
+                        (
+                            f"# {str(candidate.get('name') or '').strip()}\n\n"
+                            f"{raw_source}"
+                        ),
+                        source_key=(
+                            f"{str(candidate.get('id') or 'catalog-statblock')}:source"
+                        ),
+                        rule_refs=[],
+                    )
+                except (StatblockImportError, ValueError):
+                    pass
+                else:
+                    usable = _statblock_mechanical_identity(
+                        normalized_card
+                    ) == _statblock_mechanical_identity(source_card)
+            elif raw_source and not usable:
+                try:
+                    parse_2014_statblock(
+                        (
+                            f"# {str(candidate.get('name') or '').strip()}\n\n"
+                            f"{raw_source}"
+                        ),
+                        source_key=(
+                            f"{str(candidate.get('id') or 'catalog-statblock')}:source"
+                        ),
+                        rule_refs=[],
+                    )
+                except (StatblockImportError, ValueError):
+                    pass
+                else:
+                    usable = True
+            if not usable:
+                continue
+            usable_catalog_ids.add(str(candidate.get("id") or ""))
+            usable_catalog_names.append(str(candidate.get("name") or ""))
+            start = candidate.get("page_start")
+            end = candidate.get("page_end")
+            if (
+                isinstance(start, int)
+                and not isinstance(start, bool)
+                and isinstance(end, int)
+                and not isinstance(end, bool)
+            ):
+                usable_catalog_pages.update(range(start, end + 1))
+
+        def usable_catalog_name(name: str) -> bool:
+            return any(
+                _bounded_ocr_heading_equivalent(name, candidate_name)
+                for candidate_name in usable_catalog_names
+            )
+
         page_count = int(dict(job.inspection or {}).get("page_count", 0) or 0)
         if page_count < 1:
             raise RuntimeError("rule import inspection has no page count")
@@ -36951,6 +37107,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "offset_support": 0,
             "by_page": {},
         }
+        source_text_hints = _source_statblock_recovery_hints(chunks)
+        source_text_proven_pages = set(source_text_hints["by_page"])
+        source_text_hints["by_page"] = {
+            page: [name for name in names if not usable_catalog_name(name)]
+            for page, names in source_text_hints["by_page"].items()
+            if any(not usable_catalog_name(name) for name in names)
+        }
+        source_text_hints["entry_count"] = sum(
+            len(names) for names in source_text_hints["by_page"].values()
+        )
         if page_numbers is None:
             page_text: dict[int, list[str]] = {}
             for chunk in chunks:
@@ -37013,7 +37179,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 catalog_statblocks,
                 page_count=page_count,
             )
+            index_hints["by_page"] = {
+                page: [name for name in names if not usable_catalog_name(name)]
+                for page, names in index_hints["by_page"].items()
+                if any(not usable_catalog_name(name) for name in names)
+            }
             selected_pages.extend(index_hints["by_page"])
+            selected_pages.extend(source_text_hints["by_page"])
         else:
             if (
                 not isinstance(page_numbers, list)
@@ -37035,6 +37207,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "operation": "recover_statblocks",
             "page_numbers": selected_pages,
             "statblock_index_hints": index_hints["by_page"],
+            "source_text_hints": source_text_hints["by_page"],
         }
         scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
@@ -37048,6 +37221,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         indexed_review_keys: set[tuple[str, int]] = set()
         indexed_pages: set[int] = set()
         for candidate in catalog_statblocks:
+            if str(candidate.get("id") or "") in usable_catalog_ids:
+                continue
             start = candidate.get("page_start")
             end = candidate.get("page_end")
             normalized = str(candidate.get("normalized_content") or "").strip()
@@ -37139,12 +37314,30 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 minimum_confidence=0.5,
             )
             discovery_items = _merge_statblock_discoveries(
-                text_discoveries,
+                [
+                    item
+                    for item in (
+                        [] if page_number in source_text_proven_pages else text_discoveries
+                    )
+                    if not usable_catalog_name(str(item.get("name") or ""))
+                ],
                 primary_provider=text_provider.name,
                 secondary=[],
                 secondary_provider="",
             )
-            if ocr_provider is not None:
+            # A usable positioned text layer already supplies both identity
+            # discovery and exact column geometry. Running a neural OCR model
+            # on every such page is expensive and can introduce a second,
+            # noisier heading. Reserve OCR discovery for pages where the text
+            # layer found no card; individual text recoveries still fall back
+            # to OCR below when their mechanical fields cannot be validated.
+            if (
+                ocr_provider is not None
+                and not discovery_items
+                and not index_hints["by_page"].get(page_number)
+                and not source_text_hints["by_page"].get(page_number)
+                and page_number not in usable_catalog_pages
+            ):
                 ocr_layout = cached_rapidocr_layout(
                     source_path,
                     page_number,
@@ -37158,7 +37351,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 discovery_items = _merge_statblock_discoveries(
                     [item for item, _provider_name in discovery_items],
                     primary_provider=text_provider.name,
-                    secondary=ocr_discoveries,
+                    secondary=[
+                        item
+                        for item in ocr_discoveries
+                        if not usable_catalog_name(str(item.get("name") or ""))
+                    ],
                     secondary_provider=ocr_provider.name,
                 )
             for indexed_name in index_hints["by_page"].get(page_number, []):
@@ -37173,8 +37370,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "printed-statblock-index",
                     )
                 )
+            for source_name in source_text_hints["by_page"].get(page_number, []):
+                if any(
+                    _bounded_ocr_heading_equivalent(source_name, str(item["name"]))
+                    for item, _provider in discovery_items
+                ):
+                    continue
+                discovery_items.append(
+                    (
+                        {"name": source_name, "page_number": page_number},
+                        "indexed-statblock-core",
+                    )
+                )
             if not discovery_items:
-                if page_number in indexed_pages and not any(
+                if (
+                    page_number in indexed_pages
+                    or page_number in usable_catalog_pages
+                ) and not any(
                     int(item.get("page_number") or 0) == page_number
                     for item in failures
                 ):
@@ -37319,6 +37531,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "schema_version": 1,
             "statblock_index": {
                 key: value for key, value in index_hints.items() if key != "by_page"
+            },
+            "source_text_hints": {
+                "entry_count": source_text_hints["entry_count"],
+                "pages": sorted(source_text_hints["by_page"]),
             },
             "selected_pages": selected_pages,
             "complete_pages": sorted(set(complete_pages)),

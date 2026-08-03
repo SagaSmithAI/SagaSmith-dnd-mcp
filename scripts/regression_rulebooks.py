@@ -35,7 +35,11 @@ from sagasmith_dnd.statblocks import (
 )
 
 from sagasmith_dnd_mcp.config import McpConfig
-from sagasmith_dnd_mcp.server import create_server
+from sagasmith_dnd_mcp.server import (
+    _bounded_ocr_heading_equivalent,
+    _statblock_index_recovery_hints,
+    create_server,
+)
 
 
 def _arguments() -> argparse.Namespace:
@@ -355,7 +359,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             catalog_revision = int(extracted["result"]["job"]["revision"])
             source_chunks: list[dict[str, Any]] | None = None
             statblock_recovery: dict[str, Any] | None = None
-            if target_server is not None and args.edition == "2014":
+            if args.edition == "2014":
                 source_chunks = await _source_chunks(server, source_id)
                 if _statblock_recovery_needed(candidates, source_chunks):
                     recovery_response = await _call(
@@ -370,6 +374,25 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     )
                     statblock_recovery = recovery_response["result"]
                     catalog_revision = int(statblock_recovery["job"]["revision"])
+                    # Recovery persists checksum-bound statblock reviews on the
+                    # import job. Re-extraction is the public operation that
+                    # projects those reviews back into catalog candidates; the
+                    # recovery summary alone is not a replacement catalog.
+                    refreshed = await _call(
+                        server,
+                        "rule_import",
+                        {
+                            "campaign_id": campaign["id"],
+                            "action": "extract_candidates",
+                            "payload": {"job_id": job_id},
+                            "idempotency_key": (
+                                f"regression-extract-recovered-{id_key}"
+                            ),
+                        },
+                    )
+                    candidates = refreshed["result"]["candidates"]
+                    inventory = refreshed["result"]["inventory"]
+                    catalog_revision = int(refreshed["result"]["job"]["revision"])
                 else:
                     statblock_recovery = {
                         "schema_version": 1,
@@ -790,6 +813,43 @@ def _statblock_recovery_needed(
     ]
     if not statblocks:
         return True
+    page_count = max(
+        (
+            int(chunk.get("page_end") or chunk.get("page_start") or 0)
+            for chunk in source_chunks
+        ),
+        default=0,
+    )
+    index_hints = _statblock_index_recovery_hints(
+        source_chunks,
+        statblocks,
+        page_count=page_count,
+    )
+    indexed_names = [
+        name for names in index_hints["by_page"].values() for name in names
+    ]
+    if any(
+        not any(
+            _bounded_ocr_heading_equivalent(
+                indexed_name,
+                str(candidate.get("name") or ""),
+            )
+            for candidate in statblocks
+        )
+        for indexed_name in indexed_names
+    ):
+        return True
+    claimed_chunk_ids = {
+        str(chunk_id)
+        for candidate in statblocks
+        for chunk_id in candidate.get("source_chunk_ids") or []
+    }
+    for chunk in source_chunks:
+        if str(chunk.get("id") or "") in claimed_chunk_ids:
+            continue
+        folded = " ".join(str(chunk.get("content") or "").split()).casefold()
+        if all(label in folded for label in ("armor class", "hit points", "speed")):
+            return True
     chunks_by_id = {
         str(chunk.get("id") or ""): str(chunk.get("content") or "") for chunk in source_chunks
     }

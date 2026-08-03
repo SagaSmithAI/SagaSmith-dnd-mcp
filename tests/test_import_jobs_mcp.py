@@ -29,6 +29,7 @@ from sagasmith_dnd_mcp.server import (
     _noisy_ocr_heading_equivalent,
     _ocr_fact_key,
     _select_preferred_statblock_reviews,
+    _source_statblock_recovery_hints,
     _statblock_index_recovery_hints,
     _statblock_mechanical_identity,
     _valid_statblock_heading,
@@ -168,6 +169,32 @@ def test_statblock_discovery_unions_ocr_only_siblings() -> None:
         ("QUETZALCOATLUS", "rapidocr"),
     ]
     assert _ocr_fact_key("any álignment") == _ocr_fact_key("any alignment")
+
+
+def test_source_statblock_hints_skip_structural_page_headers() -> None:
+    hints = _source_statblock_recovery_hints(
+        [
+            {
+                "page_start": 293,
+                "heading_path": [
+                    "Ch. 6: Friends and Foes",
+                    "Dusk Hag",
+                    "CHAPTER 6 | FRIENDS AND FOES",
+                ],
+                "content": (
+                    "Medium fey, neutral evil Armor Class 17 "
+                    "Hit Points 82 Speed 30 ft."
+                ),
+            },
+            {
+                "page_start": 294,
+                "heading_path": ["Ch. 6", "ACTIONS"],
+                "content": "Armor Class 10 Hit Points 2 Speed 30 ft.",
+            },
+        ]
+    )
+
+    assert hints == {"entry_count": 1, "by_page": {293: ["Dusk Hag"]}}
 
 
 def test_statblock_index_hints_require_a_corroborated_printed_page_offset() -> None:

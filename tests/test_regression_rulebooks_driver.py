@@ -432,6 +432,70 @@ def test_parameterized_statblock_skips_visual_ocr_recovery() -> None:
     ) is True
 
 
+def test_statblock_index_triggers_recovery_for_a_missing_visual_card() -> None:
+    candidates = [
+        {
+            "id": name.casefold(),
+            "kind": "statblock",
+            "name": name,
+            "page_start": printed_page + 4,
+            "source_chunk_ids": [],
+            "artifact": {"kind": "statblock", "card": {"name": name}},
+        }
+        for name, printed_page in (("Alpha", 10), ("Beta", 11), ("Gamma", 12))
+    ]
+    chunks = [
+        {
+            "id": "index",
+            "page_start": 2,
+            "page_end": 2,
+            "heading_path": ["Index of Statblocks"],
+            "content": (
+                "Alpha ..... 10\nBeta ..... 11\nGamma ..... 12\n"
+                "Missing Horror ..... 13"
+            ),
+        },
+        {"id": "last", "page_start": 20, "page_end": 20, "content": ""},
+    ]
+
+    assert driver._statblock_recovery_needed(candidates, chunks) is True
+
+
+def test_unclaimed_statblock_core_triggers_recovery_without_a_printed_index() -> None:
+    candidate = {
+        "id": "known",
+        "kind": "statblock",
+        "name": "Known Creature",
+        "source_chunk_ids": ["known"],
+        "artifact": {
+            "kind": "statblock",
+            "card": {
+                "name": "Known Creature",
+                "normalized_content": (
+                    "KNOWN CREATURE\nMedium humanoid, neutral\n"
+                    "Armor Class 10\nHit Points 4 (1d8)\nSpeed 30 ft.\n"
+                    "STR DEX CON INT WIS CHA\n10 (+0) 10 (+0) 10 (+0) "
+                    "10 (+0) 10 (+0) 10 (+0)\n"
+                    "Challenge 0 (10 XP)\nActions\nClub. Melee Weapon Attack: "
+                    "+2 to hit, reach 5 ft., one target. Hit: 2 (1d4) bludgeoning damage."
+                ),
+            },
+        },
+    }
+    chunks = [
+        {"id": "known", "content": "Known Creature"},
+        {
+            "id": "missed",
+            "content": (
+                "MISSED HORROR Large aberration, evil Armor Class 16 "
+                "Hit Points 90 Speed 30 ft. STR DEX CON INT WIS CHA"
+            ),
+        },
+    ]
+
+    assert driver._statblock_recovery_needed([candidate], chunks) is True
+
+
 def test_strict_catalog_manifest_requires_every_selected_document() -> None:
     with pytest.raises(ValueError, match="no complete review"):
         driver._catalog_document_review(
