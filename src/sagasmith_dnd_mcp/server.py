@@ -20736,6 +20736,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         cast_level: int | None = None,
         ritual: bool = False,
         signature_free_cast: bool = False,
+        feature_cast_source: str | None = None,
         component_ruling: dict[str, Any] | None = None,
         source_item_id: str | None = None,
         choice_id: str | None = None,
@@ -20756,6 +20757,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "cast_level": cast_level,
             "ritual": ritual,
             "signature_free_cast": signature_free_cast,
+            "feature_cast_source": feature_cast_source,
             "component_ruling": component_ruling or {},
             "source_item_id": source_item_id,
             "choice_id": choice_id,
@@ -20767,8 +20769,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return combat_response(campaign_id, principal_id, replay)
-        if source_item_id and signature_free_cast:
-            raise CombatEngineError("a magic item spell cannot use a Signature Spell free cast")
+        if source_item_id and (signature_free_cast or feature_cast_source):
+            raise CombatEngineError(
+                "a magic item spell cannot use a character feature casting source"
+            )
         campaign, encounter = active_encounter(campaign_id)
         if campaign.revision != expected_revision:
             raise ValueError(
@@ -21218,6 +21222,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "spell_id": spell_id,
                 "cast_level": cast_level,
                 "source_item_id": source_item_id,
+                "feature_cast_source": feature_cast_source,
             },
         )
         applied = (
@@ -21236,6 +21241,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 cast_level=cast_level,
                 ritual=ritual,
                 signature_free_cast=signature_free_cast,
+                feature_cast_source=feature_cast_source,
                 component_ruling=component_ruling,
                 rules=rules,
             )
@@ -30789,6 +30795,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         cast_level: int | None = None,
         ritual: bool = False,
         signature_free_cast: bool = False,
+        feature_cast_source: str | None = None,
         component_ruling: dict[str, Any] | None = None,
         source_item_id: str | None = None,
         target_character_ids: list[str] | None = None,
@@ -30812,6 +30819,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "cast_level": cast_level,
             "ritual": ritual,
             "signature_free_cast": signature_free_cast,
+            "feature_cast_source": feature_cast_source,
             "component_ruling": component_ruling or {},
             "source_item_id": source_item_id,
             "target_character_ids": target_character_ids,
@@ -30826,8 +30834,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 f"character revision conflict: expected {expected_revision}, "
                 f"found {current.revision}"
             )
-        if source_item_id and signature_free_cast:
-            raise CombatEngineError("a magic item spell cannot use a Signature Spell free cast")
+        if source_item_id and (signature_free_cast or feature_cast_source):
+            raise CombatEngineError(
+                "a magic item spell cannot use a character feature casting source"
+            )
         campaign = campaigns.get(current.campaign_id)
         next_state = validate_party_state(deepcopy(campaign.state or {}))
         spell_entry = (
@@ -31012,6 +31022,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "spell_id": spell_id,
                 "cast_level": cast_level,
                 "source_item_id": source_item_id,
+                "feature_cast_source": feature_cast_source,
             },
         )
         timed_sheets: dict[str, dict[str, Any]] = {}
@@ -31069,6 +31080,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 cast_level=cast_level,
                 ritual=ritual,
                 signature_free_cast=signature_free_cast,
+                feature_cast_source=feature_cast_source,
                 component_ruling=component_ruling,
                 rules=rules,
             )
@@ -40549,6 +40561,101 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             sheet.update(updated)
             return normalized
 
+        def feat_spell_match(
+            grant: dict[str, Any],
+            *,
+            artifact_id: str | None = None,
+        ) -> tuple[str, str, dict[str, Any]]:
+            eligible_classes = {
+                str(item).casefold()
+                for item in grant.get("eligible_classes", [])
+            }
+            expected_level = int(grant.get("level", -1))
+            expected_name = str(grant.get("name") or "").strip().casefold()
+            matches = []
+            for candidate in candidates:
+                candidate_artifact = candidate[2]
+                if candidate_artifact.get("kind") != "spell":
+                    continue
+                candidate_card = dict(candidate_artifact.get("card") or {})
+                if artifact_id and str(candidate_artifact.get("id") or "") != artifact_id:
+                    continue
+                if expected_name and str(candidate_card.get("name") or "").casefold() != (
+                    expected_name
+                ):
+                    continue
+                if int(candidate_card.get("level", -1)) != expected_level:
+                    continue
+                candidate_classes = {
+                    str(item).casefold() for item in candidate_card.get("classes", [])
+                }
+                if not eligible_classes.intersection(candidate_classes):
+                    continue
+                matches.append(candidate)
+            if len(matches) != 1:
+                reference = artifact_id or str(grant.get("name") or "spell")
+                raise RulesetUnavailableError(
+                    f"feat spell grant {reference!r} must resolve to exactly one active artifact"
+                )
+            return matches[0]
+
+        def materialize_feat_spell(
+            spell_match: tuple[str, str, dict[str, Any]],
+            grant: dict[str, Any],
+            *,
+            source_key: str,
+            resource_discriminator: str,
+        ) -> dict[str, Any]:
+            method = str(grant.get("method") or "")
+            spell_card = materialize_feature_spell(
+                spell_match,
+                method=method,
+                source_key=source_key,
+                allow_existing=True,
+            )
+            spell_id = str(spell_match[2].get("id") or "")
+            free_casts = int(grant.get("free_casts", 0) or 0)
+            resource_key = ""
+            if free_casts:
+                resource_key = (
+                    f"feat_spell:{artifact_id}:{resource_discriminator}:{spell_id}"
+                )
+                if resource_key in sheet["resources"]:
+                    raise ValueError("feat spell resource is already present")
+                sheet["resources"][resource_key] = {
+                    "label": (
+                        f"{source_key}: {spell_card.get('name') or spell_id}"
+                    ),
+                    "value": free_casts,
+                    "max": free_casts,
+                    "recovers_on": str(grant.get("recovers_on") or ""),
+                    "source_key": source_key,
+                }
+            casting_source = {
+                "source_key": source_key,
+                "method": method,
+                "spellcasting_ability": str(
+                    grant.get("spellcasting_ability") or ""
+                ).casefold(),
+                "resource_key": resource_key or None,
+                "allow_slot_cast": grant.get("allow_slot_cast") is True,
+            }
+            access = spell_card.setdefault("access", {})
+            current_sources = list(access.get("feature_casting_sources") or [])
+            if any(
+                str(item.get("source_key") or "").casefold()
+                == source_key.casefold()
+                for item in current_sources
+                if isinstance(item, dict)
+            ):
+                raise ValueError("feat spell casting source is already present")
+            access["feature_casting_sources"] = [*current_sources, casting_source]
+            return {
+                "artifact_id": spell_id,
+                "name": str(spell_card.get("name") or spell_id),
+                **casting_source,
+            }
+
         def materialize_feat(
             feat_match: tuple[str, str, dict[str, Any]],
             feat_selection: dict[str, Any],
@@ -40597,6 +40704,26 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         )
                     if not has_feature:
                         raise ValueError("feat feature prerequisite is not met")
+                elif prerequisite_kind == "feature_forbidden":
+                    forbidden_feature = str(
+                        prerequisite.get("feature") or ""
+                    ).casefold()
+                    if not forbidden_feature:
+                        raise ValueError("feat forbidden feature prerequisite is empty")
+                    if any(
+                        forbidden_feature in str(item.get("name") or "").casefold()
+                        for item in sheet["content"]["features"]
+                    ):
+                        raise ValueError("feat forbidden feature prerequisite is present")
+                elif prerequisite_kind == "species_required":
+                    allowed_species = {
+                        str(item).casefold()
+                        for item in prerequisite.get("species", [])
+                    }
+                    if str(sheet["progression"].get("species") or "").casefold() not in (
+                        allowed_species
+                    ):
+                        raise ValueError("feat species prerequisite is not met")
                 else:
                     raise RulesetUnavailableError(
                         "feat prerequisite requires Agent-as-DM source review"
@@ -40782,17 +40909,100 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             {"kind": proficiency_kind, "name": normalized_name}
                         )
                     recorded_choices[choice_field] = normalized_proficiencies
+                elif requirement_kind == "spell_grants":
+                    raw_choices = feat_selection.get(choice_field)
+                    if not isinstance(raw_choices, dict):
+                        raise ValueError("feat spell choices must be an object")
+                    groups = list(requirements.get("groups") or [])
+                    group_ids = {str(item.get("id") or "") for item in groups}
+                    if set(raw_choices) != group_ids:
+                        raise ValueError(
+                            "feat spell choices must provide exactly the reviewed groups"
+                        )
+                    normalized_spell_choices: dict[str, list[str]] = {}
+                    selected_spell_ids: set[str] = set()
+                    for raw_group in groups:
+                        group = dict(raw_group)
+                        group_id = str(group.get("id") or "")
+                        spell_ids = _validated_distinct_choices(
+                            raw_choices.get(group_id),
+                            count=int(group.get("count", 0) or 0),
+                            label=f"feat spell group {group_id}",
+                        )
+                        for spell_id in spell_ids:
+                            if spell_id in selected_spell_ids:
+                                raise ValueError("feat spell choices must be distinct")
+                            selected_spell_ids.add(spell_id)
+                            spell_match = feat_spell_match(group, artifact_id=spell_id)
+                            materialize_feat_spell(
+                                spell_match,
+                                group,
+                                source_key=f"{source}: {feat_card.get('name') or feat_id}",
+                                resource_discriminator=group_id,
+                            )
+                        normalized_spell_choices[group_id] = spell_ids
+                    recorded_choices[choice_field] = normalized_spell_choices
                 else:
                     raise RulesetUnavailableError(
                         "feat selection requirements are not executable"
                     )
             elif feat_selection:
                 raise ValueError("selected feat does not accept structured choices")
+            mechanical_grants = dict(feat_card.get("mechanical_grants") or {})
+            fixed_increases = dict(
+                mechanical_grants.get("ability_score_increases") or {}
+            )
+            if fixed_increases:
+                apply_ability_score_increases(
+                    {
+                        "allowed_distributions": [
+                            sorted(fixed_increases.values(), reverse=True)
+                        ],
+                        "ability_options": list(fixed_increases),
+                        "maximum_score": int(
+                            mechanical_grants.get("maximum_ability_score", 20) or 20
+                        ),
+                    },
+                    fixed_increases,
+                    source=f"{source}: {feat_card.get('name') or feat_id}",
+                )
+            for field, target in (
+                ("languages", sheet["traits"]["languages"]),
+                (
+                    "tool_proficiencies",
+                    sheet["traits"]["proficiencies"]["tools"],
+                ),
+                (
+                    "weapon_proficiencies",
+                    sheet["traits"]["proficiencies"]["weapons"],
+                ),
+            ):
+                for value in mechanical_grants.get(field, []):
+                    if str(value).casefold() not in {
+                        str(item).casefold() for item in target
+                    }:
+                        target.append(value)
+            fixed_spell_grants = []
+            for index, raw_grant in enumerate(
+                mechanical_grants.get("spell_grants", [])
+            ):
+                grant = dict(raw_grant)
+                fixed_spell_grants.append(
+                    materialize_feat_spell(
+                        feat_spell_match(grant),
+                        grant,
+                        source_key=f"{source}: {feat_card.get('name') or feat_id}",
+                        resource_discriminator=f"fixed-{index}",
+                    )
+                )
+            if fixed_spell_grants:
+                recorded_choices["fixed_spell_grants"] = fixed_spell_grants
             for metadata_key in (
                 "category",
                 "prerequisites",
                 "repeatable",
                 "selection_requirements",
+                "mechanical_grants",
             ):
                 feat_card.pop(metadata_key, None)
             if recorded_choices:
@@ -47959,6 +48169,7 @@ Useful bounded guidance:
                 cast_level=data.get("cast_level"),
                 ritual=data.get("ritual", False),
                 signature_free_cast=data.get("signature_free_cast", False),
+                feature_cast_source=data.get("feature_cast_source"),
                 component_ruling=data.get("component_ruling"),
                 source_item_id=data.get("source_item_id"),
                 target_character_ids=data.get("target_character_ids"),

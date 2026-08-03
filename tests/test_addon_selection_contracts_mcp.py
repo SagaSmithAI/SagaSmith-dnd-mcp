@@ -135,6 +135,208 @@ def test_species_cross_kind_proficiency_choices_are_bounded_and_typed() -> None:
 
 
 @pytest.mark.fresh_database
+def test_reviewed_addon_feat_materializes_bounded_spell_sources(tmp_path: Path) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=workspace / "SagaSmith-module-gen-skills",
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Addon feat", "idempotency_key": "addon-feat-campaign"},
+        )
+        profile = await _call(
+            server,
+            "campaign_rule_profile_set",
+            {
+                "campaign_id": campaign["id"],
+                "edition": "2014",
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "addon-feat-profile",
+            },
+        )
+        artifact = {
+            "id": "dnd5e.addon.eberron.feat.aberrant-dragonmark",
+            "kind": "feat",
+            "application_state": "selection_ready",
+            "mechanical_scope": "mechanical",
+            "execution_state": "engine_ready",
+            "semantic_resolution": {
+                "status": "resolved",
+                "mode": "static_grant",
+                "first_use_compilation_required": False,
+                "clause_ids": ["aberrant-dragonmark-grants"],
+            },
+            "rule_clauses": [
+                {
+                    "schema_version": 1,
+                    "id": "aberrant-dragonmark-grants",
+                    "title": "Aberrant Dragonmark grants",
+                    "scope": "mechanical",
+                    "source_citations": [
+                        {
+                            "source": "book:eberron",
+                            "source_ref": {"page": 112},
+                            "source_excerpt": (
+                                "Increase Constitution by 1 and choose Sorcerer spells."
+                            ),
+                        }
+                    ],
+                    "settlement": {
+                        "mode": "static_grant",
+                        "grant_refs": [
+                            "card.mechanical_grants",
+                            "card.selection_requirements",
+                        ],
+                    },
+                }
+            ],
+            "card": {
+                "name": "Aberrant Dragonmark",
+                "prerequisites": [
+                    {"kind": "feature_forbidden", "feature": "dragonmark"}
+                ],
+                "repeatable": False,
+                "selection_requirements": {
+                    "field": "spell_choices",
+                    "kind": "spell_grants",
+                    "groups": [
+                        {
+                            "id": "cantrip",
+                            "count": 1,
+                            "level": 0,
+                            "eligible_classes": ["Sorcerer"],
+                            "method": "known",
+                            "spellcasting_ability": "constitution",
+                            "free_casts": 0,
+                            "recovers_on": None,
+                            "allow_slot_cast": False,
+                        },
+                        {
+                            "id": "level_1_spell",
+                            "count": 1,
+                            "level": 1,
+                            "eligible_classes": ["Sorcerer"],
+                            "method": "limited_use",
+                            "spellcasting_ability": "constitution",
+                            "free_casts": 1,
+                            "recovers_on": "long_rest",
+                            "allow_slot_cast": False,
+                        },
+                    ],
+                },
+                "mechanical_grants": {
+                    "ability_score_increases": {"constitution": 1},
+                    "maximum_ability_score": 20,
+                    "languages": [],
+                    "tool_proficiencies": [],
+                    "weapon_proficiencies": [],
+                    "spell_grants": [],
+                },
+            },
+            "rule_refs": ["book:eberron:p112"],
+        }
+        artifact["selection_contract"] = build_selection_contract(
+            artifact,
+            status="ready",
+            references=["book:eberron:p112"],
+        )
+        draft = await _call(
+            server,
+            "rule_pack_draft",
+            {
+                "manifest": {
+                    "id": "dnd5e.addon.eberron",
+                    "version": "1.0.0",
+                    "title": "Reviewed Eberron",
+                    "namespace": "dnd5e.addon.eberron",
+                    "system_id": "dnd5e",
+                    "editions": ["2014"],
+                    "capabilities": [],
+                },
+                "artifacts": [artifact],
+                "mechanics": [],
+            },
+        )
+        assert draft["status"] == "validated", str(draft)
+        await _call(
+            server,
+            "rule_pack_install",
+            {"pack_id": "dnd5e.addon.eberron", "version": "1.0.0"},
+        )
+        await _call(
+            server,
+            "campaign_rule_pack_set",
+            {
+                "campaign_id": campaign["id"],
+                "pack_id": "dnd5e.addon.eberron",
+                "version": "1.0.0",
+                "expected_revision": profile["campaign_revision"],
+                "idempotency_key": "addon-feat-activate",
+            },
+        )
+        sheet = default_character_sheet()
+        sheet["abilities"]["constitution"]["score"] = 10
+        character = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Marked Tester",
+                "sheet": sheet,
+                "idempotency_key": "addon-feat-character",
+            },
+        )
+        applied = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": character["id"],
+                "artifact_id": artifact["id"],
+                "selection": {
+                    "spell_choices": {
+                        "cantrip": ["dnd5e.content.srd2014.spell.light"],
+                        "level_1_spell": [
+                            "dnd5e.content.srd2014.spell.burning-hands"
+                        ],
+                    }
+                },
+                "expected_revision": character["revision"],
+                "idempotency_key": "addon-feat-apply",
+            },
+        )
+
+        assert applied["sheet"]["abilities"]["constitution"]["score"] == 11
+        spells = {
+            item["id"]: item for item in applied["sheet"]["content"]["spells"]
+        }
+        burning_hands = spells["dnd5e.content.srd2014.spell.burning-hands"]
+        casting_source = burning_hands["access"]["feature_casting_sources"][0]
+        assert casting_source["spellcasting_ability"] == "constitution"
+        assert casting_source["allow_slot_cast"] is False
+        resource = applied["sheet"]["resources"][casting_source["resource_key"]]
+        assert resource["value"] == resource["max"] == 1
+        assert resource["recovers_on"] == "long_rest"
+        feat = applied["sheet"]["content"]["feats"][0]
+        assert feat["choices"]["spell_choices"] == {
+            "cantrip": ["dnd5e.content.srd2014.spell.light"],
+            "level_1_spell": ["dnd5e.content.srd2014.spell.burning-hands"],
+        }
+
+    import asyncio
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.fresh_database
 def test_reviewed_addon_actor_template_derives_owner_values_and_receipt(
     tmp_path: Path,
 ) -> None:
