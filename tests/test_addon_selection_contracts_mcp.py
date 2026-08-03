@@ -487,6 +487,151 @@ def test_reviewed_addon_item_uses_bound_inventory_materializer(tmp_path: Path) -
 
 
 @pytest.mark.fresh_database
+def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Path) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=workspace / "SagaSmith-module-gen-skills",
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Addon background", "idempotency_key": "background-campaign"},
+        )
+        profile = await _call(
+            server,
+            "campaign_rule_profile_set",
+            {
+                "campaign_id": campaign["id"],
+                "edition": "2014",
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "background-profile",
+            },
+        )
+        artifact = {
+            "id": "dnd5e.addon.guild.background.guild-agent",
+            "kind": "background",
+            "application_state": "selection_ready",
+            "mechanical_scope": "descriptive",
+            "execution_state": "descriptive_ready",
+            "semantic_resolution": {
+                "status": "resolved",
+                "mode": "descriptive",
+                "first_use_compilation_required": False,
+            },
+            "card": {
+                "name": "Guild Agent",
+                "skill_proficiencies": [],
+                "background_grants": {
+                    "feature": "Guild Membership",
+                    "languages": [],
+                    "tools": [],
+                    "equipment_item_ids": [],
+                    "choices": {
+                        "language_count": 0,
+                        "tool_choice_count": 0,
+                        "equipment_packages": {
+                            "A": {
+                                "items": [
+                                    {
+                                        "inventory_template": {
+                                            "name": "Guild Signet",
+                                            "kind": "equipment",
+                                            "quantity": 1,
+                                            "description": "A reviewed guild signet.",
+                                            "mechanics": {},
+                                        },
+                                        "quantity": 1,
+                                    }
+                                ],
+                                "wallet": {"gp": 10},
+                            }
+                        },
+                    },
+                },
+            },
+            "rule_refs": ["book:addon:p1"],
+        }
+        artifact["selection_contract"] = build_selection_contract(
+            artifact,
+            status="ready",
+            references=["book:addon:p1"],
+        )
+        draft = await _call(
+            server,
+            "rule_pack_draft",
+            {
+                "manifest": {
+                    "id": "dnd5e.addon.guild",
+                    "version": "1.0.0",
+                    "title": "Guild addon",
+                    "namespace": "dnd5e.addon.guild",
+                    "system_id": "dnd5e",
+                    "editions": ["2014"],
+                    "capabilities": [],
+                },
+                "artifacts": [artifact],
+                "mechanics": [],
+            },
+        )
+        assert draft["status"] == "validated", str(draft)
+        await _call(
+            server,
+            "rule_pack_install",
+            {"pack_id": "dnd5e.addon.guild", "version": "1.0.0"},
+        )
+        await _call(
+            server,
+            "campaign_rule_pack_set",
+            {
+                "campaign_id": campaign["id"],
+                "pack_id": "dnd5e.addon.guild",
+                "version": "1.0.0",
+                "expected_revision": profile["campaign_revision"],
+                "idempotency_key": "background-activate",
+            },
+        )
+        character = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Guild Initiate",
+                "idempotency_key": "background-character",
+            },
+        )
+        applied = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": character["id"],
+                "artifact_id": artifact["id"],
+                "selection": {"equipment_package": "A"},
+                "expected_revision": character["revision"],
+                "idempotency_key": "background-apply",
+            },
+        )
+        item = applied["sheet"]["inventory"]["items"][0]
+        assert item["name"] == "Guild Signet"
+        assert applied["sheet"]["inventory"]["wallet"]["gp"] == 10
+        assert applied["sheet"]["progression"]["background_grants"][
+            "equipment_item_ids"
+        ] == [item["id"]]
+        assert applied["rule_receipts"][0]["selection"] == {"equipment_package": "A"}
+
+    import asyncio
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.fresh_database
 def test_reviewed_addon_base_class_uses_bound_level_one_materializer(tmp_path: Path) -> None:
     workspace = Path(__file__).resolve().parents[2]
     config = McpConfig(

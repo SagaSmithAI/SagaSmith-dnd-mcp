@@ -40806,7 +40806,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         raise RulesetUnavailableError(
                             "background equipment package item is not structured"
                         )
-                    if raw_item.get("selected_tool") is True:
+                    embedded_template = raw_item.get("inventory_template")
+                    item_sources = [
+                        bool(str(raw_item.get("artifact_id") or "").strip()),
+                        raw_item.get("selected_tool") is True,
+                        isinstance(embedded_template, dict),
+                    ]
+                    if sum(item_sources) != 1:
+                        raise RulesetUnavailableError(
+                            "background equipment package item needs exactly one reviewed source"
+                        )
+                    inventory_template: dict[str, Any]
+                    if isinstance(embedded_template, dict):
+                        inventory_template = deepcopy(embedded_template)
+                    elif raw_item.get("selected_tool") is True:
                         if len(selected_tools) != 1:
                             raise RulesetUnavailableError(
                                 "background equipment package requires its selected tool"
@@ -40834,18 +40847,24 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             ),
                             None,
                         )
-                    if item_match is None:
-                        raise RulesetUnavailableError(
-                            "background equipment item is absent from the active catalog"
+                    if not isinstance(embedded_template, dict):
+                        if item_match is None:
+                            raise RulesetUnavailableError(
+                                "background equipment item is absent from the active catalog"
+                            )
+                        item_artifact = item_match[2]
+                        inventory_template = deepcopy(
+                            dict(
+                                dict(item_artifact.get("card") or {}).get(
+                                    "inventory_template"
+                                )
+                                or {}
+                            )
                         )
-                    item_artifact = item_match[2]
-                    inventory_template = deepcopy(
-                        dict(dict(item_artifact.get("card") or {}).get("inventory_template") or {})
-                    )
-                    if not inventory_template:
-                        raise RulesetUnavailableError(
-                            "background equipment item has no executable inventory template"
-                        )
+                        if not inventory_template:
+                            raise RulesetUnavailableError(
+                                "background equipment item has no executable inventory template"
+                            )
                     quantity = raw_item.get("quantity", 1)
                     if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity < 1:
                         raise RulesetUnavailableError(
