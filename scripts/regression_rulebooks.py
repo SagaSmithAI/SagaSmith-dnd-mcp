@@ -731,8 +731,11 @@ async def _run_content_runtime_probes(
                     raise RuntimeError("runtime probe expected content application to fail")
                 fetched = await _call(
                     server,
-                    "character_get",
-                    {"character_id": current["id"]},
+                    "character_query",
+                    {
+                        "view": "get",
+                        "payload": {"character_id": current["id"]},
+                    },
                 )
                 after_failure = dict(_unwrapped_tool_result(fetched))
                 if after_failure["revision"] != current["revision"]:
