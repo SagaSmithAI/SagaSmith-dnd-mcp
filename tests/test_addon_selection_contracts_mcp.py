@@ -11,6 +11,7 @@ from sagasmith_dnd.statblocks import parameterized_statblock_requirements
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import (
+    _character_spell_card,
     _validated_additive_choices,
     _validated_narrative_choices,
     _validated_species_ability_choices,
@@ -37,6 +38,27 @@ def _review_decision(role: str, reviewer: str) -> dict:
         },
         "notes": "Verified against the exact source-bound actor template.",
     }
+
+
+def test_catalog_spell_projection_strips_search_metadata_and_is_independent() -> None:
+    catalog_card = {
+        "name": "Source Spell",
+        "level": 1,
+        "classes": ["Wizard"],
+        "description": "Catalog-only retrieval text.",
+        "source_title": "Addon Source",
+        "definition": {"school": "evocation"},
+    }
+
+    projected = _character_spell_card(catalog_card)
+
+    assert projected == {
+        "name": "Source Spell",
+        "level": 1,
+        "definition": {"school": "evocation"},
+    }
+    catalog_card["definition"]["school"] = "illusion"
+    assert projected["definition"]["school"] == "evocation"
 
 
 def test_background_additive_choices_preserve_fixed_and_enforce_bounds() -> None:

@@ -123,6 +123,7 @@ from sagasmith_dnd.campaign_state import (
 )
 from sagasmith_dnd.character_import import inspect_character_document
 from sagasmith_dnd.character_schema import (
+    CHARACTER_SPELL_CARD_FIELDS,
     add_effect,
     add_inventory_item,
     adjust_wallet,
@@ -523,6 +524,17 @@ from sagasmith_dnd_mcp.tool_profiles import (
 )
 
 CORE_GRAPPLE_ESCAPE_CHECKS = frozenset({"athletics", "acrobatics"})
+
+
+def _character_spell_card(catalog_card: dict[str, Any]) -> dict[str, Any]:
+    """Project a rule-catalog spell into the persistable character-card schema."""
+    return {
+        key: deepcopy(value)
+        for key, value in catalog_card.items()
+        if key in CHARACTER_SPELL_CARD_FIELDS
+    }
+
+
 SECOND_WIND_ACTIVITY_IDS = frozenset(
     {
         "dnd5e.content.srd2014.feature.fighter-second-wind",
@@ -39572,8 +39584,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     == runtime_method
                 )
                 if spell_card is None:
-                    spell_card = deepcopy(dict(spell_artifact.get("card") or {}))
-                    spell_card.pop("classes", None)
+                    spell_card = _character_spell_card(
+                        dict(spell_artifact.get("card") or {})
+                    )
                     sheet["content"]["spells"].append(spell_card)
                 spell_card["grant"] = {
                     "source_type": "subclass",
@@ -40544,8 +40557,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise ValueError("feature spell choice is already present")
             created = spell_card is None
             if spell_card is None:
-                spell_card = deepcopy(dict(spell_artifact.get("card") or {}))
-                spell_card.pop("classes", None)
+                spell_card = _character_spell_card(
+                    dict(spell_artifact.get("card") or {})
+                )
                 spell_card["grant"] = {
                     "source_type": "feature",
                     "source_key": source_key,
@@ -41287,8 +41301,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     None,
                 )
                 if spell_card is None:
-                    spell_card = deepcopy(dict(spell_artifact.get("card") or {}))
-                    spell_card.pop("classes", None)
+                    spell_card = _character_spell_card(
+                        dict(spell_artifact.get("card") or {})
+                    )
                     sheet["content"]["spells"].append(spell_card)
                 spell_card["grant"] = {
                     "source_type": "subclass",
@@ -43047,7 +43062,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             for item in sheet["content"]["spells"]
                         ):
                             raise ValueError("bonus cantrip is already present")
-                        spell_card.pop("classes", None)
+                        spell_card = _character_spell_card(spell_card)
                         spell_card["grant"] = {
                             "source_type": "subclass",
                             "source_key": declared_subclass or declared_class,
