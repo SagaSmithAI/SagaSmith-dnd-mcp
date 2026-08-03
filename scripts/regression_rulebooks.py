@@ -691,6 +691,7 @@ def _catalog_document_review(
         "default_status",
         "expected_catalog",
         "expected_counts",
+        "expected_actor_names",
     }
     if unknown:
         raise ValueError(
@@ -1067,6 +1068,41 @@ def _reviewed_candidate_identity(
     )
 
 
+def _require_expected_actor_names(
+    review_spec: dict[str, Any],
+    preset_export: dict[str, Any] | None,
+) -> None:
+    expected = review_spec.get("expected_actor_names")
+    if expected is None:
+        return
+    if not isinstance(expected, list) or any(
+        not isinstance(name, str) or not name.strip() for name in expected
+    ):
+        raise ValueError("expected_actor_names must be an array of nonempty strings")
+    cards = (
+        list(
+            dict(dict(preset_export or {}).get("package") or {})
+            .get("payload", {})
+            .get("cards")
+            or []
+        )
+        if preset_export is not None
+        else []
+    )
+    actual_names = Counter(
+        _fold_text(dict(card.get("payload") or {}).get("name"))
+        for card in cards
+        if isinstance(card, dict)
+    )
+    expected_names = Counter(_fold_text(name) for name in expected)
+    if actual_names != expected_names:
+        raise RuntimeError(
+            "actor preset names differ from the source-reviewed manifest: "
+            f"missing={sorted((expected_names - actual_names).elements())}, "
+            f"unexpected={sorted((actual_names - expected_names).elements())}"
+        )
+
+
 def _matches_includes(
     relative_path: str,
     patterns: list[str],
@@ -1395,6 +1431,7 @@ async def _portable_roundtrip(
                 f"deferred={preset_summary.get('deferred', 0)}, "
                 f"failures={preset_summary.get('failures', [])}"
             )
+    _require_expected_actor_names(review_spec or {}, preset_export)
     addon_id = f"{pack_id}.addon"
     classification = _addon_classification(relative_path)
     addon_response = await _call(

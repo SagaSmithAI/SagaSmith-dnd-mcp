@@ -19,14 +19,17 @@ from sagasmith_dnd.statblocks import parse_2014_statblock
 import sagasmith_dnd_mcp.server as server_module
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import (
+    _artifact_source_pages,
     _bounded_ocr_heading_equivalent,
     _bundled_mm2014_actor_card,
+    _canonical_statblock_artifact_for_review,
     _catalog_identity_is_evidenced,
     _matching_statblock_recovery_pair,
     _merge_statblock_discoveries,
     _noisy_ocr_heading_equivalent,
     _ocr_fact_key,
     _select_preferred_statblock_reviews,
+    _statblock_index_recovery_hints,
     _statblock_mechanical_identity,
     _valid_statblock_heading,
     create_server,
@@ -115,6 +118,35 @@ def test_noisy_review_heading_match_requires_visible_ocr_damage() -> None:
     assert not _noisy_ocr_heading_equivalent("Veteran", "Vermin")
 
 
+def test_review_identity_uses_one_same_page_catalog_artifact_only() -> None:
+    assert _canonical_statblock_artifact_for_review(
+        "JARAD Von SAvo",
+        [("Jarad Vod Savo", "artifact.jarad")],
+    ) == ("Jarad Vod Savo", "artifact.jarad")
+    assert (
+        _canonical_statblock_artifact_for_review(
+            "CATEGORY l KRASIS",
+            [
+                ("Category 1 Krasis", "artifact.one"),
+                ("Category 2 Krasis", "artifact.two"),
+            ],
+        )
+        is None
+    )
+
+
+def test_actor_catalog_identity_covers_the_full_source_citation_range() -> None:
+    assert _artifact_source_pages(
+        {
+            "source_citations": [
+                {"page_start": 252, "page_end": 253},
+                {"page_start": 0, "page_end": 10},
+                {"page_start": 9, "page_end": 8},
+            ]
+        }
+    ) == {252, 253}
+
+
 def test_statblock_discovery_unions_ocr_only_siblings() -> None:
     merged = _merge_statblock_discoveries(
         [{"name": "VELOCIRAPTOR"}],
@@ -128,6 +160,30 @@ def test_statblock_discovery_unions_ocr_only_siblings() -> None:
         ("QUETZALCOATLUS", "rapidocr"),
     ]
     assert _ocr_fact_key("any álignment") == _ocr_fact_key("any alignment")
+
+
+def test_statblock_index_hints_require_a_corroborated_printed_page_offset() -> None:
+    chunks = [
+        {
+            "heading_path": ["Index of Stat Blocks - Monsters and NPCs"],
+            "content": (
+                "Cackler ........ 195 Kraul Warrior ........ 213 "
+                "Skyjek Roc ........ 219 Nivix Cyctops ........ 216"
+            ),
+        }
+    ]
+    candidates = [
+        {"name": "CACKLER", "page_start": 196},
+        {"name": "KRAUL WARRIOR", "page_start": 214},
+        {"name": "SKYJEK ROC", "page_start": 220},
+    ]
+
+    hints = _statblock_index_recovery_hints(chunks, candidates, page_count=230)
+
+    assert hints["entry_count"] == 4
+    assert hints["page_offset"] == 1
+    assert hints["offset_support"] == 3
+    assert hints["by_page"][217] == ["Nivix Cyctops"]
 
 
 def test_statblock_corroboration_can_select_a_later_exact_scale_pair() -> None:
@@ -189,6 +245,20 @@ def test_preset_export_selects_one_strongest_review_per_source_card() -> None:
                 "normalized_content": "# MALE STEEDER\n\ncomplete",
             },
             {
+                "id": "category-one-letter",
+                "page_number": 211,
+                "review_mode": "layout_text",
+                "observation": "layout",
+                "normalized_content": "# CATEGORY l KRASIS\n\ncomplete",
+            },
+            {
+                "id": "category-one-digit",
+                "page_number": 211,
+                "review_mode": "layout_text",
+                "observation": "layout",
+                "normalized_content": "# CATEGORY 1 KRASIS\n\ncomplete",
+            },
+            {
                 "id": "ocr-debris",
                 "page_number": 237,
                 "review_mode": "layout_ocr",
@@ -203,6 +273,7 @@ def test_preset_export_selects_one_strongest_review_per_source_card() -> None:
         "hungry-visual",
         "female-steeder",
         "male-steeder",
+        "category-one-digit",
     }
     assert _valid_statblock_heading("Ox") is True
     assert _valid_statblock_heading("i\u00b7") is False
@@ -1201,7 +1272,7 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
         *,
         page_numbers: list[int] | None = None,
     ) -> list[OcrPageLayout]:
-        if fallback_model and provider.model_type == "small":
+        if fallback_model and provider.model_type == "medium":
             return [
                 OcrPageLayout(
                     page_number=layout.page_number,
@@ -1303,13 +1374,13 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
         result = recovered["result"]
         assert result["page_number"] == 1
         assert result["provider"] == "rapidocr"
-        assert result["ocr_model"] == ("medium" if fallback_model else "small")
+        assert result["ocr_model"] == ("small" if fallback_model else "medium")
         assert result["corroboration_models"] == (
-            ["medium", "medium"]
+            ["small", "small"]
             if fallback_model
-            else ["small"]
+            else ["medium"]
             if embedded_text and not corrupt_embedded_text
-            else ["small", "small"]
+            else ["medium", "medium"]
         )
         assert result["corroboration_mode"] == (
             "embedded_text"

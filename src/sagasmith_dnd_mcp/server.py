@@ -10,6 +10,7 @@ import math
 import re
 import time
 import unicodedata
+from collections import Counter
 from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import asdict, replace
@@ -1106,10 +1107,21 @@ def _select_preferred_statblock_reviews(
     def preference(review: dict[str, Any]) -> tuple[Any, ...]:
         observation = str(review.get("observation") or "")
         recovery_version = re.search(r"(?i)layout OCR v(\d+)\b", observation)
+        heading = re.search(
+            r"(?m)^#{1,6}\s+(.+?)\s*$",
+            str(review.get("normalized_content") or ""),
+        )
+        heading_text = heading.group(1) if heading is not None else ""
         return (
             mode_rank.get(str(review.get("review_mode") or ""), 0),
             int(recovery_version.group(1)) if recovery_version else 0,
             1 if review.get("agent_statblock_fill") is not None else 0,
+            1
+            if re.search(
+                r"(?i)\b(?:category|level|rank|type)\s+\d+\b",
+                heading_text,
+            )
+            else 0,
             len(str(review.get("normalized_content") or "")),
             str(review.get("id") or ""),
         )
@@ -1136,6 +1148,40 @@ def _select_preferred_statblock_reviews(
         selected.append(review)
         selected_names.setdefault(page_number, []).append(name)
     return selected
+
+
+def _canonical_statblock_artifact_for_review(
+    reviewed_name: str,
+    page_artifacts: list[tuple[str, str]],
+) -> tuple[str, str] | None:
+    """Return one catalog-reviewed identity for an OCR review on the same page.
+
+    The matching tiers intentionally stay conservative: an ambiguous page never
+    rewrites the immutable review heading, even when more than one candidate is
+    approximately equivalent.
+    """
+
+    matchers = (
+        lambda candidate: compact_ascii_key(candidate) == compact_ascii_key(reviewed_name),
+        lambda candidate: _bounded_ocr_heading_equivalent(candidate, reviewed_name),
+        lambda candidate: _noisy_ocr_heading_equivalent(reviewed_name, candidate),
+    )
+    for matcher in matchers:
+        matches = [item for item in page_artifacts if matcher(item[0])]
+        if len(matches) == 1:
+            return matches[0]
+    return None
+
+
+def _artifact_source_pages(artifact: dict[str, Any]) -> set[int]:
+    pages: set[int] = set()
+    for citation in artifact.get("source_citations") or []:
+        page_start = int(citation.get("page_start") or 0)
+        page_end = int(citation.get("page_end") or page_start)
+        if page_start <= 0 or page_end < page_start:
+            continue
+        pages.update(range(page_start, page_end + 1))
+    return pages
 
 
 def _ocr_fact_key(value: Any) -> str:
@@ -1191,6 +1237,90 @@ def _merge_statblock_discoveries(
         result.append((item, secondary_provider))
         seen.add(name_key)
     return result
+
+
+_STATBLOCK_INDEX_ENTRY_RE = re.compile(
+    r"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9 '&(),\-]{1,100}?)"
+    r"\s*\.{3,}\s*(\d{1,4})\b"
+)
+
+
+def _statblock_index_recovery_hints(
+    chunks: list[dict[str, Any]],
+    catalog_statblocks: list[dict[str, Any]],
+    *,
+    page_count: int,
+) -> dict[str, Any]:
+    """Resolve a printed statblock index to physical PDF pages without guessing offset."""
+
+    entries: list[tuple[str, int]] = []
+    seen_entries: set[tuple[str, int]] = set()
+    for chunk in chunks:
+        headings = [compact_ascii_key(item) for item in chunk.get("heading_path") or []]
+        if not any("indexofstatblocks" in heading for heading in headings):
+            continue
+        for match in _STATBLOCK_INDEX_ENTRY_RE.finditer(str(chunk.get("content") or "")):
+            name = " ".join(match.group(1).split()).strip(" .")
+            printed_page = int(match.group(2))
+            key = (compact_ascii_key(name), printed_page)
+            if not _valid_statblock_heading(name) or key in seen_entries:
+                continue
+            seen_entries.add(key)
+            entries.append((name, printed_page))
+    if not entries:
+        return {
+            "entry_count": 0,
+            "page_offset": None,
+            "offset_support": 0,
+            "by_page": {},
+        }
+
+    offsets: Counter[int] = Counter()
+    for index_name, printed_page in entries:
+        matches = [
+            candidate
+            for candidate in catalog_statblocks
+            if _bounded_ocr_heading_equivalent(
+                index_name,
+                str(candidate.get("name") or ""),
+            )
+        ]
+        if len(matches) != 1:
+            continue
+        physical_page = matches[0].get("page_start")
+        if isinstance(physical_page, bool) or not isinstance(physical_page, int):
+            continue
+        offset = physical_page - printed_page
+        if -20 <= offset <= 20:
+            offsets[offset] += 1
+    if not offsets:
+        return {
+            "entry_count": len(entries),
+            "page_offset": None,
+            "offset_support": 0,
+            "by_page": {},
+        }
+    ranked_offsets = offsets.most_common()
+    page_offset, support = ranked_offsets[0]
+    tied = len(ranked_offsets) > 1 and ranked_offsets[1][1] == support
+    if support < 3 or tied:
+        return {
+            "entry_count": len(entries),
+            "page_offset": None,
+            "offset_support": support,
+            "by_page": {},
+        }
+    by_page: dict[int, list[str]] = {}
+    for name, printed_page in entries:
+        physical_page = printed_page + page_offset
+        if 1 <= physical_page <= page_count:
+            by_page.setdefault(physical_page, []).append(name)
+    return {
+        "entry_count": len(entries),
+        "page_offset": page_offset,
+        "offset_support": support,
+        "by_page": by_page,
+    }
 
 
 def _agent_evidence_supports_fact(
@@ -36606,6 +36736,25 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if source_path.suffix.casefold() != ".pdf":
             raise ValueError("statblock catalog recovery requires a staged PDF")
         chunks = rules.source_chunks(job.source_id)
+        source = rules.source(job.source_id)
+        inventory = extract_content_inventory(
+            chunks,
+            source_title=str(source.get("title") or ""),
+        )
+        catalog_statblocks = [
+            dict(item)
+            for item in inventory["candidates"]
+            if item.get("kind") == "statblock"
+        ]
+        page_count = int(dict(job.inspection or {}).get("page_count", 0) or 0)
+        if page_count < 1:
+            raise RuntimeError("rule import inspection has no page count")
+        index_hints = {
+            "entry_count": 0,
+            "page_offset": None,
+            "offset_support": 0,
+            "by_page": {},
+        }
         if page_numbers is None:
             page_text: dict[int, list[str]] = {}
             for chunk in chunks:
@@ -36663,6 +36812,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     )
                 ):
                     selected_pages.append(page_number)
+            index_hints = _statblock_index_recovery_hints(
+                chunks,
+                catalog_statblocks,
+                page_count=page_count,
+            )
+            selected_pages.extend(index_hints["by_page"])
         else:
             if (
                 not isinstance(page_numbers, list)
@@ -36683,6 +36838,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "job_id": job_id,
             "operation": "recover_statblocks",
             "page_numbers": selected_pages,
+            "statblock_index_hints": index_hints["by_page"],
         }
         scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
@@ -36693,16 +36849,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         failures: list[dict[str, Any]] = []
         indexed_fallbacks: list[dict[str, Any]] = []
         complete_pages: list[int] = []
-        source = rules.source(job.source_id)
-        inventory = extract_content_inventory(
-            chunks,
-            source_title=str(source.get("title") or ""),
-        )
-        catalog_statblocks = [
-            dict(item)
-            for item in inventory["candidates"]
-            if item.get("kind") == "statblock"
-        ]
         indexed_review_keys: set[tuple[str, int]] = set()
         indexed_pages: set[int] = set()
         for candidate in catalog_statblocks:
@@ -36818,6 +36964,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     primary_provider=text_provider.name,
                     secondary=ocr_discoveries,
                     secondary_provider=ocr_provider.name,
+                )
+            for indexed_name in index_hints["by_page"].get(page_number, []):
+                if any(
+                    _bounded_ocr_heading_equivalent(indexed_name, str(item["name"]))
+                    for item, _provider in discovery_items
+                ):
+                    continue
+                discovery_items.append(
+                    (
+                        {"name": indexed_name, "page_number": page_number},
+                        "printed-statblock-index",
+                    )
                 )
             if not discovery_items:
                 if page_number in indexed_pages and not any(
@@ -36963,6 +37121,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         ]
         recovery_summary = {
             "schema_version": 1,
+            "statblock_index": {
+                key: value for key, value in index_hints.items() if key != "by_page"
+            },
             "selected_pages": selected_pages,
             "complete_pages": sorted(set(complete_pages)),
             "recovered": recovered_items,
@@ -44721,6 +44882,19 @@ Useful bounded guidance:
 
             reviewed_source_names_by_page: dict[int, set[str]] = {}
             reviewed_mechanical_identities_by_page: dict[int, set[str]] = {}
+            catalog_actor_names_by_page: dict[int, list[tuple[str, str]]] = {}
+            for artifact in pack.artifacts:
+                if artifact.get("kind") != "statblock":
+                    continue
+                artifact_name = " ".join(
+                    str(dict(artifact.get("card") or {}).get("name") or "").split()
+                )
+                if not _valid_statblock_heading(artifact_name):
+                    continue
+                for page_number in _artifact_source_pages(artifact):
+                    catalog_actor_names_by_page.setdefault(page_number, []).append(
+                        (artifact_name, str(artifact.get("id") or ""))
+                    )
             indexed_source_chunks: list[dict[str, Any]] = []
             import_job_id = str(pack.provenance.get("import_job_id") or "")
             source_info = dict(pack.provenance.get("rule_source") or {})
@@ -44749,8 +44923,8 @@ Useful bounded guidance:
                 source_reviews = _select_preferred_statblock_reviews(source_reviews)
                 for review in source_reviews:
                     source_text = str(review.get("normalized_content") or "").strip()
-                    source_checksum = hashlib.sha256(source_text.encode()).hexdigest()
-                    if not source_text or source_checksum != str(
+                    review_checksum = hashlib.sha256(source_text.encode()).hexdigest()
+                    if not source_text or review_checksum != str(
                         review.get("normalized_content_sha256") or ""
                     ):
                         failures.append(
@@ -44758,16 +44932,51 @@ Useful bounded guidance:
                         )
                         continue
                     page_number = int(review.get("page_number") or 0)
+                    reviewed_heading = re.search(
+                        r"(?m)^#{1,6}\s+(.+?)\s*$",
+                        source_text,
+                    )
+                    canonical_artifact: tuple[str, str] | None = None
+                    if reviewed_heading is not None:
+                        reviewed_name = reviewed_heading.group(1)
+                        canonical_artifact = _canonical_statblock_artifact_for_review(
+                            reviewed_name,
+                            catalog_actor_names_by_page.get(page_number, []),
+                        )
+                    if canonical_artifact is not None:
+                        canonical_name, canonical_artifact_id = canonical_artifact
+                        assert reviewed_heading is not None
+                        if canonical_name != reviewed_heading.group(1):
+                            source_text = (
+                                source_text[: reviewed_heading.start(1)]
+                                + canonical_name
+                                + source_text[reviewed_heading.end(1) :]
+                            )
+                            reviewed_ocr_supersessions.append(
+                                {
+                                    "artifact_id": canonical_artifact_id,
+                                    "reviewed_name": canonical_name,
+                                    "basis": "catalog_review_canonical_identity",
+                                }
+                            )
                     try:
                         reviewed_name = append_preset_card(
                             source_text=source_text,
                             source_identity=(
-                                f"rule-pack:{pack_id}@{version}#review:{source_checksum[:16]}"
+                                f"rule-pack:{pack_id}@{version}#review:{review_checksum[:16]}"
                             ),
                             source_refs=[
                                 f"rule-pack:{pack_id}@{version}#page:{page_number}",
                                 (
-                                    f"rule-pack:{pack_id}@{version}#review:{source_checksum[:16]}"
+                                    f"rule-pack:{pack_id}@{version}#review:{review_checksum[:16]}"
+                                ),
+                                *(
+                                    [
+                                        f"rule-pack:{pack_id}@{version}#artifact:"
+                                        f"{canonical_artifact[1]}"
+                                    ]
+                                    if canonical_artifact is not None
+                                    else []
                                 ),
                             ],
                             semantic_fill=(
@@ -44783,7 +44992,7 @@ Useful bounded guidance:
                         reviewed_parsed = parse_2014_statblock(
                             source_text,
                             source_key=(
-                                f"rule-pack:{pack_id}@{version}#review:{source_checksum[:16]}"
+                                f"rule-pack:{pack_id}@{version}#review:{review_checksum[:16]}"
                             ),
                             rule_refs=[],
                         )

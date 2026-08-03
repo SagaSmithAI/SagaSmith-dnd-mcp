@@ -1,0 +1,625 @@
+{
+  "version": 1,
+  "strict": true,
+  "documents": {
+    "UO\\D&D 5E - HB - School of Geometry.pdf": {
+      "complete_review": true,
+      "default_status": "accepted",
+      "rationale": "Agent reviewed every indexed section and restored the Spell Link feature whose visual heading was fused into the preceding chunk.",
+      "expected_counts": {"feature": 5, "subclass": 1},
+      "additions": [
+        {
+          "kind": "feature",
+          "name": "Spell Link",
+          "source_selectors": [
+            {
+              "heading_exact": "Arcane Topography",
+              "content_contains": "Spell Link Starting at 6th level",
+              "start_contains": "Spell Link Starting at 6th level"
+            }
+          ],
+          "card": {"class_name": "Wizard", "subclass_name": "School of Geometry", "minimum_level": 6}
+        }
+      ],
+      "decisions": [
+        {"kind": "feature", "name": "Spell Map", "artifact_patch": {"card": {"class_name": "Wizard", "subclass_name": "School of Geometry", "minimum_level": 2}}},
+        {"kind": "feature", "name": "Arcane Topography", "artifact_patch": {"card": {"class_name": "Wizard", "subclass_name": "School of Geometry", "minimum_level": 2}}},
+        {"kind": "feature", "name": "Spell Link", "artifact_patch": {"card": {"class_name": "Wizard", "subclass_name": "School of Geometry", "minimum_level": 6}}},
+        {"kind": "feature", "name": "Off the Grid", "artifact_patch": {"card": {"class_name": "Wizard", "subclass_name": "School of Geometry", "minimum_level": 10}}},
+        {"kind": "feature", "name": "Geometer's Journey", "artifact_patch": {"card": {"class_name": "Wizard", "subclass_name": "School of Geometry", "minimum_level": 14}}}
+      ]
+    },
+    "UO\\D&D 5E - UA - Artificer.pdf": {
+      "complete_review": true,
+      "default_status": "accepted",
+      "rationale": "Agent reviewed the 2017 Artificer class and restored its sibling Gunsmith specialization without treating inline ammunition modes as unrelated classes.",
+      "expected_counts": {"class": 1, "feature": 14, "subclass": 2},
+      "additions": [
+        {
+          "kind": "subclass",
+          "name": "Gunsmith",
+          "source_selectors": [{"heading_exact": "Gunsmith"}],
+          "card": {"class_name": "Artificer", "minimum_level": 1, "always_prepared_spells": []}
+        }
+      ],
+      "decisions": [
+        {"kind": "subclass", "name": "Alchemist", "artifact_patch": {"card": {"class_name": "Artificer", "minimum_level": 1}}},
+        {"kind": "subclass", "name": "Gunsmith", "artifact_patch": {"card": {"class_name": "Artificer", "minimum_level": 1}}},
+        {"kind": "feature", "name": "Alchemist’s Satchel", "artifact_patch": {"card": {"class_name": "Artificer", "subclass_name": "Alchemist", "minimum_level": 1}}},
+        {"kind": "feature", "name": "Master Smith", "artifact_patch": {"card": {"class_name": "Artificer", "subclass_name": "Gunsmith", "minimum_level": 1}}},
+        {"kind": "feature", "name": "Blast Wave", "artifact_patch": {"card": {"class_name": "Artificer", "subclass_name": "Gunsmith", "minimum_level": 9}}},
+        {"kind": "feature", "name": "Piercing Round", "artifact_patch": {"card": {"class_name": "Artificer", "subclass_name": "Gunsmith", "minimum_level": 14}}},
+        {"kind": "feature", "name": "Explosive Round", "artifact_patch": {"card": {"class_name": "Artificer", "subclass_name": "Gunsmith", "minimum_level": 17}}}
+      ]
+    },
+    "UO\\D&D 5E - UA - ArtificerV2.pdf": {
+      "complete_review": true,
+      "default_status": "accepted",
+      "rationale": "Agent reviewed both 2019 Artificer specialists, preserved their same-named Tools of the Trade features, and restored three missed feature boundaries.",
+      "expected_counts": {"class": 1, "feature": 18, "spell": 1, "statblock": 1, "subclass": 2},
+      "additions": [
+        {"kind": "subclass", "name": "Alchemist", "source_selectors": [{"heading_exact": "Alchemist"}], "card": {"class_name": "Artificer", "minimum_level": 3, "always_prepared_spells": []}},
+        {"kind": "subclass", "name": "Artillerist", "source_selectors": [{"heading_exact": "Artillerist"}], "card": {"class_name": "Artificer", "minimum_level": 3, "always_prepared_spells": []}},
+        {"kind": "feature", "name": "Spell-Storing Item", "source_selectors": [{"heading_exact": "Spell-Storing Item"}], "card": {"class_name": "Artificer", "minimum_level": 18}},
+        {"kind": "feature", "name": "Alchemist Spells", "source_selectors": [{"heading_contains": "Alchemist > Tools of the Trade", "content_contains": "Alchemist Spells Starting at 3rd level", "start_contains": "Alchemist Spells Starting at 3rd level"}], "card": {"class_name": "Artificer", "subclass_name": "Alchemist", "minimum_level": 3}},
+        {"kind": "feature", "name": "Chemical Savant", "source_selectors": [{"heading_exact": "Chemical Savant"}], "card": {"class_name": "Artificer", "subclass_name": "Alchemist", "minimum_level": 6}}
+      ],
+      "decisions": [
+        {"kind": "feature", "name": "Tools of the Trade", "source_heading_contains": "Alchemist", "artifact_patch": {"card": {"class_name": "Artificer", "subclass_name": "Alchemist", "minimum_level": 3}}},
+        {"kind": "feature", "name": "Alchemical Homunculus", "artifact_patch": {"card": {"class_name": "Artificer", "subclass_name": "Alchemist", "minimum_level": 3}}},
+        {"kind": "feature", "name": "Alchemical Mastery", "artifact_patch": {"card": {"class_name": "Artificer", "subclass_name": "Alchemist", "minimum_level": 6}}},
+        {"kind": "feature", "name": "Alchemist Spells", "artifact_patch": {"card": {"class_name": "Artificer", "subclass_name": "Alchemist", "minimum_level": 3}}},
+        {"kind": "feature", "name": "Chemical Savant", "artifact_patch": {"card": {"class_name": "Artificer", "subclass_name": "Alchemist", "minimum_level": 6}}},
+        {"kind": "feature", "name": "Tools of the Trade", "source_heading_contains": "Artillerist", "artifact_patch": {"card": {"class_name": "Artificer", "subclass_name": "Artillerist", "minimum_level": 3}}},
+        {"kind": "feature", "name": "Artillerist Spells", "artifact_patch": {"card": {"class_name": "Artificer", "subclass_name": "Artillerist", "minimum_level": 3}}},
+        {"kind": "feature", "name": "Arcane Turret", "artifact_patch": {"card": {"class_name": "Artificer", "subclass_name": "Artillerist", "minimum_level": 3}}},
+        {"kind": "feature", "name": "Fortified Position", "artifact_patch": {"card": {"class_name": "Artificer", "subclass_name": "Artillerist", "minimum_level": 14}}},
+        {"kind": "statblock", "name": "Alchemical Homunculus", "artifact_patch": {"card": {"owner_class_name": "Artificer"}}}
+      ]
+    },
+    "UO\\D&D 5E - UA - Blood Hunter Class 1.2.pdf": {
+      "complete_review": true,
+      "default_status": "accepted",
+      "rationale": "Agent reviewed the complete Blood Hunter advancement table, all three orders, blood curses, rites, and mutagen rules, restoring headings skipped by level-marker extraction.",
+      "expected_counts": {"class": 1, "feature": 32, "subclass": 3},
+      "additions": [
+        {"kind": "subclass", "name": "ORDER OF THE GHOSTSLAYER", "source_selectors": [{"heading_exact": "ORDER OF THE GHOSTSLAYER", "match_all": true}], "card": {"class_name": "Blood Hunter", "minimum_level": 3, "always_prepared_spells": []}},
+        {"kind": "subclass", "name": "ORDER OF THE PROFANE SOUL", "source_selectors": [{"heading_exact": "ORDER OF THE PROFANE SOUL", "match_all": true}], "card": {"class_name": "Blood Hunter", "minimum_level": 3, "always_prepared_spells": []}},
+        {"kind": "subclass", "name": "ORDER OF THE MUTANT", "source_selectors": [{"heading_exact": "ORDER OF THE MUTANT", "match_all": true}], "card": {"class_name": "Blood Hunter", "minimum_level": 3, "always_prepared_spells": []}},
+        {"kind": "feature", "name": "PRIMAL RITES", "source_selectors": [{"heading_exact": "PRIMAL RITES", "match_all": true}], "card": {"class_name": "Blood Hunter", "minimum_level": 1}},
+        {"kind": "feature", "name": "BLOOD CURSES", "source_selectors": [{"heading_exact": "BLOOD CURSES", "match_all": true}], "card": {"class_name": "Blood Hunter", "minimum_level": 6}},
+        {"kind": "feature", "name": "GRIM PSYCHOMETRY", "source_selectors": [{"heading_exact": "GRIM PSYCHOMETRY", "match_all": true}], "card": {"class_name": "Blood Hunter", "minimum_level": 9}},
+        {"kind": "feature", "name": "DARK VELOCITY", "source_selectors": [{"heading_exact": "DARK VELOCITY", "match_all": true}], "card": {"class_name": "Blood Hunter", "minimum_level": 10}},
+        {"kind": "feature", "name": "HARDENED SOUL", "source_selectors": [{"heading_exact": "HARDENED SOUL", "match_all": true}], "card": {"class_name": "Blood Hunter", "minimum_level": 14}},
+        {"kind": "feature", "name": "ENDURING FORM", "source_selectors": [{"heading_exact": "ENDURING FORM", "match_all": true}], "card": {"class_name": "Blood Hunter", "minimum_level": 17}},
+        {"kind": "feature", "name": "SANGUINE MASTERY", "source_selectors": [{"heading_exact": "SANGUINE MASTERY", "match_all": true}], "card": {"class_name": "Blood Hunter", "minimum_level": 20}},
+        {"kind": "feature", "name": "GRAVESIGHT", "source_selectors": [{"heading_exact": "GRAVESIGHT", "match_all": true}], "card": {"class_name": "Blood Hunter", "subclass_name": "ORDER OF THE GHOSTSLAYER", "minimum_level": 15}},
+        {"kind": "feature", "name": "VENGEFUL SPIRIT", "source_selectors": [{"heading_exact": "VENGEFUL SPIRIT", "match_all": true}], "card": {"class_name": "Blood Hunter", "subclass_name": "ORDER OF THE GHOSTSLAYER", "minimum_level": 18}},
+        {"kind": "feature", "name": "ARCANE IMPULSE", "source_selectors": [{"heading_exact": "ARCANE IMPULSE", "match_all": true}], "card": {"class_name": "Blood Hunter", "subclass_name": "ORDER OF THE PROFANE SOUL", "minimum_level": 15}},
+        {"kind": "feature", "name": "SOUL SYPHON", "source_selectors": [{"heading_exact": "SOUL SYPHON", "match_all": true}], "card": {"class_name": "Blood Hunter", "subclass_name": "ORDER OF THE PROFANE SOUL", "minimum_level": 18}},
+        {"kind": "feature", "name": "ADVANCED MUTAGEN CRAFT", "source_selectors": [{"heading_exact": "ADVANCED MUTAGEN CRAFT", "match_all": true}], "card": {"class_name": "Blood Hunter", "subclass_name": "ORDER OF THE MUTANT", "minimum_level": 7}}
+      ],
+      "decisions": [
+        {"kind": "feature", "name": "CLEANSING RITE", "artifact_patch": {"card": {"class_name": "Blood Hunter", "subclass_name": "ORDER OF THE GHOSTSLAYER", "minimum_level": 3}}},
+        {"kind": "feature", "name": "HALLOWED VEINS", "artifact_patch": {"card": {"class_name": "Blood Hunter", "subclass_name": "ORDER OF THE GHOSTSLAYER", "minimum_level": 7}}},
+        {"kind": "feature", "name": "SUPERNAL FLURRY", "artifact_patch": {"card": {"class_name": "Blood Hunter", "subclass_name": "ORDER OF THE GHOSTSLAYER", "minimum_level": 10}}},
+        {"kind": "feature", "name": "PACT MAGIC", "artifact_patch": {"card": {"class_name": "Blood Hunter", "subclass_name": "ORDER OF THE PROFANE SOUL", "minimum_level": 3}}},
+        {"kind": "feature", "name": "LETHAL FOCUS", "artifact_patch": {"card": {"class_name": "Blood Hunter", "subclass_name": "ORDER OF THE PROFANE SOUL", "minimum_level": 7}}},
+        {"kind": "feature", "name": "MYSTIC FRENZY", "artifact_patch": {"card": {"class_name": "Blood Hunter", "subclass_name": "ORDER OF THE PROFANE SOUL", "minimum_level": 10}}},
+        {"kind": "feature", "name": "DIABOLIC CHANNEL", "artifact_patch": {"card": {"class_name": "Blood Hunter", "subclass_name": "ORDER OF THE PROFANE SOUL", "minimum_level": 15}}},
+        {"kind": "feature", "name": "RITE BOND", "artifact_patch": {"card": {"class_name": "Blood Hunter", "subclass_name": "ORDER OF THE PROFANE SOUL", "minimum_level": 18}}},
+        {"kind": "feature", "name": "FORMULAS", "artifact_patch": {"card": {"class_name": "Blood Hunter", "subclass_name": "ORDER OF THE MUTANT", "minimum_level": 3}}},
+        {"kind": "feature", "name": "MUTAGEN CRAFT", "artifact_patch": {"card": {"class_name": "Blood Hunter", "subclass_name": "ORDER OF THE MUTANT", "minimum_level": 3}}},
+        {"kind": "feature", "name": "ADVANCED MUTAGEN CRAFT", "artifact_patch": {"card": {"class_name": "Blood Hunter", "subclass_name": "ORDER OF THE MUTANT", "minimum_level": 7}}},
+        {"kind": "feature", "name": "ROBUST PHYSIOLOGY", "artifact_patch": {"card": {"class_name": "Blood Hunter", "subclass_name": "ORDER OF THE MUTANT", "minimum_level": 10}}},
+        {"kind": "feature", "name": "STRANGE METABOLISM", "artifact_patch": {"card": {"class_name": "Blood Hunter", "subclass_name": "ORDER OF THE MUTANT", "minimum_level": 15}}},
+        {"kind": "feature", "name": "EXALTED MUTATION", "artifact_patch": {"card": {"class_name": "Blood Hunter", "subclass_name": "ORDER OF THE MUTANT", "minimum_level": 18}}},
+        {"kind": "feature", "name": "MUTAGENS", "artifact_patch": {"card": {"class_name": "Blood Hunter", "subclass_name": "ORDER OF THE MUTANT", "minimum_level": 3}}}
+      ]
+    },
+    "UO\\D&D 5E - UA - RevisedRanger.pdf": {
+      "complete_review": true,
+      "default_status": "accepted",
+      "rationale": "Agent reviewed the revised Ranger class and all three conclaves, restoring the subclass parents and inline 11th/15th-level companion and stalker features.",
+      "expected_counts": {"class": 1, "feature": 29, "subclass": 3},
+      "additions": [
+        {"kind": "subclass", "name": "Beast Conclave", "source_selectors": [{"heading_exact": "Beast Conclave"}], "card": {"class_name": "Revised Ranger", "minimum_level": 3, "always_prepared_spells": []}},
+        {"kind": "subclass", "name": "Hunter Conclave", "source_selectors": [{"heading_exact": "Hunter Conclave"}], "card": {"class_name": "Revised Ranger", "minimum_level": 3, "always_prepared_spells": []}},
+        {"kind": "subclass", "name": "Deep Stalker Conclave", "source_selectors": [{"heading_exact": "Deep Stalker Conclave"}], "card": {"class_name": "Revised Ranger", "minimum_level": 3, "always_prepared_spells": []}},
+        {"kind": "feature", "name": "Natural Explorer", "source_selectors": [{"heading_exact": "Natural Explorer"}], "card": {"class_name": "Revised Ranger", "minimum_level": 1}},
+        {"kind": "feature", "name": "Spellcasting", "source_selectors": [{"heading_exact": "Spellcasting"}], "card": {"class_name": "Revised Ranger", "minimum_level": 2}},
+        {"kind": "feature", "name": "Ranger Conclave", "source_selectors": [{"heading_exact": "Ranger Conclave"}], "card": {"class_name": "Revised Ranger", "minimum_level": 3}},
+        {"kind": "feature", "name": "Companion’s Bond", "source_selectors": [{"heading_exact": "Companion’s Bond"}], "card": {"class_name": "Revised Ranger", "subclass_name": "Beast Conclave", "minimum_level": 3}},
+        {"kind": "feature", "name": "Storm of Claws and Fangs", "source_selectors": [{"heading_exact": "Beast’s Defense", "content_contains": "Storm of Claws and Fangs At 11th level", "start_contains": "Storm of Claws and Fangs At 11th level", "end_before_contains": "Superior Beast’s Defense"}], "card": {"class_name": "Revised Ranger", "subclass_name": "Beast Conclave", "minimum_level": 11}},
+        {"kind": "feature", "name": "Superior Beast’s Defense", "source_selectors": [{"heading_exact": "Beast’s Defense", "content_contains": "Superior Beast’s Defense At 15th level", "start_contains": "Superior Beast’s Defense At 15th level"}], "card": {"class_name": "Revised Ranger", "subclass_name": "Beast Conclave", "minimum_level": 15}},
+        {"kind": "feature", "name": "Stalker’s Dodge", "source_selectors": [{"heading_exact": "Stalker’s Flurry", "content_contains": "Stalker’s Dodge At 15th level", "start_contains": "Stalker’s Dodge At 15th level"}], "card": {"class_name": "Revised Ranger", "subclass_name": "Deep Stalker Conclave", "minimum_level": 15}}
+      ],
+      "decisions": [
+        {"kind": "feature", "name": "Beast Conclave", "status": "rejected", "note": "The heading is a subclass identity, not a selectable feature."},
+        {"kind": "feature", "name": "Foe Slayer", "artifact_patch": {"card": {"class_name": "Revised Ranger", "minimum_level": 20}}},
+        {"kind": "feature", "name": "Keeping Track of Proficiency", "artifact_patch": {"selection_applicability": "not_applicable", "card": {"class_name": "Revised Ranger", "subclass_name": "Beast Conclave", "minimum_level": 3}}},
+        {"kind": "feature", "name": "Expanding Companion Options", "artifact_patch": {"selection_applicability": "not_applicable", "card": {"class_name": "Revised Ranger", "subclass_name": "Beast Conclave", "minimum_level": 3}}},
+        {"kind": "feature", "name": "Coordinated Attack", "artifact_patch": {"card": {"class_name": "Revised Ranger", "subclass_name": "Beast Conclave", "minimum_level": 5}}},
+        {"kind": "feature", "name": "Beast’s Defense", "artifact_patch": {"card": {"class_name": "Revised Ranger", "subclass_name": "Beast Conclave", "minimum_level": 7}}},
+        {"kind": "feature", "name": "Storm of Claws and Fangs", "artifact_patch": {"card": {"class_name": "Revised Ranger", "subclass_name": "Beast Conclave", "minimum_level": 11}}},
+        {"kind": "feature", "name": "Superior Beast’s Defense", "artifact_patch": {"card": {"class_name": "Revised Ranger", "subclass_name": "Beast Conclave", "minimum_level": 15}}},
+        {"kind": "feature", "name": "Hunter’s Prey", "artifact_patch": {"card": {"class_name": "Revised Ranger", "subclass_name": "Hunter Conclave", "minimum_level": 3}}},
+        {"kind": "feature", "name": "Extra Attack", "source_heading_exact": ["Extra Attack"], "artifact_patch": {"card": {"class_name": "Revised Ranger", "subclass_name": "Hunter Conclave", "minimum_level": 5}}},
+        {"kind": "feature", "name": "Multiattack", "artifact_patch": {"card": {"class_name": "Revised Ranger", "subclass_name": "Hunter Conclave", "minimum_level": 11}}},
+        {"kind": "feature", "name": "Superior Hunter’s Defense", "artifact_patch": {"card": {"class_name": "Revised Ranger", "subclass_name": "Hunter Conclave", "minimum_level": 15}}},
+        {"kind": "feature", "name": "Underdark Scout", "artifact_patch": {"card": {"class_name": "Revised Ranger", "subclass_name": "Deep Stalker Conclave", "minimum_level": 3}}},
+        {"kind": "feature", "name": "Deep Stalker Magic", "artifact_patch": {"card": {"class_name": "Revised Ranger", "subclass_name": "Deep Stalker Conclave", "minimum_level": 3}}},
+        {"kind": "feature", "name": "Extra Attack", "source_heading_contains": "Multiattack", "artifact_patch": {"card": {"class_name": "Revised Ranger", "subclass_name": "Deep Stalker Conclave", "minimum_level": 5}}},
+        {"kind": "feature", "name": "Iron Mind", "artifact_patch": {"card": {"class_name": "Revised Ranger", "subclass_name": "Deep Stalker Conclave", "minimum_level": 7}}},
+        {"kind": "feature", "name": "Stalker’s Flurry", "artifact_patch": {"card": {"class_name": "Revised Ranger", "subclass_name": "Deep Stalker Conclave", "minimum_level": 11}}},
+        {"kind": "feature", "name": "Stalker’s Dodge", "artifact_patch": {"card": {"class_name": "Revised Ranger", "subclass_name": "Deep Stalker Conclave", "minimum_level": 15}}}
+      ]
+    },
+    "UO\\D&D 5E - UA-AberrantLurk.pdf": {
+      "complete_review": true,
+      "default_status": "accepted",
+      "rationale": "Agent reviewed both subclass trees and the Mind Sliver spell; all typed boundaries were already present after layout repair.",
+      "expected_counts": {"feature": 14, "spell": 1, "subclass": 2},
+      "decisions": []
+    },
+    "UO\\D&D 5E - UA-TwilightFireNames.pdf": {
+      "complete_review": true,
+      "default_status": "accepted",
+      "rationale": "Agent reviewed the Twilight, Wildfire, and Onomancy trees, restored inline feature boundaries and Onomancy, and rejected a split rule-tip fragment.",
+      "expected_counts": {"feature": 19, "statblock": 1, "subclass": 3},
+      "additions": [
+        {"kind": "subclass", "name": "Onomancy", "source_selectors": [{"heading_contains": "Onomancy", "match_all": true}], "card": {"class_name": "Wizard", "minimum_level": 2, "always_prepared_spells": []}},
+        {"kind": "feature", "name": "Channel Divinity: Twilight Sanctuary", "source_selectors": [{"heading_exact": "Channel Divinity: Twilight"}, {"heading_exact": "Sanctuary"}], "card": {"class_name": "Cleric", "subclass_name": "Twilight Domain", "minimum_level": 2}},
+        {"kind": "feature", "name": "True Names", "source_selectors": [{"heading_exact": "True Names"}], "card": {"class_name": "Wizard", "subclass_name": "Onomancy", "minimum_level": 2}},
+        {"kind": "feature", "name": "Extract Name", "source_selectors": [{"heading_exact": ["Bonus Proficiencies"], "content_contains": "Extract Name 2nd-level Onomancy feature", "start_contains": "Extract Name 2nd-level Onomancy feature"}], "card": {"class_name": "Wizard", "subclass_name": "Onomancy", "minimum_level": 2}},
+        {"kind": "feature", "name": "Flames of Life", "source_selectors": [{"heading_exact": "Enhanced Bond", "content_contains": "Flames of Life 10th-level Circle of Wildfire feature", "start_contains": "Flames of Life 10th-level Circle of Wildfire feature", "end_before_contains": "Blazing Endurance"}], "card": {"class_name": "Druid", "subclass_name": "Circle of Wildfire", "minimum_level": 10}},
+        {"kind": "feature", "name": "Blazing Endurance", "source_selectors": [{"heading_exact": "Enhanced Bond", "content_contains": "Blazing Endurance 14th-level Circle of Wildfire feature", "start_contains": "Blazing Endurance 14th-level Circle of Wildfire feature"}], "card": {"class_name": "Druid", "subclass_name": "Circle of Wildfire", "minimum_level": 14}}
+      ],
+      "decisions": [
+        {"kind": "feature", "name": "Sanctuary", "status": "rejected", "note": "This is the second half of Channel Divinity: Twilight Sanctuary, not an independent feature."},
+        {"kind": "feature", "name": "Source fragment: Stack (p. 2)", "status": "rejected", "note": "This is a split continuation of the temporary-hit-point rule tip covered by the core rules."},
+        {"kind": "feature", "name": "Bonus Proficiencies", "source_heading_contains": "Divine Domain", "artifact_patch": {"card": {"class_name": "Cleric", "subclass_name": "Twilight Domain", "minimum_level": 1}}},
+        {"kind": "feature", "name": "Eyes of Night", "artifact_patch": {"card": {"class_name": "Cleric", "subclass_name": "Twilight Domain", "minimum_level": 1}}},
+        {"kind": "feature", "name": "Vigilant Blessing", "artifact_patch": {"card": {"class_name": "Cleric", "subclass_name": "Twilight Domain", "minimum_level": 1}}},
+        {"kind": "feature", "name": "Channel Divinity: Twilight Sanctuary", "artifact_patch": {"card": {"class_name": "Cleric", "subclass_name": "Twilight Domain", "minimum_level": 2}}},
+        {"kind": "feature", "name": "Steps of the Brave", "artifact_patch": {"card": {"class_name": "Cleric", "subclass_name": "Twilight Domain", "minimum_level": 6}}},
+        {"kind": "feature", "name": "Divine Strike", "artifact_patch": {"card": {"class_name": "Cleric", "subclass_name": "Twilight Domain", "minimum_level": 8}}},
+        {"kind": "feature", "name": "Midnight Shroud", "artifact_patch": {"card": {"class_name": "Cleric", "subclass_name": "Twilight Domain", "minimum_level": 17}}},
+        {"kind": "feature", "name": "Circle Spells", "artifact_patch": {"card": {"class_name": "Druid", "subclass_name": "Circle of Wildfire", "minimum_level": 2}}},
+        {"kind": "feature", "name": "Summon Wildfire", "artifact_patch": {"card": {"class_name": "Druid", "subclass_name": "Circle of Wildfire", "minimum_level": 2}}},
+        {"kind": "feature", "name": "Enhanced Bond", "artifact_patch": {"card": {"class_name": "Druid", "subclass_name": "Circle of Wildfire", "minimum_level": 6}}},
+        {"kind": "feature", "name": "Flames of Life", "artifact_patch": {"card": {"class_name": "Druid", "subclass_name": "Circle of Wildfire", "minimum_level": 10}}},
+        {"kind": "feature", "name": "Blazing Endurance", "artifact_patch": {"card": {"class_name": "Druid", "subclass_name": "Circle of Wildfire", "minimum_level": 14}}},
+        {"kind": "feature", "name": "True Names", "artifact_patch": {"selection_applicability": "not_applicable", "card": {"class_name": "Wizard", "subclass_name": "Onomancy", "minimum_level": 2}}},
+        {"kind": "feature", "name": "Bonus Proficiencies", "source_heading_exact": ["Bonus Proficiencies"], "artifact_patch": {"card": {"class_name": "Wizard", "subclass_name": "Onomancy", "minimum_level": 2}}},
+        {"kind": "feature", "name": "Extract Name", "artifact_patch": {"card": {"class_name": "Wizard", "subclass_name": "Onomancy", "minimum_level": 2}}},
+        {"kind": "feature", "name": "Fateful Naming", "artifact_patch": {"card": {"class_name": "Wizard", "subclass_name": "Onomancy", "minimum_level": 2}}},
+        {"kind": "feature", "name": "Resonant Utterance", "artifact_patch": {"card": {"class_name": "Wizard", "subclass_name": "Onomancy", "minimum_level": 6}}},
+        {"kind": "feature", "name": "Inexorable Pronouncement", "artifact_patch": {"card": {"class_name": "Wizard", "subclass_name": "Onomancy", "minimum_level": 10}}},
+        {"kind": "feature", "name": "Relentless Naming", "artifact_patch": {"card": {"class_name": "Wizard", "subclass_name": "Onomancy", "minimum_level": 14}}},
+        {"kind": "statblock", "name": "Wildfire Spirit", "artifact_patch": {"card": {"owner_class_name": "Druid"}}}
+      ]
+    },
+    "D&D 5E - Elemental Evil Player's Companion.pdf": {
+      "complete_review": true,
+      "default_status": "accepted",
+      "rationale": "Agent reviewed the source table of contents, four race entries, all spell lists, and every spell definition. Layout-safe margin preservation and cross-page entry grouping recover the complete catalog without OCR or invented source text.",
+      "expected_counts": {"species": 4, "spell": 43},
+      "expected_catalog": [
+        {"kind": "species", "name": "Aarakocra"},
+        {"kind": "species", "name": "Deep Gnome"},
+        {"kind": "species", "name": "Genasi"},
+        {"kind": "species", "name": "Goliath"},
+        {"kind": "spell", "name": "Abi-Dalzim’s Horrid Wilting"},
+        {"kind": "spell", "name": "Absorb Elements"},
+        {"kind": "spell", "name": "Aganazzar’s Scorcher"},
+        {"kind": "spell", "name": "Beast Bond"},
+        {"kind": "spell", "name": "Bones of the Earth"},
+        {"kind": "spell", "name": "Catapult"},
+        {"kind": "spell", "name": "Control Flames"},
+        {"kind": "spell", "name": "Control Winds"},
+        {"kind": "spell", "name": "Create Bonfire"},
+        {"kind": "spell", "name": "Dust Devil"},
+        {"kind": "spell", "name": "Earth Tremor"},
+        {"kind": "spell", "name": "Earthbind"},
+        {"kind": "spell", "name": "Elemental Bane"},
+        {"kind": "spell", "name": "Erupting Earth"},
+        {"kind": "spell", "name": "Flame Arrows"},
+        {"kind": "spell", "name": "Frostbite"},
+        {"kind": "spell", "name": "Gust"},
+        {"kind": "spell", "name": "Ice Knife"},
+        {"kind": "spell", "name": "Immolation"},
+        {"kind": "spell", "name": "Investiture of Flame"},
+        {"kind": "spell", "name": "Investiture of Ice"},
+        {"kind": "spell", "name": "Investiture of Stone"},
+        {"kind": "spell", "name": "Investiture of Wind"},
+        {"kind": "spell", "name": "Maelstrom"},
+        {"kind": "spell", "name": "Magic Stone"},
+        {"kind": "spell", "name": "Maximilian’s Earthen Grasp"},
+        {"kind": "spell", "name": "Melf’s Minute Meteors"},
+        {"kind": "spell", "name": "Mold Earth"},
+        {"kind": "spell", "name": "Primordial Ward"},
+        {"kind": "spell", "name": "Pyrotechnics"},
+        {"kind": "spell", "name": "Shape Water"},
+        {"kind": "spell", "name": "Skywrite"},
+        {"kind": "spell", "name": "Snilloc’s Snowball Swarm"},
+        {"kind": "spell", "name": "Storm Sphere"},
+        {"kind": "spell", "name": "Thunderclap"},
+        {"kind": "spell", "name": "Tidal Wave"},
+        {"kind": "spell", "name": "Transmute Rock"},
+        {"kind": "spell", "name": "Vitriolic Sphere"},
+        {"kind": "spell", "name": "Wall of Sand"},
+        {"kind": "spell", "name": "Wall of Water"},
+        {"kind": "spell", "name": "Warding Wind"},
+        {"kind": "spell", "name": "Watery Sphere"},
+        {"kind": "spell", "name": "Whirlwind"}
+      ],
+      "decisions": [
+        {"kind": "feature", "name": "Source fragment: Preface (p. 2)", "status": "rejected", "note": "Preface prose was misclassified by a loose numbered-text heuristic and is not a character option."},
+        {"kind": "feature", "name": "Source fragment: ON THE COVER (p. 2)", "status": "rejected", "note": "Cover credits and legal text are not a character option."},
+        {"kind": "feature", "name": "Source fragment: Deep Gnome (p. 5)", "status": "rejected", "note": "This is descriptive deep gnome lore; the complete selectable Deep Gnome entry is separately structured."},
+        {"kind": "feature", "name": "Source fragment: Spell Descriptions (p. 15)", "status": "rejected", "note": "This is a shared page fragment already covered by the separately structured spell definitions."}
+      ]
+    },
+    "D&D 5E - The Tortle Package.pdf": {
+      "complete_review": true,
+      "default_status": "accepted",
+      "rationale": "Agent reviewed all 28 pages after medium PP-OCRv6 recovery. The catalog contains the Tortle player species, all five complete new-creature statblocks, and source-bound adventure procedures; contextual feature fragments remain catalog-only Agent ruling evidence.",
+      "expected_counts": {"feature": 44, "species": 1, "statblock": 5},
+      "decisions": []
+    },
+    "D&D 5E - Guildmasters' Guide to Ravnica.pdf": {
+      "complete_review": true,
+      "default_status": "accepted",
+      "rationale": "Agent reviewed all character options, backgrounds, spells, treasure entries, and indexed creature cards. Split headings and fused item boundaries are restored from exact source spans; bounded choices replace OCR-derived counts.",
+      "expected_counts": {"background": 10, "feature": 175, "item": 15, "species": 6, "spell": 2, "statblock": 61, "subclass": 2},
+      "expected_actor_names": [
+        "Anarch",
+        "Archon of the Triumvirate",
+        "Arclight Phoenix",
+        "Aurelia",
+        "Battleforce Angel",
+        "Biomancer",
+        "Blistercoil Weird",
+        "Blood Drinker Vampire",
+        "Blood Witch",
+        "Bloodfray Giant",
+        "Borborygmos",
+        "Cackler",
+        "Category 1 Krasis",
+        "Category 2 Krasis",
+        "Category 3 Krasis",
+        "Conclave Dryad",
+        "Cosmotronic Blastseeker",
+        "Counterflux Blastseeker",
+        "Deathpact Angel",
+        "Devkarin Lich",
+        "Druid of the Old Ways",
+        "Felidar",
+        "Firefist",
+        "Firemane Angel",
+        "Flux Blastseeker",
+        "Fluxcharger",
+        "Flying Horror",
+        "Frontline Medic",
+        "Galvanic Blastseeker",
+        "Galvanice Weird",
+        "Gloamwing",
+        "Goblin Gang Member",
+        "Golgari Shaman",
+        "Guardian Giant",
+        "Horncaller",
+        "Hybrid Brute",
+        "Hybrid Flier",
+        "Hybrid Poisoner",
+        "Hybrid Shocker",
+        "Hybrid Spy",
+        "Indentured Spirit",
+        "Isperia",
+        "Jarad Vod Savo",
+        "Kraul Death Priest",
+        "Kraul Warrior",
+        "Krenko",
+        "Lawmage",
+        "Lazav",
+        "Loading Rig",
+        "Master of Cruelties",
+        "Mind Drinker Vampire",
+        "Mind Mage",
+        "Nightveil Specter",
+        "Niv-Mizzet",
+        "Nivix Cyclops",
+        "Obzedat Ghost",
+        "Orzhov Giant",
+        "Precognitive Mage",
+        "Rakdos",
+        "Rakdos Lampooner",
+        "Rakdos Performer",
+        "Reckoner",
+        "Rubblebelt Stalker",
+        "Scorchbringer Guard",
+        "Servitor Thrull",
+        "Shadow Horror",
+        "Sire of Insanity",
+        "Skittering Horror",
+        "Skyjek Roc",
+        "Skyswimmer",
+        "Soldier",
+        "Sunder Shaman",
+        "Thought Spy",
+        "Trostani",
+        "Undercity Medusa",
+        "Winged Thrull",
+        "Wurm",
+        "Zegana"
+      ],
+      "additions": [
+        {
+          "kind": "subclass",
+          "name": "Order Domain",
+          "source_selectors": [{"heading_exact": "CLE RIC: ORDER DOMAI N"}],
+          "card": {
+            "class_name": "Cleric",
+            "minimum_level": 1,
+            "always_prepared_spells": [
+              {"name": "Command", "minimum_level": 1},
+              {"name": "Heroism", "minimum_level": 1},
+              {"name": "Hold Person", "minimum_level": 3},
+              {"name": "Zone of Truth", "minimum_level": 3},
+              {"name": "Mass Healing Word", "minimum_level": 5},
+              {"name": "Slow", "minimum_level": 5},
+              {"name": "Compulsion", "minimum_level": 7},
+              {"name": "Locate Creature", "minimum_level": 7},
+              {"name": "Commune", "minimum_level": 9},
+              {"name": "Dominate Person", "minimum_level": 9}
+            ]
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Order's Wrath",
+          "source_selectors": [{"heading_exact": "ORDER'S WRATH"}],
+          "card": {"class_name": "Cleric", "subclass_name": "Order Domain", "minimum_level": 17}
+        },
+        {
+          "kind": "feature",
+          "name": "Animal Enhancement",
+          "source_selectors": [
+            {
+              "heading_exact": "SIM IC H YBRID TRAITS",
+              "content_contains": "Animal Enhancement",
+              "start_contains": "Animal Enhancement",
+              "end_contains": "Nimble Climber. You have a climbing speed equal to your walking speed"
+            },
+            {
+              "heading_exact": "SIM IC H YBRID TRAITS",
+              "content_contains": "Acid Spit",
+              "start_contains": "Underwater Adaptation",
+              "end_contains": "finish a long rest"
+            }
+          ],
+          "card": {
+            "species_name": "Simic Hybrid",
+            "minimum_level": 1,
+            "repeatable_selection_levels": [1, 5],
+            "selection_requirements": {
+              "field": "option",
+              "count": 1,
+              "options": ["Manta Glide", "Nimble Climber", "Underwater Adaptation"],
+              "requires_new_choice": true,
+              "choice_uniqueness_scope": "simic_hybrid_animal_enhancement"
+            },
+            "selection_requirements_by_level": {
+              "1": {
+                "field": "option",
+                "count": 1,
+                "options": ["Manta Glide", "Nimble Climber", "Underwater Adaptation"],
+                "requires_new_choice": true,
+                "choice_uniqueness_scope": "simic_hybrid_animal_enhancement"
+              },
+              "5": {
+                "field": "option",
+                "count": 1,
+                "options": ["Manta Glide", "Nimble Climber", "Underwater Adaptation", "Grappling Appendages", "Carapace", "Acid Spit"],
+                "requires_new_choice": true,
+                "choice_uniqueness_scope": "simic_hybrid_animal_enhancement"
+              }
+            }
+          }
+        },
+        {
+          "kind": "background",
+          "name": "Golgari Agent",
+          "source_selectors": [{"heading_exact": "BACKGROUND: GOLGARIAGENT"}],
+          "card": {
+            "skill_proficiencies": ["nature", "survival"],
+            "background_grants": {
+              "feature": "Undercity Paths",
+              "languages": [],
+              "spell_list_expansion": ["Dancing Lights", "Spare the Dying", "Entangle", "Ray of Sickness", "Protection from Poison", "Ray of Enfeeblement", "Spider Climb", "Animate Dead", "Plant Growth", "Giant Insect", "Grasping Vine", "Cloudkill", "Insect Plague"],
+              "tools": ["Poisoner's Kit"],
+              "equipment_item_ids": [],
+              "choices": {"language_count": 1, "language_options": ["Elvish", "Giant", "Kraul"], "allow_any_language": false, "tool_choice_count": 0, "tool_options": []}
+            }
+          }
+        },
+        {
+          "kind": "background",
+          "name": "l ZZET ENGINEER",
+          "source_selectors": [{"heading_exact": "lZZET CHARACTERS", "content_contains": "BACKGROUND: l ZZET ENGINEER", "start_contains": "BACKGROUND: l ZZET ENGINEER"}],
+          "card": {
+            "name": "Izzet Engineer",
+            "skill_proficiencies": ["arcana", "investigation"],
+            "background_grants": {
+              "feature": "Urban Infrastructure",
+              "languages": [],
+              "spell_list_expansion": ["Produce Flame", "Shocking Grasp", "Chaos Bolt", "Create or Destroy Water", "Unseen Servant", "Heat Metal", "Rope Trick", "Call Lightning", "Elemental Weapon", "Glyph of Warding", "Conjure Minor Elementals", "Divination", "Otiluke's Resilient Sphere", "Animate Objects", "Conjure Elemental"],
+              "tools": [],
+              "equipment_item_ids": [],
+              "choices": {
+                "language_count": 1,
+                "language_options": ["Draconic", "Goblin", "Vedalken"],
+                "allow_any_language": false,
+                "tool_choice_count": 1,
+                "tool_options": ["Alchemist's Supplies", "Brewer's Supplies", "Calligrapher's Supplies", "Carpenter's Tools", "Cartographer's Tools", "Cobbler's Tools", "Cook's Utensils", "Glassblower's Tools", "Jeweler's Tools", "Leatherworker's Tools", "Mason's Tools", "Painter's Supplies", "Potter's Tools", "Smith's Tools", "Tinker's Tools", "Weaver's Tools", "Woodcarver's Tools"]
+              }
+            }
+          }
+        },
+        {
+          "kind": "background",
+          "name": "Rakdos Cultist",
+          "source_selectors": [{"heading_exact": "BACKGROUND: RAKDOS CULTIST"}],
+          "card": {
+            "skill_proficiencies": ["acrobatics", "performance"],
+            "background_grants": {
+              "feature": "Fearsome Reputation",
+              "languages": [],
+              "spell_list_expansion": ["Fire Bolt", "Vicious Mockery", "Burning Hands", "Dissonant Whispers", "Hellish Rebuke", "Crown of Madness", "Enthrall", "Flaming Sphere", "Fear", "Haste", "Confusion", "Wall of Fire", "Dominate Person"],
+              "tools": [],
+              "equipment_item_ids": [],
+              "choices": {
+                "language_count": 1,
+                "language_options": ["Abyssal", "Giant"],
+                "allow_any_language": false,
+                "tool_choice_count": 1,
+                "tool_options": ["Bagpipes", "Drum", "Dulcimer", "Flute", "Horn", "Lute", "Lyre", "Pan Flute", "Shawm", "Viol"]
+              }
+            }
+          }
+        },
+        {"kind": "statblock", "name": "Cackler", "source_selectors": [{"heading_exact": "CACKLER"}]},
+        {"kind": "statblock", "name": "Kraul Warrior", "source_selectors": [{"heading_exact": "KRAUL WARRIOR", "content_contains": "Armor Class 18"}]},
+        {"kind": "statblock", "name": "Nivix Cyclops", "source_selectors": [{"heading_exact": "NIVIX CYCLOPS"}]},
+        {"kind": "statblock", "name": "SERVITOR TuRU LL", "source_selectors": [{"heading_exact": "THRULLS", "content_contains": "SERVITOR TuRU LL"}], "card": {"name": "Servitor Thrull"}},
+        {"kind": "statblock", "name": "Sire of Insanity", "source_selectors": [{"heading_exact": "SIRE OF INSANITY"}]},
+        {"kind": "statblock", "name": "Skyjek Roc", "source_selectors": [{"heading_exact": "SKYJEKROC"}]},
+        {"kind": "statblock", "name": "ThOSTANI", "source_selectors": [{"heading_exact": "HORN CALLER", "content_contains": "ThOSTANI Large fey"}]},
+        {"kind": "item", "name": "Mizzium Armor", "source_selectors": [{"heading_exact": "MIZZIUM ARMOR"}]},
+        {"kind": "item", "name": "Pariah's Shield", "source_selectors": [{"heading_exact": "PARIAH'S SHIELD"}]},
+        {"kind": "item", "name": "Murmur", "source_selectors": [{"heading_exact": "SPIES' MURMUR", "start_contains": "Wondrous item, uncommon", "end_before_contains": "SuNFORGER"}]},
+        {"kind": "item", "name": "Sunforger", "source_selectors": [{"heading_exact": "SPIES' MURMUR", "content_contains": "SuNFORGER Weapon", "start_contains": "SuNFORGER"}]},
+        {"kind": "item", "name": "Sword of the Paruns", "source_selectors": [{"heading_exact": "SWORD OF THE PA RUNS"}]}
+      ],
+      "decisions": [
+        {
+          "kind": "species",
+          "name": "CENTAUR",
+          "artifact_patch": {"card": {"name": "Centaur", "grants": {"ability_score_increases": {"strength": 2, "wisdom": 1}, "size": "medium", "size_options": [], "walk_speed": 40, "languages": ["Common", "Sylvan"], "language_choice_count": 0, "language_options": [], "allow_any_language": false, "skill_proficiencies": [], "skill_choice_count": 1, "skill_options": ["Animal Handling", "Medicine", "Nature", "Survival"], "allow_any_skill": false, "tool_choice_count": 0, "tool_options": []}}}
+        },
+        {
+          "kind": "species",
+          "name": "GOBLIN TR.A ITS",
+          "artifact_patch": {"card": {"name": "Goblin", "grants": {"ability_score_increases": {"dexterity": 2, "constitution": 1}, "size": "small", "size_options": [], "languages": ["Common", "Goblin"], "language_choice_count": 0, "language_options": [], "allow_any_language": false, "skill_choice_count": 0, "skill_options": [], "allow_any_skill": false, "tool_choice_count": 0, "tool_options": []}}}
+        },
+        {
+          "kind": "species",
+          "name": "LOXODON",
+          "artifact_patch": {"card": {"name": "Loxodon", "grants": {"ability_score_increases": {"constitution": 2, "wisdom": 1}, "size": "medium", "size_options": [], "languages": ["Common", "Loxodon"], "language_choice_count": 0, "language_options": [], "allow_any_language": false, "skill_choice_count": 0, "skill_options": [], "allow_any_skill": false, "tool_choice_count": 0, "tool_options": []}}}
+        },
+        {
+          "kind": "species",
+          "name": "MINOTAUR",
+          "artifact_patch": {"card": {"name": "Minotaur", "grants": {"ability_score_increases": {"strength": 2, "constitution": 1}, "size": "medium", "size_options": [], "languages": ["Common", "Minotaur"], "language_choice_count": 0, "language_options": [], "allow_any_language": false, "skill_proficiencies": [], "skill_choice_count": 1, "skill_options": ["Intimidation", "Persuasion"], "allow_any_skill": false, "tool_choice_count": 0, "tool_options": []}}}
+        },
+        {
+          "kind": "species",
+          "name": "SIM IC H YBRID",
+          "artifact_patch": {"card": {"name": "Simic Hybrid", "grants": {"ability_score_increases": {"constitution": 2}, "ability_choice": {"count": 1, "amount": 1, "exclude": ["constitution"]}, "size": "medium", "size_options": [], "walk_speed": 30, "darkvision_ft": 60, "languages": ["Common"], "language_choice_count": 1, "language_options": ["Elvish", "Vedalken"], "allow_any_language": false, "skill_choice_count": 0, "skill_options": [], "allow_any_skill": false, "tool_choice_count": 0, "tool_options": [], "features": []}}}
+        },
+        {
+          "kind": "species",
+          "name": "VEDALKEN",
+          "artifact_patch": {"card": {"name": "Vedalken", "grants": {"ability_score_increases": {"intelligence": 2, "wisdom": 1}, "size": "medium", "size_options": [], "languages": ["Common", "Vedalken"], "language_choice_count": 1, "language_options": [], "allow_any_language": true, "skill_proficiencies": [], "skill_choice_count": 1, "skill_options": ["Arcana", "History", "Investigation", "Medicine", "Performance", "Sleight of Hand"], "allow_any_skill": false, "tool_proficiencies": [], "tool_choice_count": 1, "tool_options": ["Alchemist's Supplies", "Brewer's Supplies", "Calligrapher's Supplies", "Carpenter's Tools", "Cartographer's Tools", "Cobbler's Tools", "Cook's Utensils", "Glassblower's Tools", "Jeweler's Tools", "Leatherworker's Tools", "Mason's Tools", "Painter's Supplies", "Potter's Tools", "Smith's Tools", "Tinker's Tools", "Weaver's Tools", "Woodcarver's Tools", "Disguise Kit", "Forgery Kit", "Dice", "Dragonchess", "Playing Cards", "Three-Dragon Ante", "Herbalism Kit", "Bagpipes", "Drum", "Dulcimer", "Flute", "Horn", "Lute", "Lyre", "Pan Flute", "Shawm", "Viol", "Navigator's Tools", "Poisoner's Kit", "Thieves' Tools"]}}}
+        },
+        {"kind": "subclass", "name": "DRUID: CIRCLE OF SPORES", "artifact_patch": {"card": {"name": "Circle of Spores", "class_name": "Druid", "minimum_level": 2, "always_prepared_spells": [{"name": "Blindness/Deafness", "minimum_level": 3}, {"name": "Gentle Repose", "minimum_level": 3}, {"name": "Animate Dead", "minimum_level": 5}, {"name": "Gaseous Form", "minimum_level": 5}, {"name": "Blight", "minimum_level": 7}, {"name": "Confusion", "minimum_level": 7}, {"name": "Cloudkill", "minimum_level": 9}, {"name": "Contagion", "minimum_level": 9}], "spell_grants": [{"name": "Chill Touch", "minimum_level": 2, "method": "known"}]}}},
+        {"kind": "feature", "name": "SUBCLASS OPTIONS", "artifact_patch": {"selection_applicability": "not_applicable"}},
+        {"kind": "feature", "name": "BONUS PROFICIENC IES", "artifact_patch": {"card": {"name": "Bonus Proficiencies", "class_name": "Cleric", "subclass_name": "Order Domain", "minimum_level": 1}}},
+        {"kind": "feature", "name": "VOICE OF AUTHORITY", "artifact_patch": {"card": {"name": "Voice of Authority", "class_name": "Cleric", "subclass_name": "Order Domain", "minimum_level": 1}}},
+        {"kind": "feature", "name": "CHANNEL DIVINITY: ORDER'S DEMAND", "artifact_patch": {"card": {"name": "Channel Divinity: Order's Demand", "class_name": "Cleric", "subclass_name": "Order Domain", "minimum_level": 2}}},
+        {"kind": "feature", "name": "EMBODIMENT OF THE LAW", "artifact_patch": {"card": {"name": "Embodiment of the Law", "class_name": "Cleric", "subclass_name": "Order Domain", "minimum_level": 6}}},
+        {"kind": "feature", "name": "DIVINE STRIKE", "artifact_patch": {"card": {"name": "Divine Strike", "class_name": "Cleric", "subclass_name": "Order Domain", "minimum_level": 8}}},
+        {"kind": "feature", "name": "CIRCLE SPELLS", "artifact_patch": {"card": {"name": "Circle Spells", "class_name": "Druid", "subclass_name": "Circle of Spores", "minimum_level": 2}}},
+        {"kind": "feature", "name": "HALO OF SPORES", "artifact_patch": {"card": {"name": "Halo of Spores", "class_name": "Druid", "subclass_name": "Circle of Spores", "minimum_level": 2}}},
+        {"kind": "feature", "name": "SYMBIOTIC ENTITY", "artifact_patch": {"card": {"name": "Symbiotic Entity", "class_name": "Druid", "subclass_name": "Circle of Spores", "minimum_level": 2}}},
+        {"kind": "feature", "name": "FUNGAL INFESTATION", "artifact_patch": {"card": {"name": "Fungal Infestation", "class_name": "Druid", "subclass_name": "Circle of Spores", "minimum_level": 6}}},
+        {"kind": "feature", "name": "SPREADING SPORES", "artifact_patch": {"card": {"name": "Spreading Spores", "class_name": "Druid", "subclass_name": "Circle of Spores", "minimum_level": 10}}},
+        {"kind": "feature", "name": "FUNGAL BODY", "artifact_patch": {"card": {"name": "Fungal Body", "class_name": "Druid", "subclass_name": "Circle of Spores", "minimum_level": 14}}},
+        {"kind": "feature", "name": "FALISH'S WORKSHOP", "artifact_patch": {"selection_applicability": "not_applicable"}},
+        {"kind": "feature", "name": "STR", "artifact_patch": {"selection_applicability": "not_applicable"}},
+        {"kind": "feature", "name": "WIS", "artifact_patch": {"selection_applicability": "not_applicable"}},
+        {"kind": "feature", "name": "DEX", "artifact_patch": {"selection_applicability": "not_applicable"}},
+        {
+          "kind": "background",
+          "name": "FUNCTIONARY",
+          "artifact_patch": {"card": {"name": "Azorius Functionary", "skill_proficiencies": ["insight", "intimidation"], "background_grants": {"feature": "Legal Authority", "languages": [], "spell_list_expansion": ["Friends", "Message", "Command", "Ensnaring Strike", "Arcane Lock", "Calm Emotions", "Hold Person", "Clairvoyance", "Counterspell", "Compulsion", "Divination", "Dominate Person"], "tools": [], "equipment_item_ids": [], "choices": {"language_count": 2, "language_options": [], "allow_any_language": true, "tool_choice_count": 0, "tool_options": []}}}}
+        },
+        {
+          "kind": "background",
+          "name": "BACKGROUND: BOROS LEGIONNAIRE",
+          "artifact_patch": {"card": {"name": "Boros Legionnaire", "skill_proficiencies": ["athletics", "intimidation"], "background_grants": {"feature": "Legion Station", "languages": [], "spell_list_expansion": ["Fire Bolt", "Sacred Flame", "Guiding Bolt", "Heroism", "Aid", "Scorching Ray", "Beacon of Hope", "Blinding Smite", "Death Ward", "Wall of Fire", "Flame Strike"], "tools": [], "equipment_item_ids": [], "choices": {"language_count": 1, "language_options": ["Celestial", "Draconic", "Goblin", "Minotaur"], "allow_any_language": false, "tool_choice_count": 1, "tool_options": ["Dice", "Dragonchess", "Playing Cards", "Three-Dragon Ante"]}}}}
+        },
+        {
+          "kind": "background",
+          "name": "BACKGROUND: DIMIR OPERATIVE",
+          "artifact_patch": {"card": {"name": "Dimir Operative", "skill_proficiencies": ["deception", "stealth"], "background_grants": {"feature": "False Identity", "languages": [], "spell_list_expansion": ["Encode Thoughts", "Mage Hand", "Disguise Self", "Sleep", "Detect Thoughts", "Pass without Trace", "Gaseous Form", "Meld into Stone", "Nondetection", "Arcane Eye", "Freedom of Movement", "Modify Memory"], "tools": ["Disguise Kit"], "equipment_item_ids": [], "choices": {"language_count": 1, "language_options": [], "allow_any_language": true, "tool_choice_count": 0, "tool_options": []}}}}
+        },
+        {
+          "kind": "background",
+          "name": "BAC KGROUND:GRUUL ANARCH",
+          "artifact_patch": {"card": {"name": "Gruul Anarch", "skill_proficiencies": ["animal_handling", "athletics"], "background_grants": {"feature": "Rubblebelt Refuge", "languages": [], "spell_list_expansion": ["Fire Bolt", "Produce Flame", "Compelled Duel", "Speak with Animals", "Thunderwave", "Beast Sense", "Shatter", "Conjure Animals", "Conjure Barrage", "Dominate Beast", "Stoneskin", "Destructive Wave"], "tools": ["Herbalism Kit"], "equipment_item_ids": [], "choices": {"language_count": 1, "language_options": ["Draconic", "Giant", "Goblin", "Sylvan"], "allow_any_language": false, "tool_choice_count": 0, "tool_options": []}}}}
+        },
+        {
+          "kind": "background",
+          "name": "REPRESENTATIVE",
+          "artifact_patch": {"card": {"name": "Orzhov Representative", "skill_proficiencies": ["intimidation", "religion"], "background_grants": {"feature": "Leverage", "languages": [], "spell_list_expansion": ["Friends", "Guidance", "Command", "Illusory Script", "Enthrall", "Ray of Enfeeblement", "Zone of Truth", "Bestow Curse", "Speak with Dead", "Spirit Guardians", "Blight", "Death Ward", "Leomund's Secret Chest", "Geas"], "tools": [], "equipment_item_ids": [], "choices": {"language_count": 2, "language_options": [], "allow_any_language": true, "tool_choice_count": 0, "tool_options": []}}}}
+        },
+        {
+          "kind": "background",
+          "name": "BACKGROUND: SELESNYA INITIATE",
+          "artifact_patch": {"card": {"name": "Selesnya Initiate", "skill_proficiencies": ["nature", "persuasion"], "background_grants": {"feature": "Conclave's Shelter", "languages": [], "spell_list_expansion": ["Druidcraft", "Friends", "Aid", "Animal Friendship", "Charm Person", "Animal Messenger", "Calm Emotions", "Warding Bond", "Plant Growth", "Speak with Plants", "Aura of Life", "Conjure Minor Elementals", "Awaken", "Commune with Nature"], "tools": [], "equipment_item_ids": [], "choices": {"language_count": 1, "language_options": ["Elvish", "Loxodon", "Sylvan"], "allow_any_language": false, "tool_choice_count": 1, "tool_options": ["Alchemist's Supplies", "Brewer's Supplies", "Calligrapher's Supplies", "Carpenter's Tools", "Cartographer's Tools", "Cobbler's Tools", "Cook's Utensils", "Glassblower's Tools", "Jeweler's Tools", "Leatherworker's Tools", "Mason's Tools", "Painter's Supplies", "Potter's Tools", "Smith's Tools", "Tinker's Tools", "Weaver's Tools", "Woodcarver's Tools", "Bagpipes", "Drum", "Dulcimer", "Flute", "Horn", "Lute", "Lyre", "Pan Flute", "Shawm", "Viol"]}}}}
+        },
+        {
+          "kind": "background",
+          "name": "B ACKGROUND: SIMI C SCIENTI ST",
+          "artifact_patch": {"card": {"name": "Simic Scientist", "skill_proficiencies": ["arcana", "medicine"], "background_grants": {"feature": "Researcher", "languages": [], "spell_list_expansion": ["Acid Splash", "Druidcraft", "Detect Poison and Disease", "Expeditious Retreat", "Jump", "Alter Self", "Enhance Ability", "Enlarge/Reduce", "Gaseous Form", "Water Breathing", "Wind Wall", "Freedom of Movement", "Polymorph", "Creation"], "tools": [], "equipment_item_ids": [], "choices": {"language_count": 2, "language_options": [], "allow_any_language": true, "tool_choice_count": 0, "tool_options": []}}}}
+        },
+        {
+          "kind": "spell",
+          "name": "SPELL: ENCODE THOUGHTS",
+          "artifact_patch": {"card": {"name": "Encode Thoughts", "level": 0, "classes": ["Wizard"], "definition": {"school": "enchantment", "casting_time": "1 action", "range": {"kind": "self", "normal_ft": 0, "long_ft": 0, "area": ""}, "duration": {"kind": "timed", "value": 8, "unit": "hour", "concentration": false}, "components": {"verbal": false, "somatic": true, "material": false, "material_description": "", "material_cost_cp": 0, "consumed": false}, "effect": "You transform a memory, idea, message, or a thought read from another creature into a tangible thought strand for the duration; casting the spell while holding a strand reveals its contents."}}}
+        },
+        {
+          "kind": "spell",
+          "name": "SPELL: CHAOS BOLT",
+          "artifact_patch": {"card": {"name": "Chaos Bolt", "level": 1, "classes": ["Sorcerer"], "definition": {"school": "evocation", "casting_time": "1 action", "range": {"kind": "distance", "normal_ft": 120, "long_ft": 0, "area": ""}, "duration": {"kind": "instantaneous", "value": 0, "unit": "round", "concentration": false}, "components": {"verbal": true, "somatic": true, "material": false, "material_description": "", "material_cost_cp": 0, "consumed": false}, "effect": "Make a ranged spell attack against one creature. On a hit it takes 2d8 + 1d6 damage; one d8 determines the damage type. Matching d8s can leap to another target within 30 feet. A higher-level slot adds 1d6 damage per slot level above 1st."}}}
+        },
+        {"kind": "item", "name": "GUILD K EYRUNE", "artifact_patch": {"card": {"name": "Guild Keyrune"}}},
+        {"kind": "item", "name": "PYROCONVERCER", "artifact_patch": {"card": {"name": "Pyroconverger"}}},
+        {"kind": "item", "name": "SPIES' MURMUR", "status": "rejected", "note": "The extracted card fuses Spies' Murmur with Sunforger; exact source-span additions replace it."},
+        {"kind": "item", "name": "Murmur", "artifact_patch": {"card": {"name": "Spies' Murmur"}}},
+        {"kind": "statblock", "name": "BLASTSEEKER", "status": "rejected", "note": "Blastseeker is an Izzet NPC category heading, not a creature statblock; the four named blastseeker cards are recovered separately from their exact pages."},
+        {"kind": "statblock", "name": "same", "artifact_patch": {"card": {"name": "Felidar"}}},
+        {"kind": "statblock", "name": "indentured spirit", "artifact_patch": {"card": {"name": "Indentured Spirit"}}},
+        {"kind": "statblock", "name": "GALVANICE WEIRD", "artifact_patch": {"card": {"name": "Galvanice Weird"}}},
+        {"kind": "statblock", "name": "WINGED T'HRULL", "artifact_patch": {"card": {"name": "Winged Thrull"}}},
+        {"kind": "statblock", "name": "MIND DRINKER VA MPIRE", "artifact_patch": {"card": {"name": "Mind Drinker Vampire"}}},
+        {"kind": "statblock", "name": "JARAD Von SAvo", "artifact_patch": {"card": {"name": "Jarad Vod Savo"}}},
+        {"kind": "statblock", "name": "ANA RCH", "artifact_patch": {"card": {"name": "Anarch"}}},
+        {"kind": "statblock", "name": "B IOMANCER", "artifact_patch": {"card": {"name": "Biomancer"}}},
+        {"kind": "statblock", "name": "HORN CALLER", "artifact_patch": {"card": {"name": "Horncaller"}}},
+        {"kind": "statblock", "name": "MIND M AGE", "artifact_patch": {"card": {"name": "Mind Mage"}}},
+        {"kind": "statblock", "name": "SERVITOR TuRU LL", "artifact_patch": {"card": {"name": "Servitor Thrull"}}},
+        {"kind": "statblock", "name": "ThOSTANI", "artifact_patch": {"card": {"name": "Trostani"}}},
+        {"kind": "statblock", "name": "WURM", "artifact_patch": {"card": {"name": "Wurm"}}}
+      ]
+    },
+    "NLRMEv2.pdf": {
+      "complete_review": true,
+      "default_status": "accepted",
+      "rationale": "Agent reviewed the random magical effects source as a procedural table corpus. Every mechanical chunk remains an independently source-bound, catalog-only Agent ruling card; none is misrepresented as a character-selectable feature.",
+      "expected_counts": {"feature": 410},
+      "decisions": []
+    }
+  }
+}

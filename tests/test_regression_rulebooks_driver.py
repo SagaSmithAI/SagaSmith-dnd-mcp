@@ -31,6 +31,29 @@ def test_portable_pack_id_is_stable_across_regression_runs() -> None:
     assert first.startswith("dnd5e.addon.rulebook.book.")
 
 
+def test_actor_name_gate_requires_the_exact_reviewed_multiset() -> None:
+    package = {
+        "package": {
+            "payload": {
+                "cards": [
+                    {"payload": {"name": "Cackler"}},
+                    {"payload": {"name": "Sire of Insanity"}},
+                ]
+            }
+        }
+    }
+
+    driver._require_expected_actor_names(
+        {"expected_actor_names": ["CACKLER", "Sire of Insanity"]},
+        package,
+    )
+    with pytest.raises(RuntimeError, match="missing=.*skyjek roc"):
+        driver._require_expected_actor_names(
+            {"expected_actor_names": ["Cackler", "Skyjek Roc"]},
+            package,
+        )
+
+
 def test_publication_metadata_marks_only_core_dependencies_as_standard() -> None:
     assert driver._publication_metadata("D&D 5E - Player's Handbook.pdf") == (
         "phb2014",
