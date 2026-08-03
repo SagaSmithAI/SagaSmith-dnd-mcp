@@ -10,7 +10,12 @@ from sagasmith_dnd.content_readiness import (
 from sagasmith_dnd.statblocks import parameterized_statblock_requirements
 
 from sagasmith_dnd_mcp.config import McpConfig
-from sagasmith_dnd_mcp.server import _validated_additive_choices, create_server
+from sagasmith_dnd_mcp.server import (
+    _validated_additive_choices,
+    _validated_species_ability_choices,
+    _validated_species_proficiency_choices,
+    create_server,
+)
 
 
 async def _call(server, name: str, arguments: dict):
@@ -68,6 +73,64 @@ def test_background_additive_choices_preserve_fixed_and_enforce_bounds() -> None
             label="background tool",
             fixed=[],
             options=[],
+        )
+
+
+def test_species_ability_choices_enforce_reviewed_option_subset() -> None:
+    requirement = {
+        "count": 1,
+        "amount": 1,
+        "exclude": ["charisma"],
+        "options": ["dexterity", "intelligence"],
+    }
+
+    assert _validated_species_ability_choices(
+        ["Dexterity"],
+        requirement=requirement,
+        valid_abilities={
+            "strength",
+            "dexterity",
+            "constitution",
+            "intelligence",
+            "wisdom",
+            "charisma",
+        },
+    ) == ["dexterity"]
+    with pytest.raises(ValueError, match="allowed options"):
+        _validated_species_ability_choices(
+            ["wisdom"],
+            requirement=requirement,
+            valid_abilities={
+                "strength",
+                "dexterity",
+                "constitution",
+                "intelligence",
+                "wisdom",
+                "charisma",
+            },
+        )
+
+
+def test_species_cross_kind_proficiency_choices_are_bounded_and_typed() -> None:
+    groups = [
+        {
+            "id": "natural_talent",
+            "count": 1,
+            "options": [
+                {"kind": "skill", "name": "Performance"},
+                {"kind": "tool", "name": "Lute"},
+            ],
+        }
+    ]
+
+    assert _validated_species_proficiency_choices(
+        {"natural_talent": [{"kind": "tool", "name": "lute"}]},
+        groups=groups,
+    ) == {"natural_talent": [{"kind": "tool", "name": "Lute"}]}
+    with pytest.raises(ValueError, match="allowed option"):
+        _validated_species_proficiency_choices(
+            {"natural_talent": [{"kind": "skill", "name": "Stealth"}]},
+            groups=groups,
         )
 
 

@@ -1543,6 +1543,115 @@ def _validated_additive_choices(
     return selected, combined
 
 
+def _validated_species_ability_choices(
+    value: Any,
+    *,
+    requirement: dict[str, Any],
+    valid_abilities: Any,
+) -> list[str]:
+    selected = [
+        item.casefold()
+        for item in _validated_distinct_choices(
+            value,
+            count=int(requirement.get("count", 0) or 0),
+            label="species abilities",
+        )
+    ]
+    ability_names = {str(item).casefold() for item in valid_abilities}
+    if any(item not in ability_names for item in selected):
+        raise ValueError("species ability choice is not a valid ability")
+    excluded = {str(item).casefold() for item in requirement.get("exclude", [])}
+    if excluded.intersection(selected):
+        raise ValueError("species ability choice cannot use an excluded ability")
+    raw_options = requirement.get("options", [])
+    if not isinstance(raw_options, list):
+        raise RulesetUnavailableError("species ability choice options are not executable")
+    options = {str(item).strip().casefold() for item in raw_options if str(item).strip()}
+    if options and any(item not in options for item in selected):
+        raise ValueError("species ability choice is not one of the allowed options")
+    return selected
+
+
+def _validated_species_proficiency_choices(
+    value: Any,
+    *,
+    groups: Any,
+) -> dict[str, list[dict[str, str]]]:
+    if not isinstance(groups, list):
+        raise RulesetUnavailableError(
+            "species proficiency choice groups are not executable"
+        )
+    if not groups:
+        if value not in (None, {}):
+            raise ValueError("species does not accept proficiency_choices")
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("species proficiency_choices must be an object")
+    group_map: dict[str, dict[str, Any]] = {}
+    for raw_group in groups:
+        if not isinstance(raw_group, dict):
+            raise RulesetUnavailableError(
+                "species proficiency choice group is not executable"
+            )
+        group_id = str(raw_group.get("id") or "").strip()
+        group_key = group_id.casefold()
+        if not group_id or group_key in group_map:
+            raise RulesetUnavailableError(
+                "species proficiency choice group ids must be distinct"
+            )
+        group_map[group_key] = raw_group
+    supplied = {str(key).casefold(): raw for key, raw in value.items()}
+    if set(supplied) != set(group_map):
+        raise ValueError("species proficiency_choices must answer every choice group")
+    result: dict[str, list[dict[str, str]]] = {}
+    used: set[tuple[str, str]] = set()
+    for group_key, group in group_map.items():
+        group_id = str(group["id"])
+        count = int(group.get("count", 0) or 0)
+        selected = supplied[group_key]
+        if not isinstance(selected, list) or len(selected) != count:
+            raise ValueError(
+                f"species proficiency choice {group_id} requires exactly {count} choices"
+            )
+        option_map: dict[tuple[str, str], dict[str, str]] = {}
+        for raw_option in group.get("options") or []:
+            if not isinstance(raw_option, dict):
+                raise RulesetUnavailableError(
+                    f"species proficiency choice {group_id} has an invalid option"
+                )
+            kind = str(raw_option.get("kind") or "").strip().casefold()
+            name = str(raw_option.get("name") or "").strip()
+            key = (kind, name.casefold().replace(" ", "_") if kind == "skill" else name.casefold())
+            if kind not in {"language", "skill", "tool", "weapon"} or not name:
+                raise RulesetUnavailableError(
+                    f"species proficiency choice {group_id} has an invalid option"
+                )
+            if key in option_map:
+                raise RulesetUnavailableError(
+                    f"species proficiency choice {group_id} options must be distinct"
+                )
+            option_map[key] = {"kind": kind, "name": name}
+        normalized: list[dict[str, str]] = []
+        for raw_selected in selected:
+            if not isinstance(raw_selected, dict) or set(raw_selected) != {"kind", "name"}:
+                raise ValueError(
+                    f"species proficiency choice {group_id} must use kind/name objects"
+                )
+            kind = str(raw_selected.get("kind") or "").strip().casefold()
+            name = str(raw_selected.get("name") or "").strip()
+            key = (kind, name.casefold().replace(" ", "_") if kind == "skill" else name.casefold())
+            if key not in option_map:
+                raise ValueError(
+                    f"species proficiency choice {group_id} is not an allowed option"
+                )
+            if key in used:
+                raise ValueError("species proficiency choices must be distinct")
+            used.add(key)
+            normalized.append(deepcopy(option_map[key]))
+        result[group_id] = normalized
+    return result
+
+
 def _subclass_spell_grants(card: dict[str, Any]) -> list[dict[str, Any]]:
     """Normalize legacy domain lists and explicit subclass access grants."""
 
@@ -39790,6 +39899,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     fields.append("skills")
                 if int(grants.get("tool_choice_count", 0) or 0):
                     fields.append("tools")
+                if list(grants.get("proficiency_choice_groups") or []):
+                    fields.append("proficiency_choices")
+                if int(grants.get("tool_expertise_choice_count", 0) or 0):
+                    fields.append("tool_expertise")
                 if list(grants.get("size_options") or []):
                     fields.append("size")
                 if int(dict(grants.get("ability_choice") or {}).get("count", 0) or 0):
@@ -39811,6 +39924,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "tool_options": list(
                         grants.get("tool_options") or grants.get("tool_choices") or []
                     ),
+                    "proficiency_choice_groups": deepcopy(
+                        list(grants.get("proficiency_choice_groups") or [])
+                    ),
+                    "tool_expertise_count": int(
+                        grants.get("tool_expertise_choice_count", 0) or 0
+                    ),
+                    "tool_expertise_options": list(
+                        grants.get("tool_expertise_options") or []
+                    ),
+                    "allow_any_proficient_tool_expertise": grants.get(
+                        "allow_any_proficient_tool_expertise"
+                    )
+                    is True,
                     "size_options": list(grants.get("size_options") or []),
                     "ability_choice": deepcopy(
                         dict(grants.get("ability_choice") or {})
@@ -41322,6 +41448,88 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 fixed=grants.get("tool_proficiencies") or [],
                 options=(grants.get("tool_options") or grants.get("tool_choices") or []),
             )
+            proficiency_choices = _validated_species_proficiency_choices(
+                selection.get("proficiency_choices"),
+                groups=grants.get("proficiency_choice_groups", []),
+            )
+            grouped = [
+                option
+                for choices in proficiency_choices.values()
+                for option in choices
+            ]
+            grouped_languages = [
+                option["name"] for option in grouped if option["kind"] == "language"
+            ]
+            grouped_skills = [
+                option["name"].casefold().replace(" ", "_")
+                for option in grouped
+                if option["kind"] == "skill"
+            ]
+            grouped_tools = [
+                option["name"] for option in grouped if option["kind"] == "tool"
+            ]
+            grouped_weapons = [
+                option["name"] for option in grouped if option["kind"] == "weapon"
+            ]
+            for existing, additions, label in (
+                (all_languages, grouped_languages, "language"),
+                (all_skills, grouped_skills, "skill"),
+                (all_tools, grouped_tools, "tool"),
+                (list(grants.get("weapon_proficiencies") or []), grouped_weapons, "weapon"),
+            ):
+                if {str(item).casefold() for item in existing}.intersection(
+                    str(item).casefold() for item in additions
+                ):
+                    raise ValueError(
+                        f"species proficiency choice cannot duplicate a fixed {label}"
+                    )
+            all_languages.extend(grouped_languages)
+            all_skills.extend(grouped_skills)
+            all_tools.extend(grouped_tools)
+            all_weapons = [
+                *list(grants.get("weapon_proficiencies") or []),
+                *grouped_weapons,
+            ]
+            for skill in grouped_skills:
+                if skill not in sheet["skills"]:
+                    raise ValueError(f"species references an unknown skill: {skill}")
+            selected_tool_expertise = _validated_distinct_choices(
+                selection.get("tool_expertise"),
+                count=int(grants.get("tool_expertise_choice_count", 0) or 0),
+                label="species tool expertise",
+            )
+            known_tool_map = {
+                str(item).casefold(): str(item)
+                for item in [
+                    *sheet["traits"]["proficiencies"]["tools"],
+                    *all_tools,
+                ]
+            }
+            expertise_options = {
+                str(item).casefold()
+                for item in grants.get("tool_expertise_options", [])
+            }
+            if expertise_options and any(
+                item.casefold() not in expertise_options
+                for item in selected_tool_expertise
+            ):
+                raise ValueError("species tool expertise is not one of the allowed options")
+            if (
+                selected_tool_expertise
+                and not expertise_options
+                and grants.get("allow_any_proficient_tool_expertise") is not True
+            ):
+                raise RulesetUnavailableError(
+                    "species tool expertise needs reviewed options"
+                )
+            if any(
+                item.casefold() not in known_tool_map
+                for item in selected_tool_expertise
+            ):
+                raise ValueError("species tool expertise requires tool proficiency")
+            selected_tool_expertise = [
+                known_tool_map[item.casefold()] for item in selected_tool_expertise
+            ]
             size_options = {
                 str(item).strip().casefold(): str(item).strip().casefold()
                 for item in grants.get("size_options", [])
@@ -41339,21 +41547,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             elif selected_size:
                 raise ValueError("species does not accept a size choice")
             ability_choice = dict(grants.get("ability_choice") or {})
-            selected_abilities = [
-                item.casefold()
-                for item in _validated_distinct_choices(
-                    selection.get("abilities"),
-                    count=int(ability_choice.get("count", 0) or 0),
-                    label="species abilities",
-                )
-            ]
-            excluded_abilities = {
-                str(item).casefold() for item in ability_choice.get("exclude", [])
-            }
-            if any(item not in sheet["abilities"] for item in selected_abilities):
-                raise ValueError("species ability choice is not a valid ability")
-            if excluded_abilities.intersection(selected_abilities):
-                raise ValueError("species ability choice cannot repeat a fixed increase")
+            selected_abilities = _validated_species_ability_choices(
+                selection.get("abilities"),
+                requirement=ability_choice,
+                valid_abilities=sheet["abilities"],
+            )
             values_include_grants = bool(selection.get("values_include_species_grants", False))
             abilities_include_grants = bool(
                 selection.get("ability_scores_include_species_grants", values_include_grants)
@@ -41426,7 +41624,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             proficiencies = sheet["traits"]["proficiencies"]
             proficiencies["weapons"] = list(
                 dict.fromkeys(
-                    [*proficiencies["weapons"], *list(grants.get("weapon_proficiencies") or [])]
+                    [*proficiencies["weapons"], *all_weapons]
                 )
             )
             proficiencies["tools"] = list(
@@ -41435,6 +41633,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         *proficiencies["tools"],
                         *all_tools,
                     ]
+                )
+            )
+            proficiencies["tool_expertise"] = list(
+                dict.fromkeys(
+                    [*proficiencies["tool_expertise"], *selected_tool_expertise]
                 )
             )
             sheet["traits"]["resistances"] = list(
@@ -41485,6 +41688,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "languages": selected_languages,
                 "skills": selected_skills,
                 "tools": selected_tools,
+                "proficiency_choices": proficiency_choices,
+                "tool_expertise": selected_tool_expertise,
                 "abilities": selected_abilities,
                 "size": selected_size,
                 "cantrip_artifact_id": cantrip_id,
