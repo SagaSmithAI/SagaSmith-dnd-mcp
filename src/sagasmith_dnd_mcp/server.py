@@ -891,8 +891,12 @@ SUPPORTED_FEATURE_MECHANICAL_GRANTS = frozenset(
         "hp_per_class_level",
         "languages",
         "resources",
+        "skill_proficiencies",
+        "tool_expertise_all",
+        "tool_proficiencies",
         "unarmored_base",
         "unarmored_formula",
+        "weapon_proficiencies",
     }
 )
 
@@ -43688,6 +43692,36 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 for proficiency in mechanical_grants.get("armor_proficiencies") or []:
                     if str(proficiency).casefold() not in {str(item).casefold() for item in armor}:
                         armor.append(proficiency)
+                weapons = sheet["traits"]["proficiencies"]["weapons"]
+                for proficiency in mechanical_grants.get("weapon_proficiencies") or []:
+                    if str(proficiency).casefold() not in {
+                        str(item).casefold() for item in weapons
+                    }:
+                        weapons.append(proficiency)
+                tools = sheet["traits"]["proficiencies"]["tools"]
+                for proficiency in mechanical_grants.get("tool_proficiencies") or []:
+                    if str(proficiency).casefold() not in {
+                        str(item).casefold() for item in tools
+                    }:
+                        tools.append(proficiency)
+                for proficiency in mechanical_grants.get("skill_proficiencies") or []:
+                    skill_key = str(proficiency).casefold().replace(" ", "_")
+                    if skill_key not in sheet["skills"]:
+                        raise ValueError(
+                            f"feature references an unknown skill: {proficiency}"
+                        )
+                    sheet["skills"][skill_key]["proficiency"] = "proficient"
+                tool_expertise_all = mechanical_grants.get("tool_expertise_all", False)
+                if not isinstance(tool_expertise_all, bool):
+                    raise ValueError("feature tool_expertise_all must be a boolean")
+                if tool_expertise_all:
+                    sheet["traits"]["proficiencies"]["tool_expertise_all"] = True
+                    expertise = sheet["traits"]["proficiencies"]["tool_expertise"]
+                    known_expertise = {str(item).casefold() for item in expertise}
+                    for proficiency in tools:
+                        if str(proficiency).casefold() not in known_expertise:
+                            expertise.append(proficiency)
+                            known_expertise.add(str(proficiency).casefold())
                 languages = sheet["traits"]["languages"]
                 for language in mechanical_grants.get("languages") or []:
                     if str(language).casefold() not in {str(item).casefold() for item in languages}:

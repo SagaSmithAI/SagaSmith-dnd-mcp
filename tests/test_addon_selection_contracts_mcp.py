@@ -1331,6 +1331,26 @@ def test_reviewed_addon_base_class_uses_bound_level_one_materializer(tmp_path: P
                     "tool_options": ["smith's tools", "weaver's tools"],
                     "skill_choice_count": 2,
                     "skill_options": ["arcana", "history", "investigation", "medicine"],
+                    "spellcasting": {
+                        "ability": "intelligence",
+                        "class_list": "artificer",
+                        "preparation_mode": "prepared",
+                        "slot_progression": "half_round_up",
+                        "ritual_casting": True,
+                        "spellbook": False,
+                        "cantrips_known_by_level": [
+                            2, 2, 2, 2, 2, 2, 2, 2, 2, 3,
+                            3, 3, 3, 4, 4, 4, 4, 4, 4, 4,
+                        ],
+                        "leveled_spells_known_by_level": [],
+                        "prepared_limit": {
+                            "ability": "intelligence",
+                            "class_level_divisor": 2,
+                            "rounding": "down",
+                            "minimum": 1,
+                        },
+                        "spell_list_expansion": ["Cure Wounds", "Magic Weapon"],
+                    },
                 },
             },
             "rule_refs": ["book:addon:artificer:p2"],
@@ -1339,6 +1359,59 @@ def test_reviewed_addon_base_class_uses_bound_level_one_materializer(tmp_path: P
             artifact,
             status="ready",
             references=["book:addon:artificer:p2"],
+        )
+        tool_feature = {
+            "id": "dnd5e.addon.artificer.feature.tool-expertise",
+            "kind": "feature",
+            "application_state": "selection_ready",
+            "mechanical_scope": "mechanical",
+            "execution_state": "engine_ready",
+            "semantic_resolution": {
+                "status": "resolved",
+                "mode": "static_grant",
+                "first_use_compilation_required": False,
+                "clause_ids": ["artificer-tool-proficiencies"],
+            },
+            "rule_clauses": [
+                {
+                    "schema_version": 1,
+                    "id": "artificer-tool-proficiencies",
+                    "title": "Artificer tool proficiencies",
+                    "scope": "mechanical",
+                    "source_citations": [
+                        {
+                            "source": "book:addon:artificer",
+                            "source_ref": {"page": 3},
+                            "source_excerpt": "Tool Expertise doubles tool proficiency.",
+                        }
+                    ],
+                    "settlement": {
+                        "mode": "static_grant",
+                        "grant_refs": ["card.mechanical_grants"],
+                    },
+                }
+            ],
+            "card": {
+                "name": "Tool Expertise",
+                "class_name": "Artificer",
+                "subclass_name": "",
+                "minimum_level": 1,
+                "repeatable_selection_levels": [],
+                "selection_requirements": {},
+                "selection_requirements_by_level": {},
+                "mechanical_grants": {
+                    "tool_expertise_all": True,
+                    "tool_proficiencies": ["Alchemist's Supplies"],
+                    "weapon_proficiencies": ["Martial Weapons"],
+                    "skill_proficiencies": ["History"],
+                },
+            },
+            "rule_refs": ["book:addon:artificer:p3"],
+        }
+        tool_feature["selection_contract"] = build_selection_contract(
+            tool_feature,
+            status="ready",
+            references=["book:addon:artificer:p3"],
         )
         draft = await _call(
             server,
@@ -1353,7 +1426,7 @@ def test_reviewed_addon_base_class_uses_bound_level_one_materializer(tmp_path: P
                     "editions": ["2014"],
                     "capabilities": [],
                 },
-                "artifacts": [artifact],
+                "artifacts": [artifact, tool_feature],
                 "mechanics": [],
             },
         )
@@ -1401,10 +1474,15 @@ def test_reviewed_addon_base_class_uses_bound_level_one_materializer(tmp_path: P
                 "idempotency_key": "addon-class-apply",
             },
         )
-        assert applied["sheet"]["progression"]["classes"] == [
-            {"name": "Artificer", "level": 1, "subclass": "", "hit_die": 8}
-        ]
+        assert applied["sheet"]["progression"]["classes"][0]["name"] == "Artificer"
+        assert applied["sheet"]["progression"]["classes"][0]["spellcasting"] == (
+            artifact["card"]["class_definition"]["spellcasting"]
+        )
         assert applied["sheet"]["combat"]["hp"]["max"] == 10
+        assert applied["sheet"]["spellcasting"]["ability"] == "intelligence"
+        assert applied["sheet"]["spellcasting"]["class_lists"] == ["artificer"]
+        assert applied["sheet"]["spellcasting"]["spell_slots"]["1"]["max"] == 2
+        assert applied["sheet"]["spellcasting"]["preparation"]["max_prepared"] == 1
         assert applied["sheet"]["skills"]["arcana"]["proficiency"] == "proficient"
         assert applied["class_materialization"]["saving_throw_proficiencies"] == [
             "constitution",
@@ -1418,6 +1496,30 @@ def test_reviewed_addon_base_class_uses_bound_level_one_materializer(tmp_path: P
             "skills": ["arcana", "investigation"],
             "tools": ["smith's tools"],
         }
+        feature_applied = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": character["id"],
+                "artifact_id": tool_feature["id"],
+                "selection": {},
+                "expected_revision": applied["revision"],
+                "idempotency_key": "addon-tool-expertise-apply",
+            },
+        )
+        proficiencies = feature_applied["sheet"]["traits"]["proficiencies"]
+        assert proficiencies["weapons"] == ["simple weapons", "Martial Weapons"]
+        assert proficiencies["tools"] == [
+            "thieves' tools",
+            "tinker's tools",
+            "smith's tools",
+            "Alchemist's Supplies",
+        ]
+        assert proficiencies["tool_expertise_all"] is True
+        assert proficiencies["tool_expertise"] == proficiencies["tools"]
+        assert feature_applied["sheet"]["skills"]["history"]["proficiency"] == (
+            "proficient"
+        )
 
     import asyncio
 
