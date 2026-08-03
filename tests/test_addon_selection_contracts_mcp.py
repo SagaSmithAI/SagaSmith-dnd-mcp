@@ -818,8 +818,9 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
             },
             "card": {
                 "name": "Guild Agent",
-                "skill_proficiencies": [],
+                "skill_proficiencies": ["investigation", "persuasion"],
                 "background_grants": {
+                    "skills": ["investigation", "persuasion"],
                     "feature": "Guild Membership",
                     "languages": [],
                     "spell_list_expansion": ["Aid"],
@@ -1018,6 +1019,8 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
             "Guild Signet",
         ]
         assert applied["sheet"]["inventory"]["wallet"]["gp"] == 12
+        assert applied["sheet"]["skills"]["investigation"]["proficiency"] == "proficient"
+        assert applied["sheet"]["skills"]["persuasion"]["proficiency"] == "proficient"
         assert applied["sheet"]["progression"]["background_grants"][
             "equipment_item_ids"
         ] == [item["id"] for item in items]

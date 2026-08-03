@@ -39908,7 +39908,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "spell_list_expansion": list(
                         grants.get("spell_list_expansion") or []
                     ),
-                    "skill_proficiencies": list(card.get("skill_proficiencies") or []),
+                    "skill_proficiencies": list(
+                        card.get("skill_proficiencies") or grants.get("skills") or []
+                    ),
                     "ability_score_options": ability_options,
                     "allowed_ability_score_distributions": deepcopy(
                         list(choices.get("allowed_ability_score_distributions") or [])
@@ -41338,6 +41340,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise ValueError("character already has a different background")
             grants = dict(card.get("background_grants") or {})
             fixed_equipment = deepcopy(dict(grants.pop("equipment", {}) or {}))
+            grant_skills = [
+                str(item).strip().casefold() for item in grants.pop("skills", [])
+            ]
+            card_skills = [
+                str(item).strip().casefold()
+                for item in card.get("skill_proficiencies", [])
+            ]
+            if grant_skills and card_skills and set(grant_skills) != set(card_skills):
+                raise RulesetUnavailableError(
+                    "background skill grants conflict with skill_proficiencies"
+                )
+            declared_skills = card_skills or grant_skills
             requirements = dict(grants.get("choices") or {})
             language_count = int(requirements.get("language_count", 0) or 0)
             raw_languages = selection.get("languages")
@@ -41388,9 +41402,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 options=requirements.get("tool_options") or [],
             )
             if custom_skills_raw is None:
-                selected_skills = [
-                    str(item).casefold() for item in card.get("skill_proficiencies", [])
-                ]
+                selected_skills = declared_skills
             else:
                 if not isinstance(custom_skills_raw, list):
                     raise ValueError("custom background skills must be an array")
