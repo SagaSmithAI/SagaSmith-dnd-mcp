@@ -96,6 +96,9 @@ def test_environment_config_has_separate_rule_and_module_import_roots(monkeypatc
     assert config.bound_principal_id == "trusted-user"
     assert config.document_cache_dir is not None
     assert config.document_cache_dir.name == "shared-documents"
+    assert config.ocr_page_cache_dir == (
+        config.document_cache_dir / "ocr-page-cache"
+    )
 
 
 def test_default_rule_import_roots_include_the_dnd_skill_corpus(monkeypatch) -> None:
@@ -648,6 +651,7 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
         assert capabilities["features"]["module_document_cache"] is True
         assert capabilities["features"]["module_selective_ocr"] is True
         assert capabilities["features"]["visionless_page_ocr_text"] is True
+        assert capabilities["features"]["persistent_ocr_page_cache"] is True
         assert capabilities["module_import"]["stage_inputs"] == [
             "source_path",
             "name+content",
@@ -656,6 +660,9 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
         assert "module_import(attach_asset)" in capabilities["module_import"]["stages"]
         assert capabilities["module_import"]["normalization_cache"] == "content-addressed"
         assert capabilities["module_import"]["page_extraction_cache"] == "content-addressed"
+        assert capabilities["module_import"]["ocr_page_cache"] == (
+            "content-addressed-per-model-page"
+        )
         assert capabilities["module_import"]["normalizer"].startswith("sagasmith-core/pdf-layout-v")
         assert capabilities["module_import"]["parser"] == (
             f"{DndModuleProfile.name}-v{DndModuleProfile.version}"

@@ -154,6 +154,11 @@ class McpConfig:
         return root / "normalized-modules"
 
     @property
+    def ocr_page_cache_dir(self) -> Path:
+        root = self.document_cache_dir or self.artifacts_dir
+        return root / "ocr-page-cache"
+
+    @property
     def module_assets_dir(self) -> Path:
         return self.artifacts_dir / "module-assets"
 
@@ -171,6 +176,7 @@ class McpConfig:
             self.rulebooks_dir,
             self.normalized_rulebooks_dir,
             self.normalized_modules_dir,
+            self.ocr_page_cache_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
         os.environ.setdefault("SAGASMITH_DATA_DIR", str(self.home / "data"))

@@ -179,9 +179,8 @@ class SagaSmithStorage:
     def ocr_model_chain(cls, model: str) -> list[str]:
         return [model, cls._alternate_ocr_model(model)]
 
-    @classmethod
     def _document_ocr_provider(
-        cls,
+        self,
         *,
         primary: RapidOcrProvider,
         scale: float,
@@ -191,7 +190,8 @@ class SagaSmithStorage:
             primary,
             RapidOcrProvider(
                 scale=scale,
-                model_type=cls._alternate_ocr_model(model),
+                model_type=self._alternate_ocr_model(model),
+                cache_dir=self.config.ocr_page_cache_dir,
             ),
         )
 
@@ -202,6 +202,7 @@ class SagaSmithStorage:
             self._rule_ocr_provider = RapidOcrProvider(
                 scale=self.config.rule_ocr_scale,
                 model_type=self.config.rule_ocr_model,
+                cache_dir=self.config.ocr_page_cache_dir,
             )
         return self._rule_ocr_provider
 
@@ -224,6 +225,7 @@ class SagaSmithStorage:
             self._module_ocr_provider = RapidOcrProvider(
                 scale=self.config.module_ocr_scale,
                 model_type=self.config.module_ocr_model,
+                cache_dir=self.config.ocr_page_cache_dir,
             )
         return self._module_ocr_provider
 

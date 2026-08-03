@@ -11446,6 +11446,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "module_selective_ocr": True,
                 "text_only_layout_ocr_recovery": True,
                 "visionless_page_ocr_text": True,
+                "persistent_ocr_page_cache": True,
                 "indexed_text_statblock_review": True,
                 "player_safe_scene_scopes": True,
                 "player_safe_combat_maps": True,
@@ -11503,6 +11504,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "normalizer": f"sagasmith-core/pdf-layout-v{DOCUMENT_NORMALIZER_VERSION}",
                 "normalization_cache": "content-addressed",
                 "page_extraction_cache": "content-addressed",
+                "ocr_page_cache": "content-addressed-per-model-page",
                 "text_extractor": "pypdfium2",
                 "ocr_provider": (
                     "rapidocr-cascade" if config.rule_ocr_enabled else None
@@ -11560,6 +11562,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "parser": f"{DndModuleProfile.name}-v{DndModuleProfile.version}",
                 "normalization_cache": "content-addressed",
                 "page_extraction_cache": "content-addressed",
+                "ocr_page_cache": "content-addressed-per-model-page",
                 "text_extractor": "pypdfium2",
                 "ocr_provider": (
                     "rapidocr-cascade" if config.module_ocr_enabled else None
@@ -36110,6 +36113,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 RapidOcrProvider(
                     scale=normalized_scale,
                     model_type=normalized_model,
+                    cache_dir=config.ocr_page_cache_dir,
                 ),
             )
         layout = provider.extract_layout(source, page_numbers=[page_number])[0]
