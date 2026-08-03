@@ -1,6 +1,7 @@
 {
   "version": 1,
   "strict": true,
+  "includes": ["books_catalog_review_eberron_rising_v1.json"],
   "documents": {
     "UO\\D&D 5E - HB - School of Geometry.pdf": {
       "complete_review": true,
