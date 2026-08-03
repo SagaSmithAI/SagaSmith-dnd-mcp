@@ -933,6 +933,23 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
                     "languages": ["Common"],
                     "armor_proficiencies": ["Light Armor"],
                     "spell_list_expansion": ["Aid"],
+                    "spell_grants": [
+                        {
+                            "name": "Detect Magic",
+                            "level": 1,
+                            "eligible_classes": ["Wizard"],
+                            "method": "limited_use",
+                            "spellcasting_ability": "intelligence",
+                            "free_casts": 1,
+                            "recovers_on": "long_rest",
+                            "allow_slot_cast": False,
+                            "minimum_level": 1,
+                            "ritual_only": False,
+                            "casting_overrides": {
+                                "ignore_material_components": True
+                            },
+                        }
+                    ],
                     "features": [],
                     "unresolved": [],
                 },
@@ -1165,6 +1182,14 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
         assert marked["sheet"]["traits"]["proficiencies"]["armor"] == [
             "Light Armor"
         ]
+        detect_magic = next(
+            item
+            for item in marked["sheet"]["content"]["spells"]
+            if item["name"] == "Detect Magic"
+        )
+        assert detect_magic["access"]["feature_casting_sources"][0][
+            "casting_overrides"
+        ] == {"ignore_material_components": True}
         marked_spell = await _call(
             server,
             "character_content_apply",

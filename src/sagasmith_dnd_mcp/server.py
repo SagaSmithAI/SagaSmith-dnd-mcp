@@ -41017,6 +41017,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "minimum_level": int(grant.get("minimum_level", 1) or 1),
                 "ritual_only": grant.get("ritual_only") is True,
             }
+            casting_overrides = deepcopy(
+                dict(grant.get("casting_overrides") or {})
+            )
+            if casting_overrides:
+                casting_source["casting_overrides"] = casting_overrides
             access = spell_card.setdefault("access", {})
             current_sources = list(access.get("feature_casting_sources") or [])
             if any(
