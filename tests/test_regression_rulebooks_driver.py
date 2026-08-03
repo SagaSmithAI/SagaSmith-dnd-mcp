@@ -66,6 +66,14 @@ def test_portable_roundtrip_uses_public_facades_and_preserves_package() -> None:
         "checksum": "c" * 64,
         "payload": {
             "manifest": {
+                "readiness_policy": "build_time_complete",
+                "readiness": {
+                    "complete": True,
+                    **{
+                        dimension: {"complete": True, "blockers": []}
+                        for dimension in ("source", "catalog", "selection", "runtime")
+                    },
+                },
                 "resolution_readiness": {
                     "complete": True,
                     "first_use_compilation_required": False,
@@ -161,6 +169,10 @@ def test_portable_roundtrip_uses_public_facades_and_preserves_package() -> None:
             edition="2014",
             run_id="one",
             id_key="request",
+            primary_reviewer="agent:test-primary",
+            primary_review_method="agent",
+            critic_reviewer="agent:test-critic",
+            critic_review_method="agent",
         )
     )
 
@@ -243,10 +255,32 @@ def test_portable_roundtrip_rejects_deferred_actor_presets() -> None:
                     ]
                 },
             ),
-            (
-                "rule_import",
-                {"result": {"candidates": [{"review_status": "accepted"}]}},
-            ),
+                (
+                    "rule_import",
+                    {
+                        "result": {
+                            "candidates": [
+                                {
+                                    "id": candidate["id"],
+                                    "review_status": "needs_revision",
+                                }
+                            ]
+                        }
+                    },
+                ),
+                (
+                    "rule_import",
+                    {
+                        "result": {
+                            "candidates": [
+                                {
+                                    "id": candidate["id"],
+                                    "review_status": "accepted",
+                                }
+                            ]
+                        }
+                    },
+                ),
             ("rule_import", {"result": {"draft": {"status": "validated"}}}),
             (
                 "rule_pack_query",
@@ -318,19 +352,28 @@ def test_portable_roundtrip_rejects_deferred_actor_presets() -> None:
                 edition="2014",
                 run_id="one",
                 id_key="request",
+                primary_reviewer="agent:test-primary",
+                primary_review_method="agent",
+                critic_reviewer="agent:test-critic",
+                critic_review_method="agent",
             )
         )
 
-    preset_call = source.calls[4]
+    preset_call = source.calls[5]
     decision = source.calls[1][1]["payload"]["decisions"][0]
-    assert decision == {
-        "id": candidate["id"],
-        "review_status": "accepted",
-    }
+    assert decision["id"] == candidate["id"]
+    assert decision["review_status"] == "accepted"
+    assert decision["catalog_review_decision"]["role"] == "primary"
+    critic_decision = source.calls[2][1]["payload"]["decisions"][0]
+    assert critic_decision["catalog_review_decision"]["role"] == "critic"
     assert preset_call[0] == "rule_pack_query"
     assert preset_call[1]["view"] == "preset_package"
     assert preset_call[1]["payload"]["allow_partial"] is True
-    assert len(source.calls) == 5
+    assert [
+        item["role"]
+        for item in preset_call[1]["payload"]["catalog_review_decisions"]
+    ] == ["primary", "critic"]
+    assert len(source.calls) == 6
     assert target.calls == []
 
 

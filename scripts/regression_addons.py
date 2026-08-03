@@ -96,17 +96,30 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         try:
             package = json.loads(path.read_text(encoding="utf-8"))
             checksum = str(package.get("checksum") or "")
-            readiness = dict(
+            resolution_readiness = dict(
                 package.get("payload", {})
                 .get("manifest", {})
                 .get("resolution_readiness", {})
             )
             if (
-                readiness.get("complete") is not True
-                or readiness.get("first_use_compilation_required") is not False
-                or list(readiness.get("unresolved") or [])
+                resolution_readiness.get("complete") is not True
+                or resolution_readiness.get("first_use_compilation_required") is not False
+                or list(resolution_readiness.get("unresolved") or [])
             ):
                 raise RuntimeError("addon has incomplete build-time resolution")
+            manifest = dict(package.get("payload", {}).get("manifest", {}))
+            readiness = dict(manifest.get("readiness") or {})
+            if (
+                manifest.get("readiness_policy") != "build_time_complete"
+                or readiness.get("complete") is not True
+                or any(
+                    dict(readiness.get(dimension) or {}).get("complete") is not True
+                    for dimension in ("source", "catalog", "selection", "runtime")
+                )
+            ):
+                raise RuntimeError(
+                    "addon has incomplete source/catalog/selection/runtime readiness"
+                )
             key = hashlib.sha256(
                 f"{path}\0{checksum}\0{args.run_id}".encode("utf-8")
             ).hexdigest()[:20]
@@ -224,7 +237,8 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     "checksum": checksum,
                     "classification": package["payload"]["manifest"]["classification"],
                     "content_summary": package["payload"]["manifest"]["content_summary"],
-                    "resolution_readiness": readiness,
+                    "resolution_readiness": resolution_readiness,
+                    "readiness": readiness,
                     "components": value["components"],
                     "catalog_artifacts_while_active": len(catalog["result"]),
                     "installed": True,

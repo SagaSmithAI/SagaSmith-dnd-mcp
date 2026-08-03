@@ -13,6 +13,7 @@ from typing import Any
 
 from sagasmith_core import (
     DOCUMENT_SOURCE_SUFFIXES,
+    CascadingOcrProvider,
     Database,
     RapidOcrProvider,
     VectorStore,
@@ -33,6 +34,8 @@ class SagaSmithStorage:
         self.vectors = VectorStore(DND5E.id)
         self._rule_ocr_provider: RapidOcrProvider | None = None
         self._module_ocr_provider: RapidOcrProvider | None = None
+        self._rule_document_ocr_provider: CascadingOcrProvider | None = None
+        self._module_document_ocr_provider: CascadingOcrProvider | None = None
 
     def migrate(self) -> None:
         self.database.upgrade_schema()
@@ -69,8 +72,15 @@ class SagaSmithStorage:
                 "import_roots": [str(path) for path in self.config.rule_import_roots],
                 "ocr": {
                     "enabled": self.config.rule_ocr_enabled,
-                    "provider": "rapidocr" if self.config.rule_ocr_enabled else None,
+                    "provider": (
+                        "rapidocr-cascade" if self.config.rule_ocr_enabled else None
+                    ),
                     "scale": self.config.rule_ocr_scale,
+                    "models": (
+                        self.ocr_model_chain(self.config.rule_ocr_model)
+                        if self.config.rule_ocr_enabled
+                        else []
+                    ),
                 },
             },
             "modules": {
@@ -79,8 +89,15 @@ class SagaSmithStorage:
                 "import_roots": [str(path) for path in self.config.module_import_roots],
                 "ocr": {
                     "enabled": self.config.module_ocr_enabled,
-                    "provider": "rapidocr" if self.config.module_ocr_enabled else None,
+                    "provider": (
+                        "rapidocr-cascade" if self.config.module_ocr_enabled else None
+                    ),
                     "scale": self.config.module_ocr_scale,
+                    "models": (
+                        self.ocr_model_chain(self.config.module_ocr_model)
+                        if self.config.module_ocr_enabled
+                        else []
+                    ),
                 },
             },
         }
@@ -154,6 +171,30 @@ class SagaSmithStorage:
     def rulebook_checksum(self, name: str) -> str:
         return file_sha256(self.artifact_rulebook_path(name))
 
+    @staticmethod
+    def _alternate_ocr_model(model: str) -> str:
+        return "medium" if model == "small" else "small"
+
+    @classmethod
+    def ocr_model_chain(cls, model: str) -> list[str]:
+        return [model, cls._alternate_ocr_model(model)]
+
+    @classmethod
+    def _document_ocr_provider(
+        cls,
+        *,
+        primary: RapidOcrProvider,
+        scale: float,
+        model: str,
+    ) -> CascadingOcrProvider:
+        return CascadingOcrProvider(
+            primary,
+            RapidOcrProvider(
+                scale=scale,
+                model_type=cls._alternate_ocr_model(model),
+            ),
+        )
+
     def rule_ocr_provider(self) -> RapidOcrProvider | None:
         if not self.config.rule_ocr_enabled:
             return None
@@ -164,6 +205,18 @@ class SagaSmithStorage:
             )
         return self._rule_ocr_provider
 
+    def rule_document_ocr_provider(self) -> CascadingOcrProvider | None:
+        primary = self.rule_ocr_provider()
+        if primary is None:
+            return None
+        if self._rule_document_ocr_provider is None:
+            self._rule_document_ocr_provider = self._document_ocr_provider(
+                primary=primary,
+                scale=self.config.rule_ocr_scale,
+                model=self.config.rule_ocr_model,
+            )
+        return self._rule_document_ocr_provider
+
     def module_ocr_provider(self) -> RapidOcrProvider | None:
         if not self.config.module_ocr_enabled:
             return None
@@ -173,6 +226,18 @@ class SagaSmithStorage:
                 model_type=self.config.module_ocr_model,
             )
         return self._module_ocr_provider
+
+    def module_document_ocr_provider(self) -> CascadingOcrProvider | None:
+        primary = self.module_ocr_provider()
+        if primary is None:
+            return None
+        if self._module_document_ocr_provider is None:
+            self._module_document_ocr_provider = self._document_ocr_provider(
+                primary=primary,
+                scale=self.config.module_ocr_scale,
+                model=self.config.module_ocr_model,
+            )
+        return self._module_document_ocr_provider
 
     def artifact_rulebook_path(self, name: str) -> Path:
         target = (self.config.rulebooks_dir / name).resolve()

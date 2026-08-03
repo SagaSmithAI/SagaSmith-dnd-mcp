@@ -50,6 +50,14 @@ def _package() -> dict[str, Any]:
             "manifest": {
                 "classification": "third_party",
                 "content_summary": {"feature": 1},
+                "readiness_policy": "build_time_complete",
+                "readiness": {
+                    "complete": True,
+                    **{
+                        dimension: {"complete": True, "blockers": []}
+                        for dimension in ("source", "catalog", "selection", "runtime")
+                    },
+                },
                 "resolution_readiness": {
                     "complete": True,
                     "first_use_compilation_required": False,

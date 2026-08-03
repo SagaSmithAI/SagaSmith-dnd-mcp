@@ -235,6 +235,7 @@ from sagasmith_dnd.consumables import HEALING_POTION_MECHANIC_ID, healing_potion
 from sagasmith_dnd.content_import import (
     artifact_with_direct_resolution,
     audit_release_resolution_readiness,
+    author_selection_card_from_candidate,
     compiled_artifacts_from_candidates,
     extract_content_inventory,
     module_statblock_review_candidates,
@@ -315,6 +316,7 @@ from sagasmith_dnd.portable_cards import (
     SRD2024_PRESET_PACK_ID,
     SRD2024_PRESET_PACK_VERSION,
     actor_card_from_statblock,
+    bind_actor_catalog_review,
     build_dnd_actor_card,
     build_srd2014_preset_pack,
     build_srd2024_preset_pack,
@@ -1748,6 +1750,72 @@ def _rule_payload_settled_mechanic_ids(payload: dict[str, Any]) -> set[str]:
     return local | (native if verified else set())
 
 
+def _require_valid_content_attestations(
+    artifacts: list[dict[str, Any]],
+    *,
+    operation: str,
+) -> None:
+    """Reject stale reviewed content before a trusted identifier transport.
+
+    Portable export/import replaces database-local source and chunk UUIDs with
+    stable package keys (or performs the inverse replacement).  That transport
+    changes the content fingerprint without changing the reviewed rule text.
+    We therefore validate the original attestations before any replacement and
+    only then allow the trusted transport path to rebind them.
+    """
+
+    for artifact in artifacts:
+        has_catalog = isinstance(artifact.get("catalog_review"), dict)
+        has_selection = isinstance(artifact.get("selection_contract"), dict)
+        if not has_catalog and not has_selection:
+            continue
+        artifact_id = str(artifact.get("id") or "artifact")
+        errors = []
+        if has_catalog:
+            errors.extend(catalog_review_errors(artifact))
+        if has_selection:
+            errors.extend(selection_contract_errors(artifact))
+        if errors:
+            raise ValueError(
+                f"{operation} refuses stale content attestations for "
+                f"{artifact_id}: {'; '.join(errors)}"
+            )
+
+
+def _rebind_transported_content_attestations(
+    artifacts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Bind existing review decisions to trusted portable/local identifiers."""
+
+    rebound: list[dict[str, Any]] = []
+    for raw_artifact in artifacts:
+        artifact = deepcopy(raw_artifact)
+        reviewed_catalog = artifact.pop("catalog_review", None)
+        reviewed_selection = artifact.pop("selection_contract", None)
+        if reviewed_catalog is None and reviewed_selection is None:
+            rebound.append(artifact)
+            continue
+        if isinstance(reviewed_selection, dict):
+            artifact["selection_contract"] = build_selection_contract(
+                artifact,
+                status=str(reviewed_selection.get("status") or ""),
+                references=list(reviewed_selection.get("references") or []),
+                blockers=list(reviewed_selection.get("blockers") or []),
+            )
+        elif reviewed_selection is not None:
+            raise ValueError("transported selection_contract must be an object")
+        if isinstance(reviewed_catalog, dict):
+            artifact["catalog_review"] = build_catalog_review(
+                artifact,
+                decisions=list(reviewed_catalog.get("decisions") or []),
+                status=str(reviewed_catalog.get("status") or ""),
+            )
+        elif reviewed_catalog is not None:
+            raise ValueError("transported catalog_review must be an object")
+        rebound.append(artifact)
+    return rebound
+
+
 def audit_dnd_addon_readiness_components(
     components: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -2481,7 +2549,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     def rule_document_options(checksum: str | None = None) -> dict[str, Any]:
         return {
-            "ocr_provider": storage.rule_ocr_provider(),
+            "ocr_provider": storage.rule_document_ocr_provider(),
             "document_cache_dir": config.normalized_rulebooks_dir,
             "expected_checksum": checksum or None,
             "layout_profile": DND5E_DOCUMENT_LAYOUT_PROFILE,
@@ -2489,7 +2557,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     def module_document_options(checksum: str | None = None) -> dict[str, Any]:
         return {
-            "ocr_provider": storage.module_ocr_provider(),
+            "ocr_provider": storage.module_document_ocr_provider(),
             "document_cache_dir": config.normalized_modules_dir,
             "expected_checksum": checksum or None,
             "layout_profile": DND5E_DOCUMENT_LAYOUT_PROFILE,
@@ -3323,6 +3391,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "mechanics": [deepcopy(item) for item in pack.mechanics],
             "provenance": deepcopy(provenance),
         }
+        _require_valid_content_attestations(
+            definition["artifacts"],
+            operation="portable rule-pack export",
+        )
         definition["provenance"].pop("import_job_id", None)
         definition["provenance"].pop("portable_package", None)
         source_ids: set[str] = set()
@@ -3427,6 +3499,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         portable_definition = refresh_portable_resolution_plans(make_portable(definition))
         portable_definition["artifacts"], _resolution_states_changed = (
             _finalize_rule_artifact_resolution_states(
+                list(portable_definition["artifacts"])
+            )
+        )
+        portable_definition["artifacts"] = (
+            _rebind_transported_content_attestations(
                 list(portable_definition["artifacts"])
             )
         )
@@ -3588,6 +3665,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if replay is not None:
             return replay
         pack_payload = normalized["payload"]
+        _require_valid_content_attestations(
+            list(pack_payload["artifacts"]),
+            operation="portable rule-pack import",
+        )
         try:
             existing_version = rule_packs.get_version(normalized["id"], normalized["version"])
         except LookupError:
@@ -3761,6 +3842,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "provenance": pack_payload["provenance"],
                 }
             )
+        )
+        localized["artifacts"] = _rebind_transported_content_attestations(
+            list(localized["artifacts"])
         )
         if localized["mechanics"] and pack_payload["sources"]:
             validate_source_bound_mechanics(localized["mechanics"])
@@ -11395,7 +11479,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "normalization_cache": "content-addressed",
                 "page_extraction_cache": "content-addressed",
                 "text_extractor": "pypdfium2",
-                "ocr_provider": "rapidocr" if config.rule_ocr_enabled else None,
+                "ocr_provider": (
+                    "rapidocr-cascade" if config.rule_ocr_enabled else None
+                ),
+                "ocr_models": (
+                    storage.ocr_model_chain(config.rule_ocr_model)
+                    if config.rule_ocr_enabled
+                    else []
+                ),
                 "source_citation_fields": [
                     "source_id",
                     "source_key",
@@ -11445,7 +11536,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "normalization_cache": "content-addressed",
                 "page_extraction_cache": "content-addressed",
                 "text_extractor": "pypdfium2",
-                "ocr_provider": "rapidocr" if config.module_ocr_enabled else None,
+                "ocr_provider": (
+                    "rapidocr-cascade" if config.module_ocr_enabled else None
+                ),
+                "ocr_models": (
+                    storage.ocr_model_chain(config.module_ocr_model)
+                    if config.module_ocr_enabled
+                    else []
+                ),
                 "runtime_manifest_schema": 1,
             },
             "write_requirements": ["principal_id", "expected_revision", "idempotency_key"],
@@ -12211,6 +12309,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             decision.get("artifact", candidate.get("artifact") or {})
                         ),
                     }
+                    reviewed_candidate["artifact"] = (
+                        author_selection_card_from_candidate(reviewed_candidate)
+                    )
                     first_chunk_id = next(
                         (
                             str(chunk_id)
@@ -12238,6 +12339,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         or candidate.get("application_state")
                         or "catalog_only"
                     )
+                    selection_applicability = str(
+                        artifact.get("selection_applicability") or ""
+                    )
+                    if selection_applicability not in {
+                        "",
+                        "character",
+                        "not_applicable",
+                    }:
+                        raise ValueError(
+                            f"candidate {candidate.get('id')} has invalid "
+                            "selection_applicability"
+                        )
                     references = list(
                         dict.fromkeys(
                             [
@@ -12254,7 +12367,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             ]
                         )
                     )
-                    if (
+                    if selection_applicability == "not_applicable":
+                        artifact["selection_contract"] = build_selection_contract(
+                            artifact,
+                            status="not_applicable",
+                            references=references,
+                        )
+                    elif (
                         kind in DND_SELECTION_MATERIALIZERS
                         and application_state == "selection_ready"
                     ):
@@ -34224,7 +34343,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             return replay
         document = normalize_document(
             path,
-            ocr_provider=storage.module_ocr_provider(),
+            ocr_provider=storage.module_document_ocr_provider(),
             cache_dir=config.normalized_modules_dir,
             layout_profile=DND5E_DOCUMENT_LAYOUT_PROFILE,
         )
@@ -43675,6 +43794,7 @@ Useful bounded guidance:
                 action="rule_pack_query(preset_package)",
                 allowed={
                     "allow_partial",
+                    "catalog_review_decisions",
                     "campaign_id",
                     "pack_id",
                     "version",
@@ -43696,6 +43816,16 @@ Useful bounded guidance:
             allow_partial = data.get("allow_partial", False)
             if not isinstance(allow_partial, bool):
                 raise ValueError("payload.allow_partial must be a boolean")
+            raw_catalog_review_decisions = data.get("catalog_review_decisions")
+            if raw_catalog_review_decisions is not None and not isinstance(
+                raw_catalog_review_decisions, list
+            ):
+                raise ValueError("payload.catalog_review_decisions must be an array")
+            catalog_review_decisions = (
+                deepcopy(raw_catalog_review_decisions)
+                if raw_catalog_review_decisions is not None
+                else None
+            )
             pack = rule_packs.get_version(pack_id, version)
             edition = campaign_rules_edition(campaign_id)
             cards = []
@@ -43782,6 +43912,11 @@ Useful bounded guidance:
                     tags=["monster", f"dnd5e-{edition}", "addon"],
                     semantic_fill=normalized_fill,
                 )
+                if catalog_review_decisions is not None:
+                    portable_card = bind_actor_catalog_review(
+                        portable_card,
+                        decisions=catalog_review_decisions,
+                    )
                 seen_source_checksums.add(source_checksum)
                 cards.append(portable_card)
                 return compact_ascii_key(parsed.name)
@@ -43940,6 +44075,11 @@ Useful bounded guidance:
                         metadata=dict(bundled_card.get("metadata") or {}),
                         dependencies=list(bundled_card.get("dependencies") or []),
                     )
+                    if catalog_review_decisions is not None:
+                        bundled_card = bind_actor_catalog_review(
+                            bundled_card,
+                            decisions=catalog_review_decisions,
+                        )
                     bundled_card_id = str(bundled_card["id"])
                     if bundled_card_id not in bundled_core_card_ids:
                         cards.append(bundled_card)
@@ -44759,7 +44899,7 @@ Useful bounded guidance:
                 raise ValueError("character document checksum does not match expected_checksum")
             document = normalize_document(
                 staged["path"],
-                ocr_provider=storage.module_ocr_provider(),
+                ocr_provider=storage.module_document_ocr_provider(),
                 cache_dir=config.normalized_modules_dir,
                 expected_checksum=str(staged["checksum"]),
                 layout_profile=DND5E_DOCUMENT_LAYOUT_PROFILE,
@@ -48407,6 +48547,7 @@ Useful bounded guidance:
         "character_memory_add": "actor_knowledge_change(action='add')",
         "character_memory_resolve": "actor_knowledge_change(action='revise')",
     }
+
 
     @mcp.tool()
     async def exposure_call(

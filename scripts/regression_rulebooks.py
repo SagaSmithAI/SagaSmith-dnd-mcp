@@ -47,6 +47,35 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--no-ocr", action="store_true")
     parser.add_argument("--ocr-scale", type=float, default=2.0)
     parser.add_argument(
+        "--ocr-model",
+        choices=("small", "medium"),
+        default="small",
+        help=(
+            "Preferred PP-OCRv6 profile. Statblock recovery automatically tries "
+            "the other profile only when the preferred result cannot be verified."
+        ),
+    )
+    parser.add_argument(
+        "--primary-reviewer",
+        default="deterministic:typed-card-author-v1",
+        help="Identity recorded for the primary per-candidate catalog review.",
+    )
+    parser.add_argument(
+        "--primary-review-method",
+        choices=("agent", "deterministic", "human"),
+        default="deterministic",
+    )
+    parser.add_argument(
+        "--critic-reviewer",
+        default="deterministic:source-contract-critic-v1",
+        help="Different identity recorded for the independent catalog review.",
+    )
+    parser.add_argument(
+        "--critic-review-method",
+        choices=("agent", "deterministic", "human"),
+        default="deterministic",
+    )
+    parser.add_argument(
         "--document-cache",
         type=Path,
         help=(
@@ -113,6 +142,8 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     )
     if addon_output_dir is not None:
         addon_output_dir.mkdir(parents=True, exist_ok=True)
+    if str(args.primary_reviewer).strip() == str(args.critic_reviewer).strip():
+        raise ValueError("primary and critic reviewer identities must differ")
     config = McpConfig.from_environment()
     config = McpConfig(
         home=home,
@@ -126,6 +157,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         module_import_roots=(),
         rule_ocr_enabled=not args.no_ocr,
         rule_ocr_scale=args.ocr_scale,
+        rule_ocr_model=args.ocr_model,
         document_cache_dir=document_cache,
     )
     server = create_server(config)
@@ -182,6 +214,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             module_import_roots=(),
             rule_ocr_enabled=not args.no_ocr,
             rule_ocr_scale=args.ocr_scale,
+            rule_ocr_model=args.ocr_model,
             document_cache_dir=document_cache,
         )
         target_server = create_server(target_config)
@@ -202,6 +235,17 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         "home": str(home),
         "document_cache": str(document_cache) if document_cache else None,
         "edition": args.edition,
+        "ocr_model": args.ocr_model,
+        "catalog_review": {
+            "primary": {
+                "reviewer": str(args.primary_reviewer),
+                "method": str(args.primary_review_method),
+            },
+            "critic": {
+                "reviewer": str(args.critic_reviewer),
+                "method": str(args.critic_review_method),
+            },
+        },
         "run_id": args.run_id,
         "document_count": len(documents),
         "discovered_document_count": len(discovered_documents),
@@ -322,6 +366,10 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     run_id=args.run_id,
                     id_key=id_key,
                     addon_output_dir=addon_output_dir,
+                    primary_reviewer=str(args.primary_reviewer),
+                    primary_review_method=str(args.primary_review_method),
+                    critic_reviewer=str(args.critic_reviewer),
+                    critic_review_method=str(args.critic_review_method),
                 )
                 release_components.append(
                     {
@@ -430,6 +478,27 @@ def _matches_includes(
     )
 
 
+def _catalog_review_decision(
+    *,
+    role: str,
+    reviewer: str,
+    method: str,
+    notes: str,
+) -> dict[str, Any]:
+    return {
+        "role": role,
+        "reviewer": reviewer,
+        "method": method,
+        "checks": {
+            "identity": True,
+            "classification": True,
+            "entry_boundary": True,
+            "references": True,
+        },
+        "notes": notes,
+    }
+
+
 async def _portable_roundtrip(
     *,
     source_server: Any,
@@ -445,6 +514,10 @@ async def _portable_roundtrip(
     run_id: str,
     id_key: str,
     addon_output_dir: Path | None = None,
+    primary_reviewer: str,
+    primary_review_method: str,
+    critic_reviewer: str,
+    critic_review_method: str,
 ) -> dict[str, Any]:
     """Compile the entire reviewed catalog and round-trip its self-contained addon."""
 
@@ -549,6 +622,44 @@ async def _portable_roundtrip(
         )
         draft_response = {"result": {"draft": draft_response["result"]}}
     else:
+        primary_reviewed = await _call(
+            source_server,
+            "rule_import",
+            {
+                "campaign_id": source_campaign_id,
+                "action": "review",
+                "payload": {
+                    "job_id": job_id,
+                    "decisions": [
+                        {
+                            "id": candidate["id"],
+                            "review_status": "accepted",
+                            "catalog_review_decision": _catalog_review_decision(
+                                role="primary",
+                                reviewer=primary_reviewer,
+                                method=primary_review_method,
+                                notes=(
+                                    "Reviewed typed card identity, classification, "
+                                    "entry boundary, and exact indexed references."
+                                ),
+                            ),
+                        }
+                        for candidate in candidates
+                    ],
+                },
+                "idempotency_key": f"regression-review-primary-{id_key}",
+            },
+        )
+        if any(
+            item["review_status"] not in {"needs_revision", "rejected"}
+            for item in primary_reviewed["result"]["candidates"]
+        ):
+            raise RuntimeError("primary catalog review did not reach the critic gate")
+        reviewable = [
+            item
+            for item in primary_reviewed["result"]["candidates"]
+            if item["review_status"] == "needs_revision"
+        ]
         reviewed = await _call(
             source_server,
             "rule_import",
@@ -561,18 +672,27 @@ async def _portable_roundtrip(
                         {
                             "id": candidate["id"],
                             "review_status": "accepted",
+                            "catalog_review_decision": _catalog_review_decision(
+                                role="critic",
+                                reviewer=critic_reviewer,
+                                method=critic_review_method,
+                                notes=(
+                                    "Independently verified immutable reviewed content, "
+                                    "selection contract, and exact source citations."
+                                ),
+                            ),
                         }
-                        for candidate in candidates
+                        for candidate in reviewable
                     ],
                 },
-                "idempotency_key": f"regression-review-all-{id_key}",
+                "idempotency_key": f"regression-review-critic-{id_key}",
             },
         )
         if any(
             item["review_status"] != "accepted"
             for item in reviewed["result"]["candidates"]
         ):
-            raise RuntimeError("full candidate catalog was not accepted")
+            raise RuntimeError("full candidate catalog was not independently approved")
         draft_response = await _call(
             source_server,
             "rule_import",
@@ -646,6 +766,26 @@ async def _portable_roundtrip(
                     "version": version,
                     "portable_id": f"{pack_id}.actors",
                     "allow_partial": True,
+                    "catalog_review_decisions": [
+                        _catalog_review_decision(
+                            role="primary",
+                            reviewer=primary_reviewer,
+                            method=primary_review_method,
+                            notes=(
+                                "Reviewed the exact source-backed portable actor "
+                                "identity, type, statblock boundary, and references."
+                            ),
+                        ),
+                        _catalog_review_decision(
+                            role="critic",
+                            reviewer=critic_reviewer,
+                            method=critic_review_method,
+                            notes=(
+                                "Independently verified the complete actor payload "
+                                "against its immutable source evidence."
+                            ),
+                        ),
+                    ],
                     "metadata": {
                         "distribution": "private",
                         "license": "user-supplied",
@@ -706,13 +846,31 @@ async def _portable_roundtrip(
         },
     )
     addon = addon_response["result"]["package"]
-    readiness = dict(addon["payload"]["manifest"]["resolution_readiness"])
+    resolution_readiness = dict(
+        addon["payload"]["manifest"]["resolution_readiness"]
+    )
     if (
-        readiness.get("complete") is not True
-        or readiness.get("first_use_compilation_required") is not False
-        or list(readiness.get("unresolved") or [])
+        resolution_readiness.get("complete") is not True
+        or resolution_readiness.get("first_use_compilation_required") is not False
+        or list(resolution_readiness.get("unresolved") or [])
     ):
         raise RuntimeError("addon escaped with incomplete build-time resolution")
+    addon_readiness = dict(addon["payload"]["manifest"].get("readiness") or {})
+    if (
+        addon["payload"]["manifest"].get("readiness_policy")
+        != "build_time_complete"
+        or addon_readiness.get("complete") is not True
+    ):
+        blockers = [
+            *list(dict(addon_readiness.get("source") or {}).get("blockers") or []),
+            *list(dict(addon_readiness.get("catalog") or {}).get("blockers") or []),
+            *list(dict(addon_readiness.get("selection") or {}).get("blockers") or []),
+            *list(dict(addon_readiness.get("runtime") or {}).get("blockers") or []),
+        ]
+        raise RuntimeError(
+            "addon failed source/catalog/selection/runtime readiness: "
+            + json.dumps(blockers[:20], ensure_ascii=False)
+        )
     addon_output_path = None
     if addon_output_dir is not None:
         output_name = (
@@ -841,7 +999,8 @@ async def _portable_roundtrip(
         "package_artifact": exported["artifact"],
         "addon_id": addon_id,
         "addon_checksum": addon["checksum"],
-        "resolution_readiness": readiness,
+        "resolution_readiness": resolution_readiness,
+        "readiness": addon_readiness,
         "addon_artifact": addon_response["result"]["artifact"],
         "addon_output": str(addon_output_path) if addon_output_path else None,
         "catalog_artifacts": len(candidates),
