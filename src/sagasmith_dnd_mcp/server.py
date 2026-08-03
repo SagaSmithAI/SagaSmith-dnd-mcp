@@ -39919,6 +39919,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "tool_choice_count": tool_choice_count,
                     "tool_options": list(choices.get("tool_options") or []),
                     "fixed_tools": list(grants.get("tools") or []),
+                    "fixed_equipment": deepcopy(dict(grants.get("equipment") or {})),
                     "equipment_package_options": sorted(equipment_packages),
                     "equipment_packages": equipment_packages,
                     "origin_feat_name": str(choices.get("origin_feat_name") or ""),
@@ -41336,6 +41337,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if existing_background and existing_background != selected_background:
                 raise ValueError("character already has a different background")
             grants = dict(card.get("background_grants") or {})
+            fixed_equipment = deepcopy(dict(grants.pop("equipment", {}) or {}))
             requirements = dict(grants.get("choices") or {})
             language_count = int(requirements.get("language_count", 0) or 0)
             raw_languages = selection.get("languages")
@@ -41434,6 +41436,27 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 package = equipment_packages.get(selected_equipment_package)
                 if not isinstance(package, dict):
                     raise ValueError("background equipment_package is not A or B")
+                if fixed_equipment:
+                    fixed_wallet = dict(fixed_equipment.get("wallet") or {})
+                    selected_wallet = dict(package.get("wallet") or {})
+                    package = {
+                        "items": [
+                            *deepcopy(list(fixed_equipment.get("items") or [])),
+                            *deepcopy(list(package.get("items") or [])),
+                        ],
+                        "wallet": {
+                            denomination: int(fixed_wallet.get(denomination, 0) or 0)
+                            + int(selected_wallet.get(denomination, 0) or 0)
+                            for denomination in set(fixed_wallet) | set(selected_wallet)
+                        },
+                    }
+            elif fixed_equipment:
+                if selected_equipment_package:
+                    raise ValueError("background has no selectable equipment package")
+                selected_equipment_package = "__FIXED__"
+                package = fixed_equipment
+                equipment_packages = {selected_equipment_package: package}
+            if equipment_packages:
                 if selection.get("equipment_item_ids") not in (None, []):
                     raise ValueError(
                         "structured background equipment cannot use caller-supplied item ids"
@@ -41610,7 +41633,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "selected_skills": selected_skills,
                 "ability_score_increases": selected_ability_increases,
                 "selected_tools": selected_tools,
-                "selected_equipment_package": selected_equipment_package,
+                "selected_equipment_package": (
+                    "" if selected_equipment_package == "__FIXED__" else selected_equipment_package
+                ),
             }
             sheet["progression"]["background_grants"] = {
                 **sheet["progression"]["background_grants"],

@@ -825,6 +825,20 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
                     "spell_list_expansion": ["Aid"],
                     "tools": [],
                     "equipment_item_ids": [],
+                    "equipment": {
+                        "items": [
+                            {
+                                "inventory_template": {
+                                    "name": "Identification Papers",
+                                    "kind": "equipment",
+                                    "quantity": 1,
+                                    "description": "Reviewed guild identification.",
+                                    "mechanics": {},
+                                }
+                            }
+                        ],
+                        "wallet": {"gp": 2},
+                    },
                     "choices": {
                         "language_count": 0,
                         "tool_choice_count": 0,
@@ -998,12 +1012,15 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
                 "idempotency_key": "background-apply",
             },
         )
-        item = applied["sheet"]["inventory"]["items"][0]
-        assert item["name"] == "Guild Signet"
-        assert applied["sheet"]["inventory"]["wallet"]["gp"] == 10
+        items = applied["sheet"]["inventory"]["items"]
+        assert [item["name"] for item in items] == [
+            "Identification Papers",
+            "Guild Signet",
+        ]
+        assert applied["sheet"]["inventory"]["wallet"]["gp"] == 12
         assert applied["sheet"]["progression"]["background_grants"][
             "equipment_item_ids"
-        ] == [item["id"]]
+        ] == [item["id"] for item in items]
         assert applied["sheet"]["progression"]["background_grants"][
             "spell_list_expansion"
         ] == [
