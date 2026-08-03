@@ -38574,6 +38574,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             value,
                             card,
                             source_class=class_name,
+                            artifact_id=spell_id,
                         )
                     )
                 except CombatEngineError as error:
@@ -39502,6 +39503,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "language_options": list(choices.get("language_options") or []),
                     "allow_any_language": choices.get("allow_any_language") is True,
                     "fixed_languages": list(grants.get("languages") or []),
+                    "spell_list_expansion": list(
+                        grants.get("spell_list_expansion") or []
+                    ),
                     "skill_proficiencies": list(card.get("skill_proficiencies") or []),
                     "ability_score_options": ability_options,
                     "allowed_ability_score_distributions": deepcopy(
@@ -40506,6 +40510,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     sheet,
                     card,
                     source_class=selection.get("source_class"),
+                    artifact_id=artifact_id,
                 )
             except CombatEngineError as error:
                 reason = str(error)
@@ -40914,8 +40919,51 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "background equipment references unknown inventory items: "
                         + ", ".join(missing_equipment)
                     )
+            declared_expansion = grants.get("spell_list_expansion", [])
+            if not isinstance(declared_expansion, list):
+                raise RulesetUnavailableError(
+                    "background spell-list expansion is not executable"
+                )
+            resolved_expansion: list[dict[str, str]] = []
+            for raw_spell_name in declared_expansion:
+                spell_name = str(raw_spell_name).strip()
+                if not spell_name:
+                    raise RulesetUnavailableError(
+                        "background spell-list expansion contains an empty spell"
+                    )
+                matches = [
+                    item
+                    for item in candidates
+                    if item[2].get("kind") == "spell"
+                    and str(dict(item[2].get("card") or {}).get("name") or "").casefold()
+                    == spell_name.casefold()
+                ]
+                if len(matches) != 1:
+                    return {
+                        **_ruling_status(
+                            "pending_ruling",
+                            "missing_or_conflicting_source_review",
+                        ),
+                        "reason": (
+                            "background spell-list expansion needs one exact active "
+                            f"spell artifact: {spell_name}"
+                        ),
+                    }
+                spell_pack_id, spell_pack_version, spell_artifact = matches[0]
+                resolved_expansion.append(
+                    {
+                        "artifact_id": str(spell_artifact["id"]),
+                        "name": str(
+                            dict(spell_artifact.get("card") or {}).get("name")
+                            or spell_name
+                        ),
+                        "pack_id": spell_pack_id,
+                        "pack_version": spell_pack_version,
+                    }
+                )
             sheet["progression"]["background"] = selected_background
             grants["languages"] = all_languages
+            grants["spell_list_expansion"] = resolved_expansion
             grants["tools"] = all_tools
             grants["equipment_item_ids"] = equipment_item_ids
             grants["choices"] = {

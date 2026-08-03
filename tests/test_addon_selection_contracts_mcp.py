@@ -532,6 +532,7 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
                 "background_grants": {
                     "feature": "Guild Membership",
                     "languages": [],
+                    "spell_list_expansion": ["Aid"],
                     "tools": [],
                     "equipment_item_ids": [],
                     "choices": {
@@ -598,12 +599,47 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
                 "idempotency_key": "background-activate",
             },
         )
+        character_sheet = default_character_sheet()
+        character_sheet["progression"]["level"] = 3
+        character_sheet["progression"]["classes"] = [
+            {"name": "Wizard", "level": 3, "subclass": "", "hit_die": 6}
+        ]
+        character_sheet["spellcasting"].update(
+            {
+                "ability": "intelligence",
+                "class_lists": ["wizard"],
+                "spell_slots": {
+                    "1": {
+                        "label": "1st-level slots",
+                        "value": 4,
+                        "max": 4,
+                        "recovers_on": "long_rest",
+                        "source_key": "wizard",
+                    },
+                    "2": {
+                        "label": "2nd-level slots",
+                        "value": 2,
+                        "max": 2,
+                        "recovers_on": "long_rest",
+                        "source_key": "wizard",
+                    },
+                },
+                "preparation": {
+                    "mode": "spellbook",
+                    "max_prepared": 6,
+                    "changes_on": "long_rest",
+                    "selected_spell_ids": [],
+                },
+                "spellbook": {"enabled": True, "spell_ids": []},
+            }
+        )
         character = await _call(
             server,
             "character_create",
             {
                 "campaign_id": campaign["id"],
                 "name": "Guild Initiate",
+                "sheet": character_sheet,
                 "idempotency_key": "background-character",
             },
         )
@@ -624,7 +660,38 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
         assert applied["sheet"]["progression"]["background_grants"][
             "equipment_item_ids"
         ] == [item["id"]]
+        assert applied["sheet"]["progression"]["background_grants"][
+            "spell_list_expansion"
+        ] == [
+            {
+                "artifact_id": "dnd5e.content.srd2014.spell.aid",
+                "name": "Aid",
+                "pack_id": "dnd5e.content.srd2014",
+                "pack_version": "1.20.0",
+            }
+        ]
         assert applied["rule_receipts"][0]["selection"] == {"equipment_package": "A"}
+        spell = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": character["id"],
+                "artifact_id": "dnd5e.content.srd2014.spell.aid",
+                "selection": {"source_class": "Wizard", "method": "spellbook"},
+                "expected_revision": applied["revision"],
+                "idempotency_key": "background-expanded-spell",
+            },
+        )
+        aid = next(
+            item
+            for item in spell["sheet"]["content"]["spells"]
+            if item["id"] == "dnd5e.content.srd2014.spell.aid"
+        )
+        assert aid["grant"] == {
+            "source_type": "class",
+            "source_key": "wizard",
+            "method": "spellbook",
+        }
 
     import asyncio
 
