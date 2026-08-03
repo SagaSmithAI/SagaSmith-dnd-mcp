@@ -1413,6 +1413,34 @@ def _validated_additive_choices(
     return selected, combined
 
 
+def _subclass_spell_grants(card: dict[str, Any]) -> list[dict[str, Any]]:
+    """Normalize legacy domain lists and explicit subclass access grants."""
+
+    raw_legacy = card.get("always_prepared_spells") or []
+    raw_grants = card.get("spell_grants") or []
+    if not isinstance(raw_legacy, list) or not isinstance(raw_grants, list):
+        raise RulesetUnavailableError("subclass spell grants are not executable")
+    grants = [
+        {**deepcopy(dict(item)), "method": "always_prepared"}
+        for item in raw_legacy
+        if isinstance(item, dict)
+    ]
+    if len(grants) != len(raw_legacy) or any(
+        not isinstance(item, dict) for item in raw_grants
+    ):
+        raise RulesetUnavailableError("subclass spell grants are not structured")
+    grants.extend(deepcopy(list(raw_grants)))
+    names = [str(item.get("name") or "").strip().casefold() for item in grants]
+    if any(not name for name in names) or len(names) != len(set(names)):
+        raise RulesetUnavailableError("subclass spell grants are empty or duplicated")
+    if any(
+        item.get("method") not in {"always_prepared", "known", "spellbook"}
+        for item in grants
+    ):
+        raise RulesetUnavailableError("subclass spell grant method is not executable")
+    return grants
+
+
 def audit_dnd_addon_resolution_components(
     components: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -39113,7 +39141,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             grant_sources.append(
                 (
                     subclass_name,
-                    list(subclass_card.get("always_prepared_spells") or []),
+                    _subclass_spell_grants(subclass_card),
                 )
             )
         for feature_record in sheet.get("content", {}).get("features", []):
@@ -39139,7 +39167,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             option = str(choices.get("option") or "")
             if option not in spell_options:
                 raise ValueError("recorded subclass spell option is missing or unavailable")
-            grant_sources.append((subclass_name, list(spell_options[option])))
+            grant_sources.append(
+                (
+                    subclass_name,
+                    [
+                        {**deepcopy(dict(item)), "method": "always_prepared"}
+                        for item in spell_options[option]
+                    ],
+                )
+            )
 
         candidates = available_content_artifacts(campaign_id, branch_id=branch_id)
         class_level = int(target_class.get("level", 0) or 0)
@@ -39150,6 +39186,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 minimum_level = int(grant.get("minimum_level", 1) or 1)
                 if minimum_level > class_level:
                     continue
+                method = str(grant.get("method") or "always_prepared")
                 spell_name = str(grant.get("name") or "").strip()
                 match = next(
                     (
@@ -39167,7 +39204,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     )
                 spell_pack_id, spell_version, spell_artifact = match
                 spell_id = str(spell_artifact["id"])
-                always_prepared_ids.add(spell_id)
+                if method == "always_prepared":
+                    always_prepared_ids.add(spell_id)
                 spell_card = next(
                     (
                         item
@@ -39176,8 +39214,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     ),
                     None,
                 )
-                was_always_prepared = bool(
-                    spell_card and dict(spell_card.get("access") or {}).get("always_prepared")
+                runtime_method = (
+                    "class_prepared" if method == "always_prepared" else method
+                )
+                was_granted = bool(
+                    spell_card
+                    and dict(spell_card.get("grant") or {}).get("source_type")
+                    == "subclass"
+                    and str(dict(spell_card.get("grant") or {}).get("source_key") or "")
+                    == source_name
+                    and dict(spell_card.get("grant") or {}).get("method")
+                    == runtime_method
                 )
                 if spell_card is None:
                     spell_card = deepcopy(dict(spell_artifact.get("card") or {}))
@@ -39186,11 +39233,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 spell_card["grant"] = {
                     "source_type": "subclass",
                     "source_key": source_name,
-                    "method": "class_prepared",
+                    "method": runtime_method,
                 }
-                spell_card.setdefault("access", {})["known"] = False
-                spell_card["access"]["prepared"] = True
-                spell_card["access"]["always_prepared"] = True
+                access = spell_card.setdefault("access", {})
+                access["known"] = method == "known"
+                access["prepared"] = method == "always_prepared"
+                access["always_prepared"] = method == "always_prepared"
+                if method == "spellbook":
+                    spellbook = sheet["spellcasting"]["spellbook"]
+                    if not spellbook.get("enabled"):
+                        raise RulesetUnavailableError(
+                            "subclass spellbook grant requires an enabled spellbook"
+                        )
+                    if spell_id not in spellbook.get("spell_ids", []):
+                        spellbook["spell_ids"].append(spell_id)
                 spell_card.update(
                     id=spell_id,
                     pack_id=spell_pack_id,
@@ -39198,12 +39254,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     rule_refs=list(spell_artifact.get("rule_refs") or []),
                     mechanic_refs=list(spell_artifact.get("mechanic_refs") or []),
                 )
-                if not was_always_prepared:
+                if not was_granted:
                     unlocked.append(
                         {
                             "artifact_id": spell_id,
                             "name": str(spell_card.get("name") or spell_name),
                             "minimum_level": minimum_level,
+                            "method": method,
                             "source_subclass": source_name,
                         }
                     )
@@ -40625,10 +40682,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise ValueError("target class already has a different subclass")
             target["subclass"] = str(card.get("name") or artifact_id)
             sheet["progression"]["classes"] = classes
-            domain_spell_ids: list[str] = []
-            for spell_grant in card.get("always_prepared_spells", []):
+            always_prepared_spell_ids: list[str] = []
+            for spell_grant in _subclass_spell_grants(card):
                 if int(spell_grant.get("minimum_level", 1) or 1) > int(target.get("level", 0) or 0):
                     continue
+                method = str(spell_grant.get("method") or "always_prepared")
                 spell_name = str(spell_grant.get("name") or "").strip()
                 spell_match = next(
                     (
@@ -40652,7 +40710,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     }
                 spell_pack_id, spell_version, spell_artifact = spell_match
                 spell_id = str(spell_artifact["id"])
-                domain_spell_ids.append(spell_id)
+                if method == "always_prepared":
+                    always_prepared_spell_ids.append(spell_id)
                 spell_card = next(
                     (item for item in sheet["content"]["spells"] if item.get("id") == spell_id),
                     None,
@@ -40664,11 +40723,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 spell_card["grant"] = {
                     "source_type": "subclass",
                     "source_key": str(card.get("name") or artifact_id),
-                    "method": "class_prepared",
+                    "method": (
+                        "class_prepared" if method == "always_prepared" else method
+                    ),
                 }
-                spell_card.setdefault("access", {})["known"] = False
-                spell_card["access"]["prepared"] = True
-                spell_card["access"]["always_prepared"] = True
+                access = spell_card.setdefault("access", {})
+                access["known"] = method == "known"
+                access["prepared"] = method == "always_prepared"
+                access["always_prepared"] = method == "always_prepared"
+                if method == "spellbook":
+                    spellbook = sheet["spellcasting"]["spellbook"]
+                    if not spellbook.get("enabled"):
+                        raise RulesetUnavailableError(
+                            "subclass spellbook grant requires an enabled spellbook"
+                        )
+                    if spell_id not in spellbook.get("spell_ids", []):
+                        spellbook["spell_ids"].append(spell_id)
                 spell_card.update(
                     id=spell_id,
                     pack_id=spell_pack_id,
@@ -40676,12 +40746,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     rule_refs=list(spell_artifact.get("rule_refs") or []),
                     mechanic_refs=list(spell_artifact.get("mechanic_refs") or []),
                 )
-            if domain_spell_ids:
+            if always_prepared_spell_ids:
                 preparation = sheet["spellcasting"]["preparation"]
                 preparation["selected_spell_ids"] = [
                     item
                     for item in preparation.get("selected_spell_ids", [])
-                    if item not in set(domain_spell_ids)
+                    if item not in set(always_prepared_spell_ids)
                 ]
         elif kind == "background":
             existing_background = str(sheet["progression"].get("background") or "")

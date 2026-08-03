@@ -565,6 +565,60 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
             status="ready",
             references=["book:addon:p1"],
         )
+        subclass_artifact = {
+            "id": "dnd5e.addon.guild.subclass.circle-of-spores",
+            "kind": "subclass",
+            "application_state": "selection_ready",
+            "mechanical_scope": "mechanical",
+            "execution_state": "engine_ready",
+            "semantic_resolution": {
+                "status": "resolved",
+                "mode": "static_grant",
+                "first_use_compilation_required": False,
+                "clause_ids": ["circle-of-spores-spell-grants"],
+            },
+            "rule_clauses": [
+                {
+                    "schema_version": 1,
+                    "id": "circle-of-spores-spell-grants",
+                    "title": "Circle of Spores spell grants",
+                    "scope": "mechanical",
+                    "source_citations": [
+                        {
+                            "source": "book:addon",
+                            "source_ref": {"page": 2},
+                            "source_excerpt": (
+                                "You learn the chill touch cantrip and gain circle spells."
+                            ),
+                        }
+                    ],
+                    "settlement": {
+                        "mode": "static_grant",
+                        "grant_refs": [
+                            "card.always_prepared_spells",
+                            "card.spell_grants",
+                        ],
+                    },
+                }
+            ],
+            "card": {
+                "name": "Circle of Spores",
+                "class_name": "Druid",
+                "minimum_level": 2,
+                "always_prepared_spells": [
+                    {"name": "Blindness/Deafness", "minimum_level": 3}
+                ],
+                "spell_grants": [
+                    {"name": "Chill Touch", "minimum_level": 2, "method": "known"}
+                ],
+            },
+            "rule_refs": ["book:addon:p2"],
+        }
+        subclass_artifact["selection_contract"] = build_selection_contract(
+            subclass_artifact,
+            status="ready",
+            references=["book:addon:p2"],
+        )
         draft = await _call(
             server,
             "rule_pack_draft",
@@ -578,7 +632,7 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
                     "editions": ["2014"],
                     "capabilities": [],
                 },
-                "artifacts": [artifact],
+                "artifacts": [artifact, subclass_artifact],
                 "mechanics": [],
             },
         )
@@ -692,6 +746,74 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
             "source_key": "wizard",
             "method": "spellbook",
         }
+
+        druid_sheet = default_character_sheet()
+        druid_sheet["progression"]["level"] = 3
+        druid_sheet["progression"]["classes"] = [
+            {"name": "Druid", "level": 3, "subclass": "", "hit_die": 8}
+        ]
+        druid_sheet["spellcasting"].update(
+            {
+                "ability": "wisdom",
+                "class_lists": ["druid"],
+                "spell_slots": {
+                    "1": {
+                        "label": "1st-level slots",
+                        "value": 4,
+                        "max": 4,
+                        "recovers_on": "long_rest",
+                        "source_key": "druid",
+                    },
+                    "2": {
+                        "label": "2nd-level slots",
+                        "value": 2,
+                        "max": 2,
+                        "recovers_on": "long_rest",
+                        "source_key": "druid",
+                    },
+                },
+                "preparation": {
+                    "mode": "prepared",
+                    "max_prepared": 6,
+                    "changes_on": "long_rest",
+                    "selected_spell_ids": [],
+                },
+            }
+        )
+        druid = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Spore Druid",
+                "sheet": druid_sheet,
+                "idempotency_key": "subclass-character",
+            },
+        )
+        subclass_applied = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": druid["id"],
+                "artifact_id": subclass_artifact["id"],
+                "selection": {"target_class_name": "Druid"},
+                "expected_revision": druid["revision"],
+                "idempotency_key": "subclass-apply",
+            },
+        )
+        subclass_spells = {
+            item["name"]: item
+            for item in subclass_applied["sheet"]["content"]["spells"]
+        }
+        assert subclass_spells["Chill Touch"]["grant"]["method"] == "known"
+        assert subclass_spells["Chill Touch"]["access"]["known"] is True
+        assert subclass_spells["Chill Touch"]["access"]["always_prepared"] is False
+        assert subclass_spells["Blindness/Deafness"]["grant"]["method"] == (
+            "class_prepared"
+        )
+        assert subclass_spells["Blindness/Deafness"]["access"][
+            "always_prepared"
+        ] is True
 
     import asyncio
 
