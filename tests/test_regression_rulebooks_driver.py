@@ -181,6 +181,40 @@ def test_catalog_manifest_resolves_stable_sources_and_review_actions(tmp_path) -
     assert decisions[1]["catalog_review_decision"]["method"] == "agent"
 
 
+def test_expected_catalog_uses_reviewed_names_instead_of_damaged_ocr() -> None:
+    candidates = [
+        {
+            "id": "orc",
+            "kind": "species",
+            "name": "0 RC",
+            "artifact": {
+                "kind": "species",
+                "card": {"name": "0 RC"},
+            },
+        }
+    ]
+    review = {
+        "default_status": "accepted",
+        "decisions": [
+            {
+                "kind": "species",
+                "name": "0 RC",
+                "artifact_patch": {"card": {"name": "Orc"}},
+            }
+        ],
+        "expected_catalog": [{"kind": "species", "name": "Orc"}],
+    }
+
+    decisions = driver._review_spec_decisions(
+        candidates,
+        review,
+        reviewer="agent:catalog",
+        method="agent",
+    )
+
+    assert decisions[0]["artifact"]["card"]["name"] == "Orc"
+
+
 def test_catalog_manifest_rejects_ambiguous_source_selectors() -> None:
     addition = {
         "kind": "subclass",

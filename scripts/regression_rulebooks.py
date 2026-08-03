@@ -1019,7 +1019,7 @@ def _review_spec_decisions(
             if isinstance(item, dict)
         )
         accepted_keys = Counter(
-            (_fold_text(candidate.get("kind")), _fold_text(candidate.get("name")))
+            _reviewed_candidate_identity(candidate, decision)
             for candidate, decision in zip(candidates, decisions, strict=True)
             if decision["review_status"] == "accepted"
         )
@@ -1036,12 +1036,14 @@ def _review_spec_decisions(
             for value in expected_counts.values()
         ):
             raise ValueError("expected_counts must map content kinds to nonnegative integers")
-        accepted_candidates = [
-            candidate
+        accepted_identities = [
+            _reviewed_candidate_identity(candidate, decision)
             for candidate, decision in zip(candidates, decisions, strict=True)
             if decision["review_status"] == "accepted"
         ]
-        actual_counts = _kind_counts(accepted_candidates)
+        actual_counts = dict(
+            sorted(Counter(kind for kind, _name in accepted_identities).items())
+        )
         normalized_expected = {
             str(kind): count for kind, count in sorted(expected_counts.items()) if count
         }
@@ -1051,6 +1053,18 @@ def _review_spec_decisions(
                 f"expected={normalized_expected}, actual={actual_counts}"
             )
     return decisions
+
+
+def _reviewed_candidate_identity(
+    candidate: dict[str, Any],
+    decision: dict[str, Any],
+) -> tuple[str, str]:
+    artifact = dict(decision.get("artifact") or candidate.get("artifact") or {})
+    card = dict(artifact.get("card") or {})
+    return (
+        _fold_text(artifact.get("kind") or candidate.get("kind")),
+        _fold_text(card.get("name") or candidate.get("name")),
+    )
 
 
 def _matches_includes(
