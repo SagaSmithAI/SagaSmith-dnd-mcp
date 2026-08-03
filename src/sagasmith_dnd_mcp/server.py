@@ -244,6 +244,7 @@ from sagasmith_dnd.content_import import (
 from sagasmith_dnd.content_readiness import (
     catalog_review_errors,
     selection_contract_errors,
+    selection_input_errors,
 )
 from sagasmith_dnd.content_solution import (
     ContentSolutionError,
@@ -39090,6 +39091,26 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         kind = str(artifact.get("kind") or "")
         card = deepcopy(dict(artifact.get("card") or {}))
         selection = deepcopy(selection or {})
+        pack_manifest = dict(rule_packs.get_version(pack_id, version).manifest)
+        contract_required = (
+            "readiness" in pack_manifest
+            or "readiness_policy" in pack_manifest
+            or artifact.get("selection_contract") is not None
+        )
+        if contract_required:
+            contract_errors = selection_input_errors(artifact, selection)
+            if contract_errors:
+                return {
+                    **_ruling_status(
+                        "pending_ruling",
+                        "missing_or_conflicting_source_review",
+                    ),
+                    "reason": (
+                        "catalog artifact does not have an exact, reviewed selection "
+                        "contract for this request"
+                    ),
+                    "errors": contract_errors,
+                }
         sheet = deepcopy(current.sheet)
         campaign = campaigns.get(current.campaign_id)
         phase = authoritative_phase(current.campaign_id)
@@ -40191,7 +40212,44 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     feature_card["choices"] = feature_choices
                 sheet["content"]["features"].append(feature_card)
             sheet["progression"]["species"] = selected_species
+        elif kind == "item":
+            if selection:
+                raise ValueError("item content selection does not accept input fields")
+            if any(
+                item.get("artifact_id") == artifact_id
+                for item in sheet["content"]["selections"]
+            ):
+                raise ValueError("content item is already present")
+            inventory_template = card.get("inventory_template")
+            if not isinstance(inventory_template, dict):
+                return {
+                    **_ruling_status(
+                        "pending_ruling",
+                        "missing_or_conflicting_source_review",
+                    ),
+                    "reason": "item has no reviewed inventory_template",
+                }
+            item_template = deepcopy(inventory_template)
+            item_template["source_key"] = str(
+                item_template.get("source_key")
+                or f"{pack_id}@{version}:{artifact_id}"
+            )
+            sheet, inventory_item_id = add_inventory_item(sheet, item_template)
+            sheet["content"]["selections"].append(
+                {
+                    "artifact_id": artifact_id,
+                    "kind": kind,
+                    "name": str(card.get("name") or artifact_id),
+                    "pack_id": pack_id,
+                    "pack_version": version,
+                    "rule_refs": list(artifact.get("rule_refs") or []),
+                    "mechanic_refs": list(artifact.get("mechanic_refs") or []),
+                    "selection": {"inventory_item_id": inventory_item_id},
+                }
+            )
         elif kind in {"feature", "activity"}:
+            if kind == "activity" and selection:
+                raise ValueError("activity content selection does not accept input fields")
             section = "features" if kind == "feature" else "activities"
             existing_content = next(
                 (item for item in sheet["content"][section] if item.get("id") == artifact_id),
