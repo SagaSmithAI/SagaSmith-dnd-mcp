@@ -8,6 +8,7 @@ import fnmatch
 import hashlib
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -709,29 +710,61 @@ def _review_spec_decisions(
     raw_rules = review_spec.get("decisions") or []
     if not isinstance(raw_rules, list):
         raise ValueError("catalog manifest decisions must be a list")
-    rules: dict[tuple[str, str], dict[str, Any]] = {}
+    rules: list[dict[str, Any]] = []
     for index, rule in enumerate(raw_rules):
         if not isinstance(rule, dict):
             raise ValueError(f"catalog decision {index} must be an object")
-        unknown = set(rule) - {"kind", "name", "status", "artifact_patch", "note"}
+        unknown = set(rule) - {
+            "kind",
+            "name",
+            "source_heading_exact",
+            "source_heading_contains",
+            "status",
+            "artifact_patch",
+            "note",
+        }
         if unknown:
             raise ValueError(
                 f"catalog decision {index} has unsupported fields: {sorted(unknown)}"
             )
         key = (_fold_text(rule.get("kind")), _fold_text(rule.get("name")))
-        if not all(key) or key in rules:
-            raise ValueError(f"catalog decision {index} has an invalid or duplicate identity")
-        rules[key] = rule
+        if not all(key):
+            raise ValueError(f"catalog decision {index} has an invalid identity")
+        rules.append(rule)
     default_status = str(review_spec.get("default_status") or "accepted")
     if default_status not in {"accepted", "rejected"}:
         raise ValueError("catalog manifest default_status must be accepted or rejected")
     decisions: list[dict[str, Any]] = []
-    matched: set[tuple[str, str]] = set()
+    matched: set[int] = set()
     for candidate in candidates:
         key = (_fold_text(candidate.get("kind")), _fold_text(candidate.get("name")))
-        rule = rules.get(key, {})
-        if rule:
-            matched.add(key)
+        heading_path = [
+            _fold_text(value) for value in candidate.get("source_heading_path") or []
+        ]
+        matching_rules: list[tuple[int, dict[str, Any]]] = []
+        for rule_index, rule in enumerate(rules):
+            if key != (_fold_text(rule.get("kind")), _fold_text(rule.get("name"))):
+                continue
+            exact = rule.get("source_heading_exact")
+            if exact is not None:
+                expected_path = (
+                    [_fold_text(value) for value in exact]
+                    if isinstance(exact, list)
+                    else [_fold_text(exact)]
+                )
+                if expected_path != heading_path and expected_path != heading_path[-1:]:
+                    continue
+            contains = rule.get("source_heading_contains")
+            if contains is not None and _fold_text(contains) not in " > ".join(
+                heading_path
+            ):
+                continue
+            matching_rules.append((rule_index, rule))
+        if len(matching_rules) > 1:
+            raise ValueError(f"multiple catalog decisions match candidate {key}")
+        rule = matching_rules[0][1] if matching_rules else {}
+        if matching_rules:
+            matched.add(matching_rules[0][0])
         status = str(rule.get("status") or default_status)
         if status not in {"accepted", "rejected"}:
             raise ValueError(f"catalog decision for {key} has invalid status {status}")
@@ -764,28 +797,34 @@ def _review_spec_decisions(
         elif rule.get("artifact_patch") is not None:
             raise ValueError(f"rejected catalog decision for {key} cannot patch its artifact")
         decisions.append(decision)
-    unmatched = sorted(set(rules) - matched)
+    unmatched = [index for index in range(len(rules)) if index not in matched]
     if unmatched:
-        raise ValueError(f"catalog manifest decisions matched no candidate: {unmatched}")
+        raise ValueError(
+            "catalog manifest decisions matched no candidate: "
+            + ", ".join(
+                f"{rules[index].get('kind')}:{rules[index].get('name')}"
+                for index in unmatched
+            )
+        )
     expected = review_spec.get("expected_catalog")
     if expected is not None:
         if not isinstance(expected, list):
             raise ValueError("expected_catalog must be a list")
-        expected_keys = {
+        expected_keys = Counter(
             (_fold_text(item.get("kind")), _fold_text(item.get("name")))
             for item in expected
             if isinstance(item, dict)
-        }
-        accepted_keys = {
+        )
+        accepted_keys = Counter(
             (_fold_text(candidate.get("kind")), _fold_text(candidate.get("name")))
             for candidate, decision in zip(candidates, decisions, strict=True)
             if decision["review_status"] == "accepted"
-        }
+        )
         if expected_keys != accepted_keys:
             raise ValueError(
                 "catalog manifest expected_catalog differs from the accepted catalog: "
-                f"missing={sorted(expected_keys - accepted_keys)}, "
-                f"unexpected={sorted(accepted_keys - expected_keys)}"
+                f"missing={sorted((expected_keys - accepted_keys).elements())}, "
+                f"unexpected={sorted((accepted_keys - expected_keys).elements())}"
             )
     return decisions
 

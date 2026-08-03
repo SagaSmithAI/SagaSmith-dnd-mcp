@@ -184,6 +184,49 @@ def test_strict_catalog_manifest_requires_every_selected_document() -> None:
         )
 
 
+def test_catalog_decisions_distinguish_same_named_contextual_features() -> None:
+    candidates = [
+        {
+            "id": owner.casefold(),
+            "kind": "feature",
+            "name": "Tools of the Trade",
+            "source_heading_path": ["Artificer Specialists", owner, "Tools of the Trade"],
+            "artifact": {
+                "kind": "feature",
+                "card": {"name": "Tools of the Trade"},
+            },
+        }
+        for owner in ("Alchemist", "Artillerist")
+    ]
+    review = {
+        "default_status": "accepted",
+        "decisions": [
+            {
+                "kind": "feature",
+                "name": "Tools of the Trade",
+                "source_heading_contains": owner,
+                "artifact_patch": {"card": {"subclass_name": owner}},
+            }
+            for owner in ("Alchemist", "Artillerist")
+        ],
+        "expected_catalog": [
+            {"kind": "feature", "name": "Tools of the Trade"},
+            {"kind": "feature", "name": "Tools of the Trade"},
+        ],
+    }
+
+    decisions = driver._review_spec_decisions(
+        candidates,
+        review,
+        reviewer="agent:catalog",
+        method="agent",
+    )
+
+    assert [
+        item["artifact"]["card"]["subclass_name"] for item in decisions
+    ] == ["Alchemist", "Artillerist"]
+
+
 def test_portable_roundtrip_uses_public_facades_and_preserves_package() -> None:
     package = {
         "id": "dnd5e.regression.rulebook.0123456789abcdef",
