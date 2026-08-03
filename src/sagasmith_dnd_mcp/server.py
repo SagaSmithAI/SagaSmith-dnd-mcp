@@ -39566,8 +39566,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     fields.append("languages")
                 if int(grants.get("skill_choice_count", 0) or 0):
                     fields.append("skills")
-                if list(grants.get("tool_choices") or []):
+                if int(grants.get("tool_choice_count", 0) or 0):
                     fields.append("tools")
+                if list(grants.get("size_options") or []):
+                    fields.append("size")
                 if int(dict(grants.get("ability_choice") or {}).get("count", 0) or 0):
                     fields.append("abilities")
                 if grants.get("cantrip_choice"):
@@ -39578,8 +39580,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         card.get("base_species") or card.get("name") or ""
                     ),
                     "language_count": int(grants.get("language_choice_count", 0) or 0),
+                    "language_options": list(grants.get("language_options") or []),
+                    "allow_any_language": grants.get("allow_any_language") is True,
                     "skill_count": int(grants.get("skill_choice_count", 0) or 0),
-                    "tool_options": list(grants.get("tool_choices") or []),
+                    "skill_options": list(grants.get("skill_options") or []),
+                    "allow_any_skill": grants.get("allow_any_skill") is True,
+                    "tool_count": int(grants.get("tool_choice_count", 0) or 0),
+                    "tool_options": list(
+                        grants.get("tool_options") or grants.get("tool_choices") or []
+                    ),
+                    "size_options": list(grants.get("size_options") or []),
                     "ability_choice": deepcopy(
                         dict(grants.get("ability_choice") or {})
                     ),
@@ -40986,33 +40996,50 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "reason": "species has unresolved structured grants",
                     "missing": list(grants.get("unresolved") or []),
                 }
-            selected_languages = _validated_distinct_choices(
+            selected_languages, all_languages = _validated_additive_choices(
                 selection.get("languages"),
                 count=int(grants.get("language_choice_count", 0) or 0),
-                label="species languages",
+                label="species language",
+                fixed=grants.get("languages") or [],
+                options=grants.get("language_options") or [],
+                allow_unlisted=grants.get("allow_any_language") is True,
             )
-            selected_skills = [
-                item.casefold()
-                for item in _validated_distinct_choices(
-                    selection.get("skills"),
-                    count=int(grants.get("skill_choice_count", 0) or 0),
-                    label="species skills",
-                )
-            ]
-            for skill in selected_skills:
+            selected_skills_raw, all_skills_raw = _validated_additive_choices(
+                selection.get("skills"),
+                count=int(grants.get("skill_choice_count", 0) or 0),
+                label="species skill",
+                fixed=grants.get("skill_proficiencies") or [],
+                options=grants.get("skill_options") or [],
+                allow_unlisted=grants.get("allow_any_skill") is True,
+            )
+            selected_skills = [item.casefold().replace(" ", "_") for item in selected_skills_raw]
+            all_skills = [item.casefold().replace(" ", "_") for item in all_skills_raw]
+            for skill in all_skills:
                 if skill not in sheet["skills"]:
                     raise ValueError(f"species references an unknown skill: {skill}")
-            tool_options = {
-                str(item).casefold(): str(item) for item in grants.get("tool_choices", [])
-            }
-            selected_tools = _validated_distinct_choices(
+            selected_tools, all_tools = _validated_additive_choices(
                 selection.get("tools"),
-                count=1 if tool_options else 0,
-                label="species tools",
+                count=int(grants.get("tool_choice_count", 0) or 0),
+                label="species tool",
+                fixed=grants.get("tool_proficiencies") or [],
+                options=(grants.get("tool_options") or grants.get("tool_choices") or []),
             )
-            if any(item.casefold() not in tool_options for item in selected_tools):
-                raise ValueError("species tool choice is not one of the allowed options")
-            selected_tools = [tool_options[item.casefold()] for item in selected_tools]
+            size_options = {
+                str(item).strip().casefold(): str(item).strip().casefold()
+                for item in grants.get("size_options", [])
+                if str(item).strip()
+            }
+            selected_size = str(selection.get("size") or "").strip().casefold()
+            if size_options:
+                if not selected_size:
+                    return {
+                        "status": "pending_choice",
+                        "reason": "species requires a size choice",
+                    }
+                if selected_size not in size_options:
+                    raise ValueError("species size is not one of the allowed options")
+            elif selected_size:
+                raise ValueError("species does not accept a size choice")
             ability_choice = dict(grants.get("ability_choice") or {})
             selected_abilities = [
                 item.casefold()
@@ -41080,8 +41107,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         source=hp_source,
                         adjust_current=True,
                     )
-            if grants.get("size"):
-                sheet["traits"]["size"] = str(grants["size"])
+            if grants.get("size") or selected_size:
+                sheet["traits"]["size"] = str(grants.get("size") or selected_size)
             if int(grants.get("walk_speed", 0) or 0):
                 sheet["combat"]["speed"]["walk"] = int(grants["walk_speed"])
             if int(grants.get("darkvision_ft", 0) or 0):
@@ -41090,13 +41117,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 dict.fromkeys(
                     [
                         *sheet["traits"]["languages"],
-                        *list(grants.get("languages") or []),
-                        *selected_languages,
+                        *all_languages,
                     ]
                 )
             )
-            fixed_skills = [str(item).casefold() for item in grants.get("skill_proficiencies", [])]
-            for skill in [*fixed_skills, *selected_skills]:
+            for skill in all_skills:
                 if skill not in sheet["skills"]:
                     raise ValueError(f"species references an unknown skill: {skill}")
                 sheet["skills"][skill]["proficiency"] = "proficient"
@@ -41110,8 +41135,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 dict.fromkeys(
                     [
                         *proficiencies["tools"],
-                        *list(grants.get("tool_proficiencies") or []),
-                        *selected_tools,
+                        *all_tools,
                     ]
                 )
             )
@@ -41164,6 +41188,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "skills": selected_skills,
                 "tools": selected_tools,
                 "abilities": selected_abilities,
+                "size": selected_size,
                 "cantrip_artifact_id": cantrip_id,
             }
             for feature in grants.get("features", []):
@@ -41258,6 +41283,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if kind == "feature":
                 declared_class = str(card.get("class_name") or "").strip()
                 declared_subclass = str(card.get("subclass_name") or "").strip()
+                declared_species = str(card.get("species_name") or "").strip()
                 minimum_level = int(card.get("minimum_level", 1) or 1)
                 target = next(
                     (
@@ -41269,12 +41295,26 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
                 if declared_class and target is None:
                     raise ValueError("feature class is not on this actor card")
+                if declared_species and str(
+                    sheet["progression"].get("species") or ""
+                ).casefold() != declared_species.casefold():
+                    raise ValueError("feature species is not on this actor card")
                 if target is not None and int(target.get("level", 0) or 0) < minimum_level:
                     raise ValueError(
                         f"{declared_class} must reach level {minimum_level} for this feature"
                     )
                 if target is not None and grant_level > int(target.get("level", 0) or 0):
                     raise ValueError("feature grant_level exceeds the actor's class level")
+                if declared_species and int(
+                    sheet["progression"].get("level", 0) or 0
+                ) < minimum_level:
+                    raise ValueError(
+                        f"{declared_species} must reach level {minimum_level} for this feature"
+                    )
+                if declared_species and grant_level > int(
+                    sheet["progression"].get("level", 0) or 0
+                ):
+                    raise ValueError("feature grant_level exceeds the actor's character level")
                 if declared_subclass and (
                     target is None
                     or str(target.get("subclass") or "").casefold() != declared_subclass.casefold()

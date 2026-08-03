@@ -577,6 +577,7 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
             "brewer's supplies",
             "mason's tools",
         ]
+        assert hill_dwarf["selection_requirements"]["tool_count"] == 1
         dwarf_sheet = default_character_sheet()
         dwarf_sheet["progression"]["species"] = "Dwarf"
         dwarf_sheet["combat"]["hp_progression"] = [
@@ -652,6 +653,8 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
             )
             if item["name"] == "High Elf"
         )
+        assert high_elf["selection_requirements"]["allow_any_language"] is True
+        assert high_elf["selection_requirements"]["language_count"] == 1
         elf = await call(
             server,
             "character_create",
