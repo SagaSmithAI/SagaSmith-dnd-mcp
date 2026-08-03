@@ -42142,6 +42142,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 *list(grants.get("weapon_proficiencies") or []),
                 *grouped_weapons,
             ]
+            all_armor = list(grants.get("armor_proficiencies") or [])
             for skill in grouped_skills:
                 if skill not in sheet["skills"]:
                     raise ValueError(f"species references an unknown skill: {skill}")
@@ -42276,6 +42277,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     raise ValueError(f"species references an unknown skill: {skill}")
                 sheet["skills"][skill]["proficiency"] = "proficient"
             proficiencies = sheet["traits"]["proficiencies"]
+            proficiencies["armor"] = list(
+                dict.fromkeys(
+                    [*proficiencies["armor"], *all_armor]
+                )
+            )
             proficiencies["weapons"] = list(
                 dict.fromkeys(
                     [*proficiencies["weapons"], *all_weapons]

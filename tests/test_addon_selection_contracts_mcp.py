@@ -931,6 +931,7 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
                     "size": "medium",
                     "walk_speed": 30,
                     "languages": ["Common"],
+                    "armor_proficiencies": ["Light Armor"],
                     "spell_list_expansion": ["Aid"],
                     "features": [],
                     "unresolved": [],
@@ -1160,6 +1161,9 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
                 "pack_id": "dnd5e.content.srd2014",
                 "pack_version": "1.20.0",
             }
+        ]
+        assert marked["sheet"]["traits"]["proficiencies"]["armor"] == [
+            "Light Armor"
         ]
         marked_spell = await _call(
             server,
