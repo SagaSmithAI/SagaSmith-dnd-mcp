@@ -898,6 +898,7 @@ SUPPORTED_FEATURE_MECHANICAL_GRANTS = frozenset(
         "languages",
         "resources",
         "skill_proficiencies",
+        "skill_proficiency_or_expertise",
         "tool_expertise_all",
         "tool_proficiencies",
         "tool_proficiency_replacement_options",
@@ -1866,6 +1867,34 @@ def _validate_group_limited_choices(
     if any(item not in covered for item in selected_keys):
         raise RulesetUnavailableError(
             f"{label} option groups do not cover a selected option"
+        )
+
+
+def _append_selected_proficiencies(
+    selected: list[str], *, target: list[str], label: str
+) -> None:
+    known = {str(item).casefold() for item in target}
+    for item in selected:
+        if item.casefold() in known:
+            raise ValueError(f"feature {label} choice is already proficient")
+        target.append(item)
+        known.add(item.casefold())
+
+
+def _apply_skill_proficiency_or_expertise(
+    sheet: dict[str, Any], proficiencies: Any
+) -> None:
+    if not isinstance(proficiencies, list):
+        raise RulesetUnavailableError(
+            "feature skill proficiency-or-expertise grants are not executable"
+        )
+    for raw_skill in proficiencies:
+        skill_key = str(raw_skill).strip().casefold().replace(" ", "_")
+        skill = sheet["skills"].get(skill_key)
+        if skill is None:
+            raise ValueError(f"feature references an unknown skill: {raw_skill}")
+        skill["proficiency"] = (
+            "proficient" if skill.get("proficiency") == "none" else "expertise"
         )
 
 
@@ -43803,6 +43832,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                                     )
                         feature_kind = str(requirements.get("kind") or "")
                         if feature_kind == "known_spell_grants":
+                            required_spell_levels = sorted(
+                                int(value)
+                                for value in requirements.get(
+                                    "required_spell_levels", []
+                                )
+                            )
+                            if required_spell_levels and sorted(spell_levels) != (
+                                required_spell_levels
+                            ):
+                                raise ValueError(
+                                    "feature spells do not match the required spell levels"
+                                )
                             maximum_spell_level = max(
                                 [
                                     int(level)
@@ -44224,16 +44265,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         ):
                             if not requirements.get(flag):
                                 continue
-                            known_values = {
-                                str(item).casefold() for item in target_values
-                            }
-                            for item in selected_values:
-                                if item.casefold() in known_values:
-                                    raise ValueError(
-                                        f"feature {label} choice is already proficient"
-                                    )
-                                target_values.append(item)
-                                known_values.add(item.casefold())
+                            _append_selected_proficiencies(
+                                selected_values,
+                                target=target_values,
+                                label=label,
+                            )
                 mechanical_grants = dict(card.get("mechanical_grants") or {})
                 unsupported_grants = set(mechanical_grants) - SUPPORTED_FEATURE_MECHANICAL_GRANTS
                 if unsupported_grants:
@@ -44409,6 +44445,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             f"feature references an unknown skill: {proficiency}"
                         )
                     sheet["skills"][skill_key]["proficiency"] = "proficient"
+                _apply_skill_proficiency_or_expertise(
+                    sheet,
+                    mechanical_grants.get("skill_proficiency_or_expertise") or [],
+                )
                 tool_expertise_all = mechanical_grants.get("tool_expertise_all", False)
                 if not isinstance(tool_expertise_all, bool):
                     raise ValueError("feature tool_expertise_all must be a boolean")

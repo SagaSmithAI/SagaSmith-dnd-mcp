@@ -11,6 +11,8 @@ from sagasmith_dnd.statblocks import parameterized_statblock_requirements
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import (
+    _append_selected_proficiencies,
+    _apply_skill_proficiency_or_expertise,
     _character_spell_card,
     _validate_group_limited_choices,
     _validated_additive_choices,
@@ -95,6 +97,24 @@ def test_background_group_limits_reject_two_choices_from_one_category() -> None:
         _validate_group_limited_choices(
             ["Dice", "Dragonchess"], groups=groups, label="background tool"
         )
+
+
+def test_selected_and_conditional_feature_proficiencies_mutate_exactly() -> None:
+    languages = ["Common"]
+    _append_selected_proficiencies(
+        ["Elvish"], target=languages, label="language"
+    )
+    assert languages == ["Common", "Elvish"]
+    with pytest.raises(ValueError, match="already proficient"):
+        _append_selected_proficiencies(
+            ["elvish"], target=languages, label="language"
+        )
+
+    sheet = default_character_sheet()
+    _apply_skill_proficiency_or_expertise(sheet, ["Persuasion"])
+    assert sheet["skills"]["persuasion"]["proficiency"] == "proficient"
+    _apply_skill_proficiency_or_expertise(sheet, ["Persuasion"])
+    assert sheet["skills"]["persuasion"]["proficiency"] == "expertise"
     with pytest.raises(ValueError, match="cannot duplicate a fixed grant"):
         _validated_additive_choices(
             ["common"],
