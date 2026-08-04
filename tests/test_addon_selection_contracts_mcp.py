@@ -7,7 +7,10 @@ from sagasmith_dnd.content_readiness import (
     build_catalog_review,
     build_selection_contract,
 )
-from sagasmith_dnd.statblocks import parameterized_statblock_requirements
+from sagasmith_dnd.statblocks import (
+    area_save_damage_spec,
+    parameterized_statblock_requirements,
+)
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import (
@@ -1195,6 +1198,7 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
                     "armor_proficiencies": ["Light Armor"],
                     "immunities": ["poison"],
                     "condition_immunities": ["poisoned"],
+                    "feat_choice": {"count": 1, "allowed_categories": []},
                     "spell_list_expansion": ["Aid"],
                     "spell_grants": [
                         {
@@ -1274,6 +1278,58 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
             status="ready",
             references=["book:addon:p3"],
         )
+        species_feat_artifact = {
+            "id": "dnd5e.addon.guild.feat.marked-training",
+            "kind": "feat",
+            "application_state": "selection_ready",
+            "mechanical_scope": "mechanical",
+            "execution_state": "engine_ready",
+            "semantic_resolution": {
+                "status": "resolved",
+                "mode": "static_grant",
+                "first_use_compilation_required": False,
+                "clause_ids": ["marked-training-language"],
+            },
+            "rule_clauses": [
+                {
+                    "schema_version": 1,
+                    "id": "marked-training-language",
+                    "title": "Marked Training language",
+                    "scope": "mechanical",
+                    "source_citations": [
+                        {
+                            "source": "book:addon",
+                            "source_ref": {"page": 3},
+                            "source_excerpt": "Marked Training grants Dwarvish.",
+                        }
+                    ],
+                    "settlement": {
+                        "mode": "static_grant",
+                        "grant_refs": ["card.mechanical_grants.languages"],
+                    },
+                }
+            ],
+            "card": {
+                "name": "Marked Training",
+                "prerequisites": [],
+                "repeatable": False,
+                "selection_requirements": None,
+                "mechanical_grants": {
+                    "ability_score_increases": {},
+                    "maximum_ability_score": 20,
+                    "languages": ["Dwarvish"],
+                    "tool_proficiencies": [],
+                    "weapon_proficiencies": [],
+                    "spell_grants": [],
+                },
+            },
+            "rule_refs": ["book:addon:p3"],
+        }
+        species_feat_artifact["selection_contract"] = build_selection_contract(
+            species_feat_artifact,
+            status="ready",
+            references=["book:addon:p3"],
+        )
         subclass_artifact = {
             "id": "dnd5e.addon.guild.subclass.circle-of-spores",
             "kind": "subclass",
@@ -1347,6 +1403,7 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
                     artifact,
                     reprinted_aid,
                     species_artifact,
+                    species_feat_artifact,
                     subclass_artifact,
                 ],
                 "mechanics": [],
@@ -1388,6 +1445,23 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
             "Persuasion",
             "Religion",
         ]
+        species_catalog = await _call(
+            server,
+            "content_catalog_list",
+            {
+                "campaign_id": campaign["id"],
+                "kind": "species",
+                "query": "Marked Human",
+            },
+        )
+        marked_entry = next(
+            item for item in species_catalog if item["id"] == species_artifact["id"]
+        )
+        assert "feat_selection" in marked_entry["selection_requirements"]["fields"]
+        assert marked_entry["selection_requirements"]["feat_choice"] == {
+            "count": 1,
+            "allowed_categories": [],
+        }
         character_sheet = default_character_sheet()
         character_sheet["progression"]["level"] = 3
         character_sheet["progression"]["classes"] = [
@@ -1512,7 +1586,12 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
             {
                 "character_id": marked_character["id"],
                 "artifact_id": species_artifact["id"],
-                "selection": {},
+                "selection": {
+                    "feat_selection": {
+                        "artifact_id": species_feat_artifact["id"],
+                        "selection": {},
+                    }
+                },
                 "expected_revision": marked_character["revision"],
                 "idempotency_key": "species-apply",
             },
@@ -1535,6 +1614,12 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
         assert marked["sheet"]["abilities"]["intelligence"]["score"] == 11
         assert marked["sheet"]["traits"]["immunities"] == ["poison"]
         assert marked["sheet"]["traits"]["condition_immunities"] == ["poisoned"]
+        assert "Dwarvish" in marked["sheet"]["traits"]["languages"]
+        assert any(
+            feat["id"] == species_feat_artifact["id"]
+            and feat["choices"]["grant_source"] == "Marked Human species"
+            for feat in marked["sheet"]["content"]["feats"]
+        )
         assert derive_character_sheet(marked["sheet"])["armor_class"] == 13
         detect_magic = next(
             item
@@ -1621,6 +1706,57 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
                 "source_species": "Marked Human",
             }
         ]
+
+        dragonborn_catalog = await _call(
+            server,
+            "content_catalog_list",
+            {
+                "campaign_id": campaign["id"],
+                "kind": "species",
+                "query": "Dragonborn",
+            },
+        )
+        dragonborn_id = "dnd5e.content.standard2014.species.dragonborn"
+        dragonborn_entry = next(
+            item for item in dragonborn_catalog if item["id"] == dragonborn_id
+        )
+        assert dragonborn_entry["selection_requirements"]["fields"] == [
+            "damage_affinity"
+        ]
+        dragonborn_character = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Red Dragonborn",
+                "sheet": character_sheet,
+                "idempotency_key": "dragonborn-character",
+            },
+        )
+        dragonborn_applied = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": dragonborn_character["id"],
+                "artifact_id": dragonborn_id,
+                "selection": {"damage_affinity": "red"},
+                "expected_revision": dragonborn_character["revision"],
+                "idempotency_key": "dragonborn-species-apply",
+            },
+        )
+        assert "fire" in dragonborn_applied["sheet"]["traits"]["resistances"]
+        breath = next(
+            item
+            for item in dragonborn_applied["sheet"]["content"]["activities"]
+            if item["name"] == "Breath Weapon"
+        )
+        breath_spec = area_save_damage_spec(
+            dragonborn_applied["sheet"], breath["id"]
+        )
+        assert breath_spec is not None
+        assert breath_spec["kind"] == "self_cone_save_damage"
+        assert breath_spec["save_dc"] == 10
+        assert breath_spec["damage_formula"] == "2d6"
 
         druid_sheet = default_character_sheet()
         druid_sheet["progression"]["level"] = 3

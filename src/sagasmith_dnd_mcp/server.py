@@ -426,6 +426,8 @@ from sagasmith_dnd.standard_spell_ids import (
     CORE_INVISIBILITY_MECHANIC_ID,
     CORE_INVISIBILITY_SPELL_IDS,
     CORE_WITCH_BOLT_MECHANIC_ID,
+    PHB2014_NON_SRD_SPELL_NAMES,
+    SRD2014_RENAMED_SPELLS,
     STANDARD_2014_CONTENT_PACK_ID,
     STANDARD_2014_CONTENT_PACK_VERSION,
 )
@@ -1526,20 +1528,32 @@ def _statblock_ocr_discovery_needed(
 ) -> bool:
     """Detect an empty or partially paired text layer that needs OCR discovery."""
 
+    def core_label(text: Any, label: str) -> bool:
+        value = " ".join(str(text or "").split())
+        patterns = {
+            # These variants are deliberately limited to observed display-font
+            # substitutions.  They only decide whether a page merits OCR; they
+            # never supply a mechanical field value.
+            "armor_class": r"(?i)^(?:armor|armar)\s+class\b",
+            "hit_points": r"(?i)^(?:hit|hil)\s+poin(?:t|l)s?\b",
+            "speed": r"(?i)^speed\b",
+        }
+        return bool(re.match(patterns[label], value))
+
     identity_count = sum(
         is_2014_statblock_identity_line(str(block.get("text") or ""))
         for block in layout_blocks
     )
     armor_count = sum(
-        bool(re.match(r"(?i)^\s*armor\s+class\b", str(block.get("text") or "")))
+        core_label(block.get("text"), "armor_class")
         for block in layout_blocks
     )
     hit_point_count = sum(
-        bool(re.match(r"(?i)^\s*hit\s+points?\b", str(block.get("text") or "")))
+        core_label(block.get("text"), "hit_points")
         for block in layout_blocks
     )
     speed_count = sum(
-        bool(re.match(r"(?i)^\s*speed\b", str(block.get("text") or "")))
+        core_label(block.get("text"), "speed")
         for block in layout_blocks
     )
     # Decorated card titles and size/type identities are often image glyphs
@@ -2489,7 +2503,9 @@ def _artifact_source_is_verified(
             )
     for citation in citations:
         source_ref = dict(citation.get("source_ref") or {})
-        chunk_key = str(source_ref.get("chunk_key") or "")
+        chunk_key = str(
+            source_ref.get("chunk_key") or citation.get("chunk_key") or ""
+        )
         excerpt = " ".join(str(citation.get("source_excerpt") or "").split())
         source_text = " ".join(str(chunks.get(chunk_key) or "").split())
         if (
@@ -13598,6 +13614,98 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 str(chunk.get("id") or ""): str(chunk.get("content") or "")
                 for chunk in rules.source_chunks(job.source_id)
             }
+            job_payload = dict(job.payload or {})
+            official_references: list[dict[str, Any]] = []
+            accepted_primary_kinds = {
+                str(
+                    candidates_by_id.get(str(decision.get("id") or ""), {}).get(
+                        "kind"
+                    )
+                    or ""
+                )
+                for decision in normalized_decisions
+                if decision.get("review_status") == "accepted"
+                and dict(decision.get("catalog_review_decision") or {}).get("role")
+                == "primary"
+            }
+            trusted_reference_kinds = accepted_primary_kinds.intersection(
+                {"background", "class", "feat", "item", "species", "spell", "subclass"}
+            )
+            if (
+                str(job_payload.get("authority") or "") in {"core", "supplement"}
+                and trusted_reference_kinds
+            ):
+                trusted_pack_ids = (
+                    {CORE_CONTENT_PACK_ID, STANDARD_2014_CONTENT_PACK_ID}
+                    if str(job_payload.get("edition") or "") == "2014"
+                    else {CORE_2024_CONTENT_PACK_ID}
+                )
+                for reference_kind in sorted(trusted_reference_kinds):
+                    official_references.extend(
+                        {
+                            **deepcopy(artifact),
+                            "_selection_schema_reference": {
+                                "pack_id": pack_id,
+                                "pack_version": version,
+                                "artifact_id": str(artifact.get("id") or ""),
+                            },
+                        }
+                        for pack_id, version, artifact in available_content_artifacts(
+                            campaign_id,
+                            kind=reference_kind,
+                        )
+                        if pack_id in trusted_pack_ids
+                    )
+                official_spell_references = [
+                    artifact
+                    for artifact in official_references
+                    if str(artifact.get("kind") or "") == "spell"
+                ]
+                if (
+                    "spell" in trusted_reference_kinds
+                    and str(job_payload.get("edition") or "") == "2014"
+                ):
+                    aliases_by_reference: dict[str, list[str]] = {}
+                    for source_name, reference_name in SRD2014_RENAMED_SPELLS.items():
+                        aliases_by_reference.setdefault(
+                            reference_name.casefold(), []
+                        ).append(source_name)
+                    for reference_artifact in official_spell_references:
+                        reference_card = dict(reference_artifact.get("card") or {})
+                        reference_name = " ".join(
+                            str(reference_card.get("name") or "").split()
+                        )
+                        source_names = list(
+                            aliases_by_reference.get(reference_name.casefold(), [])
+                        )
+                        source_aliases = list(source_names)
+                        if reference_name and (
+                            not source_aliases
+                            or str(job_payload.get("publication_id") or "")
+                            == "srd2014"
+                        ):
+                            source_names.append(reference_name)
+                        source_names = list(dict.fromkeys(source_names))
+                        reference_artifact["_selection_source_names"] = source_names
+                        if source_aliases:
+                            reference_artifact["_preserve_imported_name"] = True
+                        if (
+                            source_aliases
+                            and str(job_payload.get("publication_id") or "")
+                            != "srd2014"
+                        ):
+                            reference_artifact["_selection_default_source_name"] = (
+                                source_names[0]
+                            )
+                    if str(job_payload.get("publication_id") or "") == "phb2014":
+                        official_references.extend(
+                            {
+                                "kind": "spell",
+                                "card": {"name": name},
+                                "_selection_source_names": [name],
+                            }
+                            for name in PHB2014_NON_SRD_SPELL_NAMES
+                        )
             for decision in normalized_decisions:
                 if decision.get("review_status") != "accepted":
                     continue
@@ -13626,10 +13734,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             decision.get("artifact", candidate.get("artifact") or {})
                         ),
                     }
+                    candidate_kind = str(candidate.get("kind") or "")
+                    reference_artifacts = [
+                        artifact
+                        for artifact in official_references
+                        if str(artifact.get("kind") or "") == candidate_kind
+                    ]
                     reviewed_candidate["artifact"] = (
                         author_selection_card_from_candidate(
                             reviewed_candidate,
                             source_chunks_by_id=source_chunks_by_id,
+                            reference_artifacts=reference_artifacts,
                         )
                     )
                     first_chunk_id = next(
@@ -23777,12 +23892,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     )
             elif (
                 origin_kind == "self"
-                and shape == "line"
+                and shape in {"line", "cone"}
                 and area_save_spec.get("targets") == "each_creature"
             ):
                 if set(declared) != {"endpoint", "target_contexts"}:
                     raise CombatEngineError(
-                        "self-line saving-throw activity requires endpoint "
+                        "self-origin saving-throw activity requires endpoint "
                         "and target_contexts"
                     )
                 raw_endpoint = declared.get("endpoint")
@@ -23816,12 +23931,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ) * cell_ft
                 if (
                     length_ft <= 0
-                    or width_ft <= 0
+                    or (shape == "line" and width_ft <= 0)
                     or endpoint_distance <= 0
                     or endpoint_distance > length_ft
                 ):
                     raise CombatEngineError(
-                        "area saving-throw line endpoint is outside its recorded length"
+                        "area saving-throw endpoint is outside its recorded length"
                     )
             else:
                 raise CombatEngineError(
@@ -23850,7 +23965,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     )
                     if distance is None or distance > radius_ft:
                         continue
-                else:
+                elif shape == "line":
                     assert area_endpoint is not None
                     origin_x = float(area_origin["x"])
                     origin_y = float(area_origin["y"])
@@ -23873,6 +23988,34 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         or projection > 1
                         or perpendicular_ft
                         > float(area_contract["width_ft"]) / 2
+                    ):
+                        continue
+                else:
+                    assert area_endpoint is not None
+                    origin_x = float(area_origin["x"])
+                    origin_y = float(area_origin["y"])
+                    delta_x = float(area_endpoint["x"]) - origin_x
+                    delta_y = float(area_endpoint["y"]) - origin_y
+                    squared_length = delta_x**2 + delta_y**2
+                    endpoint_length = math.sqrt(squared_length)
+                    target_x = float(target_position["x"]) - origin_x
+                    target_y = float(target_position["y"]) - origin_y
+                    projection = (
+                        target_x * delta_x + target_y * delta_y
+                    ) / squared_length
+                    axial_ft = projection * endpoint_length * cell_ft
+                    perpendicular_ft = (
+                        abs(target_x * delta_y - target_y * delta_x)
+                        / endpoint_length
+                        * cell_ft
+                    )
+                    radial_ft = math.hypot(target_x, target_y) * cell_ft
+                    if (
+                        target_id == actor_id
+                        or projection <= 0
+                        or projection > 1
+                        or radial_ft > float(area_contract["length_ft"])
+                        or perpendicular_ft > axial_ft / 2
                     ):
                         continue
                 target = require_campaign_actor(campaign_id, target_id)
@@ -39071,9 +39214,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             chunk_ids = list(raw_value.get("source_chunk_ids", []) or [])
             if not chunk_ids:
                 raise ValueError("source-bound artifacts require source_chunk_ids")
-            citations = [
-                rules.citation(str(chunk_id), source_id=source_id) for chunk_id in chunk_ids
-            ]
+            citations = []
+            for chunk_id in chunk_ids:
+                normalized_chunk_id = str(chunk_id)
+                citation = rules.citation(normalized_chunk_id, source_id=source_id)
+                # Provenance must not depend on whether semantic settlement is
+                # supplied by an imported clause or an existing kernel mechanic.
+                # Persist a verbatim source excerpt on every artifact citation so
+                # portable-addon readiness can prove the same source contract for
+                # both paths.
+                source_excerpt = source_chunks_by_id.get(normalized_chunk_id, "")[:4000]
+                if source_excerpt:
+                    citation["source_excerpt"] = source_excerpt
+                citations.append(citation)
             value = artifact_with_direct_resolution(
                 {
                     "id": str(raw_value.get("id") or ""),
@@ -41081,6 +41234,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     fields.append("abilities")
                 if grants.get("cantrip_choice"):
                     fields.append("cantrip_artifact_id")
+                if grants.get("feat_choice"):
+                    fields.append("feat_selection")
+                if grants.get("damage_affinity_choice"):
+                    fields.append("damage_affinity")
                 selection_requirements = {
                     "fields": fields,
                     "base_species": str(
@@ -41117,6 +41274,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         dict(grants.get("ability_choice") or {})
                     ),
                     "cantrip_choice": deepcopy(grants.get("cantrip_choice")),
+                    "feat_choice": deepcopy(grants.get("feat_choice")),
+                    "damage_affinity_choice": deepcopy(
+                        grants.get("damage_affinity_choice")
+                    ),
                 }
             elif artifact_kind == "statblock":
                 dependent_template = deepcopy(
@@ -43049,6 +43210,71 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 selection.get("feature_choices"),
                 groups=grants.get("narrative_choice_groups", []),
             )
+            feat_requirement = dict(grants.get("feat_choice") or {})
+            raw_species_feat = selection.get("feat_selection")
+            species_feat_match: tuple[str, str, dict[str, Any]] | None = None
+            species_feat_selection: dict[str, Any] = {}
+            if feat_requirement:
+                if not isinstance(raw_species_feat, dict):
+                    return {
+                        "status": "pending_choice",
+                        "reason": "species requires one reviewed feat selection",
+                    }
+                if set(raw_species_feat) != {"artifact_id", "selection"}:
+                    raise ValueError(
+                        "species feat_selection requires artifact_id and selection"
+                    )
+                species_feat_id = str(raw_species_feat.get("artifact_id") or "").strip()
+                raw_nested_selection = raw_species_feat.get("selection")
+                if not species_feat_id or not isinstance(raw_nested_selection, dict):
+                    raise ValueError(
+                        "species feat_selection requires an artifact id and object selection"
+                    )
+                feat_matches = [
+                    item
+                    for item in candidates
+                    if item[2].get("kind") == "feat"
+                    and str(item[2].get("id") or "") == species_feat_id
+                ]
+                if len(feat_matches) != 1:
+                    raise RulesetUnavailableError(
+                        "species feat must resolve to exactly one active feat artifact"
+                    )
+                species_feat_match = feat_matches[0]
+                allowed_categories = {
+                    str(item).strip().casefold()
+                    for item in feat_requirement.get("allowed_categories", [])
+                    if str(item).strip()
+                }
+                feat_category = str(
+                    dict(species_feat_match[2].get("card") or {}).get("category") or ""
+                ).strip().casefold()
+                if allowed_categories and feat_category not in allowed_categories:
+                    raise ValueError("species feat category is not allowed")
+                species_feat_selection = deepcopy(raw_nested_selection)
+            elif raw_species_feat is not None:
+                raise ValueError("species does not grant a feat choice")
+            affinity_requirement = dict(grants.get("damage_affinity_choice") or {})
+            raw_damage_affinity = selection.get("damage_affinity")
+            selected_affinity: dict[str, Any] | None = None
+            if affinity_requirement:
+                affinity_id = str(raw_damage_affinity or "").strip().casefold()
+                if not affinity_id:
+                    return {
+                        "status": "pending_choice",
+                        "reason": "species requires one reviewed damage affinity",
+                    }
+                affinity_matches = [
+                    dict(option)
+                    for option in affinity_requirement.get("options", [])
+                    if str(dict(option).get("id") or "").strip().casefold()
+                    == affinity_id
+                ]
+                if len(affinity_matches) != 1:
+                    raise ValueError("species damage_affinity is not a reviewed option")
+                selected_affinity = affinity_matches[0]
+            elif raw_damage_affinity is not None:
+                raise ValueError("species does not accept a damage affinity")
             grouped = [
                 option
                 for choices in proficiency_choices.values()
@@ -43276,7 +43502,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             sheet["traits"]["resistances"] = list(
                 dict.fromkeys(
-                    [*sheet["traits"]["resistances"], *list(grants.get("resistances") or [])]
+                    [
+                        *sheet["traits"]["resistances"],
+                        *list(grants.get("resistances") or []),
+                        *(
+                            [str(selected_affinity["damage_type"]).casefold()]
+                            if selected_affinity is not None
+                            and affinity_requirement.get("resistance") is True
+                            else []
+                        ),
+                    ]
                 )
             )
             sheet["traits"]["immunities"] = list(
@@ -43343,6 +43578,75 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         resource_discriminator=f"fixed-{index}",
                     )
                 )
+            affinity_activity_id = ""
+            if selected_affinity is not None:
+                activity_template = dict(affinity_requirement.get("activity") or {})
+                activity_name = str(activity_template.get("name") or "").strip()
+                affinity_activity_id = (
+                    f"{artifact_id}.activity."
+                    f"{ascii_slug(str(activity_template.get('id') or activity_name))}"
+                )
+                if any(
+                    str(item.get("id") or "") == affinity_activity_id
+                    for item in sheet["content"]["activities"]
+                ):
+                    raise ValueError("species damage-affinity activity is already present")
+                area = deepcopy(dict(selected_affinity.get("area") or {}))
+                shape = str(area.get("shape") or "").casefold()
+                damage_type = str(selected_affinity.get("damage_type") or "").casefold()
+                source_excerpt = (
+                    f"{activity_name}: {shape} {damage_type} damage; save DC equals "
+                    "8 + Constitution modifier + proficiency bonus; half damage on success."
+                )
+                uses = dict(activity_template.get("uses") or {})
+                activity = {
+                    "id": affinity_activity_id,
+                    "name": activity_name,
+                    "source_key": selected_species,
+                    "description": source_excerpt,
+                    "uses": {
+                        "label": activity_name,
+                        "value": int(uses.get("max", 0) or 0),
+                        "max": int(uses.get("max", 0) or 0),
+                        "recovers_on": str(uses.get("recovers_on") or "none"),
+                        "source_key": selected_species,
+                        "slot_level": 0,
+                        "unlimited": False,
+                    },
+                    "resource_key": "",
+                    "activation": {"type": "action", "cost": 1, "trigger": ""},
+                    "scaling": [],
+                    "resource_scaling": {},
+                    "attack_scaling": {},
+                    "choices": {
+                        "area_save_damage": {
+                            "kind": f"self_{shape}_save_damage",
+                            "origin": {"kind": "self"},
+                            "area": area,
+                            "targets": "each_creature",
+                            "save_ability": str(
+                                selected_affinity.get("save_ability") or ""
+                            ).casefold(),
+                            "save_dc_formula": deepcopy(
+                                dict(activity_template.get("save_dc") or {})
+                            ),
+                            "damage_formula_by_level": deepcopy(
+                                dict(activity_template.get("damage_by_level") or {})
+                            ),
+                            "damage_type": damage_type,
+                            "half_on_success": True,
+                            "save_source_kind": "nonmagical_effect",
+                            "source_excerpt": source_excerpt,
+                        }
+                    },
+                    "advancement_grants": [],
+                    "pack_id": pack_id,
+                    "pack_version": version,
+                    "rule_refs": list(artifact.get("rule_refs") or []),
+                    "mechanic_refs": ["dnd5e.core.activity.area_save_damage"],
+                    "ruling_requirements": [],
+                }
+                sheet["content"]["activities"].append(activity)
             for raw_resource_key, raw_resource in dict(
                 grants.get("resources") or {}
             ).items():
@@ -43371,6 +43675,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "abilities": selected_abilities,
                 "size": selected_size,
                 "cantrip_artifact_id": cantrip_id,
+                "feat_selection": deepcopy(raw_species_feat),
+                "damage_affinity": (
+                    str(selected_affinity.get("id") or "")
+                    if selected_affinity is not None
+                    else ""
+                ),
+                "damage_affinity_activity_id": affinity_activity_id,
                 "fixed_spell_grants": fixed_species_spell_grants,
             }
             species_feature_grants = materialize_species_features(
@@ -43404,6 +43715,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "spell_list_expansion": resolved_expansion,
             }
             sheet["progression"]["species"] = selected_species
+            if species_feat_match is not None:
+                materialize_feat(
+                    species_feat_match,
+                    species_feat_selection,
+                    source=f"{selected_species} species",
+                )
         elif kind == "item":
             if selection:
                 raise ValueError("item content selection does not accept input fields")
@@ -48500,6 +48817,14 @@ Useful bounded guidance:
                 if not spellcasting:
                     raise ValueError("owner has no spell save DC for this template")
                 values[parameter] = int(spellcasting["save_dc"])
+            elif parameter == "owner_hit_point_maximum":
+                owner_hit_points = dict(derived.get("hit_points") or {})
+                maximum = int(owner_hit_points.get("max", 0) or 0)
+                if maximum < 1:
+                    raise ValueError(
+                        "owner has no positive hit point maximum for this template"
+                    )
+                values[parameter] = maximum
             elif parameter.startswith("owner_") and parameter.endswith("_modifier"):
                 ability = parameter[len("owner_") : -len("_modifier")]
                 if ability == "spellcasting_ability":

@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "strict": true,
+  "documents": {
+    "D&D 5E - Player's Handbook.pdf": {
+      "complete_review": true,
+      "default_status": "accepted",
+      "rationale": "The complete PHB catalog was checked against the printed class, species and subrace, background and variant, feat, subclass, spell, appendix statblock, and source-fragment boundaries. Trusted SRD 2014 cards may supply typed grants, but every imported artifact remains bound to this source.",
+      "expected_counts": {
+        "background": 18,
+        "class": 12,
+        "feat": 42,
+        "feature": 28,
+        "species": 19,
+        "spell": 361,
+        "statblock": 31,
+        "subclass": 40
+      }
+    }
+  }
+}

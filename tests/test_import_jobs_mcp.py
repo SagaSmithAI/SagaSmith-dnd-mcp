@@ -20,6 +20,7 @@ from sagasmith_dnd.statblocks import parse_2014_statblock
 import sagasmith_dnd_mcp.server as server_module
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import (
+    _artifact_source_is_verified,
     _artifact_source_pages,
     _bounded_ocr_heading_equivalent,
     _bundled_mm2014_actor_card,
@@ -41,6 +42,22 @@ from sagasmith_dnd_mcp.server import (
     _valid_statblock_heading,
     create_server,
 )
+
+
+def test_addon_source_verification_accepts_portable_chunk_key_citations() -> None:
+    chunks = {"source/section/chunk": "Exact portable source excerpt."}
+    artifact = {
+        "source_citations": [
+            {
+                "chunk_key": "source/section/chunk",
+                "source_excerpt": "portable source excerpt",
+            }
+        ]
+    }
+
+    assert _artifact_source_is_verified(artifact, chunks=chunks) is True
+    artifact["source_citations"][0]["source_excerpt"] = "invented replacement"
+    assert _artifact_source_is_verified(artifact, chunks=chunks) is False
 
 
 def _catalog_review_decision(role: str, reviewer: str) -> dict:
@@ -311,6 +328,15 @@ def test_statblock_ocr_discovery_fills_empty_and_partially_paired_text_layers() 
             {"text": "Speed 25 ft."},
         ],
         usable_catalog_count=1,
+    )
+    assert _statblock_ocr_discovery_needed(
+        [{"name": "GIANT EAGLE"}, {"name": "GIANT SPIDER"}, {"name": "IMP"}],
+        layout_blocks=[
+            *[{"text": "Armar Class 13"} for _ in range(4)],
+            *[{"text": "Hil Poinls 10 (3d4 + 3)"} for _ in range(4)],
+            *[{"text": "Speed 20 fI."} for _ in range(4)],
+        ],
+        usable_catalog_count=0,
     )
 
 
@@ -2205,6 +2231,9 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
         )
         assert catalog[0]["application_state"] == "selection_ready"
         assert catalog[0]["source_citations"][0]["source_key"] == "xgte-pilot"
+        assert "1st-level evocation spell" in catalog[0]["source_citations"][0][
+            "source_excerpt"
+        ]
 
         artifact = await call(
             server,
@@ -2445,6 +2474,183 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
         assert current_scene["module_id"] == revision_imported["module_id"]
         assert current_scene["scene_id"] == finale["scene_id"]
         assert current_scene["progress"]["percent"] == 25
+
+    asyncio.run(exercise())
+
+
+def test_core_import_reuses_trusted_standard_schemas_but_homebrew_does_not(
+    tmp_path: Path,
+) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    import_root = tmp_path / "imports"
+    import_root.mkdir()
+    source = import_root / "acolyte.md"
+    source.write_text(
+        (
+            "# Backgrounds\n\n## ACOLYTE\n\n"
+            "Ski1l Proficiencies: Insight, Religion\n\n"
+            "Languages: Two of your choice\n\n"
+            "Equipment: A holy symbol and vestments.\n\n"
+            "Feature: Shelter of the Faithful.\n\n"
+            "# Spells\n\n## FIREBALL\n\n"
+            "3rd-level evocation\n"
+            "Casting Time: 1 action\n"
+            "Range: 150 feet\n"
+            "Components: V, S, M (a mote of sulfur)\n"
+            "Duration: Instantaneous\n"
+            "Each creature in the sphere makes a Dexterity saving throw.\n"
+        ),
+        encoding="utf-8",
+    )
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=workspace / "SagaSmith-module-gen-skills",
+        rule_import_roots=(import_root,),
+    )
+
+    async def call(server, name: str, arguments: dict):
+        _, result = await server.call_tool(name, arguments)
+        return result.get("result", result) if isinstance(result, dict) else result
+
+    async def import_primary(server, campaign_id: str, authority: str) -> dict[str, dict]:
+        staged = await call(
+            server,
+            "rule_document_stage",
+            {"campaign_id": campaign_id, "source_path": str(source)},
+        )
+        created = await call(
+            server,
+            "rule_import_job_create",
+            {
+                "campaign_id": campaign_id,
+                "artifact": staged["artifact"],
+                "source_key": f"test.acolyte.{authority}",
+                "title": "Player's Handbook Acolyte",
+                "edition": "2014",
+                "publication_id": "phb2014",
+                "authority": authority,
+                "idempotency_key": f"create-{authority}",
+            },
+        )
+        job_id = created["job"]["id"]
+        await call(
+            server,
+            "rule_import_job_inspect",
+            {
+                "campaign_id": campaign_id,
+                "job_id": job_id,
+                "idempotency_key": f"inspect-{authority}",
+            },
+        )
+        await call(
+            server,
+            "rule_import_job_ingest",
+            {
+                "campaign_id": campaign_id,
+                "job_id": job_id,
+                "idempotency_key": f"ingest-{authority}",
+            },
+        )
+        extracted = await call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign_id,
+                "action": "extract_candidates",
+                "payload": {"job_id": job_id},
+                "idempotency_key": f"extract-{authority}",
+            },
+        )
+        acolyte = next(
+            item for item in extracted["candidates"] if item["name"] == "ACOLYTE"
+        )
+        fireball = next(
+            item for item in extracted["candidates"] if item["name"] == "FIREBALL"
+        )
+        reviewed = await call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign_id,
+                "action": "review",
+                "payload": {
+                    "job_id": job_id,
+                    "decisions": [
+                        {
+                            "id": acolyte["id"],
+                            "review_status": "accepted",
+                            "catalog_review_decision": _catalog_review_decision(
+                                "primary", f"agent:{authority}"
+                            ),
+                        },
+                        {
+                            "id": fireball["id"],
+                            "review_status": "accepted",
+                            "catalog_review_decision": _catalog_review_decision(
+                                "primary", f"agent:{authority}"
+                            ),
+                        },
+                    ],
+                },
+                "idempotency_key": f"review-{authority}",
+            },
+        )
+        return {
+            item["name"]: item["artifact"]
+            for item in reviewed["candidates"]
+            if item["id"] in {acolyte["id"], fireball["id"]}
+        }
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await call(
+            server,
+            "campaign_create",
+            {"name": "Trusted schema references", "idempotency_key": "campaign"},
+        )
+        await call(
+            server,
+            "campaign_rule_profile_set",
+            {
+                "campaign_id": campaign["id"],
+                "edition": "2014",
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "profile-2014",
+            },
+        )
+        core_artifacts = await import_primary(server, campaign["id"], "core")
+        homebrew_artifacts = await import_primary(server, campaign["id"], "homebrew")
+        core_artifact = core_artifacts["ACOLYTE"]
+        homebrew_artifact = homebrew_artifacts["ACOLYTE"]
+
+        assert core_artifact["selection_schema_references"] == [
+            {
+                "pack_id": "dnd5e.content.srd2014",
+                "pack_version": "1.20.0",
+                "artifact_id": "dnd5e.content.srd2014.background.acolyte",
+            }
+        ]
+        assert core_artifact["card"]["name"] == "Acolyte"
+        assert "selection_schema_references" not in homebrew_artifact
+        assert homebrew_artifact["card"]["name"] == "ACOLYTE"
+        core_fireball = core_artifacts["FIREBALL"]
+        assert core_fireball["selection_schema_references"] == [
+            {
+                "pack_id": "dnd5e.content.srd2014",
+                "pack_version": "1.20.0",
+                "artifact_id": "dnd5e.content.srd2014.spell.fireball",
+            }
+        ]
+        assert core_fireball["card"]["resolution"]["kind"] == "saving_throw"
+        assert core_fireball["mechanic_refs"] == [
+            "dnd5e.core.spell.structured_resolution"
+        ]
+        assert "selection_schema_references" not in homebrew_artifacts["FIREBALL"]
+        assert "resolution" not in homebrew_artifacts["FIREBALL"]["card"]
 
     asyncio.run(exercise())
 

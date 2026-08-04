@@ -115,6 +115,17 @@ def _arguments() -> argparse.Namespace:
             "to indexed chunk ids before the public augment_catalog call."
         ),
     )
+    parser.add_argument(
+        "--dependency-addon",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "Previously reviewed private addon package available as a semantic "
+            "dependency; repeatable. A document review must select it by exact "
+            "addon id and version before any component is embedded."
+        ),
+    )
     parser.add_argument("--fail-on-warning", action="store_true")
     parser.add_argument(
         "--portable-roundtrip",
@@ -154,7 +165,11 @@ def _key(relative_path: str, *, run_id: str = "default") -> str:
 
 
 async def _call(server: Any, name: str, arguments: dict[str, Any]) -> Any:
-    _, result = await server.call_tool(name, arguments)
+    try:
+        _, result = await server.call_tool(name, arguments)
+    except Exception as error:
+        operation = str(arguments.get("action") or arguments.get("view") or "call")
+        raise RuntimeError(f"{name}({operation}) failed: {error}") from error
     return result
 
 
@@ -211,6 +226,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     home = args.home.expanduser().resolve()
     document_cache = args.document_cache.expanduser().resolve() if args.document_cache else None
     catalog_manifest = _load_catalog_manifest(args.catalog_manifest)
+    dependency_addons = _load_dependency_addons(args.dependency_addon)
     addon_output_dir = (
         args.addon_output_dir.expanduser().resolve() if args.addon_output_dir else None
     )
@@ -512,6 +528,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     critic_reviewer=str(args.critic_reviewer),
                     critic_review_method=str(args.critic_review_method),
                     review_spec=document_review,
+                    available_dependency_addons=dependency_addons,
                 )
                 release_components.append(
                     {
@@ -1060,12 +1077,110 @@ def _catalog_document_review(
         "expected_counts",
         "expected_actor_names",
         "runtime_probes",
+        "dependency_addons",
     }
     if unknown:
         raise ValueError(
             f"catalog manifest entry for {relative_path} has unsupported fields: {sorted(unknown)}"
         )
     return review
+
+
+def _load_dependency_addons(paths: list[Path]) -> dict[tuple[str, str], dict[str, Any]]:
+    """Load exact private addon envelopes for later public-MCP validation."""
+
+    packages: dict[tuple[str, str], dict[str, Any]] = {}
+    for path in paths:
+        resolved = path.expanduser().resolve()
+        package = json.loads(resolved.read_text(encoding="utf-8"))
+        if not isinstance(package, dict) or package.get("kind") != "addon_pack":
+            raise ValueError(f"dependency addon is not an addon package: {resolved}")
+        identity = (str(package.get("id") or ""), str(package.get("version") or ""))
+        if not all(identity):
+            raise ValueError(f"dependency addon has no exact id/version: {resolved}")
+        prior = packages.get(identity)
+        if prior is not None and prior != package:
+            raise ValueError(
+                f"dependency addon identity has conflicting envelopes: {identity[0]}@{identity[1]}"
+            )
+        packages[identity] = package
+    return packages
+
+
+def _selected_dependency_addons(
+    review_spec: dict[str, Any],
+    available: dict[tuple[str, str], dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Resolve only the exact dependency addons declared by this source review."""
+
+    requirements = review_spec.get("dependency_addons") or []
+    if not isinstance(requirements, list):
+        raise ValueError("dependency_addons must be an array")
+    selected: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for index, requirement in enumerate(requirements):
+        if not isinstance(requirement, dict) or set(requirement) - {
+            "id",
+            "version",
+            "checksum",
+        }:
+            raise ValueError(
+                f"dependency_addons[{index}] must contain only id, version, and optional checksum"
+            )
+        identity = (
+            str(requirement.get("id") or ""),
+            str(requirement.get("version") or ""),
+        )
+        if not all(identity):
+            raise ValueError(f"dependency_addons[{index}] requires exact id and version")
+        if identity in seen:
+            raise ValueError(f"duplicate dependency addon: {identity[0]}@{identity[1]}")
+        package = available.get(identity)
+        if package is None:
+            raise ValueError(
+                "required dependency addon was not supplied with --dependency-addon: "
+                f"{identity[0]}@{identity[1]}"
+            )
+        expected_checksum = str(requirement.get("checksum") or "")
+        if expected_checksum and expected_checksum != str(package.get("checksum") or ""):
+            raise ValueError(
+                f"dependency addon checksum mismatch: {identity[0]}@{identity[1]}"
+            )
+        selected.append(package)
+        seen.add(identity)
+    return selected
+
+
+def _dependency_rule_components(
+    packages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Collect exact rule packages in dependency order without importing presets."""
+
+    components: list[dict[str, Any]] = []
+    by_identity: dict[tuple[str, str], dict[str, Any]] = {}
+    for addon in packages:
+        payload = addon.get("payload")
+        if not isinstance(payload, dict) or not isinstance(payload.get("components"), list):
+            raise ValueError("dependency addon has no portable component array")
+        for component in payload["components"]:
+            if not isinstance(component, dict) or component.get("kind") != "rule_pack":
+                continue
+            identity = (
+                str(component.get("id") or ""),
+                str(component.get("version") or ""),
+            )
+            if not all(identity):
+                raise ValueError("dependency addon contains a rule pack without id/version")
+            prior = by_identity.get(identity)
+            if prior is not None:
+                if prior != component:
+                    raise ValueError(
+                        f"dependency rule component conflict: {identity[0]}@{identity[1]}"
+                    )
+                continue
+            by_identity[identity] = component
+            components.append(component)
+    return components
 
 
 async def _source_chunks(server: Any, source_id: str) -> list[dict[str, Any]]:
@@ -1636,9 +1751,46 @@ async def _portable_roundtrip(
     critic_reviewer: str,
     critic_review_method: str,
     review_spec: dict[str, Any] | None = None,
+    available_dependency_addons: dict[
+        tuple[str, str], dict[str, Any]
+    ] | None = None,
 ) -> dict[str, Any]:
     """Compile the entire reviewed catalog and round-trip its self-contained addon."""
 
+    dependency_addons = _selected_dependency_addons(
+        review_spec or {}, available_dependency_addons or {}
+    )
+    dependency_rule_components = _dependency_rule_components(dependency_addons)
+    for dependency_addon in dependency_addons:
+        imported_dependency = await _call(
+            source_server,
+            "rule_import",
+            {
+                "campaign_id": source_campaign_id,
+                "action": "import_addon",
+                "payload": {"addon": dependency_addon},
+                "idempotency_key": (
+                    "regression-dependency-addon-import-"
+                    f"{hashlib.sha256(str(dependency_addon['checksum']).encode('utf-8')).hexdigest()[:20]}"
+                ),
+            },
+        )
+        if imported_dependency["result"]["installed"] is not True:
+            raise RuntimeError("dependency addon did not install through the public MCP facade")
+    manifest_dependencies = [_core_content_dependency(edition)]
+    manifest_dependencies.extend(
+        {
+            "id": str(component["id"]),
+            "version": str(component["version"]),
+        }
+        for component in dependency_rule_components
+    )
+    manifest_dependencies = list(
+        {
+            (item["id"], item["version"]): item
+            for item in manifest_dependencies
+        }.values()
+    )
     chunks = await _source_chunks(source_server, source_id)
     if not chunks:
         raise RuntimeError("indexed source has no chunk available for a portable probe")
@@ -1699,7 +1851,7 @@ async def _portable_roundtrip(
                         "namespace": pack_id,
                         "system_id": "dnd5e",
                         "editions": [edition],
-                        "dependencies": [_core_content_dependency(edition)],
+                        "dependencies": manifest_dependencies,
                         "conflicts": [],
                         "capabilities": [],
                         "content_kinds": ["feature"],
@@ -1807,7 +1959,7 @@ async def _portable_roundtrip(
                         "namespace": pack_id,
                         "system_id": "dnd5e",
                         "editions": [edition],
-                        "dependencies": [_core_content_dependency(edition)],
+                        "dependencies": manifest_dependencies,
                         "conflicts": [],
                         "capabilities": [],
                         "content_kinds": sorted(_kind_counts(candidates)),
@@ -1844,7 +1996,7 @@ async def _portable_roundtrip(
     )
     exported = export_response["result"]
     package = exported["package"]
-    addon_components = [package]
+    addon_components = [*dependency_rule_components, package]
     preset_export: dict[str, Any] | None = None
     preset_summary: dict[str, Any] = {
         "cards": 0,
@@ -2216,6 +2368,22 @@ async def _portable_roundtrip(
         "dependent_actor_templates": preset_summary.get("dependent_actor_templates", []),
         "dependent_actor_runtime_probes": dependent_actor_runtime_probes,
         "content_runtime_probes": content_runtime_probes,
+        "dependency_addons": [
+            {
+                "id": str(item["id"]),
+                "version": str(item["version"]),
+                "checksum": str(item["checksum"]),
+            }
+            for item in dependency_addons
+        ],
+        "dependency_rule_components": [
+            {
+                "id": str(item["id"]),
+                "version": str(item["version"]),
+                "checksum": str(item["checksum"]),
+            }
+            for item in dependency_rule_components
+        ],
         "preset_failures": preset_summary.get("failures", []),
         "target_source_ids": imported_source_ids,
         "fresh_source_ids": True,

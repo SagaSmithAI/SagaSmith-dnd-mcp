@@ -32,6 +32,46 @@ def test_portable_pack_id_is_stable_across_regression_runs() -> None:
     assert first.startswith("dnd5e.addon.rulebook.book.")
 
 
+def test_dependency_addons_require_exact_review_selection(tmp_path) -> None:
+    component = {
+        "kind": "rule_pack",
+        "id": "dnd5e.private.phb",
+        "version": "1.0.0",
+        "checksum": "a" * 64,
+    }
+    package = {
+        "kind": "addon_pack",
+        "id": "dnd5e.private.phb.addon",
+        "version": "1.0.0",
+        "checksum": "b" * 64,
+        "payload": {"components": [component, {"kind": "preset_pack"}]},
+    }
+    path = tmp_path / "phb.addon.sagasmith.json"
+    path.write_text(json.dumps(package), encoding="utf-8")
+
+    available = driver._load_dependency_addons([path])
+    selected = driver._selected_dependency_addons(
+        {
+            "dependency_addons": [
+                {"id": package["id"], "version": package["version"]}
+            ]
+        },
+        available,
+    )
+
+    assert selected == [package]
+    assert driver._dependency_rule_components(selected) == [component]
+    with pytest.raises(ValueError, match="was not supplied"):
+        driver._selected_dependency_addons(
+            {
+                "dependency_addons": [
+                    {"id": "missing.addon", "version": "1.0.0"}
+                ]
+            },
+            available,
+        )
+
+
 def test_source_selector_recovers_bounded_ocr_heading_spacing() -> None:
     chunk = {
         "heading_path": [
