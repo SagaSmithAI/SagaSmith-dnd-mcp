@@ -3,7 +3,8 @@
   "strict": true,
   "includes": [
     "books_catalog_review_eberron_rising_v1.json",
-    "books_catalog_review_mordenkainen_v1.json"
+    "books_catalog_review_mordenkainen_v1.json",
+    "books_catalog_review_sword_coast_v1.json"
   ],
   "documents": {
     "UO\\D&D 5E - HB - School of Geometry.pdf": {

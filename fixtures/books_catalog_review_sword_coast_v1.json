@@ -1,0 +1,4446 @@
+{
+  "version": 1,
+  "documents": {
+    "D&D 5E - Sword Coast Adventurer's Guide.pdf": {
+      "complete_review": true,
+      "default_status": "rejected",
+      "addition_default_status": "accepted",
+      "default_status_by_kind": {
+        "spell": "accepted"
+      },
+      "rationale": "Agent reviewed every printed player option: subraces and mutually exclusive variants, the deep-gnome feat, Spiked Armor, all eleven subclasses, the six additional totem options, four cantrips, the Investigator variant, and all twelve named backgrounds. Setting lore remains searchable source context.",
+      "expected_counts": {
+        "spell": 4,
+        "species": 18,
+        "feat": 1,
+        "item": 1,
+        "subclass": 11,
+        "feature": 60,
+        "background": 13
+      },
+      "runtime_probes": [
+        {
+          "name": "scag-feral-winged-tiefling",
+          "steps": [
+            {
+              "kind": "species",
+              "name": "Tiefling (Feral + Winged)",
+              "selection": {},
+              "expect": [
+                {
+                  "path": "sheet.abilities.dexterity.score",
+                  "equals": 12
+                },
+                {
+                  "path": "sheet.abilities.intelligence.score",
+                  "equals": 11
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "scag-urban-bounty-bounded-tools",
+          "steps": [
+            {
+              "kind": "background",
+              "name": "Urban Bounty Hunter",
+              "selection": {
+                "skills": [
+                  "Deception",
+                  "Stealth"
+                ],
+                "tools": [
+                  "Dice",
+                  "Lute"
+                ]
+              },
+              "expect": [
+                {
+                  "path": "sheet.skills.deception.proficiency",
+                  "equals": "proficient"
+                },
+                {
+                  "path": "sheet.traits.proficiencies.tools",
+                  "contains": "Dice"
+                },
+                {
+                  "path": "sheet.inventory.wallet.gp",
+                  "equals": 20
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "scag-master-intrigue-groups",
+          "level": 3,
+          "class_name": "Rogue",
+          "steps": [
+            {
+              "kind": "subclass",
+              "name": "Mastermind",
+              "selection": {},
+              "expect": [
+                {
+                  "path": "sheet.progression.classes",
+                  "contains_names": [
+                    "Rogue"
+                  ]
+                }
+              ]
+            },
+            {
+              "kind": "feature",
+              "name": "Master of Intrigue",
+              "selection": {
+                "intrigue_proficiencies": {
+                  "languages": [
+                    "Elvish",
+                    "Goblin"
+                  ],
+                  "gaming_set": [
+                    "Dice"
+                  ]
+                }
+              },
+              "expect": [
+                {
+                  "path": "sheet.traits.languages",
+                  "contains": "Goblin"
+                },
+                {
+                  "path": "sheet.traits.proficiencies.tools",
+                  "contains": "Disguise Kit"
+                },
+                {
+                  "path": "sheet.traits.proficiencies.tools",
+                  "contains": "Dice"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "scag-bladesinger-training",
+          "level": 2,
+          "class_name": "Wizard",
+          "steps": [
+            {
+              "kind": "subclass",
+              "name": "Bladesinging",
+              "selection": {},
+              "expect": [
+                {
+                  "path": "sheet.progression.classes",
+                  "contains_names": [
+                    "Wizard"
+                  ]
+                }
+              ]
+            },
+            {
+              "kind": "feature",
+              "name": "Training in War and Song",
+              "selection": {
+                "war_and_song_training": {
+                  "weapon": [
+                    "Rapier"
+                  ]
+                }
+              },
+              "expect": [
+                {
+                  "path": "sheet.traits.proficiencies.armor",
+                  "contains": "light armor"
+                },
+                {
+                  "path": "sheet.traits.proficiencies.weapons",
+                  "contains": "Rapier"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "scag-spiked-armor",
+          "steps": [
+            {
+              "kind": "item",
+              "name": "Spiked Armor",
+              "selection": {},
+              "expect": [
+                {
+                  "path": "sheet.inventory.items",
+                  "contains_names": [
+                    "Spiked Armor"
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "additions": [
+        {
+          "kind": "species",
+          "name": "Duergar",
+          "source_selectors": [
+            {
+              "heading_exact": "DUERGAR SUBRACE TRAITS",
+              "page_start": 105
+            }
+          ],
+          "card": {
+            "base_species": "Dwarf",
+            "grants": {
+              "ability_score_increases": {
+                "constitution": 2,
+                "strength": 1
+              },
+              "size": "medium",
+              "walk_speed": 25,
+              "languages": [
+                "Common",
+                "Dwarvish",
+                "Undercommon"
+              ],
+              "features": [
+                {
+                  "name": "Dwarven Resilience",
+                  "description": "Source poison saving-throw advantage and resistance."
+                },
+                {
+                  "name": "Stonecunning",
+                  "description": "Source History expertise-like stonework check benefit."
+                },
+                {
+                  "name": "Duergar Resilience",
+                  "description": "Advantage against illusions, charm, and paralysis."
+                },
+                {
+                  "name": "Duergar Magic",
+                  "description": "The level-gated spells cannot be cast in direct sunlight."
+                },
+                {
+                  "name": "Sunlight Sensitivity",
+                  "description": "Source attack and Perception penalty in direct sunlight."
+                }
+              ],
+              "unresolved": [],
+              "darkvision_ft": 120,
+              "weapon_proficiencies": [
+                "Battleaxe",
+                "Handaxe",
+                "Light Hammer",
+                "Warhammer"
+              ],
+              "tool_choice_count": 1,
+              "tool_options": [
+                "Smith's Tools",
+                "Brewer's Supplies",
+                "Mason's Tools"
+              ],
+              "resistances": [
+                "poison"
+              ],
+              "spell_grants": [
+                {
+                  "name": "Enlarge/Reduce",
+                  "level": 2,
+                  "eligible_classes": [
+                    "Wizard"
+                  ],
+                  "method": "limited_use",
+                  "spellcasting_ability": "intelligence",
+                  "free_casts": 1,
+                  "recovers_on": "long_rest",
+                  "allow_slot_cast": false,
+                  "minimum_level": 3,
+                  "ritual_only": false
+                },
+                {
+                  "name": "Invisibility",
+                  "level": 2,
+                  "eligible_classes": [
+                    "Wizard"
+                  ],
+                  "method": "limited_use",
+                  "spellcasting_ability": "intelligence",
+                  "free_casts": 1,
+                  "recovers_on": "long_rest",
+                  "allow_slot_cast": false,
+                  "minimum_level": 5,
+                  "ritual_only": false
+                }
+              ]
+            }
+          }
+        },
+        {
+          "kind": "species",
+          "name": "Ghostwise Halfling",
+          "source_selectors": [
+            {
+              "heading_exact": "GHOSTWISE HALFLINGS",
+              "page_start": 111
+            }
+          ],
+          "card": {
+            "base_species": "Halfling",
+            "grants": {
+              "ability_score_increases": {
+                "dexterity": 2,
+                "wisdom": 1
+              },
+              "size": "small",
+              "walk_speed": 25,
+              "languages": [
+                "Common",
+                "Halfling"
+              ],
+              "features": [
+                {
+                  "name": "Lucky",
+                  "description": "Reroll a natural 1 on an attack, check, or save."
+                },
+                {
+                  "name": "Brave",
+                  "description": "Advantage on saves against frightened."
+                },
+                {
+                  "name": "Halfling Nimbleness",
+                  "description": "Move through spaces of larger creatures."
+                },
+                {
+                  "name": "Silent Speech",
+                  "description": "Telepathically speak to one creature within 30 feet sharing a language."
+                }
+              ],
+              "unresolved": []
+            }
+          }
+        },
+        {
+          "kind": "species",
+          "name": "Deep Gnome",
+          "source_selectors": [
+            {
+              "heading_exact": "DEEP GNOMES (SVIRFNEBLIN)",
+              "page_start": 116,
+              "content_contains": "Stone Camouflage"
+            }
+          ],
+          "card": {
+            "base_species": "Gnome",
+            "grants": {
+              "ability_score_increases": {
+                "intelligence": 2,
+                "dexterity": 1
+              },
+              "size": "small",
+              "walk_speed": 25,
+              "languages": [
+                "Common",
+                "Gnomish",
+                "Undercommon"
+              ],
+              "features": [
+                {
+                  "name": "Gnome Cunning",
+                  "description": "Advantage on mental saves against magic."
+                },
+                {
+                  "name": "Stone Camouflage",
+                  "description": "Advantage to hide in rocky terrain."
+                }
+              ],
+              "unresolved": [],
+              "darkvision_ft": 120
+            }
+          }
+        },
+        {
+          "kind": "species",
+          "name": "Half-Elf (Wood Elf + Keen Senses)",
+          "source_selectors": [
+            {
+              "heading_exact": "HALF-ELF VARIANTS",
+              "page_start": 117
+            }
+          ],
+          "card": {
+            "base_species": "Half-Elf",
+            "grants": {
+              "ability_score_increases": {
+                "charisma": 2
+              },
+              "size": "medium",
+              "walk_speed": 30,
+              "languages": [
+                "Common",
+                "Elvish"
+              ],
+              "features": [
+                {
+                  "name": "Darkvision",
+                  "description": "See in darkness to the source distance."
+                },
+                {
+                  "name": "Fey Ancestry",
+                  "description": "Advantage against charm and immunity to magical sleep."
+                },
+                {
+                  "name": "Keen Senses",
+                  "description": "Replaces Skill Versatility and grants Perception proficiency."
+                }
+              ],
+              "unresolved": [],
+              "ability_choice": {
+                "count": 2,
+                "amount": 1,
+                "exclude": [
+                  "charisma"
+                ],
+                "options": [
+                  "strength",
+                  "dexterity",
+                  "constitution",
+                  "intelligence",
+                  "wisdom"
+                ]
+              },
+              "darkvision_ft": 60,
+              "language_choice_count": 1,
+              "language_options": [],
+              "allow_any_language": true,
+              "skill_proficiencies": [
+                "Perception"
+              ]
+            }
+          }
+        },
+        {
+          "kind": "species",
+          "name": "Half-Elf (Wood Elf + Elf Weapon Training)",
+          "source_selectors": [
+            {
+              "heading_exact": "HALF-ELF VARIANTS",
+              "page_start": 117
+            }
+          ],
+          "card": {
+            "base_species": "Half-Elf",
+            "grants": {
+              "ability_score_increases": {
+                "charisma": 2
+              },
+              "size": "medium",
+              "walk_speed": 30,
+              "languages": [
+                "Common",
+                "Elvish"
+              ],
+              "features": [
+                {
+                  "name": "Darkvision",
+                  "description": "See in darkness to the source distance."
+                },
+                {
+                  "name": "Fey Ancestry",
+                  "description": "Advantage against charm and immunity to magical sleep."
+                },
+                {
+                  "name": "Elf Weapon Training",
+                  "description": "Replaces Skill Versatility with the printed elf weapons."
+                }
+              ],
+              "unresolved": [],
+              "ability_choice": {
+                "count": 2,
+                "amount": 1,
+                "exclude": [
+                  "charisma"
+                ],
+                "options": [
+                  "strength",
+                  "dexterity",
+                  "constitution",
+                  "intelligence",
+                  "wisdom"
+                ]
+              },
+              "darkvision_ft": 60,
+              "language_choice_count": 1,
+              "language_options": [],
+              "allow_any_language": true,
+              "weapon_proficiencies": [
+                "Longsword",
+                "Shortsword",
+                "Shortbow",
+                "Longbow"
+              ]
+            }
+          }
+        },
+        {
+          "kind": "species",
+          "name": "Half-Elf (Wood Elf + Fleet of Foot)",
+          "source_selectors": [
+            {
+              "heading_exact": "HALF-ELF VARIANTS",
+              "page_start": 117
+            }
+          ],
+          "card": {
+            "base_species": "Half-Elf",
+            "grants": {
+              "ability_score_increases": {
+                "charisma": 2
+              },
+              "size": "medium",
+              "walk_speed": 35,
+              "languages": [
+                "Common",
+                "Elvish"
+              ],
+              "features": [
+                {
+                  "name": "Darkvision",
+                  "description": "See in darkness to the source distance."
+                },
+                {
+                  "name": "Fey Ancestry",
+                  "description": "Advantage against charm and immunity to magical sleep."
+                },
+                {
+                  "name": "Fleet of Foot",
+                  "description": "Replaces Skill Versatility and increases walking speed to 35 feet."
+                }
+              ],
+              "unresolved": [],
+              "ability_choice": {
+                "count": 2,
+                "amount": 1,
+                "exclude": [
+                  "charisma"
+                ],
+                "options": [
+                  "strength",
+                  "dexterity",
+                  "constitution",
+                  "intelligence",
+                  "wisdom"
+                ]
+              },
+              "darkvision_ft": 60,
+              "language_choice_count": 1,
+              "language_options": [],
+              "allow_any_language": true
+            }
+          }
+        },
+        {
+          "kind": "species",
+          "name": "Half-Elf (Wood Elf + Mask of the Wild)",
+          "source_selectors": [
+            {
+              "heading_exact": "HALF-ELF VARIANTS",
+              "page_start": 117
+            }
+          ],
+          "card": {
+            "base_species": "Half-Elf",
+            "grants": {
+              "ability_score_increases": {
+                "charisma": 2
+              },
+              "size": "medium",
+              "walk_speed": 30,
+              "languages": [
+                "Common",
+                "Elvish"
+              ],
+              "features": [
+                {
+                  "name": "Darkvision",
+                  "description": "See in darkness to the source distance."
+                },
+                {
+                  "name": "Fey Ancestry",
+                  "description": "Advantage against charm and immunity to magical sleep."
+                },
+                {
+                  "name": "Mask of the Wild",
+                  "description": "Replaces Skill Versatility with the source concealment permission."
+                }
+              ],
+              "unresolved": [],
+              "ability_choice": {
+                "count": 2,
+                "amount": 1,
+                "exclude": [
+                  "charisma"
+                ],
+                "options": [
+                  "strength",
+                  "dexterity",
+                  "constitution",
+                  "intelligence",
+                  "wisdom"
+                ]
+              },
+              "darkvision_ft": 60,
+              "language_choice_count": 1,
+              "language_options": [],
+              "allow_any_language": true
+            }
+          }
+        },
+        {
+          "kind": "species",
+          "name": "Half-Elf (High Elf + Elf Weapon Training)",
+          "source_selectors": [
+            {
+              "heading_exact": "HALF-ELF VARIANTS",
+              "page_start": 117
+            }
+          ],
+          "card": {
+            "base_species": "Half-Elf",
+            "grants": {
+              "ability_score_increases": {
+                "charisma": 2
+              },
+              "size": "medium",
+              "walk_speed": 30,
+              "languages": [
+                "Common",
+                "Elvish"
+              ],
+              "features": [
+                {
+                  "name": "Darkvision",
+                  "description": "See in darkness to the source distance."
+                },
+                {
+                  "name": "Fey Ancestry",
+                  "description": "Advantage against charm and immunity to magical sleep."
+                },
+                {
+                  "name": "Elf Weapon Training",
+                  "description": "Replaces Skill Versatility with the printed elf weapons."
+                }
+              ],
+              "unresolved": [],
+              "ability_choice": {
+                "count": 2,
+                "amount": 1,
+                "exclude": [
+                  "charisma"
+                ],
+                "options": [
+                  "strength",
+                  "dexterity",
+                  "constitution",
+                  "intelligence",
+                  "wisdom"
+                ]
+              },
+              "darkvision_ft": 60,
+              "language_choice_count": 1,
+              "language_options": [],
+              "allow_any_language": true,
+              "weapon_proficiencies": [
+                "Longsword",
+                "Shortsword",
+                "Shortbow",
+                "Longbow"
+              ]
+            }
+          }
+        },
+        {
+          "kind": "species",
+          "name": "Half-Elf (High Elf + Cantrip)",
+          "source_selectors": [
+            {
+              "heading_exact": "HALF-ELF VARIANTS",
+              "page_start": 117
+            }
+          ],
+          "card": {
+            "base_species": "Half-Elf",
+            "grants": {
+              "ability_score_increases": {
+                "charisma": 2
+              },
+              "size": "medium",
+              "walk_speed": 30,
+              "languages": [
+                "Common",
+                "Elvish"
+              ],
+              "features": [
+                {
+                  "name": "Darkvision",
+                  "description": "See in darkness to the source distance."
+                },
+                {
+                  "name": "Fey Ancestry",
+                  "description": "Advantage against charm and immunity to magical sleep."
+                },
+                {
+                  "name": "Cantrip",
+                  "description": "Replaces Skill Versatility with one Wizard cantrip using Intelligence."
+                }
+              ],
+              "unresolved": [],
+              "ability_choice": {
+                "count": 2,
+                "amount": 1,
+                "exclude": [
+                  "charisma"
+                ],
+                "options": [
+                  "strength",
+                  "dexterity",
+                  "constitution",
+                  "intelligence",
+                  "wisdom"
+                ]
+              },
+              "darkvision_ft": 60,
+              "language_choice_count": 1,
+              "language_options": [],
+              "allow_any_language": true,
+              "cantrip_choice": {
+                "class": "Wizard",
+                "level": 0,
+                "spellcasting_ability": "intelligence",
+                "method": "known",
+                "free_casts": 0,
+                "recovers_on": null,
+                "allow_slot_cast": false,
+                "minimum_level": 1,
+                "ritual_only": false
+              }
+            }
+          }
+        },
+        {
+          "kind": "species",
+          "name": "Half-Elf (Drow + Drow Magic)",
+          "source_selectors": [
+            {
+              "heading_exact": "HALF-ELF VARIANTS",
+              "page_start": 117
+            }
+          ],
+          "card": {
+            "base_species": "Half-Elf",
+            "grants": {
+              "ability_score_increases": {
+                "charisma": 2
+              },
+              "size": "medium",
+              "walk_speed": 30,
+              "languages": [
+                "Common",
+                "Elvish"
+              ],
+              "features": [
+                {
+                  "name": "Darkvision",
+                  "description": "See in darkness to the source distance."
+                },
+                {
+                  "name": "Fey Ancestry",
+                  "description": "Advantage against charm and immunity to magical sleep."
+                },
+                {
+                  "name": "Drow Magic",
+                  "description": "Replaces Skill Versatility with the source level-gated drow spells."
+                }
+              ],
+              "unresolved": [],
+              "ability_choice": {
+                "count": 2,
+                "amount": 1,
+                "exclude": [
+                  "charisma"
+                ],
+                "options": [
+                  "strength",
+                  "dexterity",
+                  "constitution",
+                  "intelligence",
+                  "wisdom"
+                ]
+              },
+              "darkvision_ft": 60,
+              "language_choice_count": 1,
+              "language_options": [],
+              "allow_any_language": true,
+              "spell_grants": [
+                {
+                  "name": "Dancing Lights",
+                  "level": 0,
+                  "eligible_classes": [
+                    "Wizard"
+                  ],
+                  "method": "known",
+                  "spellcasting_ability": "charisma",
+                  "free_casts": 0,
+                  "recovers_on": null,
+                  "allow_slot_cast": false,
+                  "minimum_level": 1,
+                  "ritual_only": false
+                },
+                {
+                  "name": "Faerie Fire",
+                  "level": 1,
+                  "eligible_classes": [
+                    "Wizard"
+                  ],
+                  "method": "limited_use",
+                  "spellcasting_ability": "charisma",
+                  "free_casts": 1,
+                  "recovers_on": "long_rest",
+                  "allow_slot_cast": false,
+                  "minimum_level": 3,
+                  "ritual_only": false
+                },
+                {
+                  "name": "Darkness",
+                  "level": 2,
+                  "eligible_classes": [
+                    "Wizard"
+                  ],
+                  "method": "limited_use",
+                  "spellcasting_ability": "charisma",
+                  "free_casts": 1,
+                  "recovers_on": "long_rest",
+                  "allow_slot_cast": false,
+                  "minimum_level": 5,
+                  "ritual_only": false
+                }
+              ]
+            }
+          }
+        },
+        {
+          "kind": "species",
+          "name": "Half-Elf (Aquatic + Swimming Speed)",
+          "source_selectors": [
+            {
+              "heading_exact": "HALF-ELF VARIANTS",
+              "page_start": 117
+            }
+          ],
+          "card": {
+            "base_species": "Half-Elf",
+            "grants": {
+              "ability_score_increases": {
+                "charisma": 2
+              },
+              "size": "medium",
+              "walk_speed": 30,
+              "languages": [
+                "Common",
+                "Elvish"
+              ],
+              "features": [
+                {
+                  "name": "Darkvision",
+                  "description": "See in darkness to the source distance."
+                },
+                {
+                  "name": "Fey Ancestry",
+                  "description": "Advantage against charm and immunity to magical sleep."
+                },
+                {
+                  "name": "Swimming",
+                  "description": "Replaces Skill Versatility with a 30-foot swimming speed."
+                }
+              ],
+              "unresolved": [],
+              "ability_choice": {
+                "count": 2,
+                "amount": 1,
+                "exclude": [
+                  "charisma"
+                ],
+                "options": [
+                  "strength",
+                  "dexterity",
+                  "constitution",
+                  "intelligence",
+                  "wisdom"
+                ]
+              },
+              "darkvision_ft": 60,
+              "language_choice_count": 1,
+              "language_options": [],
+              "allow_any_language": true,
+              "swim_speed": 30
+            }
+          }
+        },
+        {
+          "kind": "species",
+          "name": "Tiefling (Feral)",
+          "source_selectors": [
+            {
+              "heading_exact": "TIEFLING VARIANTS",
+              "page_start": 119
+            }
+          ],
+          "card": {
+            "base_species": "Tiefling",
+            "grants": {
+              "ability_score_increases": {
+                "dexterity": 2,
+                "intelligence": 1
+              },
+              "size": "medium",
+              "walk_speed": 30,
+              "languages": [
+                "Common",
+                "Infernal"
+              ],
+              "features": [
+                {
+                  "name": "Darkvision",
+                  "description": "See in darkness to 60 feet."
+                },
+                {
+                  "name": "Hellish Resistance",
+                  "description": "Resistance to fire damage."
+                },
+                {
+                  "name": "Infernal Legacy",
+                  "description": "The exact mutually exclusive source variant replacing the base legacy."
+                }
+              ],
+              "unresolved": [],
+              "darkvision_ft": 60,
+              "resistances": [
+                "fire"
+              ],
+              "spell_grants": [
+                {
+                  "name": "Thaumaturgy",
+                  "level": 0,
+                  "eligible_classes": [
+                    "Cleric"
+                  ],
+                  "method": "known",
+                  "spellcasting_ability": "charisma",
+                  "free_casts": 0,
+                  "recovers_on": null,
+                  "allow_slot_cast": false,
+                  "minimum_level": 1,
+                  "ritual_only": false
+                },
+                {
+                  "name": "Hellish Rebuke",
+                  "level": 1,
+                  "eligible_classes": [
+                    "Warlock"
+                  ],
+                  "method": "limited_use",
+                  "spellcasting_ability": "charisma",
+                  "free_casts": 1,
+                  "recovers_on": "long_rest",
+                  "allow_slot_cast": false,
+                  "minimum_level": 3,
+                  "ritual_only": false
+                },
+                {
+                  "name": "Darkness",
+                  "level": 2,
+                  "eligible_classes": [
+                    "Wizard"
+                  ],
+                  "method": "limited_use",
+                  "spellcasting_ability": "charisma",
+                  "free_casts": 1,
+                  "recovers_on": "long_rest",
+                  "allow_slot_cast": false,
+                  "minimum_level": 5,
+                  "ritual_only": false
+                }
+              ]
+            }
+          }
+        },
+        {
+          "kind": "species",
+          "name": "Tiefling (Devil's Tongue)",
+          "source_selectors": [
+            {
+              "heading_exact": "TIEFLING VARIANTS",
+              "page_start": 119
+            }
+          ],
+          "card": {
+            "base_species": "Tiefling",
+            "grants": {
+              "ability_score_increases": {
+                "charisma": 2,
+                "intelligence": 1
+              },
+              "size": "medium",
+              "walk_speed": 30,
+              "languages": [
+                "Common",
+                "Infernal"
+              ],
+              "features": [
+                {
+                  "name": "Darkvision",
+                  "description": "See in darkness to 60 feet."
+                },
+                {
+                  "name": "Hellish Resistance",
+                  "description": "Resistance to fire damage."
+                },
+                {
+                  "name": "Devil's Tongue",
+                  "description": "The exact mutually exclusive source variant replacing the base legacy."
+                }
+              ],
+              "unresolved": [],
+              "darkvision_ft": 60,
+              "resistances": [
+                "fire"
+              ],
+              "spell_grants": [
+                {
+                  "name": "Vicious Mockery",
+                  "level": 0,
+                  "eligible_classes": [
+                    "Bard"
+                  ],
+                  "method": "known",
+                  "spellcasting_ability": "charisma",
+                  "free_casts": 0,
+                  "recovers_on": null,
+                  "allow_slot_cast": false,
+                  "minimum_level": 1,
+                  "ritual_only": false
+                },
+                {
+                  "name": "Charm Person",
+                  "level": 1,
+                  "eligible_classes": [
+                    "Wizard"
+                  ],
+                  "method": "limited_use",
+                  "spellcasting_ability": "charisma",
+                  "free_casts": 1,
+                  "recovers_on": "long_rest",
+                  "allow_slot_cast": false,
+                  "minimum_level": 3,
+                  "ritual_only": false
+                },
+                {
+                  "name": "Enthrall",
+                  "level": 2,
+                  "eligible_classes": [
+                    "Bard"
+                  ],
+                  "method": "limited_use",
+                  "spellcasting_ability": "charisma",
+                  "free_casts": 1,
+                  "recovers_on": "long_rest",
+                  "allow_slot_cast": false,
+                  "minimum_level": 5,
+                  "ritual_only": false
+                }
+              ]
+            }
+          }
+        },
+        {
+          "kind": "species",
+          "name": "Tiefling (Feral + Devil's Tongue)",
+          "source_selectors": [
+            {
+              "heading_exact": "TIEFLING VARIANTS",
+              "page_start": 119
+            }
+          ],
+          "card": {
+            "base_species": "Tiefling",
+            "grants": {
+              "ability_score_increases": {
+                "dexterity": 2,
+                "intelligence": 1
+              },
+              "size": "medium",
+              "walk_speed": 30,
+              "languages": [
+                "Common",
+                "Infernal"
+              ],
+              "features": [
+                {
+                  "name": "Darkvision",
+                  "description": "See in darkness to 60 feet."
+                },
+                {
+                  "name": "Hellish Resistance",
+                  "description": "Resistance to fire damage."
+                },
+                {
+                  "name": "Devil's Tongue",
+                  "description": "The exact mutually exclusive source variant replacing the base legacy."
+                }
+              ],
+              "unresolved": [],
+              "darkvision_ft": 60,
+              "resistances": [
+                "fire"
+              ],
+              "spell_grants": [
+                {
+                  "name": "Vicious Mockery",
+                  "level": 0,
+                  "eligible_classes": [
+                    "Bard"
+                  ],
+                  "method": "known",
+                  "spellcasting_ability": "charisma",
+                  "free_casts": 0,
+                  "recovers_on": null,
+                  "allow_slot_cast": false,
+                  "minimum_level": 1,
+                  "ritual_only": false
+                },
+                {
+                  "name": "Charm Person",
+                  "level": 1,
+                  "eligible_classes": [
+                    "Wizard"
+                  ],
+                  "method": "limited_use",
+                  "spellcasting_ability": "charisma",
+                  "free_casts": 1,
+                  "recovers_on": "long_rest",
+                  "allow_slot_cast": false,
+                  "minimum_level": 3,
+                  "ritual_only": false
+                },
+                {
+                  "name": "Enthrall",
+                  "level": 2,
+                  "eligible_classes": [
+                    "Bard"
+                  ],
+                  "method": "limited_use",
+                  "spellcasting_ability": "charisma",
+                  "free_casts": 1,
+                  "recovers_on": "long_rest",
+                  "allow_slot_cast": false,
+                  "minimum_level": 5,
+                  "ritual_only": false
+                }
+              ]
+            }
+          }
+        },
+        {
+          "kind": "species",
+          "name": "Tiefling (Hellfire)",
+          "source_selectors": [
+            {
+              "heading_exact": "TIEFLING VARIANTS",
+              "page_start": 119
+            }
+          ],
+          "card": {
+            "base_species": "Tiefling",
+            "grants": {
+              "ability_score_increases": {
+                "charisma": 2,
+                "intelligence": 1
+              },
+              "size": "medium",
+              "walk_speed": 30,
+              "languages": [
+                "Common",
+                "Infernal"
+              ],
+              "features": [
+                {
+                  "name": "Darkvision",
+                  "description": "See in darkness to 60 feet."
+                },
+                {
+                  "name": "Hellish Resistance",
+                  "description": "Resistance to fire damage."
+                },
+                {
+                  "name": "Hellfire",
+                  "description": "The exact mutually exclusive source variant replacing the base legacy."
+                }
+              ],
+              "unresolved": [],
+              "darkvision_ft": 60,
+              "resistances": [
+                "fire"
+              ],
+              "spell_grants": [
+                {
+                  "name": "Thaumaturgy",
+                  "level": 0,
+                  "eligible_classes": [
+                    "Cleric"
+                  ],
+                  "method": "known",
+                  "spellcasting_ability": "charisma",
+                  "free_casts": 0,
+                  "recovers_on": null,
+                  "allow_slot_cast": false,
+                  "minimum_level": 1,
+                  "ritual_only": false
+                },
+                {
+                  "name": "Burning Hands",
+                  "level": 1,
+                  "eligible_classes": [
+                    "Wizard"
+                  ],
+                  "method": "limited_use",
+                  "spellcasting_ability": "charisma",
+                  "free_casts": 1,
+                  "recovers_on": "long_rest",
+                  "allow_slot_cast": false,
+                  "minimum_level": 3,
+                  "ritual_only": false
+                },
+                {
+                  "name": "Darkness",
+                  "level": 2,
+                  "eligible_classes": [
+                    "Wizard"
+                  ],
+                  "method": "limited_use",
+                  "spellcasting_ability": "charisma",
+                  "free_casts": 1,
+                  "recovers_on": "long_rest",
+                  "allow_slot_cast": false,
+                  "minimum_level": 5,
+                  "ritual_only": false
+                }
+              ]
+            }
+          }
+        },
+        {
+          "kind": "species",
+          "name": "Tiefling (Feral + Hellfire)",
+          "source_selectors": [
+            {
+              "heading_exact": "TIEFLING VARIANTS",
+              "page_start": 119
+            }
+          ],
+          "card": {
+            "base_species": "Tiefling",
+            "grants": {
+              "ability_score_increases": {
+                "dexterity": 2,
+                "intelligence": 1
+              },
+              "size": "medium",
+              "walk_speed": 30,
+              "languages": [
+                "Common",
+                "Infernal"
+              ],
+              "features": [
+                {
+                  "name": "Darkvision",
+                  "description": "See in darkness to 60 feet."
+                },
+                {
+                  "name": "Hellish Resistance",
+                  "description": "Resistance to fire damage."
+                },
+                {
+                  "name": "Hellfire",
+                  "description": "The exact mutually exclusive source variant replacing the base legacy."
+                }
+              ],
+              "unresolved": [],
+              "darkvision_ft": 60,
+              "resistances": [
+                "fire"
+              ],
+              "spell_grants": [
+                {
+                  "name": "Thaumaturgy",
+                  "level": 0,
+                  "eligible_classes": [
+                    "Cleric"
+                  ],
+                  "method": "known",
+                  "spellcasting_ability": "charisma",
+                  "free_casts": 0,
+                  "recovers_on": null,
+                  "allow_slot_cast": false,
+                  "minimum_level": 1,
+                  "ritual_only": false
+                },
+                {
+                  "name": "Burning Hands",
+                  "level": 1,
+                  "eligible_classes": [
+                    "Wizard"
+                  ],
+                  "method": "limited_use",
+                  "spellcasting_ability": "charisma",
+                  "free_casts": 1,
+                  "recovers_on": "long_rest",
+                  "allow_slot_cast": false,
+                  "minimum_level": 3,
+                  "ritual_only": false
+                },
+                {
+                  "name": "Darkness",
+                  "level": 2,
+                  "eligible_classes": [
+                    "Wizard"
+                  ],
+                  "method": "limited_use",
+                  "spellcasting_ability": "charisma",
+                  "free_casts": 1,
+                  "recovers_on": "long_rest",
+                  "allow_slot_cast": false,
+                  "minimum_level": 5,
+                  "ritual_only": false
+                }
+              ]
+            }
+          }
+        },
+        {
+          "kind": "species",
+          "name": "Tiefling (Winged)",
+          "source_selectors": [
+            {
+              "heading_exact": "TIEFLING VARIANTS",
+              "page_start": 119
+            }
+          ],
+          "card": {
+            "base_species": "Tiefling",
+            "grants": {
+              "ability_score_increases": {
+                "charisma": 2,
+                "intelligence": 1
+              },
+              "size": "medium",
+              "walk_speed": 30,
+              "languages": [
+                "Common",
+                "Infernal"
+              ],
+              "features": [
+                {
+                  "name": "Darkvision",
+                  "description": "See in darkness to 60 feet."
+                },
+                {
+                  "name": "Hellish Resistance",
+                  "description": "Resistance to fire damage."
+                },
+                {
+                  "name": "Winged",
+                  "description": "The exact mutually exclusive source variant replacing the base legacy."
+                }
+              ],
+              "unresolved": [],
+              "darkvision_ft": 60,
+              "resistances": [
+                "fire"
+              ],
+              "spell_grants": [],
+              "fly_speed": 30
+            }
+          }
+        },
+        {
+          "kind": "species",
+          "name": "Tiefling (Feral + Winged)",
+          "source_selectors": [
+            {
+              "heading_exact": "TIEFLING VARIANTS",
+              "page_start": 119
+            }
+          ],
+          "card": {
+            "base_species": "Tiefling",
+            "grants": {
+              "ability_score_increases": {
+                "dexterity": 2,
+                "intelligence": 1
+              },
+              "size": "medium",
+              "walk_speed": 30,
+              "languages": [
+                "Common",
+                "Infernal"
+              ],
+              "features": [
+                {
+                  "name": "Darkvision",
+                  "description": "See in darkness to 60 feet."
+                },
+                {
+                  "name": "Hellish Resistance",
+                  "description": "Resistance to fire damage."
+                },
+                {
+                  "name": "Winged",
+                  "description": "The exact mutually exclusive source variant replacing the base legacy."
+                }
+              ],
+              "unresolved": [],
+              "darkvision_ft": 60,
+              "resistances": [
+                "fire"
+              ],
+              "spell_grants": [],
+              "fly_speed": 30
+            }
+          }
+        },
+        {
+          "kind": "feat",
+          "name": "Svirfneblin Magic",
+          "source_selectors": [
+            {
+              "heading_exact": "DEEP GNOME FEAT",
+              "page_start": 116
+            }
+          ],
+          "card": {
+            "prerequisites": [
+              {
+                "kind": "species_required",
+                "species": [
+                  "Deep Gnome"
+                ]
+              }
+            ],
+            "repeatable": false,
+            "selection_requirements": null,
+            "mechanical_grants": {
+              "ability_score_increases": {},
+              "maximum_ability_score": 20,
+              "languages": [],
+              "tool_proficiencies": [],
+              "weapon_proficiencies": [],
+              "spell_grants": [
+                {
+                  "name": "Nondetection",
+                  "level": 3,
+                  "eligible_classes": [
+                    "Wizard"
+                  ],
+                  "method": "at_will",
+                  "spellcasting_ability": "intelligence",
+                  "free_casts": 0,
+                  "recovers_on": null,
+                  "allow_slot_cast": false,
+                  "minimum_level": 1,
+                  "ritual_only": false,
+                  "casting_overrides": {
+                    "ignore_material_components": true
+                  }
+                },
+                {
+                  "name": "Blindness/Deafness",
+                  "level": 2,
+                  "eligible_classes": [
+                    "Wizard"
+                  ],
+                  "method": "limited_use",
+                  "spellcasting_ability": "intelligence",
+                  "free_casts": 1,
+                  "recovers_on": "long_rest",
+                  "allow_slot_cast": false,
+                  "minimum_level": 1,
+                  "ritual_only": false
+                },
+                {
+                  "name": "Blur",
+                  "level": 2,
+                  "eligible_classes": [
+                    "Wizard"
+                  ],
+                  "method": "limited_use",
+                  "spellcasting_ability": "intelligence",
+                  "free_casts": 1,
+                  "recovers_on": "long_rest",
+                  "allow_slot_cast": false,
+                  "minimum_level": 1,
+                  "ritual_only": false
+                },
+                {
+                  "name": "Disguise Self",
+                  "level": 1,
+                  "eligible_classes": [
+                    "Wizard"
+                  ],
+                  "method": "limited_use",
+                  "spellcasting_ability": "intelligence",
+                  "free_casts": 1,
+                  "recovers_on": "long_rest",
+                  "allow_slot_cast": false,
+                  "minimum_level": 1,
+                  "ritual_only": false
+                }
+              ]
+            },
+            "choices": {
+              "source_effect": "Nondetection targets only the character."
+            }
+          }
+        },
+        {
+          "kind": "item",
+          "name": "Spiked Armor",
+          "source_selectors": [
+            {
+              "heading_exact": "SPIKED ARMOR",
+              "page_start": 122
+            }
+          ],
+          "card": {
+            "inventory_template": {
+              "name": "Spiked Armor",
+              "kind": "armor",
+              "quantity": 1,
+              "description": "Medium armor used by Battleragers; 75 gp and 45 lb.",
+              "weight_oz": 720,
+              "mechanics": {
+                "base_ac": 14,
+                "dexterity_mode": "max",
+                "dexterity_max": 2,
+                "stealth_disadvantage": true
+              }
+            }
+          }
+        },
+        {
+          "kind": "subclass",
+          "name": "Path of the Battlerager",
+          "source_selectors": [
+            {
+              "heading_exact": "PATH OF THE BATTLERAGER",
+              "page_start": 122
+            }
+          ],
+          "card": {
+            "name": "Path of the Battlerager",
+            "class_name": "Barbarian",
+            "minimum_level": 3,
+            "always_prepared_spells": [],
+            "spell_list_expansion": []
+          }
+        },
+        {
+          "kind": "subclass",
+          "name": "Arcana Domain",
+          "source_selectors": [
+            {
+              "heading_exact": "ARCANA DOMAIN",
+              "page_start": 126
+            }
+          ],
+          "card": {
+            "name": "Arcana Domain",
+            "class_name": "Cleric",
+            "minimum_level": 1,
+            "always_prepared_spells": [
+              {
+                "name": "Detect Magic",
+                "minimum_level": 1
+              },
+              {
+                "name": "Magic Missile",
+                "minimum_level": 1
+              },
+              {
+                "name": "Magic Weapon",
+                "minimum_level": 3
+              },
+              {
+                "name": "Nystul's Magic Aura",
+                "minimum_level": 3
+              },
+              {
+                "name": "Dispel Magic",
+                "minimum_level": 5
+              },
+              {
+                "name": "Magic Circle",
+                "minimum_level": 5
+              },
+              {
+                "name": "Arcane Eye",
+                "minimum_level": 7
+              },
+              {
+                "name": "Leomund's Secret Chest",
+                "minimum_level": 7
+              },
+              {
+                "name": "Planar Binding",
+                "minimum_level": 9
+              },
+              {
+                "name": "Teleportation Circle",
+                "minimum_level": 9
+              }
+            ],
+            "spell_list_expansion": []
+          }
+        },
+        {
+          "kind": "subclass",
+          "name": "Purple Dragon Knight",
+          "source_selectors": [
+            {
+              "heading_exact": "PURPLE DRAGON KNIGHT",
+              "page_start": 129
+            }
+          ],
+          "card": {
+            "name": "Purple Dragon Knight",
+            "class_name": "Fighter",
+            "minimum_level": 3,
+            "always_prepared_spells": [],
+            "spell_list_expansion": []
+          }
+        },
+        {
+          "kind": "subclass",
+          "name": "Way of the Long Death",
+          "source_selectors": [
+            {
+              "heading_exact": "WAY OF THE LONG DEATH",
+              "page_start": 131
+            }
+          ],
+          "card": {
+            "name": "Way of the Long Death",
+            "class_name": "Monk",
+            "minimum_level": 3,
+            "always_prepared_spells": [],
+            "spell_list_expansion": []
+          }
+        },
+        {
+          "kind": "subclass",
+          "name": "Way of the Sun Soul",
+          "source_selectors": [
+            {
+              "heading_exact": "WAY OF THE SUN SOUL",
+              "page_start": 132
+            }
+          ],
+          "card": {
+            "name": "Way of the Sun Soul",
+            "class_name": "Monk",
+            "minimum_level": 3,
+            "always_prepared_spells": [],
+            "spell_list_expansion": []
+          }
+        },
+        {
+          "kind": "subclass",
+          "name": "Oath of the Crown",
+          "source_selectors": [
+            {
+              "heading_exact": "OATH OF THE CROW-N",
+              "page_start": 133
+            },
+            {
+              "heading_exact": "OATH OF THE CROWN SPELLS",
+              "page_start": 134
+            }
+          ],
+          "card": {
+            "name": "Oath of the Crown",
+            "class_name": "Paladin",
+            "minimum_level": 3,
+            "always_prepared_spells": [
+              {
+                "name": "Command",
+                "minimum_level": 3
+              },
+              {
+                "name": "Compelled Duel",
+                "minimum_level": 3
+              },
+              {
+                "name": "Warding Bond",
+                "minimum_level": 5
+              },
+              {
+                "name": "Zone of Truth",
+                "minimum_level": 5
+              },
+              {
+                "name": "Aura of Vitality",
+                "minimum_level": 9
+              },
+              {
+                "name": "Spirit Guardians",
+                "minimum_level": 9
+              },
+              {
+                "name": "Banishment",
+                "minimum_level": 13
+              },
+              {
+                "name": "Guardian of Faith",
+                "minimum_level": 13
+              },
+              {
+                "name": "Circle of Power",
+                "minimum_level": 17
+              },
+              {
+                "name": "Geas",
+                "minimum_level": 17
+              }
+            ],
+            "spell_list_expansion": []
+          }
+        },
+        {
+          "kind": "subclass",
+          "name": "Mastermind",
+          "source_selectors": [
+            {
+              "heading_exact": "MASTERMIND",
+              "page_start": 136
+            }
+          ],
+          "card": {
+            "name": "Mastermind",
+            "class_name": "Rogue",
+            "minimum_level": 3,
+            "always_prepared_spells": [],
+            "spell_list_expansion": []
+          }
+        },
+        {
+          "kind": "subclass",
+          "name": "Swashbuckler",
+          "source_selectors": [
+            {
+              "heading_exact": "SWASHBUCKLER",
+              "page_start": 136
+            }
+          ],
+          "card": {
+            "name": "Swashbuckler",
+            "class_name": "Rogue",
+            "minimum_level": 3,
+            "always_prepared_spells": [],
+            "spell_list_expansion": []
+          }
+        },
+        {
+          "kind": "subclass",
+          "name": "Storm Sorcery",
+          "source_selectors": [
+            {
+              "heading_exact": "STORM SORCERY",
+              "page_start": 138
+            }
+          ],
+          "card": {
+            "name": "Storm Sorcery",
+            "class_name": "Sorcerer",
+            "minimum_level": 1,
+            "always_prepared_spells": [],
+            "spell_list_expansion": []
+          }
+        },
+        {
+          "kind": "subclass",
+          "name": "The Undying",
+          "source_selectors": [
+            {
+              "heading_exact": "THE UNDYING",
+              "page_start": 140
+            }
+          ],
+          "card": {
+            "name": "The Undying",
+            "class_name": "Warlock",
+            "minimum_level": 1,
+            "always_prepared_spells": [],
+            "spell_list_expansion": [
+              "False Life",
+              "Ray of Sickness",
+              "Blindness/Deafness",
+              "Silence",
+              "Feign Death",
+              "Speak with Dead",
+              "Aura of Life",
+              "Death Ward",
+              "Contagion",
+              "Legend Lore"
+            ],
+            "spell_grants": [
+              {
+                "name": "Spare the Dying",
+                "minimum_level": 1,
+                "method": "known"
+              }
+            ]
+          }
+        },
+        {
+          "kind": "subclass",
+          "name": "Bladesinging",
+          "source_selectors": [
+            {
+              "heading_exact": "BLADESINGING",
+              "page_start": 142
+            }
+          ],
+          "card": {
+            "name": "Bladesinging",
+            "class_name": "Wizard",
+            "minimum_level": 2,
+            "always_prepared_spells": [],
+            "spell_list_expansion": []
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Battlerager Armor",
+          "source_selectors": [
+            {
+              "heading_exact": "BATTLERAGER ARMOR",
+              "page_start": 122
+            }
+          ],
+          "card": {
+            "name": "Battlerager Armor",
+            "class_name": "Barbarian",
+            "subclass_name": "Path of the Battlerager",
+            "feature_subtype": "",
+            "minimum_level": 3,
+            "description": "Use spiked armor for the printed rage bonus attack and grapple damage.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Reckless Abandon",
+          "source_selectors": [
+            {
+              "heading_exact": "BATTLERAGER ARMOR",
+              "page_start": 122,
+              "content_contains": "ReCKLESS ABANDON"
+            }
+          ],
+          "card": {
+            "name": "Reckless Abandon",
+            "class_name": "Barbarian",
+            "subclass_name": "Path of the Battlerager",
+            "feature_subtype": "",
+            "minimum_level": 6,
+            "description": "Reckless Attack while raging grants Constitution-modifier temporary hit points.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Battlerager Charge",
+          "source_selectors": [
+            {
+              "heading_exact": "BATTLERAGER CHARGE",
+              "page_start": 122
+            }
+          ],
+          "card": {
+            "name": "Battlerager Charge",
+            "class_name": "Barbarian",
+            "subclass_name": "Path of the Battlerager",
+            "feature_subtype": "",
+            "minimum_level": 10,
+            "description": "Dash as a bonus action while raging.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Spiked Retribution",
+          "source_selectors": [
+            {
+              "heading_exact": "SPIKED RETRIBUTION",
+              "page_start": 122
+            }
+          ],
+          "card": {
+            "name": "Spiked Retribution",
+            "class_name": "Barbarian",
+            "subclass_name": "Path of the Battlerager",
+            "feature_subtype": "",
+            "minimum_level": 14,
+            "description": "A nearby attacker takes the printed piercing damage while you rage in spiked armor.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Channel Divinity: Arcane Abjuration",
+          "source_selectors": [
+            {
+              "heading_exact": "CHANNEL DIVINITY: ARCANE ABJURATION",
+              "page_start": 126
+            }
+          ],
+          "card": {
+            "name": "Channel Divinity: Arcane Abjuration",
+            "class_name": "Cleric",
+            "subclass_name": "Arcana Domain",
+            "feature_subtype": "",
+            "minimum_level": 2,
+            "description": "Turn one celestial, elemental, fey, or fiend using the printed Channel Divinity save.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Arcane Banishment",
+          "source_selectors": [
+            {
+              "heading_exact": "ARCANE BANISHMENT",
+              "page_start": 127
+            }
+          ],
+          "card": {
+            "name": "Arcane Banishment",
+            "class_name": "Cleric",
+            "subclass_name": "Arcana Domain",
+            "feature_subtype": "",
+            "minimum_level": 5,
+            "description": "Upgrades Arcane Abjuration to banish qualifying creatures by CR.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Spell Breaker",
+          "source_selectors": [
+            {
+              "heading_exact": "SPELL BREAKER",
+              "page_start": 127
+            }
+          ],
+          "card": {
+            "name": "Spell Breaker",
+            "class_name": "Cleric",
+            "subclass_name": "Arcana Domain",
+            "feature_subtype": "",
+            "minimum_level": 6,
+            "description": "Healing a creature with a spell can end a qualifying spell on it.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Potent Spellcasting",
+          "source_selectors": [
+            {
+              "heading_exact": "POTENT SPELLCASTING",
+              "page_start": 127
+            }
+          ],
+          "card": {
+            "name": "Potent Spellcasting",
+            "class_name": "Cleric",
+            "subclass_name": "Arcana Domain",
+            "feature_subtype": "",
+            "minimum_level": 8,
+            "description": "Add Wisdom modifier to cleric cantrip damage.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Rallying Cry",
+          "source_selectors": [
+            {
+              "heading_exact": "RALLYING CRY",
+              "page_start": 129
+            }
+          ],
+          "card": {
+            "name": "Rallying Cry",
+            "class_name": "Fighter",
+            "subclass_name": "Purple Dragon Knight",
+            "feature_subtype": "",
+            "minimum_level": 3,
+            "description": "Second Wind also heals up to three visible or audible allies by fighter level.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Inspiring Surge",
+          "source_selectors": [
+            {
+              "heading_exact": "INSPIRING SURGE",
+              "page_start": 129
+            }
+          ],
+          "card": {
+            "name": "Inspiring Surge",
+            "class_name": "Fighter",
+            "subclass_name": "Purple Dragon Knight",
+            "feature_subtype": "",
+            "minimum_level": 10,
+            "description": "Action Surge lets an ally use its reaction for one weapon attack; two allies at level 18.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Bulwark",
+          "source_selectors": [
+            {
+              "heading_exact": "BULWARK",
+              "page_start": 129
+            }
+          ],
+          "card": {
+            "name": "Bulwark",
+            "class_name": "Fighter",
+            "subclass_name": "Purple Dragon Knight",
+            "feature_subtype": "",
+            "minimum_level": 15,
+            "description": "Indomitable can extend its reroll to one failing ally on the same effect.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Touch of Death",
+          "source_selectors": [
+            {
+              "heading_exact": "TOUCH OF DEATH",
+              "page_start": 131
+            }
+          ],
+          "card": {
+            "name": "Touch of Death",
+            "class_name": "Monk",
+            "subclass_name": "Way of the Long Death",
+            "feature_subtype": "",
+            "minimum_level": 3,
+            "description": "Reducing a nearby creature to 0 HP grants Wisdom plus monk-level temporary HP.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Hour of Reaping",
+          "source_selectors": [
+            {
+              "heading_exact": "HOUR OF REAPING",
+              "page_start": 131
+            }
+          ],
+          "card": {
+            "name": "Hour of Reaping",
+            "class_name": "Monk",
+            "subclass_name": "Way of the Long Death",
+            "feature_subtype": "",
+            "minimum_level": 6,
+            "description": "Action frightens nearby creatures that can see you on a Wisdom save.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Mastery of Death",
+          "source_selectors": [
+            {
+              "heading_exact": "MASTERY OF DEATH",
+              "page_start": 132
+            }
+          ],
+          "card": {
+            "name": "Mastery of Death",
+            "class_name": "Monk",
+            "subclass_name": "Way of the Long Death",
+            "feature_subtype": "",
+            "minimum_level": 11,
+            "description": "Spend 1 ki to remain at 1 HP instead of falling to 0 HP.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Touch of the Long Death",
+          "source_selectors": [
+            {
+              "heading_exact": "TOUCH OF THE LONG DEATH",
+              "page_start": 132
+            }
+          ],
+          "card": {
+            "name": "Touch of the Long Death",
+            "class_name": "Monk",
+            "subclass_name": "Way of the Long Death",
+            "feature_subtype": "",
+            "minimum_level": 17,
+            "description": "Spend 1-10 ki after touching a creature for the printed necrotic damage save.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Radiant Sun Bolt",
+          "source_selectors": [
+            {
+              "heading_exact": "RADIANT SUN BOLT",
+              "page_start": 132
+            }
+          ],
+          "card": {
+            "name": "Radiant Sun Bolt",
+            "class_name": "Monk",
+            "subclass_name": "Way of the Sun Soul",
+            "feature_subtype": "",
+            "minimum_level": 3,
+            "description": "Ranged radiant spell attack uses Dexterity and Martial Arts die; supports Flurry bolts.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Searing Arc Strike",
+          "source_selectors": [
+            {
+              "heading_exact": "SEARING ARC STRIKE",
+              "page_start": 132
+            }
+          ],
+          "card": {
+            "name": "Searing Arc Strike",
+            "class_name": "Monk",
+            "subclass_name": "Way of the Sun Soul",
+            "feature_subtype": "",
+            "minimum_level": 6,
+            "description": "After Attack, spend ki to cast and upcast Burning Hands as a bonus action.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Searing Sunburst",
+          "source_selectors": [
+            {
+              "heading_exact": "SEARING SUNBURST",
+              "page_start": 132
+            }
+          ],
+          "card": {
+            "name": "Searing Sunburst",
+            "class_name": "Monk",
+            "subclass_name": "Way of the Sun Soul",
+            "feature_subtype": "",
+            "minimum_level": 11,
+            "description": "Action creates a ranged radiant burst; spend up to 3 ki to add damage dice.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Sun Shield",
+          "source_selectors": [
+            {
+              "heading_exact": "SUN SHIELD",
+              "page_start": 132
+            }
+          ],
+          "card": {
+            "name": "Sun Shield",
+            "class_name": "Monk",
+            "subclass_name": "Way of the Sun Soul",
+            "feature_subtype": "",
+            "minimum_level": 17,
+            "description": "Emit or suppress light; reaction deals Wisdom-modifier radiant damage to a melee attacker.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Channel Divinity",
+          "source_selectors": [
+            {
+              "heading_exact": "CHANNEL DIVINITY",
+              "page_start": 134
+            }
+          ],
+          "card": {
+            "name": "Channel Divinity",
+            "class_name": "Paladin",
+            "subclass_name": "Oath of the Crown",
+            "feature_subtype": "",
+            "minimum_level": 3,
+            "description": "Champion Challenge and Turn the Tide use the paladin's Channel Divinity.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Divine Allegiance",
+          "source_selectors": [
+            {
+              "heading_exact": "DIVINE ALLEGIANCE",
+              "page_start": 134
+            }
+          ],
+          "card": {
+            "name": "Divine Allegiance",
+            "class_name": "Paladin",
+            "subclass_name": "Oath of the Crown",
+            "feature_subtype": "",
+            "minimum_level": 7,
+            "description": "Reaction takes damage for a creature within 5 feet without transferring other effects.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Unyielding Spirit",
+          "source_selectors": [
+            {
+              "heading_exact": "UNYIELDING SPIRIT",
+              "page_start": 134
+            }
+          ],
+          "card": {
+            "name": "Unyielding Spirit",
+            "class_name": "Paladin",
+            "subclass_name": "Oath of the Crown",
+            "feature_subtype": "",
+            "minimum_level": 15,
+            "description": "Advantage on saves against paralysis and stun.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Exalted Champion",
+          "source_selectors": [
+            {
+              "heading_exact": "EXALTED CHAMPION",
+              "page_start": 134
+            }
+          ],
+          "card": {
+            "name": "Exalted Champion",
+            "class_name": "Paladin",
+            "subclass_name": "Oath of the Crown",
+            "feature_subtype": "",
+            "minimum_level": 20,
+            "description": "One-hour transformation grants the printed resistances, ally save advantage, and death-save benefit once per long rest.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Master of Tactics",
+          "source_selectors": [
+            {
+              "heading_exact": "MASTER OF TACTICS",
+              "page_start": 136
+            }
+          ],
+          "card": {
+            "name": "Master of Tactics",
+            "class_name": "Rogue",
+            "subclass_name": "Mastermind",
+            "feature_subtype": "",
+            "minimum_level": 3,
+            "description": "Help as a bonus action, including aiding an attack within 30 feet of the target.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Insightful Manipulator",
+          "source_selectors": [
+            {
+              "heading_exact": "INSIGHTFUL MANIPULATOR",
+              "page_start": 136
+            }
+          ],
+          "card": {
+            "name": "Insightful Manipulator",
+            "class_name": "Rogue",
+            "subclass_name": "Mastermind",
+            "feature_subtype": "",
+            "minimum_level": 9,
+            "description": "One minute of interaction reveals the source-defined comparative capabilities.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Misdirection",
+          "source_selectors": [
+            {
+              "heading_exact": "MISDIRECTION",
+              "page_start": 136
+            }
+          ],
+          "card": {
+            "name": "Misdirection",
+            "class_name": "Rogue",
+            "subclass_name": "Mastermind",
+            "feature_subtype": "",
+            "minimum_level": 13,
+            "description": "Redirect a cover-providing attack to the creature granting cover.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Soul of Deceit",
+          "source_selectors": [
+            {
+              "heading_exact": "SOUL OF DECEIT",
+              "page_start": 136
+            }
+          ],
+          "card": {
+            "name": "Soul of Deceit",
+            "class_name": "Rogue",
+            "subclass_name": "Mastermind",
+            "feature_subtype": "",
+            "minimum_level": 17,
+            "description": "Thought reading and truth magic receive the exact source false result.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Fancy Footwork",
+          "source_selectors": [
+            {
+              "heading_exact": "FANCY FOOTWORK",
+              "page_start": 136
+            }
+          ],
+          "card": {
+            "name": "Fancy Footwork",
+            "class_name": "Rogue",
+            "subclass_name": "Swashbuckler",
+            "feature_subtype": "",
+            "minimum_level": 3,
+            "description": "A creature you melee attack cannot opportunity attack you that turn.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Rakish Audacity",
+          "source_selectors": [
+            {
+              "heading_exact": "RAKISH AUDACITY",
+              "page_start": 137
+            }
+          ],
+          "card": {
+            "name": "Rakish Audacity",
+            "class_name": "Rogue",
+            "subclass_name": "Swashbuckler",
+            "feature_subtype": "",
+            "minimum_level": 3,
+            "description": "Add Charisma to initiative and gain the printed isolated-duel Sneak Attack route.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Panache",
+          "source_selectors": [
+            {
+              "heading_exact": "PANACHE",
+              "page_start": 137
+            }
+          ],
+          "card": {
+            "name": "Panache",
+            "class_name": "Rogue",
+            "subclass_name": "Swashbuckler",
+            "feature_subtype": "",
+            "minimum_level": 9,
+            "description": "Persuasion contested by Insight produces the source combat or noncombat effect.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Elegant Maneuver",
+          "source_selectors": [
+            {
+              "heading_exact": "ELEGANT MANEUVER",
+              "page_start": 137
+            }
+          ],
+          "card": {
+            "name": "Elegant Maneuver",
+            "class_name": "Rogue",
+            "subclass_name": "Swashbuckler",
+            "feature_subtype": "",
+            "minimum_level": 13,
+            "description": "Bonus action grants advantage on the next Acrobatics or Athletics check that turn.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Master Duelist",
+          "source_selectors": [
+            {
+              "heading_exact": "MASTER DUELIST",
+              "page_start": 137
+            }
+          ],
+          "card": {
+            "name": "Master Duelist",
+            "class_name": "Rogue",
+            "subclass_name": "Swashbuckler",
+            "feature_subtype": "",
+            "minimum_level": 17,
+            "description": "Reroll a missed attack with advantage once per short or long rest.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {
+              "resources": {
+                "feature:swashbuckler:master_duelist": {
+                  "label": "Master Duelist",
+                  "value": 1,
+                  "max": 1,
+                  "recovers_on": "short_rest",
+                  "source_key": "Master Duelist"
+                }
+              }
+            }
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Wind Speaker",
+          "source_selectors": [
+            {
+              "heading_exact": "WIND SPEAKER",
+              "page_start": 138
+            }
+          ],
+          "card": {
+            "name": "Wind Speaker",
+            "class_name": "Sorcerer",
+            "subclass_name": "Storm Sorcery",
+            "feature_subtype": "",
+            "minimum_level": 1,
+            "description": "Speak, read, and write Primordial and its four elemental dialects.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {
+              "languages": [
+                "Primordial"
+              ]
+            }
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Tempestuous Magic",
+          "source_selectors": [
+            {
+              "heading_exact": "TEMPESTUOUS MAGIC",
+              "page_start": 138
+            }
+          ],
+          "card": {
+            "name": "Tempestuous Magic",
+            "class_name": "Sorcerer",
+            "subclass_name": "Storm Sorcery",
+            "feature_subtype": "",
+            "minimum_level": 1,
+            "description": "Bonus action before or after a 1st-level-or-higher spell flies 10 feet without opportunity attacks.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Heart of the Storm",
+          "source_selectors": [
+            {
+              "heading_exact": "HEART OF THE STORM",
+              "page_start": 138
+            }
+          ],
+          "card": {
+            "name": "Heart of the Storm",
+            "class_name": "Sorcerer",
+            "subclass_name": "Storm Sorcery",
+            "feature_subtype": "",
+            "minimum_level": 6,
+            "description": "Lightning/thunder resistance and source-level splash damage when casting such spells.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Storm Guide",
+          "source_selectors": [
+            {
+              "heading_exact": "STORM GUIDE",
+              "page_start": 138
+            }
+          ],
+          "card": {
+            "name": "Storm Guide",
+            "class_name": "Sorcerer",
+            "subclass_name": "Storm Sorcery",
+            "feature_subtype": "",
+            "minimum_level": 6,
+            "description": "Use an action to stop rain or a bonus action to redirect wind in the source area.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Storm's Fury",
+          "source_selectors": [
+            {
+              "heading_exact": "STORM'S FURY",
+              "page_start": 138
+            }
+          ],
+          "card": {
+            "name": "Storm's Fury",
+            "class_name": "Sorcerer",
+            "subclass_name": "Storm Sorcery",
+            "feature_subtype": "",
+            "minimum_level": 14,
+            "description": "Reaction damages and may push a melee attacker on a failed Strength save.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Wind Soul",
+          "source_selectors": [
+            {
+              "heading_exact": "WIND SOUL",
+              "page_start": 138
+            }
+          ],
+          "card": {
+            "name": "Wind Soul",
+            "class_name": "Sorcerer",
+            "subclass_name": "Storm Sorcery",
+            "feature_subtype": "",
+            "minimum_level": 18,
+            "description": "Lightning/thunder immunity, flight, and the source one-hour party flight grant.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Among the Dead",
+          "source_selectors": [
+            {
+              "heading_exact": "AMONG THE DEAD",
+              "page_start": 140
+            }
+          ],
+          "card": {
+            "name": "Among the Dead",
+            "class_name": "Warlock",
+            "subclass_name": "The Undying",
+            "feature_subtype": "",
+            "minimum_level": 1,
+            "description": "Learn Spare the Dying and gain the source disease and undead-targeting defenses.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Defy Death",
+          "source_selectors": [
+            {
+              "heading_exact": "DEFY DEATH",
+              "page_start": 141
+            }
+          ],
+          "card": {
+            "name": "Defy Death",
+            "class_name": "Warlock",
+            "subclass_name": "The Undying",
+            "feature_subtype": "",
+            "minimum_level": 6,
+            "description": "Regain source hit points after a death save success or Spare the Dying once per long rest.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {
+              "resources": {
+                "feature:undying:defy_death": {
+                  "label": "Defy Death",
+                  "value": 1,
+                  "max": 1,
+                  "recovers_on": "long_rest",
+                  "source_key": "Defy Death"
+                }
+              }
+            }
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Undying Nature",
+          "source_selectors": [
+            {
+              "heading_exact": "UNDYING NATURE",
+              "page_start": 141
+            }
+          ],
+          "card": {
+            "name": "Undying Nature",
+            "class_name": "Warlock",
+            "subclass_name": "The Undying",
+            "feature_subtype": "",
+            "minimum_level": 10,
+            "description": "Source breathing, sustenance, aging, sleep, and magical-aging protections.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Indestructible Life",
+          "source_selectors": [
+            {
+              "heading_exact": "INDESTRUCTIBLE LIFE",
+              "page_start": 141
+            }
+          ],
+          "card": {
+            "name": "Indestructible Life",
+            "class_name": "Warlock",
+            "subclass_name": "The Undying",
+            "feature_subtype": "",
+            "minimum_level": 14,
+            "description": "Bonus action regains source hit points and can reattach a severed part once per rest.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {
+              "resources": {
+                "feature:undying:indestructible_life": {
+                  "label": "Indestructible Life",
+                  "value": 1,
+                  "max": 1,
+                  "recovers_on": "short_rest",
+                  "source_key": "Indestructible Life"
+                }
+              }
+            }
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Bladesong",
+          "source_selectors": [
+            {
+              "heading_exact": "BLADESONG",
+              "page_start": 143
+            }
+          ],
+          "card": {
+            "name": "Bladesong",
+            "class_name": "Wizard",
+            "subclass_name": "Bladesinging",
+            "feature_subtype": "",
+            "minimum_level": 2,
+            "description": "Bonus action starts the one-minute source AC, speed, Acrobatics, and concentration benefits.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {
+              "resources": {
+                "feature:bladesinger:bladesong": {
+                  "label": "Bladesong",
+                  "value": 2,
+                  "max": 2,
+                  "recovers_on": "short_rest",
+                  "source_key": "Bladesong"
+                }
+              }
+            }
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Extra Attack",
+          "source_selectors": [
+            {
+              "heading_exact": "EXTRA ATTACK",
+              "page_start": 143
+            }
+          ],
+          "card": {
+            "name": "Extra Attack",
+            "class_name": "Wizard",
+            "subclass_name": "Bladesinging",
+            "feature_subtype": "",
+            "minimum_level": 6,
+            "description": "Attack twice when taking the Attack action.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Song of Defense",
+          "source_selectors": [
+            {
+              "heading_exact": "SONG OF DEFENSE",
+              "page_start": 143
+            }
+          ],
+          "card": {
+            "name": "Song of Defense",
+            "class_name": "Wizard",
+            "subclass_name": "Bladesinging",
+            "feature_subtype": "",
+            "minimum_level": 10,
+            "description": "Reaction spends a spell slot to reduce damage by five times the slot level.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Song of Victory",
+          "source_selectors": [
+            {
+              "heading_exact": "SONG OF VICTORY",
+              "page_start": 143
+            }
+          ],
+          "card": {
+            "name": "Song of Victory",
+            "class_name": "Wizard",
+            "subclass_name": "Bladesinging",
+            "feature_subtype": "",
+            "minimum_level": 14,
+            "description": "Add Intelligence modifier to melee weapon damage while Bladesong is active.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Arcane Initiate",
+          "source_selectors": [
+            {
+              "heading_exact": "ARCANE INITIATE",
+              "page_start": 126
+            }
+          ],
+          "card": {
+            "name": "Arcane Initiate",
+            "class_name": "Cleric",
+            "subclass_name": "Arcana Domain",
+            "feature_subtype": "",
+            "minimum_level": 1,
+            "description": "Gain Arcana proficiency, or expertise when already proficient, and two Wizard cantrips treated as cleric cantrips.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {
+              "field": "arcane_cantrips",
+              "kind": "known_spell_grants",
+              "count": 2,
+              "required_spell_levels": [
+                0,
+                0
+              ],
+              "eligible_class": "Wizard",
+              "source_class": "Cleric",
+              "grant_method": "known"
+            },
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {
+              "skill_proficiency_or_expertise": [
+                "Arcana"
+              ]
+            }
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Arcane Mastery",
+          "source_selectors": [
+            {
+              "heading_exact": "ARCANE MASTERY",
+              "page_start": 127
+            }
+          ],
+          "card": {
+            "name": "Arcane Mastery",
+            "class_name": "Cleric",
+            "subclass_name": "Arcana Domain",
+            "feature_subtype": "",
+            "minimum_level": 17,
+            "description": "Choose one Wizard spell of each level 6 through 9; each becomes a domain spell and is always prepared.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {
+              "field": "arcane_mastery_spells",
+              "kind": "known_spell_grants",
+              "count": 4,
+              "required_spell_levels": [
+                6,
+                7,
+                8,
+                9
+              ],
+              "eligible_class": "Wizard",
+              "source_class": "Cleric",
+              "grant_method": "class_prepared",
+              "always_prepared": true
+            },
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Royal Envoy",
+          "source_selectors": [
+            {
+              "heading_exact": "ROYAL ENVOY",
+              "page_start": 129
+            }
+          ],
+          "card": {
+            "name": "Royal Envoy",
+            "class_name": "Fighter",
+            "subclass_name": "Purple Dragon Knight",
+            "feature_subtype": "",
+            "minimum_level": 7,
+            "description": "Gain Persuasion proficiency, or double proficiency when already proficient.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {
+              "skill_proficiency_or_expertise": [
+                "Persuasion"
+              ]
+            }
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Master of Intrigue",
+          "source_selectors": [
+            {
+              "heading_exact": "MASTER OF INTRIGUE",
+              "page_start": 136
+            }
+          ],
+          "card": {
+            "name": "Master of Intrigue",
+            "class_name": "Rogue",
+            "subclass_name": "Mastermind",
+            "feature_subtype": "",
+            "minimum_level": 3,
+            "description": "Gain Disguise Kit and Forgery Kit plus two languages and one gaming set; mimicry remains source context.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {
+              "field": "intrigue_proficiencies",
+              "kind": "proficiency_grants",
+              "groups": [
+                {
+                  "id": "languages",
+                  "kind": "language",
+                  "count": 2,
+                  "options": [],
+                  "allow_unlisted": true
+                },
+                {
+                  "id": "gaming_set",
+                  "kind": "tool",
+                  "count": 1,
+                  "options": [
+                    "Dice",
+                    "Dragonchess",
+                    "Playing Cards",
+                    "Three-Dragon Ante"
+                  ]
+                }
+              ]
+            },
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {
+              "tool_proficiencies": [
+                "Disguise Kit",
+                "Forgery Kit"
+              ]
+            }
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Training in War and Song",
+          "source_selectors": [
+            {
+              "heading_exact": "TRAINING IN WAR AND SONG",
+              "page_start": 143
+            }
+          ],
+          "card": {
+            "name": "Training in War and Song",
+            "class_name": "Wizard",
+            "subclass_name": "Bladesinging",
+            "feature_subtype": "",
+            "minimum_level": 2,
+            "description": "Gain light armor and one one-handed melee weapon proficiency.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {
+              "field": "war_and_song_training",
+              "kind": "proficiency_grants",
+              "groups": [
+                {
+                  "id": "weapon",
+                  "kind": "weapon",
+                  "count": 1,
+                  "options": [
+                    "Club",
+                    "Dagger",
+                    "Handaxe",
+                    "Javelin",
+                    "Light Hammer",
+                    "Mace",
+                    "Quarterstaff",
+                    "Sickle",
+                    "Spear",
+                    "Battleaxe",
+                    "Flail",
+                    "Longsword",
+                    "Morningstar",
+                    "Rapier",
+                    "Scimitar",
+                    "Shortsword",
+                    "Trident",
+                    "War Pick",
+                    "Warhammer",
+                    "Whip"
+                  ]
+                }
+              ]
+            },
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {
+              "armor_proficiencies": [
+                "light armor"
+              ]
+            }
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Totem Spirit",
+          "source_selectors": [
+            {
+              "heading_exact": "UTHGARDT TOTEMS",
+              "page_start": 123
+            }
+          ],
+          "card": {
+            "name": "Totem Spirit",
+            "class_name": "Barbarian",
+            "subclass_name": "Path of the Totem Warrior",
+            "feature_subtype": "",
+            "minimum_level": 3,
+            "description": "Choose exactly one of the source's additional Uthgardt totem options.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {
+              "field": "totem_option",
+              "kind": "feature_grants",
+              "count": 1,
+              "options": [
+                "Totem Spirit (Elk)",
+                "Totem Spirit (Tiger)"
+              ],
+              "option_artifact_ids": {
+                "Totem Spirit (Elk)": "dnd5e.addon.rulebook.d-d-5e-sword-coast-adventurer-s-guide.16e6a243ef0a.feature.totem-spirit-elk",
+                "Totem Spirit (Tiger)": "dnd5e.addon.rulebook.d-d-5e-sword-coast-adventurer-s-guide.16e6a243ef0a.feature.totem-spirit-tiger"
+              },
+              "option_prerequisites": {
+                "Totem Spirit (Elk)": {
+                  "minimum_level": 3
+                },
+                "Totem Spirit (Tiger)": {
+                  "minimum_level": 3
+                }
+              },
+              "option_subtype": "selectable_option"
+            },
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Totem Spirit (Elk)",
+          "source_selectors": [
+            {
+              "heading_exact": "UTHGARDT TOTEMS",
+              "page_start": 123
+            }
+          ],
+          "card": {
+            "name": "Totem Spirit (Elk)",
+            "class_name": "Barbarian",
+            "subclass_name": "Path of the Totem Warrior",
+            "feature_subtype": "selectable_option",
+            "minimum_level": 3,
+            "description": "While raging, walking speed increases by 15 feet.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Totem Spirit (Tiger)",
+          "source_selectors": [
+            {
+              "heading_exact": "UTHGARDT TOTEMS",
+              "page_start": 123
+            }
+          ],
+          "card": {
+            "name": "Totem Spirit (Tiger)",
+            "class_name": "Barbarian",
+            "subclass_name": "Path of the Totem Warrior",
+            "feature_subtype": "selectable_option",
+            "minimum_level": 3,
+            "description": "While raging, long jump increases 10 feet and high jump 3 feet.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Aspect of the Beast",
+          "source_selectors": [
+            {
+              "heading_exact": "ASPECT OF THE BEAST",
+              "page_start": 123
+            }
+          ],
+          "card": {
+            "name": "Aspect of the Beast",
+            "class_name": "Barbarian",
+            "subclass_name": "Path of the Totem Warrior",
+            "feature_subtype": "",
+            "minimum_level": 6,
+            "description": "Choose exactly one of the source's additional Uthgardt totem options.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {
+              "field": "totem_option",
+              "kind": "feature_grants",
+              "count": 1,
+              "options": [
+                "Aspect of the Beast (Elk)",
+                "Aspect of the Beast (Tiger)"
+              ],
+              "option_artifact_ids": {
+                "Aspect of the Beast (Elk)": "dnd5e.addon.rulebook.d-d-5e-sword-coast-adventurer-s-guide.16e6a243ef0a.feature.aspect-of-the-beast-elk",
+                "Aspect of the Beast (Tiger)": "dnd5e.addon.rulebook.d-d-5e-sword-coast-adventurer-s-guide.16e6a243ef0a.feature.aspect-of-the-beast-tiger"
+              },
+              "option_prerequisites": {
+                "Aspect of the Beast (Elk)": {
+                  "minimum_level": 6
+                },
+                "Aspect of the Beast (Tiger)": {
+                  "minimum_level": 6
+                }
+              },
+              "option_subtype": "selectable_option"
+            },
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Aspect of the Beast (Elk)",
+          "source_selectors": [
+            {
+              "heading_exact": "ASPECT OF THE BEAST",
+              "page_start": 123
+            }
+          ],
+          "card": {
+            "name": "Aspect of the Beast (Elk)",
+            "class_name": "Barbarian",
+            "subclass_name": "Path of the Totem Warrior",
+            "feature_subtype": "selectable_option",
+            "minimum_level": 6,
+            "description": "Mounted or foot travel pace doubles for up to ten companions within 60 feet.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Aspect of the Beast (Tiger)",
+          "source_selectors": [
+            {
+              "heading_exact": "ASPECT OF THE BEAST",
+              "page_start": 123
+            }
+          ],
+          "card": {
+            "name": "Aspect of the Beast (Tiger)",
+            "class_name": "Barbarian",
+            "subclass_name": "Path of the Totem Warrior",
+            "feature_subtype": "selectable_option",
+            "minimum_level": 6,
+            "description": "Gain proficiency in two of Athletics, Acrobatics, Stealth, and Survival.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Totemic Attunement",
+          "source_selectors": [
+            {
+              "heading_exact": "TOTEMIC ATTUNEMENT",
+              "page_start": 123
+            }
+          ],
+          "card": {
+            "name": "Totemic Attunement",
+            "class_name": "Barbarian",
+            "subclass_name": "Path of the Totem Warrior",
+            "feature_subtype": "",
+            "minimum_level": 14,
+            "description": "Choose exactly one of the source's additional Uthgardt totem options.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {
+              "field": "totem_option",
+              "kind": "feature_grants",
+              "count": 1,
+              "options": [
+                "Totemic Attunement (Elk)",
+                "Totemic Attunement (Tiger)"
+              ],
+              "option_artifact_ids": {
+                "Totemic Attunement (Elk)": "dnd5e.addon.rulebook.d-d-5e-sword-coast-adventurer-s-guide.16e6a243ef0a.feature.totemic-attunement-elk",
+                "Totemic Attunement (Tiger)": "dnd5e.addon.rulebook.d-d-5e-sword-coast-adventurer-s-guide.16e6a243ef0a.feature.totemic-attunement-tiger"
+              },
+              "option_prerequisites": {
+                "Totemic Attunement (Elk)": {
+                  "minimum_level": 14
+                },
+                "Totemic Attunement (Tiger)": {
+                  "minimum_level": 14
+                }
+              },
+              "option_subtype": "selectable_option"
+            },
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Totemic Attunement (Elk)",
+          "source_selectors": [
+            {
+              "heading_exact": "TOTEMIC ATTUNEMENT",
+              "page_start": 123
+            }
+          ],
+          "card": {
+            "name": "Totemic Attunement (Elk)",
+            "class_name": "Barbarian",
+            "subclass_name": "Path of the Totem Warrior",
+            "feature_subtype": "selectable_option",
+            "minimum_level": 14,
+            "description": "Bonus action passes through a Large-or-smaller creature and may knock it prone with source damage.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "Totemic Attunement (Tiger)",
+          "source_selectors": [
+            {
+              "heading_exact": "TOTEMIC ATTUNEMENT",
+              "page_start": 123
+            }
+          ],
+          "card": {
+            "name": "Totemic Attunement (Tiger)",
+            "class_name": "Barbarian",
+            "subclass_name": "Path of the Totem Warrior",
+            "feature_subtype": "selectable_option",
+            "minimum_level": 14,
+            "description": "While raging, move at least 20 feet then make an extra melee weapon attack as a bonus action.",
+            "repeatable_selection_levels": [],
+            "selection_requirements": {},
+            "selection_requirements_by_level": {},
+            "mechanical_grants": {}
+          }
+        },
+        {
+          "kind": "background",
+          "name": "City Watch",
+          "source_selectors": [
+            {
+              "heading_exact": "CITY WATCH",
+              "page_start": 146,
+              "match_all": false
+            }
+          ],
+          "card": {
+            "name": "City Watch",
+            "skill_proficiencies": [
+              "Athletics",
+              "Insight"
+            ],
+            "background_grants": {
+              "feature": "Watcher's Eye",
+              "skills": [
+                "Athletics",
+                "Insight"
+              ],
+              "languages": [],
+              "spell_list_expansion": [],
+              "tools": [],
+              "equipment_item_ids": [],
+              "equipment": {
+                "items": [
+                  {
+                    "inventory_template": {
+                      "name": "Watch Uniform",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  },
+                  {
+                    "inventory_template": {
+                      "name": "Horn",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  },
+                  {
+                    "inventory_template": {
+                      "name": "Manacles",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  }
+                ],
+                "wallet": {
+                  "gp": 10
+                }
+              },
+              "choices": {
+                "skill_choice_count": 0,
+                "skill_options": [],
+                "language_count": 2,
+                "language_options": [],
+                "allow_any_language": true,
+                "tool_choice_count": 0,
+                "tool_options": [],
+                "tool_option_groups": []
+              }
+            }
+          }
+        },
+        {
+          "kind": "background",
+          "name": "Investigator",
+          "source_selectors": [
+            {
+              "heading_exact": "VARIANT: INVESTIGATOR",
+              "page_start": 146,
+              "match_all": false
+            }
+          ],
+          "card": {
+            "name": "Investigator",
+            "skill_proficiencies": [
+              "Investigation",
+              "Insight"
+            ],
+            "background_grants": {
+              "feature": "Watcher's Eye",
+              "skills": [
+                "Investigation",
+                "Insight"
+              ],
+              "languages": [],
+              "spell_list_expansion": [],
+              "tools": [],
+              "equipment_item_ids": [],
+              "equipment": {
+                "items": [
+                  {
+                    "inventory_template": {
+                      "name": "Investigator Uniform",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  },
+                  {
+                    "inventory_template": {
+                      "name": "Horn",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  },
+                  {
+                    "inventory_template": {
+                      "name": "Manacles",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  }
+                ],
+                "wallet": {
+                  "gp": 10
+                }
+              },
+              "choices": {
+                "skill_choice_count": 0,
+                "skill_options": [],
+                "language_count": 2,
+                "language_options": [],
+                "allow_any_language": true,
+                "tool_choice_count": 0,
+                "tool_options": [],
+                "tool_option_groups": []
+              }
+            }
+          }
+        },
+        {
+          "kind": "background",
+          "name": "Clan Crafter",
+          "source_selectors": [
+            {
+              "heading_exact": "CLAN CRAFTER",
+              "page_start": 146,
+              "match_all": false
+            }
+          ],
+          "card": {
+            "name": "Clan Crafter",
+            "skill_proficiencies": [
+              "History",
+              "Insight"
+            ],
+            "background_grants": {
+              "feature": "Respect of the Stout Folk",
+              "skills": [
+                "History",
+                "Insight"
+              ],
+              "languages": [],
+              "spell_list_expansion": [],
+              "tools": [],
+              "equipment_item_ids": [],
+              "equipment": {
+                "items": [
+                  {
+                    "inventory_template": {
+                      "name": "Maker's Mark Chisel",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  },
+                  {
+                    "inventory_template": {
+                      "name": "Traveler's Clothes",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  },
+                  {
+                    "inventory_template": {
+                      "name": "10 gp Gem",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  },
+                  {
+                    "selected_tool": true
+                  }
+                ],
+                "wallet": {
+                  "gp": 5
+                }
+              },
+              "choices": {
+                "skill_choice_count": 0,
+                "skill_options": [],
+                "language_count": 1,
+                "language_options": [
+                  "Dwarvish"
+                ],
+                "allow_any_language": false,
+                "tool_choice_count": 1,
+                "tool_options": [
+                  "Alchemist's Supplies",
+                  "Brewer's Supplies",
+                  "Calligrapher's Supplies",
+                  "Carpenter's Tools",
+                  "Cartographer's Tools",
+                  "Cobbler's Tools",
+                  "Cook's Utensils",
+                  "Glassblower's Tools",
+                  "Jeweler's Tools",
+                  "Leatherworker's Tools",
+                  "Mason's Tools",
+                  "Painter's Supplies",
+                  "Potter's Tools",
+                  "Smith's Tools",
+                  "Tinker's Tools",
+                  "Weaver's Tools",
+                  "Woodcarver's Tools"
+                ],
+                "tool_option_groups": []
+              }
+            }
+          }
+        },
+        {
+          "kind": "background",
+          "name": "Cloistered Scholar",
+          "source_selectors": [
+            {
+              "heading_exact": "CLOISTERED SCHOLAR",
+              "page_start": 147,
+              "match_all": false
+            }
+          ],
+          "card": {
+            "name": "Cloistered Scholar",
+            "skill_proficiencies": [
+              "History"
+            ],
+            "background_grants": {
+              "feature": "Library Access",
+              "skills": [
+                "History"
+              ],
+              "languages": [],
+              "spell_list_expansion": [],
+              "tools": [],
+              "equipment_item_ids": [],
+              "equipment": {
+                "items": [
+                  {
+                    "inventory_template": {
+                      "name": "Scholar's Robes",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  },
+                  {
+                    "inventory_template": {
+                      "name": "Writing Kit",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  },
+                  {
+                    "inventory_template": {
+                      "name": "Borrowed Book",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  }
+                ],
+                "wallet": {
+                  "gp": 10
+                }
+              },
+              "choices": {
+                "skill_choice_count": 1,
+                "skill_options": [
+                  "Arcana",
+                  "Nature",
+                  "Religion"
+                ],
+                "language_count": 2,
+                "language_options": [],
+                "allow_any_language": true,
+                "tool_choice_count": 0,
+                "tool_options": [],
+                "tool_option_groups": []
+              }
+            }
+          }
+        },
+        {
+          "kind": "background",
+          "name": "Courtier",
+          "source_selectors": [
+            {
+              "heading_exact": "COURTIER",
+              "page_start": 147,
+              "match_all": false
+            }
+          ],
+          "card": {
+            "name": "Courtier",
+            "skill_proficiencies": [
+              "Insight",
+              "Persuasion"
+            ],
+            "background_grants": {
+              "feature": "Court Functionary",
+              "skills": [
+                "Insight",
+                "Persuasion"
+              ],
+              "languages": [],
+              "spell_list_expansion": [],
+              "tools": [],
+              "equipment_item_ids": [],
+              "equipment": {
+                "items": [
+                  {
+                    "inventory_template": {
+                      "name": "Fine Clothes",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  }
+                ],
+                "wallet": {
+                  "gp": 5
+                }
+              },
+              "choices": {
+                "skill_choice_count": 0,
+                "skill_options": [],
+                "language_count": 2,
+                "language_options": [],
+                "allow_any_language": true,
+                "tool_choice_count": 0,
+                "tool_options": [],
+                "tool_option_groups": []
+              }
+            }
+          }
+        },
+        {
+          "kind": "background",
+          "name": "Faction Agent",
+          "source_selectors": [
+            {
+              "heading_exact": "FACTION AGENT",
+              "page_start": 148,
+              "match_all": true
+            }
+          ],
+          "card": {
+            "name": "Faction Agent",
+            "skill_proficiencies": [
+              "Insight"
+            ],
+            "background_grants": {
+              "feature": "Safe Haven",
+              "skills": [
+                "Insight"
+              ],
+              "languages": [],
+              "spell_list_expansion": [],
+              "tools": [],
+              "equipment_item_ids": [],
+              "equipment": {
+                "items": [
+                  {
+                    "inventory_template": {
+                      "name": "Faction Badge",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  },
+                  {
+                    "inventory_template": {
+                      "name": "Faction Text",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  },
+                  {
+                    "inventory_template": {
+                      "name": "Common Clothes",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  }
+                ],
+                "wallet": {
+                  "gp": 15
+                }
+              },
+              "choices": {
+                "skill_choice_count": 1,
+                "skill_options": [
+                  "Animal Handling",
+                  "Arcana",
+                  "Deception",
+                  "History",
+                  "Intimidation",
+                  "Investigation",
+                  "Medicine",
+                  "Nature",
+                  "Perception",
+                  "Performance",
+                  "Persuasion",
+                  "Religion",
+                  "Survival"
+                ],
+                "language_count": 2,
+                "language_options": [],
+                "allow_any_language": true,
+                "tool_choice_count": 0,
+                "tool_options": [],
+                "tool_option_groups": []
+              }
+            }
+          }
+        },
+        {
+          "kind": "background",
+          "name": "Far Traveler",
+          "source_selectors": [
+            {
+              "heading_exact": "FAR TRAVELER",
+              "page_start": 149,
+              "match_all": false
+            }
+          ],
+          "card": {
+            "name": "Far Traveler",
+            "skill_proficiencies": [
+              "Insight",
+              "Perception"
+            ],
+            "background_grants": {
+              "feature": "All Eyes on You",
+              "skills": [
+                "Insight",
+                "Perception"
+              ],
+              "languages": [],
+              "spell_list_expansion": [],
+              "tools": [],
+              "equipment_item_ids": [],
+              "equipment": {
+                "items": [
+                  {
+                    "inventory_template": {
+                      "name": "Poorly Wrought Maps",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  },
+                  {
+                    "inventory_template": {
+                      "name": "10 gp Jewelry",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  },
+                  {
+                    "inventory_template": {
+                      "name": "Traveler's Clothes",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  },
+                  {
+                    "selected_tool": true
+                  }
+                ],
+                "wallet": {
+                  "gp": 5
+                }
+              },
+              "choices": {
+                "skill_choice_count": 0,
+                "skill_options": [],
+                "language_count": 1,
+                "language_options": [],
+                "allow_any_language": true,
+                "tool_choice_count": 1,
+                "tool_options": [
+                  "Dice",
+                  "Dragonchess",
+                  "Playing Cards",
+                  "Three-Dragon Ante",
+                  "Bagpipes",
+                  "Drum",
+                  "Dulcimer",
+                  "Flute",
+                  "Horn",
+                  "Lute",
+                  "Lyre",
+                  "Pan Flute",
+                  "Shawm",
+                  "Viol"
+                ],
+                "tool_option_groups": []
+              }
+            }
+          }
+        },
+        {
+          "kind": "background",
+          "name": "Inheritor",
+          "source_selectors": [
+            {
+              "heading_exact": "INHERITOR",
+              "page_start": 151,
+              "match_all": false
+            }
+          ],
+          "card": {
+            "name": "Inheritor",
+            "skill_proficiencies": [
+              "Survival"
+            ],
+            "background_grants": {
+              "feature": "Inheritance",
+              "skills": [
+                "Survival"
+              ],
+              "languages": [],
+              "spell_list_expansion": [],
+              "tools": [],
+              "equipment_item_ids": [],
+              "equipment": {
+                "items": [
+                  {
+                    "inventory_template": {
+                      "name": "Inheritance",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  },
+                  {
+                    "inventory_template": {
+                      "name": "Traveler's Clothes",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  }
+                ],
+                "wallet": {
+                  "gp": 15
+                }
+              },
+              "choices": {
+                "skill_choice_count": 1,
+                "skill_options": [
+                  "Arcana",
+                  "History",
+                  "Religion"
+                ],
+                "language_count": 1,
+                "language_options": [],
+                "allow_any_language": true,
+                "tool_choice_count": 1,
+                "tool_options": [
+                  "Dice",
+                  "Dragonchess",
+                  "Playing Cards",
+                  "Three-Dragon Ante",
+                  "Bagpipes",
+                  "Drum",
+                  "Dulcimer",
+                  "Flute",
+                  "Horn",
+                  "Lute",
+                  "Lyre",
+                  "Pan Flute",
+                  "Shawm",
+                  "Viol"
+                ],
+                "tool_option_groups": []
+              }
+            }
+          }
+        },
+        {
+          "kind": "background",
+          "name": "Knight of the Order",
+          "source_selectors": [
+            {
+              "heading_exact": "KNIGHT OF THE ORDER",
+              "page_start": 152,
+              "match_all": false
+            }
+          ],
+          "card": {
+            "name": "Knight of the Order",
+            "skill_proficiencies": [
+              "Persuasion"
+            ],
+            "background_grants": {
+              "feature": "Knightly Regard",
+              "skills": [
+                "Persuasion"
+              ],
+              "languages": [],
+              "spell_list_expansion": [],
+              "tools": [],
+              "equipment_item_ids": [],
+              "equipment": {
+                "items": [
+                  {
+                    "inventory_template": {
+                      "name": "Traveler's Clothes",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  },
+                  {
+                    "inventory_template": {
+                      "name": "Order Insignia",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  }
+                ],
+                "wallet": {
+                  "gp": 10
+                }
+              },
+              "choices": {
+                "skill_choice_count": 1,
+                "skill_options": [
+                  "Arcana",
+                  "History",
+                  "Nature",
+                  "Religion"
+                ],
+                "language_count": 1,
+                "language_options": [],
+                "allow_any_language": true,
+                "tool_choice_count": 1,
+                "tool_options": [
+                  "Dice",
+                  "Dragonchess",
+                  "Playing Cards",
+                  "Three-Dragon Ante",
+                  "Bagpipes",
+                  "Drum",
+                  "Dulcimer",
+                  "Flute",
+                  "Horn",
+                  "Lute",
+                  "Lyre",
+                  "Pan Flute",
+                  "Shawm",
+                  "Viol"
+                ],
+                "tool_option_groups": []
+              }
+            }
+          }
+        },
+        {
+          "kind": "background",
+          "name": "Mercenary Veteran",
+          "source_selectors": [
+            {
+              "heading_exact": "MERCENARY VETERAN",
+              "page_start": 153,
+              "match_all": false
+            }
+          ],
+          "card": {
+            "name": "Mercenary Veteran",
+            "skill_proficiencies": [
+              "Athletics",
+              "Persuasion"
+            ],
+            "background_grants": {
+              "feature": "Mercenary Life",
+              "skills": [
+                "Athletics",
+                "Persuasion"
+              ],
+              "languages": [],
+              "spell_list_expansion": [],
+              "tools": [
+                "Vehicles (Land)"
+              ],
+              "equipment_item_ids": [],
+              "equipment": {
+                "items": [
+                  {
+                    "inventory_template": {
+                      "name": "Mercenary Uniform",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  },
+                  {
+                    "inventory_template": {
+                      "name": "Rank Insignia",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  },
+                  {
+                    "inventory_template": {
+                      "name": "Common Clothes",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  },
+                  {
+                    "selected_tool": true
+                  }
+                ],
+                "wallet": {
+                  "gp": 10
+                }
+              },
+              "choices": {
+                "skill_choice_count": 0,
+                "skill_options": [],
+                "language_count": 0,
+                "language_options": [],
+                "allow_any_language": false,
+                "tool_choice_count": 1,
+                "tool_options": [
+                  "Dice",
+                  "Dragonchess",
+                  "Playing Cards",
+                  "Three-Dragon Ante"
+                ],
+                "tool_option_groups": []
+              }
+            }
+          }
+        },
+        {
+          "kind": "background",
+          "name": "Urban Bounty Hunter",
+          "source_selectors": [
+            {
+              "heading_exact": "URBAN BOUNTY HUNTER",
+              "page_start": 154,
+              "match_all": false
+            }
+          ],
+          "card": {
+            "name": "Urban Bounty Hunter",
+            "skill_proficiencies": [],
+            "background_grants": {
+              "feature": "Ear to the Ground",
+              "skills": [],
+              "languages": [],
+              "spell_list_expansion": [],
+              "tools": [],
+              "equipment_item_ids": [],
+              "equipment": {
+                "items": [
+                  {
+                    "inventory_template": {
+                      "name": "Work Clothes",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  }
+                ],
+                "wallet": {
+                  "gp": 20
+                }
+              },
+              "choices": {
+                "skill_choice_count": 2,
+                "skill_options": [
+                  "Deception",
+                  "Insight",
+                  "Persuasion",
+                  "Stealth"
+                ],
+                "language_count": 0,
+                "language_options": [],
+                "allow_any_language": false,
+                "tool_choice_count": 2,
+                "tool_options": [
+                  "Dice",
+                  "Dragonchess",
+                  "Playing Cards",
+                  "Three-Dragon Ante",
+                  "Bagpipes",
+                  "Drum",
+                  "Dulcimer",
+                  "Flute",
+                  "Horn",
+                  "Lute",
+                  "Lyre",
+                  "Pan Flute",
+                  "Shawm",
+                  "Viol",
+                  "Thieves' Tools"
+                ],
+                "tool_option_groups": [
+                  {
+                    "id": "gaming_set",
+                    "maximum": 1,
+                    "options": [
+                      "Dice",
+                      "Dragonchess",
+                      "Playing Cards",
+                      "Three-Dragon Ante"
+                    ]
+                  },
+                  {
+                    "id": "instrument",
+                    "maximum": 1,
+                    "options": [
+                      "Bagpipes",
+                      "Drum",
+                      "Dulcimer",
+                      "Flute",
+                      "Horn",
+                      "Lute",
+                      "Lyre",
+                      "Pan Flute",
+                      "Shawm",
+                      "Viol"
+                    ]
+                  },
+                  {
+                    "id": "thieves_tools",
+                    "maximum": 1,
+                    "options": [
+                      "Thieves' Tools"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "kind": "background",
+          "name": "Uthgardt Tribe Member",
+          "source_selectors": [
+            {
+              "heading_exact": "UTHGARDT TRIBE MEMBER",
+              "page_start": 154,
+              "match_all": true
+            }
+          ],
+          "card": {
+            "name": "Uthgardt Tribe Member",
+            "skill_proficiencies": [
+              "Athletics",
+              "Survival"
+            ],
+            "background_grants": {
+              "feature": "Uthgardt Heritage",
+              "skills": [
+                "Athletics",
+                "Survival"
+              ],
+              "languages": [],
+              "spell_list_expansion": [],
+              "tools": [],
+              "equipment_item_ids": [],
+              "equipment": {
+                "items": [
+                  {
+                    "inventory_template": {
+                      "name": "Hunting Trap",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  },
+                  {
+                    "inventory_template": {
+                      "name": "Tribal Totem",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  },
+                  {
+                    "inventory_template": {
+                      "name": "Traveler's Clothes",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  }
+                ],
+                "wallet": {
+                  "gp": 10
+                }
+              },
+              "choices": {
+                "skill_choice_count": 0,
+                "skill_options": [],
+                "language_count": 1,
+                "language_options": [],
+                "allow_any_language": true,
+                "tool_choice_count": 1,
+                "tool_options": [
+                  "Alchemist's Supplies",
+                  "Brewer's Supplies",
+                  "Calligrapher's Supplies",
+                  "Carpenter's Tools",
+                  "Cartographer's Tools",
+                  "Cobbler's Tools",
+                  "Cook's Utensils",
+                  "Glassblower's Tools",
+                  "Jeweler's Tools",
+                  "Leatherworker's Tools",
+                  "Mason's Tools",
+                  "Painter's Supplies",
+                  "Potter's Tools",
+                  "Smith's Tools",
+                  "Tinker's Tools",
+                  "Weaver's Tools",
+                  "Woodcarver's Tools",
+                  "Bagpipes",
+                  "Drum",
+                  "Dulcimer",
+                  "Flute",
+                  "Horn",
+                  "Lute",
+                  "Lyre",
+                  "Pan Flute",
+                  "Shawm",
+                  "Viol"
+                ],
+                "tool_option_groups": []
+              }
+            }
+          }
+        },
+        {
+          "kind": "background",
+          "name": "Waterdhavian Noble",
+          "source_selectors": [
+            {
+              "heading_exact": "WATERDHAVIAN NOBLE",
+              "page_start": 155,
+              "match_all": false
+            }
+          ],
+          "card": {
+            "name": "Waterdhavian Noble",
+            "skill_proficiencies": [
+              "History",
+              "Persuasion"
+            ],
+            "background_grants": {
+              "feature": "Kept in Style",
+              "skills": [
+                "History",
+                "Persuasion"
+              ],
+              "languages": [],
+              "spell_list_expansion": [],
+              "tools": [],
+              "equipment_item_ids": [],
+              "equipment": {
+                "items": [
+                  {
+                    "inventory_template": {
+                      "name": "Fine Clothes",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  },
+                  {
+                    "inventory_template": {
+                      "name": "Signet Ring",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  },
+                  {
+                    "inventory_template": {
+                      "name": "Pedigree Scroll",
+                      "kind": "equipment",
+                      "quantity": 1,
+                      "description": "Source-reviewed background equipment.",
+                      "mechanics": {}
+                    }
+                  }
+                ],
+                "wallet": {
+                  "gp": 20
+                }
+              },
+              "choices": {
+                "skill_choice_count": 0,
+                "skill_options": [],
+                "language_count": 1,
+                "language_options": [],
+                "allow_any_language": true,
+                "tool_choice_count": 1,
+                "tool_options": [
+                  "Dice",
+                  "Dragonchess",
+                  "Playing Cards",
+                  "Three-Dragon Ante",
+                  "Bagpipes",
+                  "Drum",
+                  "Dulcimer",
+                  "Flute",
+                  "Horn",
+                  "Lute",
+                  "Lyre",
+                  "Pan Flute",
+                  "Shawm",
+                  "Viol"
+                ],
+                "tool_option_groups": []
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
