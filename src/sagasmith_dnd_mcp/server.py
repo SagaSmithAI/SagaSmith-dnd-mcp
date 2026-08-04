@@ -40549,12 +40549,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 grants = dict(card.get("background_grants") or {})
                 choices = dict(grants.get("choices") or {})
                 ability_options = list(choices.get("ability_score_options") or [])
+                skill_choice_count = int(choices.get("skill_choice_count", 0) or 0)
                 tool_choice_count = int(choices.get("tool_choice_count", 0) or 0)
                 fields = []
                 if choices.get("language_count"):
                     fields.append("languages")
                 if ability_options:
                     fields.append("ability_score_increases")
+                if skill_choice_count:
+                    fields.append("skills")
                 if tool_choice_count:
                     fields.append("tools")
                 equipment_packages = deepcopy(
@@ -40576,6 +40579,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "skill_proficiencies": list(
                         card.get("skill_proficiencies") or grants.get("skills") or []
                     ),
+                    "skill_choice_count": skill_choice_count,
+                    "skill_options": list(choices.get("skill_options") or []),
                     "ability_score_options": ability_options,
                     "allowed_ability_score_distributions": deepcopy(
                         list(choices.get("allowed_ability_score_distributions") or [])
@@ -42064,16 +42069,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             base_background = str(card.get("name") or artifact_id)
             custom_name = str(selection.get("custom_name") or "").strip()
             custom_skills_raw = selection.get("skills")
-            if bool(custom_name) != (custom_skills_raw is not None):
-                return {
-                    "status": "pending_choice",
-                    "reason": (
-                        "custom background requires both custom_name and exactly two skill choices"
-                    ),
-                }
-            selected_background = custom_name or base_background
-            if existing_background and existing_background != selected_background:
-                raise ValueError("character already has a different background")
             grants = dict(card.get("background_grants") or {})
             fixed_equipment = deepcopy(dict(grants.pop("equipment", {}) or {}))
             grant_skills = [
@@ -42089,6 +42084,29 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
             declared_skills = card_skills or grant_skills
             requirements = dict(grants.get("choices") or {})
+            skill_choice_count = int(requirements.get("skill_choice_count", 0) or 0)
+            if custom_name and custom_skills_raw is None:
+                return {
+                    "status": "pending_choice",
+                    "reason": (
+                        "custom background requires both custom_name and exactly two skill choices"
+                    ),
+                }
+            if not custom_name and skill_choice_count and custom_skills_raw is None:
+                return {
+                    "status": "pending_choice",
+                    "reason": (
+                        f"background requires exactly {skill_choice_count} skill choices"
+                    ),
+                }
+            if not custom_name and not skill_choice_count and custom_skills_raw is not None:
+                raise ValueError(
+                    "background skills require custom_name unless the reviewed card "
+                    "declares skill choices"
+                )
+            selected_background = custom_name or base_background
+            if existing_background and existing_background != selected_background:
+                raise ValueError("character already has a different background")
             language_count = int(requirements.get("language_count", 0) or 0)
             raw_languages = selection.get("languages")
             if raw_languages is None:
@@ -42137,9 +42155,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 fixed=grants.get("tools") or [],
                 options=requirements.get("tool_options") or [],
             )
-            if custom_skills_raw is None:
-                selected_skills = declared_skills
-            else:
+            selected_skill_choices: list[str] = []
+            if custom_name:
                 if not isinstance(custom_skills_raw, list):
                     raise ValueError("custom background skills must be an array")
                 selected_skills = [str(item).strip().casefold() for item in custom_skills_raw]
@@ -42170,6 +42187,26 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             "already granted by another source: " + ", ".join(duplicate_skills)
                         ),
                     }
+                selected_skill_choices = list(selected_skills)
+            else:
+                selected_skill_choices, selected_skills = _validated_additive_choices(
+                    custom_skills_raw,
+                    count=skill_choice_count,
+                    label="background skill",
+                    fixed=declared_skills,
+                    options=requirements.get("skill_options") or [],
+                )
+                selected_skill_choices = [
+                    skill.casefold() for skill in selected_skill_choices
+                ]
+                selected_skills = [skill.casefold() for skill in selected_skills]
+                unknown_skills = [
+                    skill for skill in selected_skills if skill not in sheet["skills"]
+                ]
+                if unknown_skills:
+                    raise ValueError(
+                        "background references unknown skills: " + ", ".join(unknown_skills)
+                    )
             equipment_packages = dict(requirements.get("equipment_packages") or {})
             selected_equipment_package = str(
                 selection.get("equipment_package") or ""
@@ -42352,6 +42389,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "base_background": base_background,
                 "customized": bool(custom_name),
                 "selected_skills": selected_skills,
+                "selected_skill_choices": selected_skill_choices,
                 "ability_score_increases": selected_ability_increases,
                 "selected_tools": selected_tools,
                 "selected_equipment_package": (

@@ -840,9 +840,9 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
             },
             "card": {
                 "name": "Guild Agent",
-                "skill_proficiencies": ["investigation", "persuasion"],
+                "skill_proficiencies": ["investigation"],
                 "background_grants": {
-                    "skills": ["investigation", "persuasion"],
+                    "skills": ["investigation"],
                     "feature": "Guild Membership",
                     "languages": [],
                     "spell_list_expansion": ["Aid"],
@@ -864,6 +864,8 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
                     },
                     "choices": {
                         "language_count": 0,
+                        "skill_choice_count": 1,
+                        "skill_options": ["Persuasion", "Religion"],
                         "tool_choice_count": 0,
                         "equipment_packages": {
                             "A": {
@@ -1086,6 +1088,25 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
                 "idempotency_key": "background-activate",
             },
         )
+        catalog = await _call(
+            server,
+            "content_catalog_list",
+            {
+                "campaign_id": campaign["id"],
+                "kind": "background",
+                "query": "Guild Agent",
+            },
+        )
+        background_entry = next(item for item in catalog if item["id"] == artifact["id"])
+        assert background_entry["selection_requirements"]["fields"] == [
+            "skills",
+            "equipment_package",
+        ]
+        assert background_entry["selection_requirements"]["skill_choice_count"] == 1
+        assert background_entry["selection_requirements"]["skill_options"] == [
+            "Persuasion",
+            "Religion",
+        ]
         character_sheet = default_character_sheet()
         character_sheet["progression"]["level"] = 3
         character_sheet["progression"]["classes"] = [
@@ -1136,7 +1157,10 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
             {
                 "character_id": character["id"],
                 "artifact_id": artifact["id"],
-                "selection": {"equipment_package": "A"},
+                "selection": {
+                    "skills": ["persuasion"],
+                    "equipment_package": "A",
+                },
                 "expected_revision": character["revision"],
                 "idempotency_key": "background-apply",
             },
@@ -1162,7 +1186,13 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
                 "pack_version": "1.20.0",
             }
         ]
-        assert applied["rule_receipts"][0]["selection"] == {"equipment_package": "A"}
+        assert applied["sheet"]["progression"]["background_grants"]["choices"][
+            "selected_skill_choices"
+        ] == ["persuasion"]
+        assert applied["rule_receipts"][0]["selection"] == {
+            "skills": ["persuasion"],
+            "equipment_package": "A",
+        }
         spell = await _call(
             server,
             "character_content_apply",
