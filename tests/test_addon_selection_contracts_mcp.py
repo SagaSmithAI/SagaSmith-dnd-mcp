@@ -994,6 +994,7 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
                     "ability_score_increases": {"intelligence": 1},
                     "size": "medium",
                     "walk_speed": 30,
+                    "fly_speed": 30,
                     "languages": ["Common"],
                     "armor_proficiencies": ["Light Armor"],
                     "spell_list_expansion": ["Aid"],
@@ -1313,6 +1314,7 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
         assert marked["sheet"]["traits"]["proficiencies"]["armor"] == [
             "Light Armor"
         ]
+        assert marked["sheet"]["combat"]["speed"]["fly"] == 30
         detect_magic = next(
             item
             for item in marked["sheet"]["content"]["spells"]
