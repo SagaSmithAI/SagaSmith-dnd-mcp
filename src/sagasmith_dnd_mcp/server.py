@@ -41544,20 +41544,28 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise ValueError("an at-will content spell cannot have free casts")
             resource_key = ""
             if free_casts:
+                resource_group = str(grant.get("resource_group") or "").strip()
                 resource_key = (
-                    f"content_spell:{artifact_id}:{resource_discriminator}:{spell_id}"
+                    f"content_spell:{artifact_id}:group:{resource_group.casefold()}"
+                    if resource_group
+                    else f"content_spell:{artifact_id}:{resource_discriminator}:{spell_id}"
                 )
-                if resource_key in sheet["resources"]:
-                    raise ValueError("feat spell resource is already present")
-                sheet["resources"][resource_key] = {
+                resource = {
                     "label": (
-                        f"{source_key}: {spell_card.get('name') or spell_id}"
+                        f"{source_key}: {resource_group}"
+                        if resource_group
+                        else f"{source_key}: {spell_card.get('name') or spell_id}"
                     ),
                     "value": free_casts,
                     "max": free_casts,
                     "recovers_on": str(grant.get("recovers_on") or ""),
                     "source_key": source_key,
                 }
+                existing_resource = sheet["resources"].get(resource_key)
+                if existing_resource is not None and existing_resource != resource:
+                    raise ValueError("feat spell resource conflicts with an existing resource")
+                if existing_resource is None:
+                    sheet["resources"][resource_key] = resource
             casting_source = {
                 "source_key": source_key,
                 "method": method,
@@ -42852,6 +42860,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             if not abilities_include_grants:
                 increases = dict(grants.get("ability_score_increases") or {})
+                decreases = dict(grants.get("ability_score_decreases") or {})
                 for ability in selected_abilities:
                     increases[ability] = int(increases.get(ability, 0)) + int(
                         ability_choice.get("amount", 0) or 0
@@ -42860,11 +42869,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     sheet["abilities"][ability]["score"] = int(
                         sheet["abilities"][ability]["score"]
                     ) + int(amount)
+                for ability, amount in decreases.items():
+                    sheet["abilities"][ability]["score"] = int(
+                        sheet["abilities"][ability]["score"]
+                    ) - int(amount)
                 sheet = apply_constitution_score_hit_point_change(
                     sheet,
                     previous_score=constitution_score_before,
                     new_score=int(sheet["abilities"]["constitution"]["score"]),
-                    source=f"{selected_species}: Constitution ability score increase",
+                    source=f"{selected_species}: Constitution ability score adjustment",
                     adjust_current=True,
                 )
             if not hp_includes_grants:
@@ -42904,6 +42917,28 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 sheet["combat"]["speed"]["swim"] = int(grants["swim_speed"])
             if int(grants.get("darkvision_ft", 0) or 0):
                 sheet["traits"]["senses"]["darkvision"] = int(grants["darkvision_ft"])
+            natural_armor_base = int(grants.get("natural_armor_base", 0) or 0)
+            if natural_armor_base:
+                sheet, _ = add_effect(
+                    sheet,
+                    {
+                        "name": f"{selected_species} Natural Armor",
+                        "kind": "feature",
+                        "source": artifact_id,
+                        "duration": {"period": "manual", "remaining": 0},
+                        "changes": [
+                            {
+                                "path": "combat.ac.unarmored_base",
+                                "mode": "override",
+                                "value": natural_armor_base,
+                            }
+                        ],
+                        "description": (
+                            "Species alternate AC calculation while not wearing armor; "
+                            "a shield applies normally."
+                        ),
+                    },
+                )
             sheet["traits"]["languages"] = list(
                 dict.fromkeys(
                     [
@@ -42943,6 +42978,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             sheet["traits"]["resistances"] = list(
                 dict.fromkeys(
                     [*sheet["traits"]["resistances"], *list(grants.get("resistances") or [])]
+                )
+            )
+            sheet["traits"]["immunities"] = list(
+                dict.fromkeys(
+                    [*sheet["traits"]["immunities"], *list(grants.get("immunities") or [])]
+                )
+            )
+            sheet["traits"]["condition_immunities"] = list(
+                dict.fromkeys(
+                    [
+                        *sheet["traits"]["condition_immunities"],
+                        *list(grants.get("condition_immunities") or []),
+                    ]
                 )
             )
             cantrip_id = str(selection.get("cantrip_artifact_id") or "")

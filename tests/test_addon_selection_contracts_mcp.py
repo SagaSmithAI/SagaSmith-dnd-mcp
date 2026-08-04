@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 from sagasmith_core.rule_packs import RulesetUnavailableError
-from sagasmith_dnd.character_schema import default_character_sheet
+from sagasmith_dnd.character_schema import default_character_sheet, derive_character_sheet
 from sagasmith_dnd.content_readiness import (
     build_catalog_review,
     build_selection_contract,
@@ -1040,11 +1040,15 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
                 "base_species": "Human",
                 "grants": {
                     "ability_score_increases": {"intelligence": 1},
+                    "ability_score_decreases": {"strength": 2},
                     "size": "medium",
                     "walk_speed": 30,
                     "fly_speed": 30,
+                    "natural_armor_base": 13,
                     "languages": ["Common"],
                     "armor_proficiencies": ["Light Armor"],
+                    "immunities": ["poison"],
+                    "condition_immunities": ["poisoned"],
                     "spell_list_expansion": ["Aid"],
                     "spell_grants": [
                         {
@@ -1055,6 +1059,7 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
                             "spellcasting_ability": "intelligence",
                             "free_casts": 1,
                             "recovers_on": "long_rest",
+                            "resource_group": "Marked Magic",
                             "allow_slot_cast": False,
                             "minimum_level": 1,
                             "ritual_only": False,
@@ -1085,6 +1090,7 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
                             "spellcasting_ability": "charisma",
                             "free_casts": 1,
                             "recovers_on": "long_rest",
+                            "resource_group": "Marked Magic",
                             "allow_slot_cast": False,
                             "minimum_level": 3,
                             "ritual_only": False,
@@ -1368,6 +1374,11 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
             "Light Armor"
         ]
         assert marked["sheet"]["combat"]["speed"]["fly"] == 30
+        assert marked["sheet"]["abilities"]["strength"]["score"] == 8
+        assert marked["sheet"]["abilities"]["intelligence"]["score"] == 11
+        assert marked["sheet"]["traits"]["immunities"] == ["poison"]
+        assert marked["sheet"]["traits"]["condition_immunities"] == ["poisoned"]
+        assert derive_character_sheet(marked["sheet"])["armor_class"] == 13
         detect_magic = next(
             item
             for item in marked["sheet"]["content"]["spells"]
@@ -1393,6 +1404,10 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
         assert burning_hands["access"]["feature_casting_sources"][0][
             "casting_overrides"
         ] == {"fixed_cast_level": 2}
+        assert (
+            detect_magic["access"]["feature_casting_sources"][0]["resource_key"]
+            == burning_hands["access"]["feature_casting_sources"][0]["resource_key"]
+        )
         assert marked["sheet"]["resources"]["species:marked-human:insight"][
             "value"
         ] == 1
