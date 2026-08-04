@@ -2076,15 +2076,23 @@ def _materialize_feature_proficiency_groups(
             )
         normalized = [option_map.get(item.casefold(), item) for item in selected]
         kind = str(group.get("kind") or "").casefold()
-        if kind == "skill":
+        if kind in {"skill", "skill_expertise"}:
             for item in normalized:
                 skill_key = item.casefold().replace(" ", "_")
                 skill = sheet["skills"].get(skill_key)
                 if skill is None:
                     raise ValueError("feature proficiency group names an unknown skill")
-                if skill.get("proficiency") != "none":
+                if kind == "skill" and skill.get("proficiency") != "none":
                     raise ValueError("feature proficiency group skill is already proficient")
-                skill["proficiency"] = "proficient"
+                if kind == "skill_expertise" and skill.get("proficiency") == "none":
+                    raise ValueError(
+                        "feature proficiency group expertise requires proficiency"
+                    )
+                if kind == "skill_expertise" and skill.get("proficiency") == "expertise":
+                    raise ValueError("feature proficiency group skill already has expertise")
+                skill["proficiency"] = (
+                    "expertise" if kind == "skill_expertise" else "proficient"
+                )
         else:
             targets = {
                 "language": sheet["traits"]["languages"],
@@ -13277,17 +13285,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 reject_executable_fields(item, path=f"{path}.{key}")
 
         candidates = [deepcopy(item) for item in job.candidates]
-        existing_keys = {
-            (
-                str(item.get("kind") or "").casefold(),
-                "".join(
-                    character
-                    for character in str(item.get("name") or "").casefold()
-                    if character.isalnum()
-                ),
-            )
-            for item in candidates
-        }
         added_ids: list[str] = []
         replaced_ids: list[str] = []
         for index, raw_addition in enumerate(additions):
@@ -13402,7 +13399,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
                 == identity_key
             ]
-            if identity_key in existing_keys and not replace_existing:
+            referenced_chunks = set(chunk_ids)
+            matching_existing = [
+                item
+                for item in matching_existing
+                if referenced_chunks.intersection(
+                    str(chunk_id)
+                    for chunk_id in item.get("source_chunk_ids", [])
+                )
+            ]
+            if matching_existing and not replace_existing:
                 raise ValueError(
                     f"additions[{index}] duplicates an existing candidate; revise it during review"
                 )
@@ -13419,7 +13425,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "source-bound addition"
                     )
                 candidates.remove(replaced)
-                existing_keys.remove(identity_key)
                 replaced_ids.append(str(replaced.get("id") or ""))
             raw_card = raw_addition.get("card") or {}
             if not isinstance(raw_card, dict):
@@ -13545,7 +13550,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ],
             }
             candidates.append(candidate)
-            existing_keys.add(identity_key)
             added_ids.append(candidate_id)
 
         updated = import_jobs.set_candidates(
@@ -41967,6 +41971,34 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         allowed_species
                     ):
                         raise ValueError("feat species prerequisite is not met")
+                elif prerequisite_kind == "size_required":
+                    allowed_sizes = {
+                        str(item).casefold()
+                        for item in prerequisite.get("sizes", [])
+                    }
+                    if str(sheet["traits"].get("size") or "").casefold() not in (
+                        allowed_sizes
+                    ):
+                        raise ValueError("feat size prerequisite is not met")
+                elif prerequisite_kind == "species_or_size":
+                    allowed_species = {
+                        str(item).casefold()
+                        for item in prerequisite.get("species", [])
+                    }
+                    allowed_sizes = {
+                        str(item).casefold()
+                        for item in prerequisite.get("sizes", [])
+                    }
+                    has_species = (
+                        str(sheet["progression"].get("species") or "").casefold()
+                        in allowed_species
+                    )
+                    has_size = (
+                        str(sheet["traits"].get("size") or "").casefold()
+                        in allowed_sizes
+                    )
+                    if not (has_species or has_size):
+                        raise ValueError("feat species-or-size prerequisite is not met")
                 else:
                     raise RulesetUnavailableError(
                         "feat prerequisite requires Agent-as-DM source review"
@@ -42152,6 +42184,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             {"kind": proficiency_kind, "name": normalized_name}
                         )
                     recorded_choices[choice_field] = normalized_proficiencies
+                elif requirement_kind == "proficiency_groups":
+                    recorded_choices[choice_field] = (
+                        _materialize_feature_proficiency_groups(
+                            sheet,
+                            value=feat_selection.get(choice_field),
+                            groups=requirements.get("groups"),
+                        )
+                    )
                 elif requirement_kind == "spell_grants":
                     raw_choices = feat_selection.get(choice_field)
                     if not isinstance(raw_choices, dict):

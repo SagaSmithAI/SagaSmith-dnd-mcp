@@ -251,6 +251,43 @@ def test_selected_and_conditional_feature_proficiencies_mutate_exactly() -> None
     }
     assert sheet["traits"]["languages"] == ["Elvish", "Goblin"]
     assert sheet["traits"]["proficiencies"]["tools"] == ["Dice"]
+
+    expertise_sheet = default_character_sheet()
+    expertise = _materialize_feature_proficiency_groups(
+        expertise_sheet,
+        value={"skill": ["Stealth"], "expertise": ["Stealth"]},
+        groups=[
+            {
+                "id": "skill",
+                "kind": "skill",
+                "count": 1,
+                "options": ["Stealth"],
+            },
+            {
+                "id": "expertise",
+                "kind": "skill_expertise",
+                "count": 1,
+                "options": [],
+                "allow_unlisted": True,
+            },
+        ],
+    )
+    assert expertise == {"skill": ["Stealth"], "expertise": ["Stealth"]}
+    assert expertise_sheet["skills"]["stealth"]["proficiency"] == "expertise"
+    with pytest.raises(ValueError, match="expertise requires proficiency"):
+        _materialize_feature_proficiency_groups(
+            default_character_sheet(),
+            value={"expertise": ["Arcana"]},
+            groups=[
+                {
+                    "id": "expertise",
+                    "kind": "skill_expertise",
+                    "count": 1,
+                    "options": [],
+                    "allow_unlisted": True,
+                }
+            ],
+        )
     with pytest.raises(ValueError, match="cannot duplicate a fixed grant"):
         _validated_additive_choices(
             ["common"],

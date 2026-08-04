@@ -1126,10 +1126,13 @@ def _source_selector_matches(
             _fold_text(heading_parts[-1] if heading_parts else ""),
         }:
             return False
-    if "heading_contains" in selector and _fold_text(
-        selector["heading_contains"]
-    ) not in _fold_text(heading):
-        return False
+    if "heading_contains" in selector:
+        expected_heading = str(selector["heading_contains"])
+        if _fold_text(expected_heading) not in _fold_text(heading) and not any(
+            _bounded_ocr_heading_equivalent(expected_heading, part)
+            for part in heading_parts
+        ):
+            return False
     if "content_contains" in selector and _fold_text(
         selector["content_contains"]
     ) not in _fold_text(chunk.get("content")):
@@ -1292,19 +1295,40 @@ def _bind_catalog_addition_replacements(
             identity(candidate.get("kind"), candidate.get("name")), []
         ).append(candidate)
     bound: list[dict[str, Any]] = []
+    consumed_candidates: set[int] = set()
     for addition in additions:
         item = json.loads(json.dumps(addition))
         if "replace_existing" not in item:
             matches = candidates_by_identity.get(
                 identity(item.get("kind"), item.get("name")), []
             )
+            source_chunk_ids = {
+                str(chunk_id)
+                for chunk_id in item.get("source_chunk_ids", [])
+                if str(chunk_id)
+            }
+            if source_chunk_ids:
+                matches = [
+                    candidate
+                    for candidate in matches
+                    if source_chunk_ids.intersection(
+                        str(chunk_id)
+                        for chunk_id in candidate.get("source_chunk_ids", [])
+                    )
+                ]
             if len(matches) > 1:
                 raise ValueError(
-                    "catalog addition matches multiple extracted candidates: "
+                    "catalog addition matches multiple source candidates: "
                     f"{item.get('kind')}:{item.get('name')}"
                 )
-            if matches:
+            if matches and id(matches[0]) not in consumed_candidates:
                 item["replace_existing"] = True
+                consumed_candidates.add(id(matches[0]))
+            elif matches:
+                # Repeated headings can be merged into one extracted candidate.
+                # Replace that candidate once, then add each remaining reviewed
+                # source slice as an independent same-name artifact.
+                item["replace_existing"] = False
         bound.append(item)
     return bound
 
@@ -1380,7 +1404,14 @@ def _review_spec_decisions(
         heading_path = [_fold_text(value) for value in candidate.get("source_heading_path") or []]
         matching_rules: list[tuple[int, dict[str, Any]]] = []
         for rule_index, rule in enumerate(rules):
-            if key != (_fold_text(rule.get("kind")), _fold_text(rule.get("name"))):
+            rule_key = (_fold_text(rule.get("kind")), _fold_text(rule.get("name")))
+            if key[0] != rule_key[0] or (
+                key[1] != rule_key[1]
+                and not _bounded_ocr_heading_equivalent(
+                    str(candidate.get("name") or ""),
+                    str(rule.get("name") or ""),
+                )
+            ):
                 continue
             exact = rule.get("source_heading_exact")
             if exact is not None:

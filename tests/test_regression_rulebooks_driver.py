@@ -32,6 +32,27 @@ def test_portable_pack_id_is_stable_across_regression_runs() -> None:
     assert first.startswith("dnd5e.addon.rulebook.book.")
 
 
+def test_source_selector_recovers_bounded_ocr_heading_spacing() -> None:
+    chunk = {
+        "heading_path": [
+            "Character Options",
+            "M ANTLE OF I NSPIRATION",
+        ],
+        "content": "At 3rd level, the feature applies.",
+        "page_start": 15,
+        "page_end": 15,
+    }
+
+    assert driver._source_selector_matches(
+        chunk,
+        {"heading_contains": "Mantle of Inspiration", "page_start": 15},
+    )
+    assert not driver._source_selector_matches(
+        chunk,
+        {"heading_contains": "Mantle of Majesty", "page_start": 15},
+    )
+
+
 def test_actor_name_gate_requires_the_exact_reviewed_multiset() -> None:
     package = {
         "package": {
@@ -285,6 +306,38 @@ def test_expected_catalog_uses_reviewed_names_instead_of_damaged_ocr() -> None:
     assert decisions[0]["artifact"]["card"]["name"] == "Orc"
 
 
+def test_catalog_review_recovers_bounded_ocr_spacing_in_identity() -> None:
+    decisions = driver._review_spec_decisions(
+        [
+            {
+                "id": "boots",
+                "kind": "item",
+                "name": "B OOT S OF FALSE TRACKS",
+                "artifact": {
+                    "kind": "item",
+                    "card": {"name": "B OOT S OF FALSE TRACKS"},
+                },
+            }
+        ],
+        {
+            "default_status": "rejected",
+            "decisions": [
+                {
+                    "kind": "item",
+                    "name": "B OOTS OF FALSE TRACKS",
+                    "status": "accepted",
+                    "artifact_patch": {"card": {"name": "Boots of False Tracks"}},
+                }
+            ],
+        },
+        reviewer="agent:catalog",
+        method="agent",
+    )
+
+    assert decisions[0]["review_status"] == "accepted"
+    assert decisions[0]["artifact"]["card"]["name"] == "Boots of False Tracks"
+
+
 def test_catalog_manifest_can_accept_only_fully_reviewed_content_kinds() -> None:
     candidates = [
         {
@@ -426,6 +479,61 @@ def test_catalog_additions_replace_only_one_exact_extracted_identity() -> None:
     assert "replace_existing" not in bound[1]
     assert bound[2]["replace_existing"] is False
     assert "replace_existing" not in additions[0]
+
+
+def test_catalog_additions_disambiguate_same_name_by_source_chunk() -> None:
+    additions = [
+        {
+            "kind": "feature",
+            "name": "Bonus Proficiencies",
+            "source_chunk_ids": ["drunken-master"],
+        }
+    ]
+
+    bound = driver._bind_catalog_addition_replacements(
+        additions,
+        [
+            {
+                "kind": "feature",
+                "name": "BONUS PROFICIENCIES",
+                "source_chunk_ids": ["college-of-swords"],
+            },
+            {
+                "kind": "feature",
+                "name": "BONUS PROFICIENCIES",
+                "source_chunk_ids": ["drunken-master"],
+            },
+        ],
+    )
+
+    assert bound[0]["replace_existing"] is True
+
+
+def test_catalog_additions_split_one_merged_same_name_candidate() -> None:
+    bound = driver._bind_catalog_addition_replacements(
+        [
+            {
+                "kind": "feature",
+                "name": "Bonus Proficiency",
+                "source_chunk_ids": ["cavalier"],
+            },
+            {
+                "kind": "feature",
+                "name": "Bonus Proficiency",
+                "source_chunk_ids": ["samurai"],
+            },
+        ],
+        [
+            {
+                "kind": "feature",
+                "name": "BONUS PROFICIENCY",
+                "source_chunk_ids": ["cavalier", "samurai"],
+            }
+        ],
+    )
+
+    assert bound[0]["replace_existing"] is True
+    assert bound[1]["replace_existing"] is False
 
 
 def test_runtime_probe_expectations_support_nested_and_named_content() -> None:

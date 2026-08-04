@@ -554,7 +554,11 @@ def test_rule_import_agent_can_add_only_source_bound_catalog_entities(tmp_path: 
             "A gunsmith is a master engineer who forges a firearm powered by magic.\n\n"
             "### Master Smith\n\n"
             "When you choose this specialization at 1st level, you gain proficiency "
-            "with smith's tools.\n"
+            "with smith's tools.\n\n"
+            "# Rival Specialists\n\n"
+            "### Master Smith\n\n"
+            "When you choose this rival specialization at 1st level, you gain "
+            "proficiency with jeweler's tools.\n"
         ),
         encoding="utf-8",
     )
@@ -687,8 +691,15 @@ def test_rule_import_agent_can_add_only_source_bound_catalog_entities(tmp_path: 
         replay = await _call(server, "rule_import", arguments)
         assert replay["job"]["revision"] == augmented["job"]["revision"]
 
-        master_smith = next(
+        master_smiths = [
             item for item in augmented["candidates"] if item["name"] == "Master Smith"
+        ]
+        assert len(master_smiths) == 2
+        master_smith = next(
+            item
+            for item in master_smiths
+            if "smith's tools" in item["artifact"]["card"]["description"]
+            and "jeweler's tools" not in item["artifact"]["card"]["description"]
         )
         replacement = await _call(
             server,
@@ -727,6 +738,14 @@ def test_rule_import_agent_can_add_only_source_bound_catalog_entities(tmp_path: 
         assert replacement["replaced_candidate_ids"] == [master_smith["id"]]
         assert all(
             item["id"] != master_smith["id"] for item in replacement["candidates"]
+        )
+        assert any(
+            item["id"] == next(
+                candidate["id"]
+                for candidate in master_smiths
+                if candidate["id"] != master_smith["id"]
+            )
+            for item in replacement["candidates"]
         )
         replacement_card = next(
             item
