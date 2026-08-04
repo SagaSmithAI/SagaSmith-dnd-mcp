@@ -113,6 +113,53 @@ def test_agent_statblock_slot_reviews_replay_bounded_ocr_corrections() -> None:
         "statblock_slot": 2,
         "ocr_corrections": {"abilities": {"str": "21 (+5)"}},
     }
+    normalized_spec = driver._statblock_slot_review_specs(
+        {
+            "statblock_slot_reviews": [
+                {
+                    "page_number": 63,
+                    "statblock_slot": 2,
+                    "name": "Nalfeshnee",
+                    "expected_identity": "Large fiend (demon), chaotic evil",
+                    "ocr_corrections": {"abilities": {"str": "21 (+5)"}},
+                    "note": (
+                        "Agent identified the creature from its actions and page context."
+                    ),
+                }
+            ]
+        }
+    )[0]
+    assert arguments["idempotency_key"] == (
+        "regression-agent-statblock-slot-"
+        f"r{driver.OCR_STATBLOCK_RECOVERY_VERSION}-book-review-"
+        f"{driver._statblock_slot_review_token(normalized_spec)}"
+    )
+
+
+def test_agent_statblock_slot_token_is_local_to_one_correction() -> None:
+    first = {
+        "page_number": 63,
+        "statblock_slot": 2,
+        "name": "Nalfeshnee",
+        "ocr_corrections": {"abilities": {"str": "21 (+5)"}},
+    }
+    reordered = {
+        "name": "Nalfeshnee",
+        "ocr_corrections": {"abilities": {"str": "21 (+5)"}},
+        "statblock_slot": 2,
+        "page_number": 63,
+    }
+    revised = {
+        **first,
+        "ocr_corrections": {"abilities": {"str": "22 (+6)"}},
+    }
+
+    assert driver._statblock_slot_review_token(first) == (
+        driver._statblock_slot_review_token(reordered)
+    )
+    assert driver._statblock_slot_review_token(first) != (
+        driver._statblock_slot_review_token(revised)
+    )
 
 
 def test_agent_statblock_slot_manifest_rejects_duplicate_or_unbounded_slots() -> None:

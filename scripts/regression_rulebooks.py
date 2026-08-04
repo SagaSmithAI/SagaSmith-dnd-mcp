@@ -410,6 +410,18 @@ def _statblock_slot_review_specs(review_spec: dict[str, Any]) -> list[dict[str, 
     return normalized
 
 
+def _statblock_slot_review_token(spec: dict[str, Any]) -> str:
+    """Bind one idempotent replay to only that Agent correction."""
+
+    canonical = json.dumps(
+        spec,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
 async def _apply_statblock_slot_reviews(
     server: Any,
     *,
@@ -426,6 +438,7 @@ async def _apply_statblock_slot_reviews(
     applied: list[dict[str, Any]] = []
     revision = 0
     for index, spec in enumerate(reviews, start=1):
+        correction_token = _statblock_slot_review_token(spec)
         try:
             response = await _call(
                 server,
@@ -446,7 +459,8 @@ async def _apply_statblock_slot_reviews(
                     },
                     "idempotency_key": (
                         "regression-agent-statblock-slot-"
-                        f"r{OCR_STATBLOCK_RECOVERY_VERSION}-{id_key}-{index}"
+                        f"r{OCR_STATBLOCK_RECOVERY_VERSION}-{id_key}-"
+                        f"{correction_token}"
                     ),
                 },
             )
@@ -855,7 +869,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     campaign_id=str(campaign["id"]),
                     job_id=job_id,
                     review_spec=document_review,
-                    id_key=review_id_key,
+                    id_key=id_key,
                 )
                 if statblock_slot_review is not None:
                     catalog_revision = int(statblock_slot_review["job_revision"])
