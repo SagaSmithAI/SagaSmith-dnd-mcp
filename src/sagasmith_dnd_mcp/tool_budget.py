@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-TOOL_BUDGET_VERSION = "2026-08-addon-actor-materializer-v30"
+TOOL_BUDGET_VERSION = "2026-08-agent-ocr-review-v31"
 
 # Captured before the conservative facade consolidation.  Keep this historical
 # baseline so a lower tool count cannot conceal a larger aggregate input schema.
@@ -66,7 +66,7 @@ TARGET_CORE_TOOL_COUNT = 13
 # Version 30 adds one DM-only, phase-safe addon actor materializer.  Its strict
 # typed inputs derive owner statistics server-side and keep the aggregate below
 # the historical 92-tool/56,611-byte baseline.
-TARGET_INPUT_SCHEMA_BYTES = 53_164
+TARGET_INPUT_SCHEMA_BYTES = 53_441
 PROFILE_TOOL_LIMITS = {
     "lobby": 64,
     "play": 49,

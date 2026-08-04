@@ -159,7 +159,7 @@ def test_skill_plan_manifest_covers_every_tool_group_and_tracks_reads(
     tracker = SkillReadTracker()
 
     assert plans.summary()["available"] is True
-    assert plans.summary()["tool_group_count"] == len(GROUP_BY_ID) == 21
+    assert plans.summary()["tool_group_count"] == len(GROUP_BY_ID) == 23
     plan = plans.plan(
         phase="lobby",
         role="public",
@@ -660,9 +660,9 @@ def test_real_skill_plan_manifest_is_valid_and_within_budgets() -> None:
 
     assert SKILL_PLAN_ASSET_ID.endswith("skill-plan.v1.json")
     assert plans.available is True, plans.load_error
-    assert plans.summary()["group_count"] == 36
-    assert plans.summary()["tool_group_count"] == 21
-    assert plans.summary()["operation_binding_count"] == 21
+    assert plans.summary()["group_count"] == 37
+    assert plans.summary()["tool_group_count"] == 23
+    assert plans.summary()["operation_binding_count"] == 25
     assert len(skills.read("dnd.full.skills.dnd-dm")) < 12_000
     assert len(
         skills.read_asset(
@@ -765,9 +765,9 @@ def test_stdio_cold_start_uses_real_phase_skill_plan(tmp_path: Path) -> None:
                     "phase_skill_plan"
                 ]
                 assert summary["available"] is True
-                assert summary["group_count"] == 36
-                assert summary["tool_group_count"] == 21
-                assert summary["operation_binding_count"] == 21
+                assert summary["group_count"] == 37
+                assert summary["tool_group_count"] == 23
+                assert summary["operation_binding_count"] == 25
 
                 planned = await session.call_tool(
                     "skill_query",

@@ -54,6 +54,7 @@ from sagasmith_core import (
     RuleService,
     SnapshotService,
     SubjectContextService,
+    apply_document_page_revisions,
     build_addon_pack,
     build_module_pack,
     build_preset_pack,
@@ -63,6 +64,7 @@ from sagasmith_core import (
     extract_pdf_page_text,
     file_sha256,
     normalize_document,
+    normalized_document_page_text,
     ocr_layout_text,
     portable_rule_definition_checksum,
     render_pdf_page,
@@ -1116,6 +1118,16 @@ def _bounded_edit_distance(left: str, right: str, *, limit: int) -> int:
             return limit + 1
         previous = current
     return previous[-1]
+
+
+def _compact_transcription_key(value: Any) -> str:
+    """Keep Unicode letters/digits while ignoring OCR layout punctuation."""
+
+    return "".join(
+        character.casefold()
+        for character in unicodedata.normalize("NFKC", str(value or ""))
+        if character.isalnum()
+    )
 
 
 def _bounded_ocr_heading_equivalent(left: str, right: str) -> bool:
@@ -3514,21 +3526,39 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     skill_read_tracker = SkillReadTracker()
     native_rule_providers = load_native_rule_providers()
 
-    def rule_document_options(checksum: str | None = None) -> dict[str, Any]:
-        return {
+    def rule_document_options(
+        checksum: str | None = None,
+        page_revisions: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        options = {
             "ocr_provider": storage.rule_document_ocr_provider(),
             "document_cache_dir": config.normalized_rulebooks_dir,
             "expected_checksum": checksum or None,
             "layout_profile": DND5E_DOCUMENT_LAYOUT_PROFILE,
         }
+        if page_revisions is not None:
+            options["page_revisions"] = deepcopy(page_revisions)
+        return options
 
-    def module_document_options(checksum: str | None = None) -> dict[str, Any]:
-        return {
+    def module_document_options(
+        checksum: str | None = None,
+        page_revisions: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        options = {
             "ocr_provider": storage.module_document_ocr_provider(),
             "document_cache_dir": config.normalized_modules_dir,
             "expected_checksum": checksum or None,
             "layout_profile": DND5E_DOCUMENT_LAYOUT_PROFILE,
         }
+        if page_revisions is not None:
+            options["page_revisions"] = deepcopy(page_revisions)
+        return options
+
+    def import_page_revisions(job: Any) -> list[dict[str, Any]]:
+        revisions = dict(job.inspection or {}).get("page_revisions", [])
+        if not isinstance(revisions, list):
+            raise RuntimeError("import inspection page_revisions must be an array")
+        return [deepcopy(dict(item)) for item in revisions if isinstance(item, dict)]
 
     def profile_options_with_core_lock(
         edition: str, options: dict[str, Any] | None = None
@@ -12390,6 +12420,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "text_only_layout_ocr_recovery": True,
                 "visionless_page_ocr_text": True,
                 "persistent_ocr_page_cache": True,
+                "per_page_ocr_confidence_fallback": True,
+                "lexical_pdf_damage_detection": True,
+                "agent_bounded_ocr_text_review": True,
                 "indexed_text_statblock_review": True,
                 "player_safe_scene_scopes": True,
                 "player_safe_combat_maps": True,
@@ -12427,6 +12460,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "rule_import(render_page)",
                     "rule_import(recover_statblock)",
                     "rule_import(recover_statblocks)",
+                    "rule_import(review_text)",
                     "rule_import(ingest)",
                     "rule_import(review_statblock)",
                     "rule_import(extract_candidates)",
@@ -12457,6 +12491,31 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     if config.rule_ocr_enabled
                     else []
                 ),
+                "ocr_selection": {
+                    "scope": "per-page",
+                    "minimum_layout_confidence": 0.86,
+                    "lexical_damage_detection": True,
+                    "fallback_model": storage.ocr_model_chain(
+                        config.rule_ocr_model
+                    )[1],
+                },
+                "text_review": {
+                    "actions": [
+                        "rule_import(render_page)",
+                        "rule_import(review_text)",
+                    ],
+                    "evidence_bases": [
+                        "cross_text",
+                        "agent_context",
+                        "rendered_page",
+                    ],
+                    "raw_source_immutable": True,
+                    "unique_exact_page_replacements": True,
+                    "max_revisions_per_page": 8,
+                    "post_ingest_revision": "new_import_job_required",
+                    "vision_required": False,
+                    "agent_context_numeric_changes": False,
+                },
                 "source_citation_fields": [
                     "source_id",
                     "source_key",
@@ -12495,8 +12554,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "module_import(attach_asset)",
                     "module_query(assets)",
                     "module_review(render_page)",
+                    "module_review(render_transcript)",
                     "module_review(recover_statblock)",
                     "module_review(submit_content)",
+                    "module_review(submit_transcript)",
                     "module_set_progress(spatial_review)",
                 ],
                 "stage_inputs": ["source_path", "name+content", "module-scoped asset"],
@@ -12515,6 +12576,31 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     if config.module_ocr_enabled
                     else []
                 ),
+                "ocr_selection": {
+                    "scope": "per-page",
+                    "minimum_layout_confidence": 0.86,
+                    "lexical_damage_detection": True,
+                    "fallback_model": storage.ocr_model_chain(
+                        config.module_ocr_model
+                    )[1],
+                },
+                "text_review": {
+                    "actions": [
+                        "module_review(render_transcript)",
+                        "module_review(submit_transcript)",
+                    ],
+                    "evidence_bases": [
+                        "cross_text",
+                        "agent_context",
+                        "rendered_page",
+                    ],
+                    "raw_source_immutable": True,
+                    "unique_exact_page_replacements": True,
+                    "max_revisions_per_page": 8,
+                    "post_ingest_revision": "new_import_job_required",
+                    "vision_required": False,
+                    "agent_context_numeric_changes": False,
+                },
                 "runtime_manifest_schema": 1,
             },
             "write_requirements": ["principal_id", "expected_revision", "idempotency_key"],
@@ -12860,7 +12946,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             return replay
         inspection = rules.inspect_path(
             storage.artifact_rulebook_path(job.artifact),
-            **rule_document_options(job.artifact_checksum),
+            **rule_document_options(
+                job.artifact_checksum,
+                import_page_revisions(job),
+            ),
         )
         updated = import_jobs.record_inspection(
             job_id,
@@ -12925,7 +13014,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             authority=str(values.get("authority") or "supplement"),
             embedder=embedder,
             vector_store=vectors,
-            **rule_document_options(job.artifact_checksum),
+            **rule_document_options(
+                job.artifact_checksum,
+                import_page_revisions(job),
+            ),
         )
         source = rules.source(result.source_id)
         updated = import_jobs.record_result(
@@ -35874,7 +35966,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         preview = modules.preview_path(
             storage.artifact_module_path(job.artifact),
             parser=MarkdownModuleParser(profile=DndModuleProfile()),
-            **module_document_options(job.artifact_checksum),
+            **module_document_options(
+                job.artifact_checksum,
+                import_page_revisions(job),
+            ),
         )
         updated = import_jobs.record_inspection(
             job_id,
@@ -35990,7 +36085,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             vector_store=vectors,
             activate=False,
             logical_source_key=str(values.get("source_key") or job.artifact),
-            **module_document_options(job.artifact_checksum),
+            **module_document_options(
+                job.artifact_checksum,
+                import_page_revisions(job),
+            ),
         )
         updated = import_jobs.record_result(
             job_id,
@@ -37177,6 +37275,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise RuntimeError("rulebook PDF no longer matches its staged checksum")
         if not isinstance(include_ocr_text, bool):
             raise ValueError("include_ocr_text must be a boolean")
+        transcription = staged_transcription_evidence(
+            job,
+            page_number,
+            include_ocr=include_ocr_text,
+        )
         return [
             {
                 "campaign_id": campaign_id,
@@ -37190,14 +37293,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "scale": rendered.scale,
                 "image_checksum": rendered.checksum,
                 "ocr": (
-                    local_ocr_page_evidence(
-                        source,
-                        page_number,
-                        scope="rulebook",
-                    )
+                    transcription["ocr"]
                     if include_ocr_text
                     else {"included": False}
                 ),
+                "transcription": {
+                    key: value
+                    for key, value in transcription.items()
+                    if key != "ocr"
+                },
             },
             Image(data=rendered.content, format="png"),
         ]
@@ -37277,32 +37381,297 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "available": False,
                 "reason": f"{scope} OCR is disabled",
             }
-        layout = cached_rapidocr_layout(
-            source_path,
-            page_number,
-            scale=scale,
-            preferred_provider=provider,
-            model_type=model,
-        )
-        page_text, used_columns = ocr_layout_text(layout)
-        confidences = [float(block.confidence) for block in layout.blocks]
+        variants: list[dict[str, Any]] = []
+        for variant_model in storage.ocr_model_chain(model):
+            variant_provider = (
+                provider
+                if variant_model == model
+                else RapidOcrProvider(
+                    scale=scale,
+                    model_type=variant_model,
+                    cache_dir=config.ocr_page_cache_dir,
+                )
+            )
+            try:
+                layout = cached_rapidocr_layout(
+                    source_path,
+                    page_number,
+                    scale=scale,
+                    preferred_provider=variant_provider,
+                    model_type=variant_model,
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                variants.append(
+                    {
+                        "available": False,
+                        "provider": variant_provider.name,
+                        "profile": variant_provider.cache_profile,
+                        "model": variant_model,
+                        "scale": scale,
+                        "page_number": page_number,
+                        "error": str(exc)[:500],
+                    }
+                )
+                continue
+            page_text, used_columns = ocr_layout_text(layout)
+            confidences = [float(block.confidence) for block in layout.blocks]
+            variants.append(
+                {
+                    "available": True,
+                    "provider": variant_provider.name,
+                    "profile": variant_provider.cache_profile,
+                    "model": variant_model,
+                    "scale": scale,
+                    "page_number": page_number,
+                    "used_column_recovery": used_columns,
+                    "block_count": len(layout.blocks),
+                    "average_confidence": (
+                        sum(confidences) / len(confidences) if confidences else 0.0
+                    ),
+                    "minimum_confidence": min(confidences) if confidences else 0.0,
+                    "text_sha256": hashlib.sha256(page_text.encode("utf-8")).hexdigest(),
+                    "text": page_text[:50000],
+                    "truncated": len(page_text) > 50000,
+                }
+            )
+        available_variants = [item for item in variants if item["available"]]
+        if not available_variants:
+            return {
+                "included": True,
+                "available": False,
+                "reason": "all configured local OCR models failed",
+                "variants": variants,
+            }
+        primary = available_variants[0]
         return {
             "included": True,
             "available": True,
-            "provider": provider.name,
-            "profile": provider.cache_profile,
-            "model": model,
-            "scale": scale,
+            **primary,
+            "variants": variants,
+        }
+
+    def staged_transcription_evidence(
+        job: Any,
+        page_number: int,
+        *,
+        include_ocr: bool = True,
+    ) -> dict[str, Any]:
+        """Build source-checksum-bound text evidence for a visionless reviewer."""
+
+        if job.kind == "rulebook":
+            source = storage.artifact_rulebook_path(job.artifact)
+            ocr_provider = storage.rule_document_ocr_provider()
+            cache_dir = config.normalized_rulebooks_dir
+            scope: Literal["rulebook", "module"] = "rulebook"
+        elif job.kind == "module":
+            source = storage.artifact_module_path(job.artifact)
+            ocr_provider = storage.module_document_ocr_provider()
+            cache_dir = config.normalized_modules_dir
+            scope = "module"
+        else:  # pragma: no cover - ImportJobService constrains this value
+            raise ValueError("unsupported import job kind")
+        if source.suffix.casefold() != ".pdf":
+            raise ValueError("page transcription review requires a staged PDF")
+        document = normalize_document(
+            source,
+            ocr_provider=ocr_provider,
+            cache_dir=cache_dir,
+            expected_checksum=job.artifact_checksum,
+            layout_profile=DND5E_DOCUMENT_LAYOUT_PROFILE,
+        )
+        document = apply_document_page_revisions(document, import_page_revisions(job))
+        normalized_text = normalized_document_page_text(document, page_number)
+        native_text = extract_pdf_page_text(source, page_number)
+        ocr = (
+            local_ocr_page_evidence(source, page_number, scope=scope)
+            if include_ocr
+            else {"included": False, "available": False, "variants": []}
+        )
+        return {
+            "source_checksum": job.artifact_checksum,
             "page_number": page_number,
-            "used_column_recovery": used_columns,
-            "block_count": len(layout.blocks),
-            "average_confidence": (
-                sum(confidences) / len(confidences) if confidences else 0.0
+            "normalized": {
+                "text_sha256": hashlib.sha256(
+                    normalized_text.encode("utf-8")
+                ).hexdigest(),
+                "text": normalized_text[:50000],
+                "truncated": len(normalized_text) > 50000,
+            },
+            "native_text": {
+                "text_sha256": hashlib.sha256(native_text.encode("utf-8")).hexdigest(),
+                "text": native_text[:50000],
+                "truncated": len(native_text) > 50000,
+            },
+            "ocr": ocr,
+        }
+
+    def submit_import_text_review(
+        campaign_id: str,
+        job_id: str,
+        page_number: int,
+        base_text_sha256: str,
+        replacements: list[dict[str, str]],
+        rationale: str,
+        evidence_basis: Literal["cross_text", "agent_context", "rendered_page"],
+        rendered_image_checksum: str | None,
+        review_method: Literal["agent", "human"],
+        principal_id: str,
+        expected_revision: int | None,
+        idempotency_key: str | None,
+    ) -> dict[str, Any]:
+        """Persist one bounded Agent/human transcript repair and rerun inspection."""
+
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for text review")
+        job = require_import_job(campaign_id, job_id)
+        request_payload = {
+            "job_id": job_id,
+            "operation": "review_text",
+            "page_number": page_number,
+            "base_text_sha256": base_text_sha256,
+            "replacements": deepcopy(replacements),
+            "rationale": rationale,
+            "evidence_basis": evidence_basis,
+            "rendered_image_checksum": rendered_image_checksum,
+            "review_method": review_method,
+        }
+        scope_key = f"import-job:{campaign_id}:{job_id}:{principal_id}"
+        replay = replay_idempotent(scope_key, idempotency_key, request_payload)
+        if replay is not None:
+            return replay
+        if job.state != "inspected":
+            raise ValueError("text review requires an inspected, not-yet-ingested import job")
+        if expected_revision is not None and expected_revision != job.revision:
+            raise ValueError(
+                f"import job revision conflict: expected {expected_revision}, found {job.revision}"
+            )
+        if evidence_basis not in {"cross_text", "agent_context", "rendered_page"}:
+            raise ValueError("evidence_basis is invalid")
+        if review_method not in {"agent", "human"}:
+            raise ValueError("review_method must be agent or human")
+        if not isinstance(replacements, list):
+            raise ValueError("replacements must be an array")
+        normalized_replacements: list[dict[str, str]] = []
+        for index, replacement in enumerate(replacements):
+            if not isinstance(replacement, dict) or set(replacement) != {"old", "new"}:
+                raise ValueError(f"replacements[{index}] must contain only old and new")
+            normalized_replacements.append(
+                {"old": str(replacement["old"]), "new": str(replacement["new"])}
+            )
+        page_review_count = sum(
+            int(item.get("page_number") or 0) == page_number
+            for item in import_page_revisions(job)
+        )
+        if page_review_count >= 8:
+            raise ValueError("this physical page already has eight transcription reviews")
+        evidence = staged_transcription_evidence(job, page_number)
+        actual_base = str(dict(evidence["normalized"])["text_sha256"])
+        if str(base_text_sha256) != actual_base:
+            raise ValueError("base_text_sha256 does not match the current normalized page")
+        evidence_texts = [
+            str(dict(evidence["native_text"])["text"]),
+            *[
+                str(dict(item).get("text") or "")
+                for item in dict(evidence["ocr"]).get("variants", [])
+                if item.get("available")
+            ],
+        ]
+        if evidence_basis == "rendered_page":
+            rendered = render_pdf_page(
+                storage.artifact_rulebook_path(job.artifact)
+                if job.kind == "rulebook"
+                else storage.artifact_module_path(job.artifact),
+                page_number,
+                scale=1.5,
+            )
+            if rendered_image_checksum != rendered.checksum:
+                raise ValueError("rendered page checksum does not match review evidence")
+        for index, replacement in enumerate(normalized_replacements):
+            old = replacement["old"]
+            new = replacement["new"]
+            supporting_sources = sum(
+                bool(new and new.casefold() in text.casefold()) for text in evidence_texts
+            )
+            if evidence_basis == "cross_text" and supporting_sources < 2:
+                raise ValueError(
+                    f"replacements[{index}].new requires agreement from two text sources"
+                )
+            if evidence_basis == "agent_context":
+                if re.findall(r"\d+", old) != re.findall(r"\d+", new):
+                    raise ValueError("agent_context cannot alter numeric evidence")
+                old_key = _compact_transcription_key(old)
+                new_key = _compact_transcription_key(new)
+                edit_limit = max(2, int(max(len(old_key), len(new_key)) * 0.2))
+                if (
+                    not old_key
+                    or not new_key
+                    or _bounded_edit_distance(old_key, new_key, limit=edit_limit)
+                    > edit_limit
+                ):
+                    raise ValueError(
+                        f"replacements[{index}] exceeds bounded agent_context correction"
+                    )
+        review_evidence = {
+            "basis": evidence_basis,
+            "normalized_text_sha256": actual_base,
+            "native_text_sha256": dict(evidence["native_text"])["text_sha256"],
+            "ocr_variants": [
+                {
+                    key: item[key]
+                    for key in ("model", "profile", "text_sha256")
+                }
+                for item in dict(evidence["ocr"]).get("variants", [])
+                if item.get("available")
+            ],
+            **(
+                {"rendered_image_checksum": rendered_image_checksum}
+                if evidence_basis == "rendered_page"
+                else {}
             ),
-            "minimum_confidence": min(confidences) if confidences else 0.0,
-            "text_sha256": hashlib.sha256(page_text.encode("utf-8")).hexdigest(),
-            "text": page_text[:50000],
-            "truncated": len(page_text) > 50000,
+        }
+        revision = {
+            "source_checksum": job.artifact_checksum,
+            "page_number": page_number,
+            "base_text_sha256": actual_base,
+            "replacements": deepcopy(normalized_replacements),
+            "reviewer": principal_id,
+            "review_method": review_method,
+            "rationale": rationale,
+            "evidence": review_evidence,
+        }
+        revisions = [*import_page_revisions(job), revision]
+        if job.kind == "rulebook":
+            inspection = rules.inspect_path(
+                storage.artifact_rulebook_path(job.artifact),
+                **rule_document_options(job.artifact_checksum, revisions),
+            )
+        else:
+            inspection = modules.preview_path(
+                storage.artifact_module_path(job.artifact),
+                parser=MarkdownModuleParser(profile=DndModuleProfile()),
+                **module_document_options(job.artifact_checksum, revisions),
+            )
+        inspection["page_revisions"] = deepcopy(revisions)
+        updated = import_jobs.record_inspection(
+            job_id,
+            inspection,
+            expected_revision=job.revision,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope_key,
+                payload=request_payload,
+                response=lambda result: {
+                    "job": import_job_view(result),
+                    "review": revision,
+                    "inspection": inspection,
+                },
+            ),
+        )
+        return {
+            "job": import_job_view(updated),
+            "review": revision,
+            "inspection": inspection,
         }
 
     def local_rule_catalog_identity_evidence(
@@ -46179,6 +46548,7 @@ Useful bounded guidance:
             "recover_statblock",
             "recover_statblocks",
             "ingest",
+            "review_text",
             "review_statblock",
             "extract_candidates",
             "augment_catalog",
@@ -46441,6 +46811,46 @@ Useful bounded guidance:
                     data["job_id"],
                     acknowledge_warnings,
                     principal_id,
+                    idempotency_key,
+                ),
+            )
+        if action == "review_text":
+            data = strict_facade_payload(
+                payload,
+                action="rule_import(review_text)",
+                allowed={
+                    "job_id",
+                    "page_number",
+                    "base_text_sha256",
+                    "replacements",
+                    "rationale",
+                    "evidence_basis",
+                    "rendered_image_checksum",
+                    "review_method",
+                },
+                required_names=(
+                    "job_id",
+                    "page_number",
+                    "base_text_sha256",
+                    "replacements",
+                    "rationale",
+                    "evidence_basis",
+                ),
+            )
+            return facade_result(
+                action,
+                submit_import_text_review(
+                    campaign_id,
+                    str(data["job_id"]),
+                    data["page_number"],
+                    str(data["base_text_sha256"]),
+                    data["replacements"],
+                    str(data["rationale"]),
+                    data["evidence_basis"],
+                    data.get("rendered_image_checksum"),
+                    data.get("review_method", "agent"),
+                    principal_id,
+                    expected_revision,
                     idempotency_key,
                 ),
             )
@@ -46811,12 +47221,112 @@ Useful bounded guidance:
     @mcp.tool()
     def module_review(
         campaign_id: str,
-        action: Literal["render_page", "recover_statblock", "submit_content"],
+        action: Literal[
+            "render_page",
+            "render_transcript",
+            "recover_statblock",
+            "submit_content",
+            "submit_transcript",
+        ],
         payload: dict[str, Any],
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+        expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Render, text-only recover, or submit managed module evidence."""
+        if action == "render_transcript":
+            require_facade_phase(
+                campaign_id,
+                "module_review(render_transcript)",
+                PROFILE_LOBBY,
+            )
+            data = strict_facade_payload(
+                payload,
+                action="module_review(render_transcript)",
+                allowed={"job_id", "page_number", "scale", "include_ocr_text"},
+                required_names=("job_id", "page_number"),
+            )
+            access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+            job = require_import_job(campaign_id, str(data["job_id"]), "module")
+            source = storage.artifact_module_path(job.artifact)
+            if source.suffix.casefold() != ".pdf":
+                raise ValueError("module transcript rendering requires a staged PDF")
+            include_ocr_text = data.get("include_ocr_text", True)
+            if not isinstance(include_ocr_text, bool):
+                raise ValueError("include_ocr_text must be a boolean")
+            rendered = render_pdf_page(
+                source,
+                data["page_number"],
+                scale=data.get("scale", 1.5),
+            )
+            transcription = staged_transcription_evidence(
+                job,
+                data["page_number"],
+                include_ocr=include_ocr_text,
+            )
+            return facade_render_result(  # type: ignore[return-value]
+                [
+                    {
+                        "campaign_id": campaign_id,
+                        "job_id": job.id,
+                        "artifact": job.artifact,
+                        "source_checksum": rendered.source_checksum,
+                        "page_number": rendered.page_number,
+                        "page_count": rendered.page_count,
+                        "width": rendered.width,
+                        "height": rendered.height,
+                        "scale": rendered.scale,
+                        "image_checksum": rendered.checksum,
+                        "transcription": transcription,
+                    },
+                    Image(data=rendered.content, format="png"),
+                ]
+            )
+        if action == "submit_transcript":
+            require_facade_phase(
+                campaign_id,
+                "module_review(submit_transcript)",
+                PROFILE_LOBBY,
+            )
+            data = strict_facade_payload(
+                payload,
+                action="module_review(submit_transcript)",
+                allowed={
+                    "job_id",
+                    "page_number",
+                    "base_text_sha256",
+                    "replacements",
+                    "rationale",
+                    "evidence_basis",
+                    "rendered_image_checksum",
+                    "review_method",
+                },
+                required_names=(
+                    "job_id",
+                    "page_number",
+                    "base_text_sha256",
+                    "replacements",
+                    "rationale",
+                    "evidence_basis",
+                ),
+            )
+            return facade_result(
+                action,
+                submit_import_text_review(
+                    campaign_id,
+                    str(data["job_id"]),
+                    data["page_number"],
+                    str(data["base_text_sha256"]),
+                    data["replacements"],
+                    str(data["rationale"]),
+                    data["evidence_basis"],
+                    data.get("rendered_image_checksum"),
+                    data.get("review_method", "agent"),
+                    principal_id,
+                    expected_revision,
+                    idempotency_key,
+                ),
+            )
         if action == "render_page":
             require_facade_phase(
                 campaign_id,

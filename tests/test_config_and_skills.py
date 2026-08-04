@@ -529,7 +529,7 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
                 "combat": 48,
             }
         )
-        assert schema_bytes == TARGET_INPUT_SCHEMA_BYTES == 53_164
+        assert schema_bytes == TARGET_INPUT_SCHEMA_BYTES == 53_441
         assert schema_bytes < BASELINE_INPUT_SCHEMA_BYTES
         by_name = {tool.name: tool for tool in tools}
         assert by_name["chase"].inputSchema["properties"]["action"]["enum"] == [
@@ -563,6 +563,7 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
             "recover_statblock",
             "recover_statblocks",
             "ingest",
+            "review_text",
             "review_statblock",
             "extract_candidates",
             "augment_catalog",
@@ -573,8 +574,10 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
         ]
         assert by_name["module_review"].inputSchema["properties"]["action"]["enum"] == [
             "render_page",
+            "render_transcript",
             "recover_statblock",
             "submit_content",
+            "submit_transcript",
         ]
         assert by_name["combat_choice"].inputSchema["properties"]["action"]["enum"] == [
             "open",
@@ -652,6 +655,9 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
         assert capabilities["features"]["module_selective_ocr"] is True
         assert capabilities["features"]["visionless_page_ocr_text"] is True
         assert capabilities["features"]["persistent_ocr_page_cache"] is True
+        assert capabilities["features"]["per_page_ocr_confidence_fallback"] is True
+        assert capabilities["features"]["lexical_pdf_damage_detection"] is True
+        assert capabilities["features"]["agent_bounded_ocr_text_review"] is True
         assert capabilities["module_import"]["stage_inputs"] == [
             "source_path",
             "name+content",
@@ -663,6 +669,29 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
         assert capabilities["module_import"]["ocr_page_cache"] == (
             "content-addressed-per-model-page"
         )
+        assert capabilities["module_import"]["ocr_selection"] == {
+            "scope": "per-page",
+            "minimum_layout_confidence": 0.86,
+            "lexical_damage_detection": True,
+            "fallback_model": "small",
+        }
+        assert capabilities["module_import"]["text_review"] == {
+            "actions": [
+                "module_review(render_transcript)",
+                "module_review(submit_transcript)",
+            ],
+            "evidence_bases": [
+                "cross_text",
+                "agent_context",
+                "rendered_page",
+            ],
+            "raw_source_immutable": True,
+            "unique_exact_page_replacements": True,
+            "max_revisions_per_page": 8,
+            "post_ingest_revision": "new_import_job_required",
+            "vision_required": False,
+            "agent_context_numeric_changes": False,
+        }
         assert capabilities["module_import"]["normalizer"].startswith("sagasmith-core/pdf-layout-v")
         assert capabilities["module_import"]["parser"] == (
             f"{DndModuleProfile.name}-v{DndModuleProfile.version}"
@@ -712,6 +741,20 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
         }
         assert "rule_pack_compile(from_source)" in capabilities["rulebook_import"]["stages"]
         assert "rule_import(extract_candidates)" in capabilities["rulebook_import"]["stages"]
+        assert capabilities["rulebook_import"]["text_review"] == {
+            "actions": ["rule_import(render_page)", "rule_import(review_text)"],
+            "evidence_bases": [
+                "cross_text",
+                "agent_context",
+                "rendered_page",
+            ],
+            "raw_source_immutable": True,
+            "unique_exact_page_replacements": True,
+            "max_revisions_per_page": 8,
+            "post_ingest_revision": "new_import_job_required",
+            "vision_required": False,
+            "agent_context_numeric_changes": False,
+        }
         assert capabilities["rulebook_import"]["normalization_cache"] == "content-addressed"
         assert capabilities["rulebook_import"]["page_extraction_cache"] == "content-addressed"
         assert capabilities["rulebook_import"]["normalizer"].startswith(

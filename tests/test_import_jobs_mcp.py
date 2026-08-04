@@ -27,6 +27,7 @@ from sagasmith_dnd_mcp.server import (
     _canonical_statblock_artifact_for_mechanics,
     _canonical_statblock_artifact_for_review,
     _catalog_identity_is_evidenced,
+    _compact_transcription_key,
     _matching_statblock_recovery_pair,
     _merge_statblock_discoveries,
     _noisy_ocr_heading_equivalent,
@@ -78,6 +79,11 @@ def _catalog_review_decision(role: str, reviewer: str) -> dict:
 def test_bounded_ocr_heading_equivalence_allows_one_glyph_only() -> None:
     assert _bounded_ocr_heading_equivalent("0INOLOTH", "OINOLOTH")
     assert _bounded_ocr_heading_equivalent("Jarad Von Savo", "JARAD VOD SAVO")
+
+
+def test_transcription_context_key_preserves_non_ascii_words() -> None:
+    assert _compact_transcription_key("## 章节 标题") == "章节标题"
+    assert _compact_transcription_key("Épée +1") == "épée1"
     assert not _bounded_ocr_heading_equivalent("Imp", "Ink")
 
 
@@ -911,7 +917,7 @@ def test_rule_import_renders_a_checksum_bound_review_page(
         *,
         page_numbers: list[int] | None = None,
     ) -> list[OcrPageLayout]:
-        assert provider.model_type == "medium"
+        assert provider.model_type in {"medium", "small"}
         assert page_numbers == [1]
         return [layout]
 
@@ -980,6 +986,15 @@ def test_rule_import_renders_a_checksum_bound_review_page(
         ).hexdigest()
         assert metadata["ocr"]["text"] == "Commoner rulebook review page"
         assert metadata["ocr"]["truncated"] is False
+        assert [item["model"] for item in metadata["ocr"]["variants"]] == [
+            "medium",
+            "small",
+        ]
+        assert metadata["transcription"]["source_checksum"] == staged["result"][
+            "checksum"
+        ]
+        assert metadata["transcription"]["normalized"]["text_sha256"]
+        assert metadata["transcription"]["native_text"]["text_sha256"]
         assert rendered.structuredContent == metadata
         assert rendered.content[1].mimeType == "image/png"
 
@@ -992,6 +1007,104 @@ def test_rule_import_renders_a_checksum_bound_review_page(
                 "idempotency_key": "inspect",
             },
         )
+        with pytest.raises(Exception, match="cannot alter numeric evidence"):
+            await server.call_tool(
+                "rule_import",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "review_text",
+                    "payload": {
+                        "job_id": job_id,
+                        "page_number": 1,
+                        "base_text_sha256": metadata["transcription"]["normalized"][
+                            "text_sha256"
+                        ],
+                        "replacements": [
+                            {
+                                "old": "Commoner rulebook review page",
+                                "new": "Commoner rulebook review page 2",
+                            }
+                        ],
+                        "rationale": "An invalid Agent attempt to invent a page number.",
+                        "evidence_basis": "agent_context",
+                    },
+                    "expected_revision": inspected["result"]["job"]["revision"],
+                    "idempotency_key": "reject-numeric-text-change",
+                },
+            )
+        text_review_arguments = {
+            "campaign_id": campaign["id"],
+            "action": "review_text",
+            "payload": {
+                "job_id": job_id,
+                "page_number": 1,
+                "base_text_sha256": metadata["transcription"]["normalized"][
+                    "text_sha256"
+                ],
+                "replacements": [
+                    {
+                        "old": "Commoner rulebook review page",
+                        "new": "## COMMONER RULEBOOK REVIEW PAGE",
+                    }
+                ],
+                "rationale": (
+                    "The independent native and OCR transcripts agree on the words; "
+                    "the Agent restores the source heading capitalization."
+                ),
+                "evidence_basis": "agent_context",
+            },
+            "expected_revision": inspected["result"]["job"]["revision"],
+            "idempotency_key": "review-text",
+        }
+        _, text_reviewed = await server.call_tool(
+            "rule_import", text_review_arguments
+        )
+        _, text_review_replayed = await server.call_tool(
+            "rule_import", text_review_arguments
+        )
+        assert text_review_replayed == text_reviewed
+        assert text_reviewed["result"]["review"]["review_method"] == "agent"
+        assert text_reviewed["result"]["inspection"]["page_revisions"][0][
+            "evidence"
+        ]["basis"] == "agent_context"
+        rerendered = await server.call_tool(
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "render_page",
+                "payload": {
+                    "job_id": job_id,
+                    "page_number": 1,
+                    "include_ocr_text": False,
+                },
+            },
+        )
+        revised_metadata = json.loads(rerendered.content[0].text)
+        _, text_refined = await server.call_tool(
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "review_text",
+                "payload": {
+                    "job_id": job_id,
+                    "page_number": 1,
+                    "base_text_sha256": revised_metadata["transcription"][
+                        "normalized"
+                    ]["text_sha256"],
+                    "replacements": [
+                        {
+                            "old": "## COMMONER RULEBOOK REVIEW PAGE",
+                            "new": "##### COMMONER RULEBOOK REVIEW PAGE",
+                        }
+                    ],
+                    "rationale": "Match the adjacent entry heading depth.",
+                    "evidence_basis": "agent_context",
+                },
+                "expected_revision": text_reviewed["result"]["job"]["revision"],
+                "idempotency_key": "refine-text-review",
+            },
+        )
+        assert len(text_refined["result"]["inspection"]["page_revisions"]) == 2
         _, ingested = await server.call_tool(
             "rule_import",
             {
@@ -999,7 +1112,9 @@ def test_rule_import_renders_a_checksum_bound_review_page(
                 "action": "ingest",
                 "payload": {
                     "job_id": job_id,
-                    "acknowledge_warnings": bool(inspected["result"]["inspection"]["warnings"]),
+                    "acknowledge_warnings": bool(
+                        text_refined["result"]["inspection"]["warnings"]
+                    ),
                 },
                 "idempotency_key": "ingest",
             },
@@ -1485,6 +1600,151 @@ def test_rule_import_renders_a_checksum_bound_review_page(
                     "idempotency_key": "review-statblock-agent-gap",
                 },
             )
+
+    asyncio.run(exercise())
+
+
+def test_module_import_accepts_checksum_bound_agent_transcript_review(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import_root = tmp_path / "modules"
+    import_root.mkdir()
+    source = import_root / "transcript.pdf"
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=300, height=200)
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    font_ref = writer._add_object(font)
+    page[NameObject("/Resources")] = DictionaryObject(
+        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font_ref})}
+    )
+    content = DecodedStreamObject()
+    content.set_data(
+        b"BT /F1 12 Tf 20 160 Td "
+        b"(Arrival transcript contains enough exact source words.) Tj ET"
+    )
+    page[NameObject("/Contents")] = writer._add_object(content)
+    with source.open("wb") as stream:
+        writer.write(stream)
+    layout = OcrPageLayout(
+        page_number=1,
+        width=450,
+        height=300,
+        blocks=(
+            OcrTextBlock(
+                "Arrival transcript contains enough exact source words.",
+                0.98,
+                20,
+                20,
+                420,
+                45,
+            ),
+        ),
+    )
+
+    def extract_layout(
+        provider: RapidOcrProvider,
+        path: Path,
+        *,
+        page_numbers: list[int] | None = None,
+    ) -> list[OcrPageLayout]:
+        assert provider.model_type in {"medium", "small"}
+        assert path.name.endswith("transcript.pdf")
+        assert page_numbers == [1]
+        if provider.model_type == "medium":
+            raise RuntimeError("primary OCR model unavailable")
+        return [layout]
+
+    monkeypatch.setattr(RapidOcrProvider, "extract_layout", extract_layout)
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        module_import_roots=(import_root,),
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        _, campaign = await server.call_tool(
+            "campaign_create",
+            {"name": "Module transcript", "idempotency_key": "campaign"},
+        )
+        _, staged = await server.call_tool(
+            "module_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "stage",
+                "payload": {
+                    "source_path": str(source),
+                    "source_key": "transcript",
+                    "title": "Transcript",
+                },
+                "idempotency_key": "stage",
+            },
+        )
+        job_id = staged["result"]["job"]["id"]
+        _, inspected = await server.call_tool(
+            "module_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "inspect",
+                "payload": {"job_id": job_id},
+                "idempotency_key": "inspect",
+            },
+        )
+        rendered = await server.call_tool(
+            "module_review",
+            {
+                "campaign_id": campaign["id"],
+                "action": "render_transcript",
+                "payload": {"job_id": job_id, "page_number": 1},
+            },
+        )
+        metadata = json.loads(rendered.content[0].text)
+        assert isinstance(rendered.content[1], ImageContent)
+        assert [
+            item["model"] for item in metadata["transcription"]["ocr"]["variants"]
+        ] == ["medium", "small"]
+        assert [
+            item["available"]
+            for item in metadata["transcription"]["ocr"]["variants"]
+        ] == [False, True]
+        assert metadata["transcription"]["ocr"]["model"] == "small"
+        review_arguments = {
+            "campaign_id": campaign["id"],
+            "action": "submit_transcript",
+            "payload": {
+                "job_id": job_id,
+                "page_number": 1,
+                "base_text_sha256": metadata["transcription"]["normalized"][
+                    "text_sha256"
+                ],
+                "replacements": [
+                    {"old": "Arrival transcript", "new": "ARRIVAL TRANSCRIPT"}
+                ],
+                "rationale": "Restore the display-heading capitalization.",
+                "evidence_basis": "agent_context",
+            },
+            "expected_revision": inspected["result"]["job"]["revision"],
+            "idempotency_key": "review-transcript",
+        }
+        _, reviewed = await server.call_tool("module_review", review_arguments)
+        _, replayed = await server.call_tool("module_review", review_arguments)
+
+        assert replayed == reviewed
+        assert reviewed["result"]["job"]["state"] == "inspected"
+        assert reviewed["result"]["inspection"]["page_revisions"][0][
+            "replacements"
+        ] == [{"old": "Arrival transcript", "new": "ARRIVAL TRANSCRIPT"}]
 
     asyncio.run(exercise())
 

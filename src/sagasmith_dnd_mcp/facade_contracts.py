@@ -1216,6 +1216,28 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
         "ingest": [
             _variant(("acknowledge_warnings", "job_id"), ("job_id",))
         ],
+        "review_text": [
+            _variant(
+                (
+                    "base_text_sha256",
+                    "evidence_basis",
+                    "job_id",
+                    "page_number",
+                    "rationale",
+                    "rendered_image_checksum",
+                    "replacements",
+                    "review_method",
+                ),
+                (
+                    "job_id",
+                    "page_number",
+                    "base_text_sha256",
+                    "replacements",
+                    "rationale",
+                    "evidence_basis",
+                ),
+            )
+        ],
         "review_statblock": [
             _variant(
                 (
@@ -1319,6 +1341,12 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                 ("module_id", "page_number"),
             )
         ],
+        "render_transcript": [
+            _variant(
+                ("include_ocr_text", "job_id", "page_number", "scale"),
+                ("job_id", "page_number"),
+            )
+        ],
         "recover_statblock": [
             _variant(
                 (
@@ -1354,6 +1382,28 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                     "content_key",
                     "normalized_content",
                     "observation",
+                ),
+            )
+        ],
+        "submit_transcript": [
+            _variant(
+                (
+                    "base_text_sha256",
+                    "evidence_basis",
+                    "job_id",
+                    "page_number",
+                    "rationale",
+                    "rendered_image_checksum",
+                    "replacements",
+                    "review_method",
+                ),
+                (
+                    "job_id",
+                    "page_number",
+                    "base_text_sha256",
+                    "replacements",
+                    "rationale",
+                    "evidence_basis",
                 ),
             )
         ],
