@@ -956,6 +956,54 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
             status="ready",
             references=["book:addon:p1"],
         )
+        reprinted_aid = {
+            "id": "dnd5e.addon.guild.spell.aid",
+            "kind": "spell",
+            "application_state": "selection_ready",
+            "mechanical_scope": "descriptive",
+            "execution_state": "descriptive_ready",
+            "semantic_resolution": {
+                "status": "resolved",
+                "mode": "descriptive",
+                "first_use_compilation_required": False,
+            },
+            "card": {
+                "name": "Aid",
+                "classes": ["Cleric", "Paladin"],
+                "level": 2,
+                "definition": {
+                    "school": "abjuration",
+                    "casting_time": "1 action",
+                    "range": {
+                        "kind": "distance",
+                        "normal_ft": 30,
+                        "long_ft": 0,
+                        "area": "",
+                    },
+                    "duration": {
+                        "kind": "timed",
+                        "value": 8,
+                        "unit": "hour",
+                        "concentration": False,
+                    },
+                    "components": {
+                        "verbal": True,
+                        "somatic": True,
+                        "material": True,
+                        "material_description": "a tiny strip of white cloth",
+                        "material_cost_cp": 0,
+                        "consumed": False,
+                    },
+                    "effect": "Source-local reviewed reprint used by this addon.",
+                },
+            },
+            "rule_refs": ["book:addon:p3"],
+        }
+        reprinted_aid["selection_contract"] = build_selection_contract(
+            reprinted_aid,
+            status="ready",
+            references=["book:addon:p3"],
+        )
         species_artifact = {
             "id": "dnd5e.addon.guild.species.marked-human",
             "kind": "species",
@@ -1132,7 +1180,12 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
                     "editions": ["2014"],
                     "capabilities": [],
                 },
-                "artifacts": [artifact, species_artifact, subclass_artifact],
+                "artifacts": [
+                    artifact,
+                    reprinted_aid,
+                    species_artifact,
+                    subclass_artifact,
+                ],
                 "mechanics": [],
             },
         )
@@ -1245,10 +1298,10 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
             "spell_list_expansion"
         ] == [
             {
-                "artifact_id": "dnd5e.content.srd2014.spell.aid",
+                "artifact_id": "dnd5e.addon.guild.spell.aid",
                 "name": "Aid",
-                "pack_id": "dnd5e.content.srd2014",
-                "pack_version": "1.20.0",
+                "pack_id": "dnd5e.addon.guild",
+                "pack_version": "1.0.0",
             }
         ]
         assert applied["sheet"]["progression"]["background_grants"]["choices"][
@@ -1263,7 +1316,7 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
             "character_content_apply",
             {
                 "character_id": character["id"],
-                "artifact_id": "dnd5e.content.srd2014.spell.aid",
+                "artifact_id": "dnd5e.addon.guild.spell.aid",
                 "selection": {"source_class": "Wizard", "method": "spellbook"},
                 "expected_revision": applied["revision"],
                 "idempotency_key": "background-expanded-spell",
@@ -1272,7 +1325,7 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
         aid = next(
             item
             for item in spell["sheet"]["content"]["spells"]
-            if item["id"] == "dnd5e.content.srd2014.spell.aid"
+            if item["id"] == "dnd5e.addon.guild.spell.aid"
         )
         assert aid["grant"] == {
             "source_type": "class",
@@ -1305,10 +1358,10 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
             "spell_list_expansion"
         ] == [
             {
-                "artifact_id": "dnd5e.content.srd2014.spell.aid",
+                "artifact_id": "dnd5e.addon.guild.spell.aid",
                 "name": "Aid",
-                "pack_id": "dnd5e.content.srd2014",
-                "pack_version": "1.20.0",
+                "pack_id": "dnd5e.addon.guild",
+                "pack_version": "1.0.0",
             }
         ]
         assert marked["sheet"]["traits"]["proficiencies"]["armor"] == [
@@ -1348,14 +1401,14 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
             "character_content_apply",
             {
                 "character_id": marked_character["id"],
-                "artifact_id": "dnd5e.content.srd2014.spell.aid",
+                "artifact_id": "dnd5e.addon.guild.spell.aid",
                 "selection": {"source_class": "Wizard", "method": "spellbook"},
                 "expected_revision": marked["revision"],
                 "idempotency_key": "species-expanded-spell",
             },
         )
         assert any(
-            item["id"] == "dnd5e.content.srd2014.spell.aid"
+            item["id"] == "dnd5e.addon.guild.spell.aid"
             for item in marked_spell["sheet"]["content"]["spells"]
         )
 
@@ -1431,10 +1484,10 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
             "spell_list_expansion"
         ] == [
             {
-                "artifact_id": "dnd5e.content.srd2014.spell.aid",
+                "artifact_id": "dnd5e.addon.guild.spell.aid",
                 "name": "Aid",
-                "pack_id": "dnd5e.content.srd2014",
-                "pack_version": "1.20.0",
+                "pack_id": "dnd5e.addon.guild",
+                "pack_version": "1.0.0",
                 "source_class": "Druid",
             }
         ]
@@ -1443,7 +1496,7 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
             "character_content_apply",
             {
                 "character_id": druid["id"],
-                "artifact_id": "dnd5e.content.srd2014.spell.aid",
+                "artifact_id": "dnd5e.addon.guild.spell.aid",
                 "selection": {
                     "source_class": "Druid",
                     "method": "class_prepared",
@@ -1455,7 +1508,7 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
         expanded_aid = next(
             item
             for item in expanded_spell["sheet"]["content"]["spells"]
-            if item["id"] == "dnd5e.content.srd2014.spell.aid"
+            if item["id"] == "dnd5e.addon.guild.spell.aid"
         )
         assert expanded_aid["grant"] == {
             "source_type": "class",

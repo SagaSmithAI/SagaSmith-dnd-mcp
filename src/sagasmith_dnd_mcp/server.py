@@ -41352,6 +41352,26 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "mechanic_refs": list(artifact.get("mechanic_refs") or []),
         }
 
+        def source_local_content_matches(
+            matches: list[tuple[str, str, dict[str, Any]]],
+        ) -> list[tuple[str, str, dict[str, Any]]]:
+            """Prefer a reprinted rule from the content pack that grants it.
+
+            Official supplements commonly reprint spells.  A source-bound
+            species, subclass, feat, or feature must use its own reviewed
+            printing when that pack supplies one; otherwise one unambiguous
+            active artifact is still required.  This keeps two enabled books
+            from turning a legitimate reprint into a name collision without
+            silently choosing between unrelated external definitions.
+            """
+
+            local = [
+                item
+                for item in matches
+                if item[0] == pack_id and item[1] == version
+            ]
+            return local or matches
+
         def materialize_feature_spell(
             spell_match: tuple[str, str, dict[str, Any]],
             *,
@@ -41494,6 +41514,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 if not eligible_classes.intersection(candidate_classes):
                     continue
                 matches.append(candidate)
+            matches = source_local_content_matches(matches)
             if len(matches) != 1:
                 reference = artifact_id or str(grant.get("name") or "spell")
                 raise RulesetUnavailableError(
@@ -41594,6 +41615,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     ).casefold()
                     == spell_name.casefold()
                 ]
+                matches = source_local_content_matches(matches)
                 if len(matches) != 1:
                     return [], spell_name
                 spell_pack_id, spell_pack_version, spell_artifact = matches[0]
@@ -42189,17 +42211,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     continue
                 method = str(spell_grant.get("method") or "always_prepared")
                 spell_name = str(spell_grant.get("name") or "").strip()
-                spell_match = next(
-                    (
+                spell_matches = source_local_content_matches(
+                    [
                         item
                         for item in candidates
                         if item[2].get("kind") == "spell"
-                        and str(dict(item[2].get("card") or {}).get("name") or "").casefold()
+                        and str(
+                            dict(item[2].get("card") or {}).get("name") or ""
+                        ).casefold()
                         == spell_name.casefold()
-                    ),
-                    None,
+                    ]
                 )
-                if spell_match is None:
+                if len(spell_matches) != 1:
                     return {
                         **_ruling_status(
                             "pending_ruling",
@@ -42209,6 +42232,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             f"subclass spell is not available in the active catalog: {spell_name}"
                         ),
                     }
+                spell_match = spell_matches[0]
                 spell_pack_id, spell_version, spell_artifact = spell_match
                 spell_id = str(spell_artifact["id"])
                 if method == "always_prepared":
@@ -43636,8 +43660,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             sheet["content"]["features"].append(invocation_card)
                             spell_name = at_will_spells.get(option)
                             if spell_name:
-                                spell_match = next(
-                                    (
+                                spell_matches = source_local_content_matches(
+                                    [
                                         item
                                         for item in candidates
                                         if item[2].get("kind") == "spell"
@@ -43646,15 +43670,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                                             or ""
                                         ).casefold()
                                         == spell_name.casefold()
-                                    ),
-                                    None,
+                                    ]
                                 )
-                                if spell_match is None:
+                                if len(spell_matches) != 1:
                                     raise RulesetUnavailableError(
                                         f"invocation spell is unavailable: {spell_name}"
                                     )
                                 materialize_feature_spell(
-                                    spell_match,
+                                    spell_matches[0],
                                     method="eldritch_invocation",
                                     source_key=option,
                                     at_will=True,
@@ -44270,8 +44293,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                                 )
                             at_will_spell = str(at_will_spells.get(selected_value) or "")
                             if at_will_spell:
-                                at_will_match = next(
-                                    (
+                                at_will_matches = source_local_content_matches(
+                                    [
                                         item
                                         for item in candidates
                                         if item[2].get("kind") == "spell"
@@ -44279,16 +44302,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                                             dict(item[2].get("card") or {}).get("name") or ""
                                         ).casefold()
                                         == at_will_spell.casefold()
-                                    ),
-                                    None,
+                                    ]
                                 )
-                                if at_will_match is None:
+                                if len(at_will_matches) != 1:
                                     raise RulesetUnavailableError(
                                         "eldritch invocation at-will spell is "
                                         f"unavailable: {at_will_spell}"
                                     )
                                 materialize_feature_spell(
-                                    at_will_match,
+                                    at_will_matches[0],
                                     method="eldritch_invocation",
                                     source_key=selected_value,
                                     at_will=True,
