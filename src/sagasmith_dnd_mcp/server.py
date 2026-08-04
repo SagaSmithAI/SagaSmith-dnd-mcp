@@ -41992,6 +41992,44 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise ValueError("target class already has a different subclass")
             target["subclass"] = str(card.get("name") or artifact_id)
             sheet["progression"]["classes"] = classes
+            resolved_expansion, unresolved_spell_name = resolve_spell_list_expansion(
+                card.get("spell_list_expansion", []),
+                source_label="subclass",
+            )
+            if unresolved_spell_name is not None:
+                return {
+                    **_ruling_status(
+                        "pending_ruling",
+                        "missing_or_conflicting_source_review",
+                    ),
+                    "reason": (
+                        "subclass spell-list expansion needs one exact active "
+                        f"spell artifact: {unresolved_spell_name}"
+                    ),
+                }
+            source_class_name = str(target.get("name") or target_class)
+            subclass_grants = sheet["progression"].setdefault(
+                "subclass_grants", {"spell_list_expansion": []}
+            )
+            existing_expansion = list(
+                subclass_grants.get("spell_list_expansion") or []
+            )
+            expansion_by_identity = {
+                (
+                    str(item.get("source_class") or "").casefold(),
+                    str(item.get("artifact_id") or ""),
+                ): item
+                for item in existing_expansion
+                if isinstance(item, dict)
+            }
+            for item in resolved_expansion:
+                bound_item = {**item, "source_class": source_class_name}
+                expansion_by_identity[
+                    (source_class_name.casefold(), str(item["artifact_id"]))
+                ] = bound_item
+            subclass_grants["spell_list_expansion"] = list(
+                expansion_by_identity.values()
+            )
             always_prepared_spell_ids: list[str] = []
             for spell_grant in _subclass_spell_grants(card):
                 if int(spell_grant.get("minimum_level", 1) or 1) > int(target.get("level", 0) or 0):

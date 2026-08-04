@@ -1032,6 +1032,7 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
                         "grant_refs": [
                             "card.always_prepared_spells",
                             "card.spell_grants",
+                            "card.spell_list_expansion",
                         ],
                     },
                 }
@@ -1046,6 +1047,7 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
                 "spell_grants": [
                     {"name": "Chill Touch", "minimum_level": 2, "method": "known"}
                 ],
+                "spell_list_expansion": ["Aid"],
             },
             "rule_refs": ["book:addon:p2"],
         }
@@ -1360,6 +1362,42 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
         assert subclass_spells["Blindness/Deafness"]["access"][
             "always_prepared"
         ] is True
+        assert "Aid" not in subclass_spells
+        assert subclass_applied["sheet"]["progression"]["subclass_grants"][
+            "spell_list_expansion"
+        ] == [
+            {
+                "artifact_id": "dnd5e.content.srd2014.spell.aid",
+                "name": "Aid",
+                "pack_id": "dnd5e.content.srd2014",
+                "pack_version": "1.20.0",
+                "source_class": "Druid",
+            }
+        ]
+        expanded_spell = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": druid["id"],
+                "artifact_id": "dnd5e.content.srd2014.spell.aid",
+                "selection": {
+                    "source_class": "Druid",
+                    "method": "class_prepared",
+                },
+                "expected_revision": subclass_applied["revision"],
+                "idempotency_key": "subclass-expanded-spell",
+            },
+        )
+        expanded_aid = next(
+            item
+            for item in expanded_spell["sheet"]["content"]["spells"]
+            if item["id"] == "dnd5e.content.srd2014.spell.aid"
+        )
+        assert expanded_aid["grant"] == {
+            "source_type": "class",
+            "source_key": "druid",
+            "method": "class_prepared",
+        }
 
     import asyncio
 
