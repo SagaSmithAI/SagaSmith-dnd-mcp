@@ -961,6 +961,20 @@ def _catalog_identity_is_evidenced(name: str, evidence: str) -> bool:
     if qualifier in normalized_evidence:
         return True
 
+    # Some source-approved variants are explicit compositions of independently
+    # printed alternatives (for example ``Feral + Winged``).  Treat ``+`` as a
+    # strict conjunction: the base identity and every complete qualifier must
+    # be evidenced by the same bounded source selection.
+    compound_parts = [
+        normalized(part)
+        for part in re.split(r"\s+\+\s+", variant.group(2))
+        if normalized(part)
+    ]
+    if len(compound_parts) > 1 and all(
+        len(part) >= 3 and part in normalized_evidence for part in compound_parts
+    ):
+        return True
+
     # Printed qualifiers in compact tables are often split at one mistaken
     # glyph (for example ``Vadalis`` -> ``Vada I is``).  Keep this fallback
     # bounded to a variant whose base identity is already exact, one edit, and
@@ -44572,6 +44586,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 for metadata_key in (
                     "class_name",
                     "subclass_name",
+                    "feature_subtype",
                     "minimum_level",
                     "unlock_levels",
                     "repeatable_selection_levels",

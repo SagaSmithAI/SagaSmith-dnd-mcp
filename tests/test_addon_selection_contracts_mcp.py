@@ -1588,6 +1588,7 @@ def test_reviewed_addon_base_class_uses_bound_level_one_materializer(tmp_path: P
                 "name": "Tool Expertise",
                 "class_name": "Artificer",
                 "subclass_name": "",
+                "feature_subtype": "",
                 "minimum_level": 1,
                 "repeatable_selection_levels": [],
                 "selection_requirements": {},
