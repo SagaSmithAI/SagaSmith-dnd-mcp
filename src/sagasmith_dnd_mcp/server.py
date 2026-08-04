@@ -37953,10 +37953,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             normalized_segment = _ocr_fact_key(
                 "\n".join(page_lines[segment_start:segment_end])
             )
+            ability_order = ("str", "dex", "con", "int", "wis", "cha")
+            ability_scores = dict(critical_facts["abilities"])
+            ordered_ability_table = (
+                _ocr_fact_key(" ".join(ability.upper() for ability in ability_order))
+                in normalized_segment
+                and _ocr_fact_key(
+                    " ".join(str(ability_scores[ability]) for ability in ability_order)
+                )
+                in normalized_segment
+            )
             embedded_mismatches = [
                 label
                 for label, fact in corroboration_pairs
                 if _ocr_fact_key(fact) not in normalized_segment
+                and not (
+                    label.casefold() in ability_order and ordered_ability_table
+                )
             ]
             if not embedded_mismatches:
                 corroboration_mode = "embedded_text"
