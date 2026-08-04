@@ -1963,12 +1963,21 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
             ocr_block("COMMONER", 30, 355, 180, 380),
         ),
     )
+    layout_calls: list[tuple[str, float, tuple[int, ...]]] = []
+
     def extract_layout(
         provider: RapidOcrProvider,
         path: Path,
         *,
         page_numbers: list[int] | None = None,
     ) -> list[OcrPageLayout]:
+        layout_calls.append(
+            (
+                provider.model_type,
+                provider.scale,
+                tuple(page_numbers or ()),
+            )
+        )
         if fallback_model and provider.model_type == "medium":
             return [
                 OcrPageLayout(
@@ -2065,9 +2074,11 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
             "idempotency_key": "recover",
         }
         _, recovered = await server.call_tool("rule_import", arguments)
+        recovery_layout_call_count = len(layout_calls)
         _, replayed = await server.call_tool("rule_import", arguments)
 
         assert replayed == recovered
+        assert len(layout_calls) == recovery_layout_call_count
         result = recovered["result"]
         assert result["page_number"] == 1
         assert result["provider"] == "rapidocr"
@@ -2217,11 +2228,13 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
             "rule_import",
             agent_named_arguments,
         )
+        agent_named_layout_call_count = len(layout_calls)
         _, replayed_agent_named = await server.call_tool(
             "rule_import",
             agent_named_arguments,
         )
         assert replayed_agent_named == agent_named
+        assert len(layout_calls) == agent_named_layout_call_count
         assert agent_named["result"]["recovery"]["evidence"][
             "heading_match_mode"
         ] == "agent_named_structural_slot"

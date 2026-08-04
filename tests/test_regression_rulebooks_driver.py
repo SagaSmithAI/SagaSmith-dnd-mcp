@@ -151,7 +151,7 @@ def test_agent_statblock_slot_reviews_replay_bounded_ocr_corrections() -> None:
         }
     )[0]
     assert arguments["idempotency_key"] == (
-        "regression-agent-statblock-slot-"
+        "regression-agent-statblock-slot-wrapper-v1-"
         f"r{driver.OCR_STATBLOCK_RECOVERY_VERSION}-book-review-"
         f"{driver._statblock_slot_review_token(normalized_spec)}"
     )

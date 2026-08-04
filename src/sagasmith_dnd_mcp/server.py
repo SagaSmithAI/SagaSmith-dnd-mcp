@@ -434,6 +434,7 @@ from sagasmith_dnd.standard_spell_ids import (
     STANDARD_2014_CONTENT_PACK_VERSION,
 )
 from sagasmith_dnd.statblocks import (
+    OCR_STATBLOCK_RECOVERY_VERSION,
     StatblockImportError,
     apply_dependent_actor_template_variant,
     apply_reviewed_statblock_fill,
@@ -38214,18 +38215,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         job = require_import_job(campaign_id, job_id, "rulebook")
         if not job.source_id:
             raise ValueError("rule import job must be indexed before OCR recovery")
-        stored_receipt_review: dict[str, Any] | None = None
-        try:
-            stored_receipt = idempotency.receipt(campaign_id, idempotency_key)
-        except LookupError:
-            pass
-        else:
-            receipt_response = dict(stored_receipt.response or {})
-            candidate_review = receipt_response.get("review")
-            if isinstance(candidate_review, dict) and str(
-                candidate_review.get("job_id") or ""
-            ) == str(job.id):
-                stored_receipt_review = dict(candidate_review)
         source_path = storage.artifact_rulebook_path(job.artifact)
         if source_path.suffix.casefold() != ".pdf":
             raise ValueError("OCR statblock recovery requires a staged PDF")
@@ -38342,6 +38331,28 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             }
             if not normalized_ocr_corrections:
                 raise ValueError("ocr_corrections must contain a non-empty correction")
+        recovery_request = {
+            "operation": "recover_statblock",
+            "job_id": job_id,
+            "source_id": str(job.source_id),
+            "source_checksum": str(job.artifact_checksum),
+            "name": target_name,
+            "page_number": page_number,
+            "statblock_slot": statblock_slot,
+            "ocr_corrections": deepcopy(normalized_ocr_corrections),
+            "agent_fill": deepcopy(agent_fill),
+            "recovery_version": OCR_STATBLOCK_RECOVERY_VERSION,
+        }
+        recovery_scope = (
+            f"rule-statblock-ocr:{campaign_id}:{job_id}:{principal_id}"
+        )
+        replay = replay_idempotent(
+            recovery_scope,
+            idempotency_key,
+            recovery_request,
+        )
+        if replay is not None:
+            return replay
         provider = storage.rule_ocr_provider()
         if provider is None or not hasattr(provider, "extract_layout"):
             raise RuntimeError("layout OCR recovery requires the configured RapidOCR provider")
@@ -38400,34 +38411,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 and str(review.get("normalized_content") or "").strip() == content
                 and str(review.get("review_mode") or "") == "layout_ocr"
             ]
-            receipt_matches_recovery = bool(
-                stored_receipt_review is not None
-                and int(stored_receipt_review.get("page_number") or 0)
-                == recovered_page
-                and str(stored_receipt_review.get("source_id") or "")
-                == str(job.source_id)
-                and str(stored_receipt_review.get("asset_checksum") or "")
-                == str(job.artifact_checksum)
-                and str(
-                    stored_receipt_review.get("normalized_content") or ""
-                ).strip()
-                == content
-                and str(stored_receipt_review.get("review_mode") or "")
-                == "layout_ocr"
-            )
-            if receipt_matches_recovery:
-                assert stored_receipt_review is not None
-                stored_parent = stored_receipt_review.get(
-                    "derived_from_review_id"
-                )
-                derived_from_review_id = (
-                    str(stored_parent) if stored_parent else None
-                )
-                reviewed_observation = str(
-                    stored_receipt_review.get("observation")
-                    or reviewed_observation
-                )
-            elif existing_same_content:
+            if existing_same_content:
                 # A new key may converge on content already reviewed by an
                 # older route. Preserve lineage only when all identical
                 # reviews agree; otherwise create an unambiguous root review.
@@ -38470,6 +38454,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         mechanical_matches.append(review)
                 if len(mechanical_matches) == 1:
                     derived_from_review_id = str(mechanical_matches[0]["id"])
+        review_idempotency_key = "ocr-review-" + hashlib.sha256(
+            canonical_json(
+                {
+                    "outer_key": idempotency_key,
+                    "request": recovery_request,
+                    "page_number": recovered_page,
+                    "normalized_content_sha256": hashlib.sha256(
+                        content.encode("utf-8")
+                    ).hexdigest(),
+                }
+            ).encode("utf-8")
+        ).hexdigest()[:32]
         reviewed = rule_statblock_review(
             campaign_id,
             job_id,
@@ -38477,12 +38473,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             content,
             reviewed_observation,
             principal_id=principal_id,
-            idempotency_key=idempotency_key,
+            idempotency_key=review_idempotency_key,
             review_mode="layout_ocr",
             agent_fill=agent_fill,
             derived_from_review_id=derived_from_review_id,
         )
-        return {
+        response = {
             "campaign_id": campaign_id,
             "job_id": job_id,
             **{
@@ -38492,6 +38488,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             },
             **reviewed,
         }
+        return remember_idempotent(
+            recovery_scope,
+            idempotency_key,
+            recovery_request,
+            response,
+            campaign_id=campaign_id,
+        )
 
     def rule_statblock_catalog_recover(
         campaign_id: str,

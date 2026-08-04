@@ -528,7 +528,7 @@ async def _apply_statblock_slot_reviews(
                         ),
                     },
                     "idempotency_key": (
-                        "regression-agent-statblock-slot-"
+                        "regression-agent-statblock-slot-wrapper-v1-"
                         f"r{OCR_STATBLOCK_RECOVERY_VERSION}-{id_key}-"
                         f"{correction_token}"
                     ),
