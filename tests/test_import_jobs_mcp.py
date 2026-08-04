@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,7 @@ from sagasmith_dnd_mcp.server import (
     _artifact_source_pages,
     _bounded_ocr_heading_equivalent,
     _bundled_mm2014_actor_card,
+    _canonical_statblock_artifact_for_mechanics,
     _canonical_statblock_artifact_for_review,
     _catalog_identity_is_evidenced,
     _matching_statblock_recovery_pair,
@@ -203,11 +205,39 @@ def test_actor_catalog_identity_covers_the_full_source_citation_range() -> None:
     ) == {252, 253}
 
 
+def test_catalog_identity_can_use_one_unique_same_page_mechanical_match() -> None:
+    assert _canonical_statblock_artifact_for_mechanics(
+        "mechanics:commander",
+        [
+            ("mechanics:gish", "Githyanki Gish", "artifact.gish"),
+            (
+                "mechanics:commander",
+                "Githyanki Supreme Commander",
+                "artifact.commander",
+            ),
+        ],
+    ) == ("Githyanki Supreme Commander", "artifact.commander")
+    assert (
+        _canonical_statblock_artifact_for_mechanics(
+            "mechanics:shared",
+            [
+                ("mechanics:shared", "First", "artifact.first"),
+                ("mechanics:shared", "Second", "artifact.second"),
+            ],
+        )
+        is None
+    )
+
+
 def test_statblock_discovery_unions_ocr_only_siblings() -> None:
     merged = _merge_statblock_discoveries(
-        [{"name": "VELOCIRAPTOR"}],
+        [{"name": "VELOCIRAPTOR"}, {"name": "i·"}],
         primary_provider="pdf-text-layout",
-        secondary=[{"name": "VELOCIRAPTOR"}, {"name": "QUETZALCOATLUS"}],
+        secondary=[
+            {"name": "VELOCIRAPTOR"},
+            {"name": "QUETZALCOATLUS"},
+            {"name": "• '1"},
+        ],
         secondary_provider="rapidocr",
     )
 
@@ -241,7 +271,7 @@ def test_statblock_ocr_discovery_fills_empty_and_partially_paired_text_layers() 
     assert _statblock_ocr_discovery_needed(
         [],
         layout_blocks=[],
-        page_has_usable_catalog_card=False,
+        usable_catalog_count=0,
     )
     assert _statblock_ocr_discovery_needed(
         [{"name": "CLAWFOOT"}],
@@ -249,17 +279,30 @@ def test_statblock_ocr_discovery_fills_empty_and_partially_paired_text_layers() 
             {"text": "Medium beast, unaligned"},
             {"text": "Medium beast, unaligned"},
         ],
-        page_has_usable_catalog_card=False,
+        usable_catalog_count=0,
     )
     assert not _statblock_ocr_discovery_needed(
         [{"name": "MORDAKHESH"}],
         layout_blocks=[{"text": "Medium.fiend, lawful evil"}],
-        page_has_usable_catalog_card=False,
+        usable_catalog_count=0,
     )
     assert not _statblock_ocr_discovery_needed(
         [],
         layout_blocks=[],
-        page_has_usable_catalog_card=True,
+        usable_catalog_count=1,
+    )
+    assert _statblock_ocr_discovery_needed(
+        [],
+        layout_blocks=[
+            {"text": "Medium undead, lawful evil"},
+            {"text": "Armor Class 9"},
+            {"text": "Hit Points 63"},
+            {"text": "Speed 0 ft., fly 40 ft."},
+            {"text": "Armor Class 19"},
+            {"text": "Hit Points 95"},
+            {"text": "Speed 25 ft."},
+        ],
+        usable_catalog_count=1,
     )
 
 
@@ -322,10 +365,29 @@ def test_source_statblock_hints_skip_structural_page_headers() -> None:
                 "heading_path": ["Ch. 6", "ACTIONS"],
                 "content": "Armor Class 10 Hit Points 2 Speed 30 ft.",
             },
+            {
+                "page_start": 295,
+                "heading_path": [
+                    "Ch. 6: Bestiary",
+                    "GITHYANKI GISH",
+                    "GITHYANKI SUPREME",
+                    "COMMANDER",
+                ],
+                "content": (
+                    "Medium humanoid, lawful evil Armor Class 18 "
+                    "Hit Points 187 Speed 30 ft."
+                ),
+            },
         ]
     )
 
-    assert hints == {"entry_count": 1, "by_page": {293: ["Dusk Hag"]}}
+    assert hints == {
+        "entry_count": 2,
+        "by_page": {
+            293: ["Dusk Hag"],
+            295: ["GITHYANKI SUPREME COMMANDER"],
+        },
+    }
 
 
 def test_statblock_index_hints_require_a_corroborated_printed_page_offset() -> None:
@@ -1683,6 +1745,24 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
             "layout_text",
             "layout_ocr",
         }
+
+        # Simulate a process interruption after the individual review committed
+        # but before the enclosing batch receipt became durable. The same public
+        # call must resume from the checksum-bound review, not try to mutate it
+        # again or turn it into an Agent-fill failure.
+        database_path = config.home / "data" / "ttrpgbase.db"
+        with sqlite3.connect(database_path) as connection:
+            connection.execute(
+                "DELETE FROM idempotency_records WHERE key = ?",
+                (batch_arguments["idempotency_key"],),
+            )
+            connection.commit()
+        _, resumed_batch = await server.call_tool("rule_import", batch_arguments)
+        assert resumed_batch["result"]["status"] == "complete"
+        assert resumed_batch["result"]["failures"] == []
+        assert resumed_batch["result"]["recovered"][0]["validation"][
+            "resumed_from_persisted_review"
+        ] is True
         if embedded_text:
             with pytest.raises(Exception, match="unsupported .* payload fields"):
                 await server.call_tool(

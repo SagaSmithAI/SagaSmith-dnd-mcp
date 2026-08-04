@@ -1264,6 +1264,20 @@ def _canonical_statblock_artifact_for_review(
     return None
 
 
+def _canonical_statblock_artifact_for_mechanics(
+    reviewed_identity: str,
+    page_artifacts: list[tuple[str, str, str]],
+) -> tuple[str, str] | None:
+    """Resolve a reviewed transcription to one same-page catalog card by mechanics."""
+
+    matches = [
+        (name, artifact_id)
+        for identity, name, artifact_id in page_artifacts
+        if identity == reviewed_identity
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
 def _artifact_source_pages(artifact: dict[str, Any]) -> set[int]:
     pages: set[int] = set()
     for citation in artifact.get("source_citations") or []:
@@ -1318,10 +1332,16 @@ def _merge_statblock_discoveries(
 ) -> list[tuple[dict[str, Any], str]]:
     """Union independent page discoveries without hiding OCR-only siblings."""
 
-    result = [(dict(item), primary_provider) for item in primary]
+    result = [
+        (dict(item), primary_provider)
+        for item in primary
+        if _valid_statblock_heading(item.get("name"))
+    ]
     seen = {compact_ascii_key(item["name"]) for item, _provider in result}
     for raw in secondary:
         item = dict(raw)
+        if not _valid_statblock_heading(item.get("name")):
+            continue
         name_key = compact_ascii_key(item["name"])
         if name_key in seen:
             continue
@@ -1368,17 +1388,35 @@ def _statblock_ocr_discovery_needed(
     discoveries: list[dict[str, Any]],
     *,
     layout_blocks: list[dict[str, Any]],
-    page_has_usable_catalog_card: bool,
+    usable_catalog_count: int,
 ) -> bool:
     """Detect an empty or partially paired text layer that needs OCR discovery."""
 
-    if page_has_usable_catalog_card:
-        return False
     identity_count = sum(
         is_2014_statblock_identity_line(str(block.get("text") or ""))
         for block in layout_blocks
     )
-    return not discoveries or identity_count > len(discoveries)
+    armor_count = sum(
+        bool(re.match(r"(?i)^\s*armor\s+class\b", str(block.get("text") or "")))
+        for block in layout_blocks
+    )
+    hit_point_count = sum(
+        bool(re.match(r"(?i)^\s*hit\s+points?\b", str(block.get("text") or "")))
+        for block in layout_blocks
+    )
+    speed_count = sum(
+        bool(re.match(r"(?i)^\s*speed\b", str(block.get("text") or "")))
+        for block in layout_blocks
+    )
+    # Decorated card titles and size/type identities are often image glyphs
+    # even when the rest of a PDF is searchable. Repeated AC/HP/Speed cores are
+    # therefore independent evidence of sibling cards that still need names.
+    structural_card_count = max(
+        identity_count,
+        min(armor_count, hit_point_count, speed_count),
+    )
+    paired_count = len(discoveries) + max(0, usable_catalog_count)
+    return paired_count == 0 or structural_card_count > paired_count
 
 
 def _project_recovered_statblock_candidates(
@@ -1535,7 +1573,8 @@ def _source_statblock_recovery_hints(
         if isinstance(page_number, bool) or not isinstance(page_number, int):
             continue
         name = ""
-        for raw_heading in reversed(list(chunk.get("heading_path") or [])):
+        candidate_headings: list[str] = []
+        for raw_heading in list(chunk.get("heading_path") or []):
             heading = " ".join(str(raw_heading).split()).strip()
             heading_key = compact_ascii_key(heading)
             if (
@@ -1546,8 +1585,22 @@ def _source_statblock_recovery_hints(
                 or not _valid_statblock_heading(heading)
             ):
                 continue
-            name = heading
-            break
+            candidate_headings.append(heading)
+        if candidate_headings:
+            name = candidate_headings[-1]
+            # PDF bookmarks can split a single decorated identity over two
+            # consecutive heading nodes (for example, "GITHYANKI SUPREME" /
+            # "COMMANDER"). Rejoin a one-token suffix only when its immediate
+            # parent is itself a multi-token display heading; broad one-token
+            # section labels such as DEVILS or DROW remain untouched.
+            if (
+                len(name.split()) == 1
+                and len(candidate_headings) >= 2
+                and len(candidate_headings[-2].split()) >= 2
+                and name.upper() == name
+                and candidate_headings[-2].upper() == candidate_headings[-2]
+            ):
+                name = f"{candidate_headings[-2]} {name}"
         if not name:
             continue
         name_key = compact_ascii_key(name)
@@ -37268,7 +37321,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         }
         usable_catalog_ids: set[str] = set()
         usable_catalog_names: list[str] = []
-        usable_catalog_pages: set[int] = set()
+        usable_catalog_counts_by_page: dict[int, int] = {}
         for candidate in catalog_statblocks:
             card = dict(dict(candidate.get("artifact") or {}).get("card") or {})
             normalized = str(
@@ -37350,7 +37403,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 and isinstance(end, int)
                 and not isinstance(end, bool)
             ):
-                usable_catalog_pages.update(range(start, end + 1))
+                for page_number in range(start, end + 1):
+                    usable_catalog_counts_by_page[page_number] = (
+                        usable_catalog_counts_by_page.get(page_number, 0) + 1
+                    )
 
         def usable_catalog_name(name: str) -> bool:
             return any(
@@ -37479,6 +37535,81 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         complete_pages: list[int] = []
         indexed_review_keys: set[tuple[str, int]] = set()
         indexed_pages: set[int] = set()
+
+        # A catalog recovery can legitimately be interrupted after one or more
+        # source reviews commit but before the enclosing batch receipt commits.
+        # Resume from those immutable reviews instead of attempting the same
+        # domain write again.  Besides making long OCR jobs restartable, this
+        # keeps a prior successful review from being misreported as an Agent
+        # semantic-fill failure merely because its idempotency record exists.
+        persisted_reviews = [
+            dict(item)
+            for item in dict(job.result or {}).get("statblock_reviews") or []
+            if isinstance(item, dict)
+        ]
+
+        def persisted_review_response(
+            *,
+            page_number: int,
+            name: str,
+            review_modes: set[str],
+        ) -> dict[str, Any] | None:
+            matches: list[dict[str, Any]] = []
+            for review in persisted_reviews:
+                if (
+                    int(review.get("page_number") or 0) != page_number
+                    or str(review.get("review_mode") or "visual") not in review_modes
+                ):
+                    continue
+                content = str(review.get("normalized_content") or "").strip()
+                if hashlib.sha256(content.encode()).hexdigest() != str(
+                    review.get("normalized_content_sha256") or ""
+                ):
+                    continue
+                heading = re.search(r"(?m)^#{1,6}\s+(.+?)\s*$", content)
+                if heading is None or not _bounded_ocr_heading_equivalent(
+                    name, heading.group(1)
+                ):
+                    continue
+                matches.append(review)
+            selected = _select_preferred_statblock_reviews(matches)
+            if len(selected) != 1:
+                return None
+            review = selected[0]
+            content = str(review["normalized_content"])
+            parsed = parse_2014_statblock_template_preview(
+                content,
+                source_key=f"rule-review:{review['id']}",
+                rule_refs=[],
+            )
+            agent_fill = review.get("agent_statblock_fill")
+            requirements = (
+                require_standard_statblock_engine_support(
+                    parsed.sheet,
+                    agent_fill,
+                    statblock_warnings=parsed.warnings,
+                )
+                if is_canonical_standard_rule_source(source)
+                else statblock_agent_fill_requirements(parsed.sheet)
+            )
+            status = str(review.get("agent_fill_status") or "")
+            if status not in {"complete", "pending", "not_required"}:
+                status = "complete" if agent_fill is not None else (
+                    "pending" if requirements["required"] else "not_required"
+                )
+            validation = {
+                "challenge_rating": parsed.challenge_rating,
+                "experience_points": parsed.experience_points,
+                **statblock_settlement(parsed.warnings),
+                "agent_fill": agent_fill,
+                "agent_fill_status": status,
+                "requires_agent_fill": status == "pending",
+                "resolved_warnings": [],
+                "agent_fill_requirements": requirements,
+                "resumed_from_persisted_review": True,
+            }
+            return {"review": review, "validation": validation}
+
         for candidate in catalog_statblocks:
             if str(candidate.get("id") or "") in usable_catalog_ids:
                 continue
@@ -37500,20 +37631,26 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 f"{idempotency_key}\0indexed\0{candidate['id']}\0{normalized}".encode()
             ).hexdigest()[:24]
             try:
-                reviewed = rule_statblock_review(
-                    campaign_id,
-                    job_id,
-                    start,
-                    normalized,
-                    (
-                        "Deterministic D&D statblock normalization recovered a "
-                        "complete card from checksum-bound indexed source chunks."
-                    ),
-                    principal_id=principal_id,
-                    idempotency_key=f"catalog-indexed-review-{review_key}",
-                    review_mode="indexed_text",
-                    evidence_chunk_ids=list(candidate.get("source_chunk_ids") or []),
+                reviewed = persisted_review_response(
+                    page_number=start,
+                    name=name,
+                    review_modes={"indexed_text"},
                 )
+                if reviewed is None:
+                    reviewed = rule_statblock_review(
+                        campaign_id,
+                        job_id,
+                        start,
+                        normalized,
+                        (
+                            "Deterministic D&D statblock normalization recovered a "
+                            "complete card from checksum-bound indexed source chunks."
+                        ),
+                        principal_id=principal_id,
+                        idempotency_key=f"catalog-indexed-review-{review_key}",
+                        review_mode="indexed_text",
+                        evidence_chunk_ids=list(candidate.get("source_chunk_ids") or []),
+                    )
             except (ValueError, StatblockImportError) as error:
                 # A text-normalized card can still contain column bleed or a
                 # falsely extended heading scope. Retain the indexed failure,
@@ -37595,8 +37732,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 and _statblock_ocr_discovery_needed(
                     [item for item, _provider_name in discovery_items],
                     layout_blocks=text_layout_blocks,
-                    page_has_usable_catalog_card=(
-                        page_number in usable_catalog_pages
+                    usable_catalog_count=usable_catalog_counts_by_page.get(
+                        page_number, 0
                     ),
                 )
             ):
@@ -37652,7 +37789,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if not discovery_items:
                 if (
                     page_number in indexed_pages
-                    or page_number in usable_catalog_pages
+                    or page_number in usable_catalog_counts_by_page
                 ) and not any(
                     int(item.get("page_number") or 0) == page_number
                     for item in failures
@@ -37671,15 +37808,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     continue
                 recovery_mode = "layout_text"
                 try:
-                    recovery = recover_2014_statblock_from_ocr(
-                        text_layout_value,
+                    reviewed = persisted_review_response(
+                        page_number=page_number,
                         name=name,
-                        minimum_confidence=0.5,
+                        review_modes={"layout_text", "layout_ocr"},
                     )
-                    observation = (
-                        "Embedded PDF character coordinates recovered a structurally "
-                        "bounded statblock from its exact source page."
-                    )
+                    if reviewed is None:
+                        recovery = recover_2014_statblock_from_ocr(
+                            text_layout_value,
+                            name=name,
+                            minimum_confidence=0.5,
+                        )
+                        observation = (
+                            "Embedded PDF character coordinates recovered a structurally "
+                            "bounded statblock from its exact source page."
+                        )
+                    else:
+                        recovery_mode = str(reviewed["review"]["review_mode"])
                 except StatblockImportError as text_error:
                     if ocr_provider is None:
                         failures.append(
@@ -37713,27 +37858,40 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     recovery = dict(recovered_result["recovery"])
                     observation = str(recovered_result["observation"])
                     recovery_mode = "layout_ocr"
-                content = str(recovery["normalized_content"])
-                recovery_key = hashlib.sha256(
-                    f"{idempotency_key}\0{page_number}\0{name}\0{content}".encode()
-                ).hexdigest()[:24]
-                try:
-                    reviewed = rule_statblock_review(
-                        campaign_id,
-                        job_id,
-                        page_number,
-                        content,
-                        observation,
-                        principal_id=principal_id,
-                        idempotency_key=f"catalog-review-{recovery_key}",
-                        review_mode=recovery_mode,
-                    )
-                except (ValueError, StatblockImportError) as error:
+                if reviewed is None:
+                    content = str(recovery["normalized_content"])
+                    recovery_key = hashlib.sha256(
+                        f"{idempotency_key}\0{page_number}\0{name}\0{content}".encode()
+                    ).hexdigest()[:24]
+                    try:
+                        reviewed = rule_statblock_review(
+                            campaign_id,
+                            job_id,
+                            page_number,
+                            content,
+                            observation,
+                            principal_id=principal_id,
+                            idempotency_key=f"catalog-review-{recovery_key}",
+                            review_mode=recovery_mode,
+                        )
+                    except (ValueError, StatblockImportError) as error:
+                        failures.append(
+                            {
+                                "page_number": page_number,
+                                "name": name,
+                                "error": str(error),
+                                "required_resolution": "agent_semantic_fill",
+                            }
+                        )
+                        page_failures += 1
+                        continue
+                    persisted_reviews.append(dict(reviewed["review"]))
+                if reviewed is None:
                     failures.append(
                         {
                             "page_number": page_number,
                             "name": name,
-                            "error": str(error),
+                            "error": "statblock review did not produce a resumable result",
                             "required_resolution": "agent_semantic_fill",
                         }
                     )
@@ -46224,6 +46382,9 @@ Useful bounded guidance:
             reviewed_source_names_by_page: dict[int, set[str]] = {}
             reviewed_mechanical_identities_by_page: dict[int, set[str]] = {}
             catalog_actor_names_by_page: dict[int, list[tuple[str, str]]] = {}
+            catalog_actor_mechanics_by_page: dict[
+                int, list[tuple[str, str, str]]
+            ] = {}
             for artifact in pack.artifacts:
                 if artifact.get("kind") != "statblock":
                     continue
@@ -46236,6 +46397,32 @@ Useful bounded guidance:
                     catalog_actor_names_by_page.setdefault(page_number, []).append(
                         (artifact_name, str(artifact.get("id") or ""))
                     )
+                source_text = str(
+                    dict(artifact.get("card") or {}).get("normalized_content") or ""
+                ).strip()
+                if source_text:
+                    try:
+                        parsed_artifact = parse_2014_statblock_template_preview(
+                            source_text,
+                            source_key=str(artifact.get("id") or "catalog-statblock"),
+                            rule_refs=[],
+                        )
+                    except (StatblockImportError, ValueError):
+                        pass
+                    else:
+                        mechanical_identity = _statblock_mechanical_identity(
+                            parsed_artifact
+                        )
+                        for page_number in _artifact_source_pages(artifact):
+                            catalog_actor_mechanics_by_page.setdefault(
+                                page_number, []
+                            ).append(
+                                (
+                                    mechanical_identity,
+                                    artifact_name,
+                                    str(artifact.get("id") or ""),
+                                )
+                            )
             indexed_source_chunks: list[dict[str, Any]] = []
             import_job_id = str(pack.provenance.get("import_job_id") or "")
             source_info = dict(pack.provenance.get("rule_source") or {})
@@ -46290,6 +46477,22 @@ Useful bounded guidance:
                             reviewed_name,
                             catalog_actor_names_by_page.get(page_number, []),
                         )
+                    if canonical_artifact is None:
+                        try:
+                            reviewed_preview = parse_2014_statblock_template_preview(
+                                source_text,
+                                source_key=str(review.get("id") or "reviewed-statblock"),
+                                rule_refs=[],
+                            )
+                        except (StatblockImportError, ValueError):
+                            pass
+                        else:
+                            canonical_artifact = (
+                                _canonical_statblock_artifact_for_mechanics(
+                                    _statblock_mechanical_identity(reviewed_preview),
+                                    catalog_actor_mechanics_by_page.get(page_number, []),
+                                )
+                            )
                     if canonical_artifact is not None:
                         canonical_name, canonical_artifact_id = canonical_artifact
                         assert reviewed_heading is not None
@@ -46575,6 +46778,28 @@ Useful bounded guidance:
                         {"artifact_id": artifact.get("id"), "error": "not normalized"}
                     )
                     continue
+                source_heading = re.search(
+                    r"(?m)^#{1,6}\s+(.+?)\s*$",
+                    source_text,
+                )
+                reviewed_card_name = str(card.get("name") or "").strip()
+                if (
+                    source_heading is not None
+                    and _valid_statblock_heading(reviewed_card_name)
+                    and source_heading.group(1) != reviewed_card_name
+                ):
+                    source_text = (
+                        source_text[: source_heading.start(1)]
+                        + reviewed_card_name
+                        + source_text[source_heading.end(1) :]
+                    )
+                    reviewed_ocr_supersessions.append(
+                        {
+                            "artifact_id": str(artifact.get("id") or ""),
+                            "reviewed_name": reviewed_card_name,
+                            "basis": "catalog_artifact_canonical_identity",
+                        }
+                    )
                 if not _valid_statblock_heading(str(card.get("name") or "")):
                     try:
                         unresolved_heading = parse_2014_statblock(
