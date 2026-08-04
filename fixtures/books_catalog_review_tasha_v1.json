@@ -1,0 +1,350 @@
+{
+  "version": 1,
+  "documents": {
+    "D&D 5E - Tasha's Cauldron of Everything.pdf": {
+      "complete_review": true,
+      "default_status": "accepted",
+      "rationale": "Agent reviewed the complete extracted catalog against indexed source pages. Five owner-dependent statblocks whose PDF columns flattened their core fields are corrected from the immutable page text and dual OCR evidence; the corrected source remains a portable, replayable card rather than a title-specific engine rule.",
+      "expected_counts": {
+        "background": 1,
+        "feat": 44,
+        "feature": 370,
+        "item": 47,
+        "species": 1,
+        "spell": 21,
+        "statblock": 18,
+        "subclass": 9
+      },
+      "decisions": [
+        {
+          "kind": "subclass",
+          "name": "C HA NGING YOU R SUB C LA S S",
+          "artifact_patch": {
+            "kind": "feature",
+            "application_state": "catalog_only",
+            "selection_applicability": "not_applicable",
+            "mechanical_scope": "descriptive",
+            "card": {
+              "name": "Changing Your Subclass"
+            }
+          }
+        },
+        {
+          "kind": "subclass",
+          "name": "OATH OF GLORY",
+          "artifact_patch": {
+            "card": {
+              "name": "Oath of Glory",
+              "class_name": "Paladin",
+              "minimum_level": 3
+            }
+          }
+        },
+        {
+          "kind": "subclass",
+          "name": "OATH OF THE WATCHERS",
+          "artifact_patch": {
+            "card": {
+              "name": "Oath of the Watchers",
+              "class_name": "Paladin",
+              "minimum_level": 3
+            }
+          }
+        },
+        {
+          "kind": "spell",
+          "name": "BLADE OF DISASTER",
+          "artifact_patch": {
+            "card": {
+              "name": "Blade of Disaster",
+              "classes": ["Sorcerer", "Warlock", "Wizard"]
+            }
+          }
+        },
+        {
+          "kind": "spell",
+          "name": "BOOMING BLADE",
+          "artifact_patch": {
+            "card": {
+              "name": "Booming Blade",
+              "classes": ["Artificer", "Sorcerer", "Warlock", "Wizard"]
+            }
+          }
+        },
+        {
+          "kind": "spell",
+          "name": "DREAM OF THE BLUE VEIL",
+          "artifact_patch": {
+            "card": {
+              "name": "Dream of the Blue Veil",
+              "classes": ["Bard", "Sorcerer", "Warlock", "Wizard"],
+              "definition": {
+                "effect": "You and up to eight willing creatures in range fall unconscious and receive visions of another Material Plane world. If the six-hour casting completes, all affected creatures are transported to a safe location within 1 mile of where the required destination-world magic item was made, or where an affected destination-world native was born. Damage ends the effect early for that creature; damage to the caster ends it for everyone, preventing transport."
+              }
+            }
+          }
+        },
+        {
+          "kind": "spell",
+          "name": "GREEN-FLAME BLADE",
+          "artifact_patch": {
+            "card": {
+              "name": "Green-Flame Blade",
+              "classes": ["Artificer", "Sorcerer", "Warlock", "Wizard"]
+            }
+          }
+        },
+        {
+          "kind": "spell",
+          "name": "INTELLECT FORTRESS",
+          "artifact_patch": {
+            "card": {
+              "name": "Intellect Fortress",
+              "classes": ["Artificer", "Bard", "Sorcerer", "Warlock", "Wizard"]
+            }
+          }
+        },
+        {
+          "kind": "spell",
+          "name": "LIGHTNI NG LURE",
+          "artifact_patch": {
+            "card": {
+              "name": "Lightning Lure",
+              "classes": ["Artificer", "Sorcerer", "Warlock", "Wizard"]
+            }
+          }
+        },
+        {
+          "kind": "spell",
+          "name": "MIND SLIVER",
+          "artifact_patch": {
+            "card": {
+              "name": "Mind Sliver",
+              "classes": ["Sorcerer", "Warlock", "Wizard"]
+            }
+          }
+        },
+        {
+          "kind": "spell",
+          "name": "SPIRIT SHROUD",
+          "artifact_patch": {
+            "card": {
+              "name": "Spirit Shroud",
+              "classes": ["Cleric", "Paladin", "Warlock", "Wizard"]
+            }
+          }
+        },
+        {
+          "kind": "spell",
+          "name": "SUMMON ABERRATION",
+          "artifact_patch": {
+            "card": {
+              "name": "Summon Aberration",
+              "classes": ["Warlock", "Wizard"],
+              "definition": {
+                "effect": "Summon one aberrant spirit in an unoccupied space within range using the Aberrant Spirit stat block; choose Beholderkin, Slaad, or Star Spawn. It is an ally, disappears at 0 hit points or when the spell ends, shares your initiative and acts immediately after you, obeys verbal commands without an action, and otherwise Dodges and avoids danger. A higher slot supplies the spell level used by its stat block."
+              }
+            }
+          }
+        },
+        {
+          "kind": "spell",
+          "name": "SUMMON BEAST",
+          "artifact_patch": {
+            "card": {
+              "name": "Summon Beast",
+              "classes": ["Druid", "Ranger"],
+              "definition": {
+                "effect": "Summon one bestial spirit in an unoccupied space within range using the Bestial Spirit stat block; choose Air, Land, or Water. It is an ally, disappears at 0 hit points or when the spell ends, shares your initiative and acts immediately after you, obeys verbal commands without an action, and otherwise Dodges and avoids danger. A higher slot supplies the spell level used by its stat block."
+              }
+            }
+          }
+        },
+        {
+          "kind": "spell",
+          "name": "SUMMON C E LE STIAL",
+          "artifact_patch": {
+            "card": {
+              "name": "Summon Celestial",
+              "classes": ["Cleric", "Paladin"],
+              "definition": {
+                "effect": "Summon one celestial spirit in an unoccupied space within range using the Celestial Spirit stat block; choose Avenger or Defender. It is an ally, disappears at 0 hit points or when the spell ends, shares your initiative and acts immediately after you, obeys verbal commands without an action, and otherwise Dodges and avoids danger. A higher slot supplies the spell level used by its stat block."
+              }
+            }
+          }
+        },
+        {
+          "kind": "spell",
+          "name": "SUMMON C ON STRUCT",
+          "artifact_patch": {
+            "card": {
+              "name": "Summon Construct",
+              "classes": ["Artificer", "Wizard"],
+              "definition": {
+                "effect": "Summon one construct spirit in an unoccupied space within range using the Construct Spirit stat block; choose Clay, Metal, or Stone. It is an ally, disappears at 0 hit points or when the spell ends, shares your initiative and acts immediately after you, obeys verbal commands without an action, and otherwise Dodges and avoids danger. A higher slot supplies the spell level used by its stat block."
+              }
+            }
+          }
+        },
+        {
+          "kind": "spell",
+          "name": "SUMMON ELEMENTAL",
+          "artifact_patch": {
+            "card": {
+              "name": "Summon Elemental",
+              "classes": ["Druid", "Ranger", "Wizard"],
+              "definition": {
+                "effect": "Summon one elemental spirit in an unoccupied space within range using the Elemental Spirit stat block; choose Air, Earth, Fire, or Water. It is an ally, disappears at 0 hit points or when the spell ends, shares your initiative and acts immediately after you, obeys verbal commands without an action, and otherwise Dodges and avoids danger. A higher slot supplies the spell level used by its stat block."
+              }
+            }
+          }
+        },
+        {
+          "kind": "spell",
+          "name": "SUMMON FEY",
+          "artifact_patch": {
+            "card": {
+              "name": "Summon Fey",
+              "classes": ["Druid", "Ranger", "Warlock", "Wizard"],
+              "definition": {
+                "effect": "Summon one fey spirit in an unoccupied space within range using the Fey Spirit stat block; choose Fuming, Mirthful, or Tricksy. It is an ally, disappears at 0 hit points or when the spell ends, shares your initiative and acts immediately after you, obeys verbal commands without an action, and otherwise Dodges and avoids danger. A higher slot supplies the spell level used by its stat block."
+              }
+            }
+          }
+        },
+        {
+          "kind": "spell",
+          "name": "SUMMON FIEND",
+          "artifact_patch": {
+            "card": {
+              "name": "Summon Fiend",
+              "classes": ["Warlock", "Wizard"],
+              "definition": {
+                "effect": "Summon one fiendish spirit in an unoccupied space within range using the Fiendish Spirit stat block; choose Demon, Devil, or Yugoloth. It is an ally, disappears at 0 hit points or when the spell ends, shares your initiative and acts immediately after you, obeys verbal commands without an action, and otherwise Dodges and avoids danger. A higher slot supplies the spell level used by its stat block."
+              }
+            }
+          }
+        },
+        {
+          "kind": "spell",
+          "name": "SUMMON SHADOWSPAWN",
+          "artifact_patch": {
+            "card": {
+              "name": "Summon Shadowspawn",
+              "classes": ["Warlock", "Wizard"],
+              "definition": {
+                "effect": "Summon one shadow spirit in an unoccupied space within range using the Shadow Spirit stat block; choose Fury, Despair, or Fear. It is an ally, disappears at 0 hit points or when the spell ends, shares your initiative and acts immediately after you, obeys verbal commands without an action, and otherwise Dodges and avoids danger. A higher slot supplies the spell level used by its stat block."
+              }
+            }
+          }
+        },
+        {
+          "kind": "spell",
+          "name": "SUMMON UNDEAD",
+          "artifact_patch": {
+            "card": {
+              "name": "Summon Undead",
+              "classes": ["Warlock", "Wizard"],
+              "definition": {
+                "effect": "Summon one undead spirit in an unoccupied space within range using the Undead Spirit stat block; choose Ghostly, Putrid, or Skeletal. It is an ally, disappears at 0 hit points or when the spell ends, shares your initiative and acts immediately after you, obeys verbal commands without an action, and otherwise Dodges and avoids danger. A higher slot supplies the spell level used by its stat block."
+              }
+            }
+          }
+        },
+        {
+          "kind": "spell",
+          "name": "SWORD BURST",
+          "artifact_patch": {
+            "card": {
+              "name": "Sword Burst",
+              "classes": ["Artificer", "Sorcerer", "Warlock", "Wizard"]
+            }
+          }
+        },
+        {
+          "kind": "spell",
+          "name": "TASHA'S CAUSTIC BREW",
+          "artifact_patch": {
+            "card": {
+              "name": "Tasha's Caustic Brew",
+              "classes": ["Artificer", "Sorcerer", "Wizard"]
+            }
+          }
+        },
+        {
+          "kind": "spell",
+          "name": "TASHA'S MIND WHI P",
+          "artifact_patch": {
+            "card": {
+              "name": "Tasha's Mind Whip",
+              "classes": ["Sorcerer", "Wizard"],
+              "definition": {
+                "effect": "One visible creature makes an Intelligence saving throw. On a failure it takes 3d6 psychic damage, cannot take reactions until the end of its next turn, and on that turn may take only one of movement, an action, or a bonus action; on a success it takes half damage with no other effect. A slot above 2nd adds one target per level, with targets within 30 feet of each other."
+              }
+            }
+          }
+        },
+        {
+          "kind": "spell",
+          "name": "TASHA'S OTHERWORLDLY GUISE",
+          "artifact_patch": {
+            "card": {
+              "name": "Tasha's Otherworldly Guise",
+              "classes": ["Sorcerer", "Warlock", "Wizard"]
+            }
+          }
+        },
+        {
+          "kind": "statblock",
+          "name": "HOMUNCULUS SERVANT",
+          "artifact_patch": {
+            "card": {
+              "owner_class_name": "Artificer",
+              "normalized_content": "# HOMUNCULUS SERVANT\n\n*Tiny construct*\n\n**Armor Class** 13 (natural armor)\n\n**Hit Points** 1 + your Intelligence modifier + your artificer level (the homunculus has a number of Hit Dice [d4s] equal to your artificer level)\n\n**Speed** 20 ft., fly 30 ft.\n\n| STR | DEX | CON | INT | WIS | CHA |\n|---:|---:|---:|---:|---:|---:|\n| 4 (-3) | 15 (+2) | 12 (+1) | 10 (+0) | 10 (+0) | 7 (-2) |\n\n**Saving Throws** Dex +2 plus PB\n\n**Skills** Perception +0 plus PB x 2, Stealth +2 plus PB\n\n**Damage Immunities** poison\n\n**Condition Immunities** exhaustion, poisoned\n\n**Senses** darkvision 60 ft., passive Perception 10 + (PB x 2)\n\n**Languages** understands the languages you speak\n\n**Challenge** —\n\n**Proficiency Bonus (PB)** equals your bonus\n\n***Evasion.*** If the homunculus is subjected to an effect that allows it to make a Dexterity saving throw to take only half damage, it instead takes no damage if it succeeds on the saving throw, and only half damage if it fails. It can't use this trait if it's incapacitated.\n\n## Actions\n\n***Force Strike.*** Ranged Weapon Attack: your spell attack modifier to hit, range 30 ft., one target you can see. Hit: 1d4 + PB force damage.\n\n## Reactions\n\n***Channel Magic.*** The homunculus delivers a spell you cast that has a range of touch. The homunculus must be within 120 feet of you."
+            }
+          }
+        },
+        {
+          "kind": "statblock",
+          "name": "DANCING ITEM",
+          "artifact_patch": {
+            "card": {
+              "owner_class_name": "Bard",
+              "normalized_content": "# DANCING ITEM\n\n*Large or smaller construct*\n\n**Armor Class** 16 (natural armor)\n\n**Hit Points** 10 + five times your bard level\n\n**Speed** 30 ft., fly 30 ft. (hover)\n\n| STR | DEX | CON | INT | WIS | CHA |\n|---:|---:|---:|---:|---:|---:|\n| 18 (+4) | 14 (+2) | 16 (+3) | 4 (-3) | 10 (+0) | 6 (-2) |\n\n**Damage Immunities** poison, psychic\n\n**Condition Immunities** charmed, exhaustion, frightened, poisoned\n\n**Senses** darkvision 60 ft., passive Perception 10\n\n**Languages** understands the languages you speak\n\n**Challenge** —\n\n**Proficiency Bonus (PB)** equals your bonus\n\n***Immutable Form.*** The item is immune to any spell or effect that would alter its form.\n\n***Irrepressible Dance.*** When any creature starts its turn within 10 feet of the item, the item can increase or decrease (your choice) the walking speed of that creature by 10 feet until the end of the turn, provided the item isn't incapacitated.\n\n## Actions\n\n***Force-Empowered Slam.*** Melee Weapon Attack: your spell attack modifier to hit, reach 5 ft., one target you can see. Hit: 1d10 + PB force damage."
+            }
+          }
+        },
+        {
+          "kind": "statblock",
+          "name": "BEAST OF THE LAND",
+          "artifact_patch": {
+            "card": {
+              "owner_class_name": "Ranger",
+              "normalized_content": "# BEAST OF THE LAND\n\n*Medium beast*\n\n**Armor Class** 13 + PB (natural armor)\n\n**Hit Points** 5 + five times your ranger level (the beast has a number of Hit Dice [d8s] equal to your ranger level)\n\n**Speed** 40 ft., climb 40 ft.\n\n| STR | DEX | CON | INT | WIS | CHA |\n|---:|---:|---:|---:|---:|---:|\n| 14 (+2) | 14 (+2) | 15 (+2) | 8 (-1) | 14 (+2) | 11 (+0) |\n\n**Senses** darkvision 60 ft., passive Perception 12\n\n**Languages** understands the languages you speak\n\n**Challenge** —\n\n**Proficiency Bonus (PB)** equals your bonus\n\n***Charge.*** If the beast moves at least 20 feet straight toward a target and then hits it with a maul attack on the same turn, the target takes an extra 1d6 slashing damage. If the target is a creature, it must succeed on a Strength saving throw against your spell save DC or be knocked prone.\n\n***Primal Bond.*** You can add your proficiency bonus to any ability check or saving throw that the beast makes.\n\n## Actions\n\n***Maul.*** Melee Weapon Attack: your spell attack modifier to hit, reach 5 ft., one target. Hit: 1d8 + 2 + PB slashing damage."
+            }
+          }
+        },
+        {
+          "kind": "statblock",
+          "name": "BEAST OF THE SEA",
+          "artifact_patch": {
+            "card": {
+              "owner_class_name": "Ranger",
+              "normalized_content": "# BEAST OF THE SEA\n\n*Medium beast*\n\n**Armor Class** 13 + PB (natural armor)\n\n**Hit Points** 5 + five times your ranger level (the beast has a number of Hit Dice [d8s] equal to your ranger level)\n\n**Speed** 5 ft., swim 60 ft.\n\n| STR | DEX | CON | INT | WIS | CHA |\n|---:|---:|---:|---:|---:|---:|\n| 14 (+2) | 14 (+2) | 15 (+2) | 8 (-1) | 14 (+2) | 11 (+0) |\n\n**Senses** darkvision 60 ft., passive Perception 12\n\n**Languages** understands the languages you speak\n\n**Challenge** —\n\n**Proficiency Bonus (PB)** equals your bonus\n\n***Amphibious.*** The beast can breathe both air and water.\n\n***Primal Bond.*** You can add your proficiency bonus to any ability check or saving throw that the beast makes.\n\n## Actions\n\n***Binding Strike.*** Melee Weapon Attack: your spell attack modifier to hit, reach 5 ft., one target. Hit: 1d6 + 2 + PB piercing or bludgeoning damage (your choice), and the target is grappled (escape DC equals your spell save DC). Until this grapple ends, the beast can't use this attack on another target."
+            }
+          }
+        },
+        {
+          "kind": "statblock",
+          "name": "BEAST OF THE SKY",
+          "artifact_patch": {
+            "card": {
+              "owner_class_name": "Ranger",
+              "normalized_content": "# BEAST OF THE SKY\n\n*Small beast*\n\n**Armor Class** 13 + PB (natural armor)\n\n**Hit Points** 4 + four times your ranger level (the beast has a number of Hit Dice [d6s] equal to your ranger level)\n\n**Speed** 10 ft., fly 60 ft.\n\n| STR | DEX | CON | INT | WIS | CHA |\n|---:|---:|---:|---:|---:|---:|\n| 6 (-2) | 16 (+3) | 13 (+1) | 8 (-1) | 14 (+2) | 11 (+0) |\n\n**Senses** darkvision 60 ft., passive Perception 12\n\n**Languages** understands the languages you speak\n\n**Challenge** —\n\n**Proficiency Bonus (PB)** equals your bonus\n\n***Flyby.*** The beast doesn't provoke opportunity attacks when it flies out of an enemy's reach.\n\n***Primal Bond.*** You can add your proficiency bonus to any ability check or saving throw that the beast makes.\n\n## Actions\n\n***Shred.*** Melee Weapon Attack: your spell attack modifier to hit, reach 5 ft., one target. Hit: 1d4 + 3 + PB slashing damage."
+            }
+          }
+        }
+      ]
+    }
+  }
+}
