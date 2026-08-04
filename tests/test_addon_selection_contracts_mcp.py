@@ -15,6 +15,7 @@ from sagasmith_dnd_mcp.server import (
     _apply_skill_proficiency_or_expertise,
     _character_spell_card,
     _materialize_feature_proficiency_groups,
+    _reviewed_statblock_variants,
     _validate_group_limited_choices,
     _validated_additive_choices,
     _validated_narrative_choices,
@@ -22,6 +23,38 @@ from sagasmith_dnd_mcp.server import (
     _validated_species_proficiency_choices,
     create_server,
 )
+
+
+def test_reviewed_statblock_variants_require_full_distinct_matching_cards() -> None:
+    source = """# Ox
+
+*Large beast, unaligned*
+
+**Armor Class** 10
+**Hit Points** 15 (2d10 + 4)
+**Speed** 30 ft.
+
+| STR | DEX | CON | INT | WIS | CHA |
+|---:|---:|---:|---:|---:|---:|
+| 18 (+4) | 10 (+0) | 14 (+2) | 2 (-4) | 10 (+0) | 4 (-3) |
+
+**Senses** passive Perception 10
+**Languages** —
+**Challenge** 1/4 (50 XP)
+
+## Actions
+
+***Gore.*** Melee Weapon Attack: +6 to hit, reach 5 ft., one target.
+Hit: 7 (1d6 + 4) piercing damage.
+"""
+    card = {"statblock_variants": [{"name": "Ox", "normalized_content": source}]}
+
+    assert _reviewed_statblock_variants(card) == [
+        {"name": "Ox", "normalized_content": source.strip()}
+    ]
+    card["statblock_variants"][0]["name"] = "Rothé"
+    with pytest.raises(ValueError, match="heading must match"):
+        _reviewed_statblock_variants(card)
 
 
 async def _call(server, name: str, arguments: dict):
@@ -1106,7 +1139,18 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
                             "source_key": "Marked Human",
                         }
                     },
-                    "features": [],
+                    "features": [
+                        {
+                            "name": "Marked Awareness",
+                            "description": "A source-reviewed level-one species feature.",
+                            "minimum_level": 1,
+                        },
+                        {
+                            "name": "Greater Mark",
+                            "description": "A source-reviewed higher-level species feature.",
+                            "minimum_level": 4,
+                        },
+                    ],
                     "unresolved": [],
                 },
             },
@@ -1411,6 +1455,13 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
         assert marked["sheet"]["resources"]["species:marked-human:insight"][
             "value"
         ] == 1
+        assert [
+            item["name"] for item in marked["sheet"]["content"]["features"]
+        ] == ["Marked Awareness"]
+        marked_awareness = marked["sheet"]["content"]["features"][0]
+        assert marked_awareness["id"].endswith(".feature.marked-awareness")
+        assert marked_awareness["source_key"] == "Marked Human"
+        assert "minimum_level" not in marked_awareness
         marked_spell = await _call(
             server,
             "character_content_apply",
@@ -1426,6 +1477,37 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
             item["id"] == "dnd5e.addon.guild.spell.aid"
             for item in marked_spell["sheet"]["content"]["spells"]
         )
+        marked_level_four = await _call(
+            server,
+            "character_state_change",
+            {
+                "character_id": marked_character["id"],
+                "action": "level_advance",
+                "payload": {
+                    "class_name": "Wizard",
+                    "hp_method": "fixed",
+                    "reason": "unlock the reviewed level-four species feature",
+                    "source_ref": "test:marked-wizard-level-4",
+                },
+                "expected_revision": marked_spell["revision"],
+                "idempotency_key": "species-level-four",
+            },
+        )
+        advanced_marked = marked_level_four["character"]
+        assert [
+            item["name"]
+            for item in advanced_marked["sheet"]["content"]["features"]
+        ] == ["Marked Awareness", "Greater Mark"]
+        assert marked_level_four["advancement"]["species_feature_grants"] == [
+            {
+                "artifact_id": (
+                    "dnd5e.addon.guild.species.marked-human.feature.greater-mark"
+                ),
+                "name": "Greater Mark",
+                "minimum_level": 4,
+                "source_species": "Marked Human",
+            }
+        ]
 
         druid_sheet = default_character_sheet()
         druid_sheet["progression"]["level"] = 3

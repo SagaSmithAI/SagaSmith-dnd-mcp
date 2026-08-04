@@ -1297,6 +1297,45 @@ def _canonical_statblock_artifact_for_mechanics(
     return matches[0] if len(matches) == 1 else None
 
 
+def _reviewed_statblock_variants(card: dict[str, Any]) -> list[dict[str, str]]:
+    """Validate full source-reviewed actor variants carried by one statblock card."""
+
+    raw_variants = card.get("statblock_variants", [])
+    if not isinstance(raw_variants, list) or len(raw_variants) > 32:
+        raise ValueError("statblock_variants must be an array of at most 32 variants")
+    variants: list[dict[str, str]] = []
+    names: set[str] = set()
+    checksums: set[str] = set()
+    for index, raw_variant in enumerate(raw_variants):
+        if not isinstance(raw_variant, dict):
+            raise ValueError(f"statblock_variants[{index}] must be an object")
+        unsupported = set(raw_variant) - {"name", "normalized_content"}
+        if unsupported:
+            raise ValueError(
+                f"statblock_variants[{index}] has unsupported fields: "
+                f"{sorted(unsupported)}"
+            )
+        name = " ".join(str(raw_variant.get("name") or "").split())
+        source_text = str(raw_variant.get("normalized_content") or "").strip()
+        if not _valid_statblock_heading(name) or not source_text:
+            raise ValueError(
+                f"statblock_variants[{index}] requires a valid name and normalized_content"
+            )
+        heading = re.search(r"(?m)^#{1,6}\s+(.+?)\s*$", source_text)
+        if heading is None or compact_ascii_key(heading.group(1)) != compact_ascii_key(name):
+            raise ValueError(
+                f"statblock_variants[{index}] heading must match its reviewed name"
+            )
+        name_key = compact_ascii_key(name)
+        checksum = hashlib.sha256(source_text.encode()).hexdigest()
+        if name_key in names or checksum in checksums:
+            raise ValueError("statblock_variants must have distinct names and source text")
+        names.add(name_key)
+        checksums.add(checksum)
+        variants.append({"name": name, "normalized_content": source_text})
+    return variants
+
+
 def _artifact_source_pages(artifact: dict[str, Any]) -> set[int]:
     pages: set[int] = set()
     for citation in artifact.get("source_citations") or []:
@@ -31155,6 +31194,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             source_ref=normalized_source_ref,
             reason=normalized_reason,
         )
+        applied["species_feature_grants"] = refresh_level_unlocked_species_features(
+            applied["sheet"]
+        )
         applied["subclass_spell_grants"] = refresh_level_unlocked_subclass_spells(
             current.campaign_id,
             applied["sheet"],
@@ -40232,6 +40274,137 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         ]
         return result
 
+    def materialize_species_features(
+        sheet: dict[str, Any],
+        *,
+        features: Any,
+        species_name: str,
+        species_artifact_id: str,
+        pack_id: str,
+        pack_version: str,
+        rule_refs: list[str],
+        mechanic_refs: list[str],
+        maximum_level: int,
+        choices: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Append only currently unlocked embedded species features."""
+
+        if not isinstance(features, list):
+            raise ValueError("species features must be an array")
+        present_ids = {
+            str(item.get("id") or "")
+            for item in sheet.get("content", {}).get("features", [])
+        }
+        unlocked: list[dict[str, Any]] = []
+        for index, raw_feature in enumerate(features):
+            if not isinstance(raw_feature, dict):
+                raise ValueError(f"species features[{index}] must be an object")
+            minimum_level = raw_feature.get("minimum_level", 1)
+            if (
+                isinstance(minimum_level, bool)
+                or not isinstance(minimum_level, int)
+                or not 1 <= minimum_level <= 20
+            ):
+                raise ValueError(
+                    f"species features[{index}].minimum_level must be an integer from 1 to 20"
+                )
+            if minimum_level > maximum_level:
+                continue
+            feature_card = deepcopy(raw_feature)
+            feature_card.pop("minimum_level", None)
+            feature_name = " ".join(str(feature_card.get("name") or "").split())
+            if not feature_name:
+                raise ValueError(f"species features[{index}].name must not be empty")
+            feature_id = str(feature_card.get("id") or "").strip() or (
+                f"{species_artifact_id}.feature.{ascii_slug(feature_name)}"
+            )
+            if feature_id in present_ids:
+                continue
+            feature_card.update(
+                id=feature_id,
+                name=feature_name,
+                source_key=str(feature_card.get("source_key") or species_name),
+                pack_id=pack_id,
+                pack_version=pack_version,
+                rule_refs=list(rule_refs),
+                mechanic_refs=list(mechanic_refs),
+            )
+            feature_card.setdefault("activation", {"type": "passive"})
+            if choices and any(choices.values()):
+                feature_card["choices"] = deepcopy(choices)
+            sheet["content"]["features"].append(feature_card)
+            present_ids.add(feature_id)
+            unlocked.append(
+                {
+                    "artifact_id": feature_id,
+                    "name": feature_name,
+                    "minimum_level": minimum_level,
+                    "source_species": species_name,
+                }
+            )
+        return unlocked
+
+    def refresh_level_unlocked_species_features(
+        sheet: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Materialize deterministic species features unlocked by total character level."""
+
+        selection = next(
+            (
+                item
+                for item in sheet.get("content", {}).get("selections", [])
+                if str(item.get("kind") or "") == "species"
+            ),
+            None,
+        )
+        if selection is None:
+            return []
+        artifact_id = str(selection.get("artifact_id") or "")
+        pack_id = str(selection.get("pack_id") or "")
+        version = str(selection.get("pack_version") or "")
+        if not artifact_id or not pack_id or not version:
+            raise ValueError(
+                "recorded species content must include artifact id, pack id, and pack version"
+            )
+        try:
+            pack = rule_packs.get_version(pack_id, version)
+        except LookupError as error:
+            raise RulesetUnavailableError(
+                f"recorded species content pack is unavailable: {pack_id}@{version}"
+            ) from error
+        artifact = next(
+            (item for item in pack.artifacts if str(item.get("id") or "") == artifact_id),
+            None,
+        )
+        if artifact is None:
+            raise RulesetUnavailableError(
+                f"recorded species content is unavailable: {artifact_id} in {pack_id}@{version}"
+            )
+        card = dict(artifact.get("card") or {})
+        species_name = str(card.get("name") or selection.get("name") or artifact_id)
+        existing_choices = next(
+            (
+                dict(item.get("choices") or {})
+                for item in sheet.get("content", {}).get("features", [])
+                if str(item.get("source_key") or "").casefold()
+                == species_name.casefold()
+                and item.get("choices")
+            ),
+            dict(selection.get("selection") or {}),
+        )
+        return materialize_species_features(
+            sheet,
+            features=dict(card.get("grants") or {}).get("features", []),
+            species_name=species_name,
+            species_artifact_id=artifact_id,
+            pack_id=pack_id,
+            pack_version=version,
+            rule_refs=list(artifact.get("rule_refs") or []),
+            mechanic_refs=list(artifact.get("mechanic_refs") or []),
+            maximum_level=int(sheet.get("progression", {}).get("level", 0) or 0),
+            choices=existing_choices,
+        )
+
     def refresh_level_unlocked_subclass_spells(
         campaign_id: str,
         sheet: dict[str, Any],
@@ -40461,19 +40634,28 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 None,
             )
             if artifact is None:
-                embedded = next(
-                    (
-                        feature
-                        for item in pack.artifacts
-                        for feature in dict(dict(item.get("card") or {}).get("grants") or {}).get(
-                            "features", []
+                for parent in pack.artifacts:
+                    parent_id = str(parent.get("id") or "").strip()
+                    embedded_features = dict(
+                        dict(parent.get("card") or {}).get("grants") or {}
+                    ).get("features", [])
+                    for raw_feature in embedded_features:
+                        feature = dict(raw_feature)
+                        feature_name = " ".join(
+                            str(feature.get("name") or "").split()
                         )
-                        if str(feature.get("id") or "") == artifact_id
-                    ),
-                    None,
-                )
-                if embedded is not None:
-                    artifact = {"id": artifact_id, "kind": "feature", "card": embedded}
+                        embedded_id = str(feature.get("id") or "").strip() or (
+                            f"{parent_id}.feature.{ascii_slug(feature_name)}"
+                        )
+                        if embedded_id == artifact_id:
+                            artifact = {
+                                "id": artifact_id,
+                                "kind": "feature",
+                                "card": {**feature, "id": embedded_id},
+                            }
+                            break
+                    if artifact is not None:
+                        break
             if artifact is None:
                 raise RulesetUnavailableError(
                     f"recorded artifact is unavailable: {artifact_id} in {pack_id}@{version}"
@@ -41320,6 +41502,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         spellbook_copy: dict[str, Any] | None = None
         subclass_spell_grants: list[dict[str, Any]] = []
         feature_spell_grants: list[dict[str, Any]] = []
+        species_feature_grants: list[dict[str, Any]] = []
         class_materialization: dict[str, Any] | None = None
         replacing_feature_selection = False
         requested_method = str(selection.get("method") or "").strip().casefold()
@@ -43074,17 +43257,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "cantrip_artifact_id": cantrip_id,
                 "fixed_spell_grants": fixed_species_spell_grants,
             }
-            for feature in grants.get("features", []):
-                feature_card = deepcopy(dict(feature))
-                feature_card.update(
-                    pack_id=pack_id,
-                    pack_version=version,
-                    rule_refs=list(artifact.get("rule_refs") or []),
-                    mechanic_refs=list(artifact.get("mechanic_refs") or []),
-                )
-                if any(feature_choices.values()):
-                    feature_card["choices"] = feature_choices
-                sheet["content"]["features"].append(feature_card)
+            species_feature_grants = materialize_species_features(
+                sheet,
+                features=grants.get("features", []),
+                species_name=selected_species,
+                species_artifact_id=artifact_id,
+                pack_id=pack_id,
+                pack_version=version,
+                rule_refs=list(artifact.get("rule_refs") or []),
+                mechanic_refs=list(artifact.get("mechanic_refs") or []),
+                maximum_level=int(sheet.get("progression", {}).get("level", 0) or 0),
+                choices=feature_choices,
+            )
             resolved_expansion, unresolved_spell_name = resolve_spell_list_expansion(
                 grants.get("spell_list_expansion", []),
                 source_label="species",
@@ -44792,6 +44976,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             **(
                 {"feature_spell_grants": feature_spell_grants}
                 if feature_spell_grants
+                else {}
+            ),
+            **(
+                {"species_feature_grants": species_feature_grants}
+                if species_feature_grants
                 else {}
             ),
             **(
@@ -46916,6 +47105,31 @@ Useful bounded guidance:
                 if artifact.get("kind") != "statblock":
                     continue
                 card = dict(artifact.get("card") or {})
+                try:
+                    for variant in _reviewed_statblock_variants(card):
+                        append_preset_card(
+                            source_text=variant["normalized_content"],
+                            source_identity=(
+                                f"{artifact['id']}#reviewed-variant:"
+                                f"{ascii_slug(variant['name'])}"
+                            ),
+                            source_refs=[
+                                f"rule-pack:{pack_id}@{version}#artifact:{artifact['id']}",
+                                f"rule-pack:{pack_id}@{version}#variant:"
+                                f"{ascii_slug(variant['name'])}",
+                            ],
+                        )
+                except (
+                    StatblockImportError,
+                    PortableContentError,
+                    ValueError,
+                ) as error:
+                    failures.append(
+                        {
+                            "artifact_id": artifact.get("id"),
+                            "error": f"reviewed statblock variant: {error}",
+                        }
+                    )
                 card_name = compact_ascii_key(str(card.get("name") or ""))
                 if card_name in reviewed_source_names:
                     continue
