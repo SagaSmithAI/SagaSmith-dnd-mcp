@@ -38286,6 +38286,39 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         content = str(recovered["normalized_content"])
         derived_from_review_id = None
         if statblock_slot is not None:
+            all_statblock_reviews = [
+                dict(review)
+                for review in list(
+                    dict(job.result or {}).get("statblock_reviews") or []
+                )
+            ]
+            existing_same_content = [
+                review
+                for review in all_statblock_reviews
+                if int(review.get("page_number") or 0) == recovered_page
+                and str(review.get("source_id") or "") == str(job.source_id)
+                and str(review.get("asset_checksum") or "")
+                == str(job.artifact_checksum)
+                and str(review.get("normalized_content") or "").strip() == content
+                and str(review.get("review_mode") or "") == "layout_ocr"
+            ]
+            if existing_same_content:
+                # Replay must retain the lineage chosen by the original call.
+                # Preferred-review projection can hide the parent after the
+                # derived review commits, so recomputing it would change the
+                # idempotency request despite an identical public request.
+                stored_parents = {
+                    str(review.get("derived_from_review_id") or "")
+                    for review in existing_same_content
+                }
+                if len(stored_parents) != 1:
+                    raise RuntimeError(
+                        "existing OCR statblock reviews have ambiguous lineage"
+                    )
+                stored_parent = next(iter(stored_parents))
+                derived_from_review_id = (
+                    str(stored_parent) if stored_parent else None
+                )
             parsed_recovery = parse_2014_statblock_template_preview(
                 content,
                 source_key=f"slot-recovery:{job.id}:{recovered_page}:{statblock_slot}",
@@ -38293,26 +38326,29 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             recovery_identity = _statblock_mechanical_identity(parsed_recovery)
             mechanical_matches: list[dict[str, Any]] = []
-            for review in _select_preferred_statblock_reviews(
-                list(dict(job.result or {}).get("statblock_reviews") or [])
-            ):
-                if int(review.get("page_number") or 0) != recovered_page:
-                    continue
-                prior_content = str(review.get("normalized_content") or "").strip()
-                if not prior_content or prior_content == content:
-                    continue
-                try:
-                    prior_parsed = parse_2014_statblock_template_preview(
-                        prior_content,
-                        source_key=str(review.get("id") or "prior-slot-review"),
-                        rule_refs=[],
-                    )
-                except (StatblockImportError, ValueError):
-                    continue
-                if _statblock_mechanical_identity(prior_parsed) == recovery_identity:
-                    mechanical_matches.append(review)
-            if len(mechanical_matches) == 1:
-                derived_from_review_id = str(mechanical_matches[0]["id"])
+            if not existing_same_content:
+                for review in _select_preferred_statblock_reviews(
+                    all_statblock_reviews
+                ):
+                    if int(review.get("page_number") or 0) != recovered_page:
+                        continue
+                    prior_content = str(
+                        review.get("normalized_content") or ""
+                    ).strip()
+                    if not prior_content or prior_content == content:
+                        continue
+                    try:
+                        prior_parsed = parse_2014_statblock_template_preview(
+                            prior_content,
+                            source_key=str(review.get("id") or "prior-slot-review"),
+                            rule_refs=[],
+                        )
+                    except (StatblockImportError, ValueError):
+                        continue
+                    if _statblock_mechanical_identity(prior_parsed) == recovery_identity:
+                        mechanical_matches.append(review)
+                if len(mechanical_matches) == 1:
+                    derived_from_review_id = str(mechanical_matches[0]["id"])
         reviewed = rule_statblock_review(
             campaign_id,
             job_id,

@@ -2091,40 +2091,46 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
         assert resumed_batch["result"]["recovered"][0]["validation"][
             "resumed_from_persisted_review"
         ] is True
+        agent_named_arguments = {
+            "campaign_id": campaign["id"],
+            "action": "recover_statblock",
+            "payload": {
+                "job_id": job_id,
+                "name": "Reviewed Commoner",
+                "page_number": 1,
+                "statblock_slot": 1,
+                **(
+                    {
+                        "ocr_corrections": {
+                            "text_replacements": [
+                                {
+                                    "old": (
+                                        "Club. Melee Weapon Attack: +2 to hit, "
+                                        "reach 5 ft., one target."
+                                    ),
+                                    "new": (
+                                        "Club. Melee Weapon Attack: +2 to hit, "
+                                        "reach 5 ft., one creature."
+                                    ),
+                                }
+                            ]
+                        }
+                    }
+                    if embedded_text
+                    else {}
+                ),
+            },
+            "idempotency_key": "recover-agent-named-slot",
+        }
         _, agent_named = await server.call_tool(
             "rule_import",
-            {
-                "campaign_id": campaign["id"],
-                "action": "recover_statblock",
-                "payload": {
-                    "job_id": job_id,
-                    "name": "Reviewed Commoner",
-                    "page_number": 1,
-                    "statblock_slot": 1,
-                    **(
-                        {
-                            "ocr_corrections": {
-                                "text_replacements": [
-                                    {
-                                        "old": (
-                                            "Club. Melee Weapon Attack: +2 to hit, "
-                                            "reach 5 ft., one target."
-                                        ),
-                                        "new": (
-                                            "Club. Melee Weapon Attack: +2 to hit, "
-                                            "reach 5 ft., one creature."
-                                        ),
-                                    }
-                                ]
-                            }
-                        }
-                        if embedded_text
-                        else {}
-                    ),
-                },
-                "idempotency_key": "recover-agent-named-slot",
-            },
+            agent_named_arguments,
         )
+        _, replayed_agent_named = await server.call_tool(
+            "rule_import",
+            agent_named_arguments,
+        )
+        assert replayed_agent_named == agent_named
         assert agent_named["result"]["recovery"]["evidence"][
             "heading_match_mode"
         ] == "agent_named_structural_slot"
