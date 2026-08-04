@@ -25,6 +25,100 @@ class _FakeServer:
         return None, response
 
 
+def test_agent_transcription_reviews_replay_before_rulebook_ingest() -> None:
+    base_hash = "a" * 64
+    server = _FakeServer(
+        [
+            (
+                "rule_import",
+                {
+                    "image_checksum": "b" * 64,
+                    "transcription": {
+                        "normalized": {"text_sha256": base_hash}
+                    },
+                },
+            ),
+            (
+                "rule_import",
+                {
+                    "result": {
+                        "job": {"revision": 3},
+                        "inspection": {"warnings": [], "page_revisions": [{}]},
+                        "review": {
+                            "review_method": "agent",
+                            "evidence": {"basis": "agent_context"},
+                        },
+                    }
+                },
+            ),
+        ]
+    )
+
+    result = asyncio.run(
+        driver._apply_transcription_reviews(
+            server,
+            campaign_id="campaign-1",
+            job_id="job-1",
+            initial_revision=2,
+            review_spec={
+                "text_reviews": [
+                    {
+                        "page_number": 7,
+                        "base_text_sha256": base_hash,
+                        "replacements": [{"old": "F i reball", "new": "Fireball"}],
+                        "rationale": "Agent restores a split heading without changing numbers.",
+                        "evidence_basis": "agent_context",
+                    }
+                ]
+            },
+            id_key="book",
+        )
+    )
+
+    assert result is not None
+    assert result["count"] == 1
+    assert result["job_revision"] == 3
+    render_call, review_call = server.calls
+    assert render_call[1]["action"] == "render_page"
+    assert render_call[1]["payload"]["include_ocr_text"] is False
+    assert review_call[1]["action"] == "review_text"
+    assert review_call[1]["expected_revision"] == 2
+    assert review_call[1]["payload"]["review_method"] == "agent"
+    assert review_call[1]["payload"]["base_text_sha256"] == base_hash
+
+
+def test_transcription_review_manifest_rejects_unbound_or_unsafe_entries() -> None:
+    with pytest.raises(ValueError, match="base_text_sha256"):
+        driver._transcription_review_specs(
+            {
+                "text_reviews": [
+                    {
+                        "page_number": 1,
+                        "base_text_sha256": "not-a-hash",
+                        "replacements": [{"old": "F ire", "new": "Fire"}],
+                        "rationale": "Agent repairs a split word.",
+                        "evidence_basis": "agent_context",
+                    }
+                ]
+            }
+        )
+    with pytest.raises(ValueError, match="rendered_image_checksum requires"):
+        driver._transcription_review_specs(
+            {
+                "text_reviews": [
+                    {
+                        "page_number": 1,
+                        "base_text_sha256": "a" * 64,
+                        "replacements": [{"old": "F ire", "new": "Fire"}],
+                        "rationale": "Agent repairs a split word.",
+                        "evidence_basis": "agent_context",
+                        "rendered_image_checksum": "b" * 64,
+                    }
+                ]
+            }
+        )
+
+
 def test_portable_pack_id_is_stable_across_regression_runs() -> None:
     first = driver._portable_pack_id("book.pdf", run_id="one")
     assert first == driver._portable_pack_id("book.pdf", run_id="one")
@@ -146,6 +240,32 @@ def test_include_globs_are_case_insensitive_and_optional() -> None:
     assert driver._matches_includes(path, ["Player*.pdf", "*guide.PDF"]) is True
     assert driver._matches_includes(path, ["Monster*.pdf"]) is False
     assert driver._matches_includes(path, [], empty=False) is False
+
+
+def test_runtime_probe_hp_uses_legal_fixed_average_progression() -> None:
+    sheet = driver.default_character_sheet()
+    sheet["progression"]["level"] = 10
+    sheet["progression"]["classes"] = [
+        {"name": "Wizard", "level": 10, "subclass": "", "hit_die": 8}
+    ]
+    sheet["abilities"]["constitution"]["score"] = 18
+
+    driver._complete_probe_hit_points(sheet, source="runtime probe")
+
+    assert sheet["combat"]["hp"] == {"value": 93, "max": 93, "temp": 0}
+    assert sheet["combat"]["hit_dice"]["d8"]["max"] == 10
+    assert [entry["value"] for entry in sheet["combat"]["hp_progression"]] == [
+        12,
+        9,
+        9,
+        9,
+        9,
+        9,
+        9,
+        9,
+        9,
+        9,
+    ]
 
 
 def test_large_catalog_augmentation_uses_revisioned_public_batches() -> None:

@@ -173,6 +173,199 @@ async def _call(server: Any, name: str, arguments: dict[str, Any]) -> Any:
     return result
 
 
+def _rendered_page_metadata(response: Any) -> dict[str, Any]:
+    """Read structured page evidence without discarding native image content."""
+
+    structured = getattr(response, "structuredContent", None)
+    if isinstance(structured, dict):
+        return dict(structured)
+    if isinstance(response, tuple) and len(response) == 2:
+        response = response[1]
+    if isinstance(response, dict) and "transcription" in response:
+        return dict(response)
+    content = getattr(response, "content", None)
+    if isinstance(content, list) and content:
+        text = getattr(content[0], "text", None)
+        if isinstance(text, str):
+            metadata = json.loads(text)
+            if isinstance(metadata, dict):
+                return metadata
+    raise RuntimeError("rule_import(render_page) returned no structured page metadata")
+
+
+def _transcription_review_specs(review_spec: dict[str, Any]) -> list[dict[str, Any]]:
+    """Validate source-bound Agent/human OCR corrections stored in a manifest."""
+
+    raw_reviews = review_spec.get("text_reviews") or []
+    if not isinstance(raw_reviews, list):
+        raise ValueError("catalog manifest text_reviews must be a list")
+    reviews: list[dict[str, Any]] = []
+    for index, raw_review in enumerate(raw_reviews):
+        if not isinstance(raw_review, dict):
+            raise ValueError(f"text review {index} must be an object")
+        unknown = set(raw_review) - {
+            "page_number",
+            "base_text_sha256",
+            "replacements",
+            "rationale",
+            "evidence_basis",
+            "rendered_image_checksum",
+            "review_method",
+        }
+        if unknown:
+            raise ValueError(
+                f"text review {index} has unsupported fields: {sorted(unknown)}"
+            )
+        page_number = raw_review.get("page_number")
+        if (
+            isinstance(page_number, bool)
+            or not isinstance(page_number, int)
+            or page_number < 1
+        ):
+            raise ValueError(f"text review {index} page_number must be positive")
+        base_text_sha256 = str(raw_review.get("base_text_sha256") or "")
+        if (
+            len(base_text_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in base_text_sha256)
+        ):
+            raise ValueError(
+                f"text review {index} base_text_sha256 must be lowercase SHA-256"
+            )
+        replacements = raw_review.get("replacements")
+        if not isinstance(replacements, list) or not replacements:
+            raise ValueError(f"text review {index} replacements must be nonempty")
+        for replacement_index, replacement in enumerate(replacements):
+            if not isinstance(replacement, dict) or set(replacement) != {"old", "new"}:
+                raise ValueError(
+                    f"text review {index} replacement {replacement_index} "
+                    "must contain only old and new"
+                )
+            if (
+                not isinstance(replacement["old"], str)
+                or not replacement["old"]
+                or not isinstance(replacement["new"], str)
+                or replacement["old"] == replacement["new"]
+            ):
+                raise ValueError(
+                    f"text review {index} replacement {replacement_index} is invalid"
+                )
+        rationale = str(raw_review.get("rationale") or "").strip()
+        if len(rationale) < 8:
+            raise ValueError(f"text review {index} rationale is too short")
+        evidence_basis = str(raw_review.get("evidence_basis") or "")
+        if evidence_basis not in {"cross_text", "agent_context", "rendered_page"}:
+            raise ValueError(f"text review {index} evidence_basis is invalid")
+        review_method = str(raw_review.get("review_method") or "agent")
+        if review_method not in {"agent", "human"}:
+            raise ValueError(f"text review {index} review_method is invalid")
+        rendered_image_checksum = raw_review.get("rendered_image_checksum")
+        if evidence_basis == "rendered_page":
+            rendered_image_checksum = str(rendered_image_checksum or "")
+            if (
+                len(rendered_image_checksum) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in rendered_image_checksum
+                )
+            ):
+                raise ValueError(
+                    f"text review {index} rendered_image_checksum must be lowercase SHA-256"
+                )
+        elif rendered_image_checksum is not None:
+            raise ValueError(
+                f"text review {index} rendered_image_checksum requires rendered_page evidence"
+            )
+        reviews.append(
+            {
+                "page_number": page_number,
+                "base_text_sha256": base_text_sha256,
+                "replacements": json.loads(json.dumps(replacements)),
+                "rationale": rationale,
+                "evidence_basis": evidence_basis,
+                "review_method": review_method,
+                **(
+                    {"rendered_image_checksum": rendered_image_checksum}
+                    if evidence_basis == "rendered_page"
+                    else {}
+                ),
+            }
+        )
+    return reviews
+
+
+async def _apply_transcription_reviews(
+    server: Any,
+    *,
+    campaign_id: str,
+    job_id: str,
+    initial_revision: int,
+    review_spec: dict[str, Any],
+    id_key: str,
+) -> dict[str, Any] | None:
+    """Replay reviewed OCR repairs through the public, revisioned MCP facade."""
+
+    reviews = _transcription_review_specs(review_spec)
+    if not reviews:
+        return None
+    revision = initial_revision
+    applied: list[dict[str, Any]] = []
+    inspection: dict[str, Any] | None = None
+    for index, review in enumerate(reviews, start=1):
+        rendered = await server.call_tool(
+            "rule_import",
+            {
+                "campaign_id": campaign_id,
+                "action": "render_page",
+                "payload": {
+                    "job_id": job_id,
+                    "page_number": review["page_number"],
+                    "scale": 1.5,
+                    "include_ocr_text": False,
+                },
+            },
+        )
+        metadata = _rendered_page_metadata(rendered)
+        actual_base = str(
+            dict(dict(metadata.get("transcription") or {}).get("normalized") or {}).get(
+                "text_sha256"
+            )
+            or ""
+        )
+        if actual_base != review["base_text_sha256"]:
+            raise RuntimeError(
+                f"text review {index} base hash drifted on page {review['page_number']}: "
+                f"expected {review['base_text_sha256']}, found {actual_base}"
+            )
+        if review["evidence_basis"] == "rendered_page" and str(
+            metadata.get("image_checksum") or ""
+        ) != review["rendered_image_checksum"]:
+            raise RuntimeError(
+                f"text review {index} image checksum drifted on page "
+                f"{review['page_number']}"
+            )
+        response = await _call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign_id,
+                "action": "review_text",
+                "payload": {"job_id": job_id, **review},
+                "expected_revision": revision,
+                "idempotency_key": f"regression-text-review-{id_key}-{index}",
+            },
+        )
+        result = dict(response["result"])
+        revision = int(result["job"]["revision"])
+        inspection = dict(result["inspection"])
+        applied.append(dict(result["review"]))
+    return {
+        "count": len(applied),
+        "reviews": applied,
+        "inspection": inspection,
+        "job_revision": revision,
+    }
+
+
 async def _augment_catalog_batches(
     server: Any,
     *,
@@ -391,6 +584,20 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 },
             )
             inspection = inspected["result"]["inspection"]
+            document_review = _catalog_document_review(
+                catalog_manifest,
+                relative_path,
+            )
+            transcription_review = await _apply_transcription_reviews(
+                server,
+                campaign_id=str(campaign["id"]),
+                job_id=job_id,
+                initial_revision=int(inspected["result"]["job"]["revision"]),
+                review_spec=document_review,
+                id_key=id_key,
+            )
+            if transcription_review is not None:
+                inspection = dict(transcription_review["inspection"])
             warnings = list(inspection.get("warnings") or [])
             if warnings and args.fail_on_warning:
                 raise RuntimeError("; ".join(warnings))
@@ -466,10 +673,6 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                             "source-proven dependent actor templates"
                         ),
                     }
-            document_review = _catalog_document_review(
-                catalog_manifest,
-                relative_path,
-            )
             catalog_augmentation: dict[str, Any] | None = None
             if document_review.get("additions"):
                 if source_chunks is None:
@@ -567,6 +770,15 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     "content_inventory": {
                         key: value for key, value in inventory.items() if key != "ledger"
                     },
+                    "transcription_review": (
+                        {
+                            key: value
+                            for key, value in transcription_review.items()
+                            if key != "inspection"
+                        }
+                        if transcription_review is not None
+                        else None
+                    ),
                     "statblock_recovery": statblock_recovery,
                     "catalog_augmentation": catalog_augmentation,
                     "source_scoped_search_hit": bool(hits),
@@ -697,6 +909,49 @@ def _unwrapped_tool_result(value: Any) -> Any:
     return value
 
 
+def _complete_probe_hit_points(sheet: dict[str, Any], *, source: str) -> None:
+    """Give a synthetic runtime probe a legal fixed-average HP progression."""
+
+    classes = list(dict(sheet.get("progression") or {}).get("classes") or [])
+    if len(classes) != 1:
+        raise ValueError("runtime probes require exactly one class for HP generation")
+    class_entry = dict(classes[0])
+    level = int(dict(sheet["progression"]).get("level", 0) or 0)
+    hit_die = int(class_entry.get("hit_die", 0) or 0)
+    constitution = int(dict(sheet["abilities"]["constitution"]).get("score", 0) or 0)
+    if not 1 <= level <= 20 or hit_die not in {6, 8, 10, 12}:
+        raise ValueError("runtime probe needs a legal level and class hit die")
+    constitution_modifier = (constitution - 10) // 2
+    gains = [
+        max(
+            1,
+            (hit_die if current_level == 1 else hit_die // 2 + 1)
+            + constitution_modifier,
+        )
+        for current_level in range(1, level + 1)
+    ]
+    maximum = sum(gains)
+    sheet["combat"]["hp"] = {"value": maximum, "max": maximum, "temp": 0}
+    sheet["combat"]["hit_dice"] = {
+        f"d{hit_die}": {
+            "label": f"d{hit_die}",
+            "value": level,
+            "max": level,
+            "recovers_on": "long_rest",
+            "source_key": str(class_entry.get("name") or source),
+        }
+    }
+    sheet["combat"]["hp_progression"] = [
+        {
+            "level": current_level,
+            "method": "fixed",
+            "value": gain,
+            "source": source,
+        }
+        for current_level, gain in enumerate(gains, 1)
+    ]
+
+
 async def _run_content_runtime_probes(
     *,
     server: Any,
@@ -751,6 +1006,7 @@ async def _run_content_runtime_probes(
             if not 1 <= score <= 30:
                 raise ValueError("runtime probe ability scores must be 1..30")
             sheet["abilities"][normalized_ability]["score"] = score
+        _complete_probe_hit_points(sheet, source=f"addon runtime probe {probe_name}")
         probe_key = f"{id_key}-content-{probe_index}"
         created_response = await _call(
             server,
@@ -1078,6 +1334,7 @@ def _catalog_document_review(
         "expected_actor_names",
         "runtime_probes",
         "dependency_addons",
+        "text_reviews",
     }
     if unknown:
         raise ValueError(
@@ -2213,6 +2470,10 @@ async def _portable_roundtrip(
         for ability in owner_sheet["abilities"].values():
             ability["score"] = 18
         owner_sheet["spellcasting"]["ability"] = "intelligence"
+        _complete_probe_hit_points(
+            owner_sheet,
+            source=f"addon dependent actor owner {artifact_id}",
+        )
         probe_key = f"{id_key}-{template_index}"
         owner_response = await _call(
             target_server,
