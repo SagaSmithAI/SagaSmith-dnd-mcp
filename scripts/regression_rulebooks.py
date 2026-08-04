@@ -502,6 +502,12 @@ async def _apply_statblock_slot_reviews(
     revision = 0
     for index, spec in enumerate(reviews, start=1):
         correction_token = _statblock_slot_review_token(spec)
+        print(
+            "  [Agent OCR "
+            f"{index}/{len(reviews)}] page {spec['page_number']} "
+            f"slot {spec['statblock_slot']}: {spec['name']}",
+            flush=True,
+        )
         try:
             response = await _call(
                 server,
