@@ -910,6 +910,82 @@ SUPPORTED_FEATURE_MECHANICAL_GRANTS = frozenset(
 )
 
 
+def _feature_requirements_with_active_extensions(
+    requirements: dict[str, Any],
+    *,
+    selector_card: dict[str, Any],
+    candidates: list[tuple[str, str, dict[str, Any]]],
+) -> dict[str, Any]:
+    """Merge active addon options into a selector without changing its count."""
+
+    result = deepcopy(requirements)
+    selector_name = str(selector_card.get("name") or "").strip().casefold()
+    selector_class = str(selector_card.get("class_name") or "").strip().casefold()
+    selector_subclass = str(selector_card.get("subclass_name") or "").strip().casefold()
+    options = [str(item) for item in result.get("options", [])]
+    option_ids = {
+        str(key): str(value)
+        for key, value in dict(result.get("option_artifact_ids") or {}).items()
+    }
+    prerequisites = deepcopy(dict(result.get("option_prerequisites") or {}))
+    at_will_spells = {
+        str(key): str(value)
+        for key, value in dict(result.get("at_will_spells") or {}).items()
+    }
+    changed = False
+    for _pack_id, _version, artifact in candidates:
+        if artifact.get("kind") != "feature":
+            continue
+        option_card = dict(artifact.get("card") or {})
+        if str(option_card.get("feature_subtype") or "") != "selectable_option":
+            continue
+        extension = dict(option_card.get("extends_feature") or {})
+        if not extension:
+            continue
+        if str(extension.get("name") or "").strip().casefold() != selector_name:
+            continue
+        extension_class = str(extension.get("class_name") or "").strip().casefold()
+        extension_subclass = str(extension.get("subclass_name") or "").strip().casefold()
+        if extension_class and extension_class != selector_class:
+            continue
+        if extension_subclass and extension_subclass != selector_subclass:
+            continue
+        option_name = str(option_card.get("name") or "").strip()
+        option_id = str(artifact.get("id") or "").strip()
+        if not option_name or not option_id:
+            raise RulesetUnavailableError("feature option extension is missing identity")
+        existing = next(
+            (item for item in options if item.casefold() == option_name.casefold()),
+            None,
+        )
+        if existing is not None:
+            if option_ids.get(existing, option_id) != option_id:
+                raise RulesetUnavailableError(
+                    f"feature option extension conflicts with {option_name}"
+                )
+            continue
+        options.append(option_name)
+        option_ids[option_name] = option_id
+        prerequisite = {
+            field: deepcopy(option_card[field])
+            for field in SUPPORTED_FEATURE_OPTION_PREREQUISITE_FIELDS
+            if option_card.get(field) not in (None, "", [])
+        }
+        if prerequisite:
+            prerequisites[option_name] = prerequisite
+        at_will_spell = str(option_card.get("at_will_spell") or "").strip()
+        if at_will_spell:
+            at_will_spells[option_name] = at_will_spell
+        changed = True
+    if not changed:
+        return result
+    result["options"] = options
+    result["option_artifact_ids"] = option_ids
+    result["option_prerequisites"] = prerequisites
+    result["at_will_spells"] = at_will_spells
+    return result
+
+
 def _compact_agent_evidence(value: Any) -> str:
     return compact_ascii_key(value)
 
@@ -43412,6 +43488,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ):
                     raise ValueError("feature subclass is not selected on this actor card")
                 requirements = initial_requirements
+                requirements = _feature_requirements_with_active_extensions(
+                    requirements,
+                    selector_card=card,
+                    candidates=candidates,
+                )
                 selection_kind = str(requirements.get("kind") or "")
                 unsupported_requirement_fields = (
                     set(requirements) - SUPPORTED_FEATURE_SELECTION_REQUIREMENT_FIELDS
@@ -44548,6 +44629,77 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                                     at_will=True,
                                     allow_existing=True,
                                 )
+                            option_name = next(
+                                (
+                                    item
+                                    for item in requirements.get("options", [])
+                                    if str(item).casefold() == selected_value.casefold()
+                                ),
+                                selected_value,
+                            )
+                            option_artifact_id = str(
+                                dict(requirements.get("option_artifact_ids") or {}).get(
+                                    str(option_name)
+                                )
+                                or ""
+                            )
+                            if option_artifact_id and not any(
+                                str(item.get("id") or "") == option_artifact_id
+                                for item in sheet["content"]["features"]
+                            ):
+                                option_match = next(
+                                    (
+                                        item
+                                        for item in candidates
+                                        if str(item[2].get("id") or "")
+                                        == option_artifact_id
+                                        and item[2].get("kind") == "feature"
+                                    ),
+                                    None,
+                                )
+                                if option_match is None:
+                                    raise RulesetUnavailableError(
+                                        "feature option extension artifact is unavailable"
+                                    )
+                                option_card = deepcopy(
+                                    dict(option_match[2].get("card") or {})
+                                )
+                                if str(option_card.get("feature_subtype") or "") != (
+                                    "selectable_option"
+                                ):
+                                    raise RulesetUnavailableError(
+                                        "feature option extension has the wrong subtype"
+                                    )
+                                for metadata_key in (
+                                    "at_will_spell",
+                                    "class_name",
+                                    "extends_feature",
+                                    "feature_subtype",
+                                    "mechanical_grants",
+                                    "minimum_level",
+                                    "required_cantrip",
+                                    "required_invocation",
+                                    "required_pact_boon",
+                                    "selection_requirements",
+                                    "selection_requirements_by_level",
+                                    "subclass_name",
+                                ):
+                                    option_card.pop(metadata_key, None)
+                                option_card["source_key"] = str(
+                                    card.get("name") or artifact_id
+                                )
+                                option_card.update(
+                                    id=option_artifact_id,
+                                    pack_id=option_match[0],
+                                    pack_version=option_match[1],
+                                    rule_refs=list(
+                                        option_match[2].get("rule_refs") or []
+                                    ),
+                                    mechanic_refs=list(
+                                        option_match[2].get("mechanic_refs") or []
+                                    ),
+                                )
+                                sheet["content"]["features"].append(option_card)
                         if requirements.get("requires_existing_proficiency"):
                             for item in selected_values:
                                 skill = sheet["skills"].get(item.casefold())

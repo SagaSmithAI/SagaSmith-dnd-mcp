@@ -14,6 +14,7 @@ from sagasmith_dnd_mcp.server import (
     _append_selected_proficiencies,
     _apply_skill_proficiency_or_expertise,
     _character_spell_card,
+    _feature_requirements_with_active_extensions,
     _materialize_feature_proficiency_groups,
     _reviewed_statblock_variants,
     _validate_group_limited_choices,
@@ -23,6 +24,81 @@ from sagasmith_dnd_mcp.server import (
     _validated_species_proficiency_choices,
     create_server,
 )
+
+
+def test_active_addon_options_extend_selector_without_granting_extra_choices() -> None:
+    requirements = {
+        "field": "options",
+        "count": 1,
+        "options": ["Armor of Shadows"],
+        "option_prerequisites": {},
+    }
+    option = {
+        "id": "dnd5e.addon.xanathar.feature.shroud-of-shadow",
+        "kind": "feature",
+        "card": {
+            "name": "Shroud of Shadow",
+            "class_name": "Warlock",
+            "minimum_level": 15,
+            "feature_subtype": "selectable_option",
+            "extends_feature": {
+                "name": "Eldritch Invocations",
+                "class_name": "Warlock",
+            },
+            "at_will_spell": "Invisibility",
+        },
+    }
+
+    extended = _feature_requirements_with_active_extensions(
+        requirements,
+        selector_card={"name": "Eldritch Invocations", "class_name": "Warlock"},
+        candidates=[("dnd5e.addon.xanathar", "1.0.0", option)],
+    )
+
+    assert extended["count"] == 1
+    assert extended["options"] == ["Armor of Shadows", "Shroud of Shadow"]
+    assert extended["option_artifact_ids"] == {
+        "Shroud of Shadow": option["id"]
+    }
+    assert extended["option_prerequisites"] == {
+        "Shroud of Shadow": {"minimum_level": 15}
+    }
+    assert extended["at_will_spells"] == {
+        "Shroud of Shadow": "Invisibility"
+    }
+
+
+def test_active_addon_option_rejects_conflicting_selector_identity() -> None:
+    option = {
+        "id": "dnd5e.addon.conflict.feature.armor-of-shadows",
+        "kind": "feature",
+        "card": {
+            "name": "Armor of Shadows",
+            "class_name": "Warlock",
+            "feature_subtype": "selectable_option",
+            "extends_feature": {
+                "name": "Eldritch Invocations",
+                "class_name": "Warlock",
+            },
+        },
+    }
+
+    with pytest.raises(RulesetUnavailableError, match="conflicts"):
+        _feature_requirements_with_active_extensions(
+            {
+                "field": "options",
+                "count": 1,
+                "options": ["Armor of Shadows"],
+                "option_artifact_ids": {
+                    "Armor of Shadows": "dnd5e.srd2014.feature.armor-of-shadows"
+                },
+            },
+            selector_card={
+                "name": "Eldritch Invocations",
+                "class_name": "Warlock",
+            },
+            candidates=[("dnd5e.addon.conflict", "1.0.0", option)],
+        )
 
 
 def test_reviewed_statblock_variants_require_full_distinct_matching_cards() -> None:
