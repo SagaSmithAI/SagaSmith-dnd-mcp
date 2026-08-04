@@ -15,7 +15,7 @@ from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import asdict, replace
 from datetime import datetime
-from functools import wraps
+from functools import lru_cache, wraps
 from pathlib import Path
 from typing import Annotated, Any, Callable, Literal, TypeVar
 from uuid import uuid4
@@ -528,6 +528,43 @@ from sagasmith_dnd_mcp.tool_profiles import (
     profiles_for_tool,
     validate_profile_coverage,
 )
+
+
+@lru_cache(maxsize=8)
+def _render_immutable_pdf_page_cached(
+    source_path: str,
+    page_number: int,
+    scale: float,
+    source_checksum: str,
+    modified_ns: int,
+    size: int,
+) -> Any:
+    """Render one immutable evidence page once for adjacent card reviews."""
+
+    del modified_ns, size
+    rendered = render_pdf_page(Path(source_path), page_number, scale=scale)
+    if rendered.source_checksum != source_checksum:
+        raise RuntimeError("rulebook PDF no longer matches its staged checksum")
+    return rendered
+
+
+def _render_immutable_pdf_page(
+    source_path: Path,
+    page_number: int,
+    *,
+    scale: float,
+    source_checksum: str,
+) -> Any:
+    stat = source_path.stat()
+    return _render_immutable_pdf_page_cached(
+        str(source_path.resolve()),
+        page_number,
+        scale,
+        source_checksum,
+        stat.st_mtime_ns,
+        stat.st_size,
+    )
+
 
 CORE_GRAPPLE_ESCAPE_CHECKS = frozenset({"athletics", "acrobatics"})
 
@@ -2462,6 +2499,19 @@ def audit_dnd_addon_resolution_components(
                         ),
                     }
                 )
+    # Addon envelopes canonicalize their embedded components by kind, id, and
+    # version.  The semantic audit is persisted before that transport step and
+    # recomputed after it, so its evidence lists must not depend on the caller's
+    # component order.  Otherwise a multi-pack addon can be complete yet fail
+    # closed on import solely because the envelope sorted its components.
+    rule_reports.sort(key=lambda item: (str(item["id"]), str(item["version"])))
+    unresolved.sort(
+        key=lambda item: (
+            str(item.get("component_id") or ""),
+            str(item.get("artifact_id") or ""),
+            str(item.get("reason") or ""),
+        )
+    )
     return {
         "schema_version": 1,
         "complete": not unresolved,
@@ -2864,6 +2914,15 @@ def audit_dnd_addon_readiness_components(
                     else ""
                 )
                 contract_errors = selection_contract_errors(artifact)
+                declared_blockers = (
+                    [
+                        str(item).strip()
+                        for item in dict(contract).get("blockers") or []
+                        if str(item).strip()
+                    ]
+                    if isinstance(contract, dict)
+                    else []
+                )
                 if contract_status == "not_applicable" and not contract_errors:
                     selection_not_applicable += 1
                 else:
@@ -2875,7 +2934,11 @@ def audit_dnd_addon_readiness_components(
                             _addon_readiness_blocker(
                                 component_id,
                                 artifact_id,
-                                "; ".join(contract_errors)
+                                "; ".join(
+                                    dict.fromkeys(
+                                        [*contract_errors, *declared_blockers]
+                                    )
+                                )
                                 or "selection contract is blocked",
                             )
                         )
@@ -39170,9 +39233,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         source_path = storage.artifact_rulebook_path(job.artifact)
         if source_path.suffix.casefold() != ".pdf":
             raise ValueError("rule statblock review requires a staged PDF")
-        rendered = render_pdf_page(source_path, page_number, scale=1.5)
-        if rendered.source_checksum != job.artifact_checksum:
-            raise RuntimeError("rulebook PDF no longer matches its staged checksum")
+        rendered = _render_immutable_pdf_page(
+            source_path,
+            page_number,
+            scale=1.5,
+            source_checksum=job.artifact_checksum,
+        )
         review_identity = (
             f"{job.id}:{page_number}:{hashlib.sha256(content.encode('utf-8')).hexdigest()}"
         )
@@ -41705,7 +41771,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             == "catalog_only"
                         ),
                         "normalization_authority": "engine",
-                        "dependent_actor_template": {},
                     }
             entry = {
                 "id": artifact["id"],

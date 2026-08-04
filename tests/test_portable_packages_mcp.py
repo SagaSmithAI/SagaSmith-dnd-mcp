@@ -17,6 +17,7 @@ from sagasmith_dnd.resolution_plan import (
     resolution_plan_template,
 )
 
+import sagasmith_dnd_mcp.server as server_module
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import (
     audit_dnd_addon_readiness_components,
@@ -24,6 +25,49 @@ from sagasmith_dnd_mcp.server import (
     create_server,
     finalize_dnd_addon_resolution_components,
 )
+
+
+def test_immutable_review_page_render_is_reused_until_the_file_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "book.pdf"
+    path.write_bytes(b"first")
+    calls: list[tuple[Path, int, float]] = []
+
+    class Rendered:
+        source_checksum = "checksum"
+
+    def fake_render(source: Path, page_number: int, *, scale: float) -> Rendered:
+        calls.append((source, page_number, scale))
+        return Rendered()
+
+    monkeypatch.setattr(server_module, "render_pdf_page", fake_render)
+    server_module._render_immutable_pdf_page_cached.cache_clear()
+
+    first = server_module._render_immutable_pdf_page(
+        path,
+        3,
+        scale=1.5,
+        source_checksum="checksum",
+    )
+    replay = server_module._render_immutable_pdf_page(
+        path,
+        3,
+        scale=1.5,
+        source_checksum="checksum",
+    )
+    path.write_bytes(b"second version")
+    changed = server_module._render_immutable_pdf_page(
+        path,
+        3,
+        scale=1.5,
+        source_checksum="checksum",
+    )
+
+    assert first is replay
+    assert changed is not first
+    assert len(calls) == 2
 
 
 def _passing_catalog_decisions() -> list[dict]:
@@ -173,6 +217,19 @@ def test_addon_readiness_recomputes_all_four_dimensions_from_content() -> None:
     }
     assert report["runtime"]["modes"] == {"descriptive": 1}
 
+    blocked = copy.deepcopy(component)
+    blocked_artifact = blocked["payload"]["artifacts"][0]
+    blocked_artifact["selection_contract"] = build_selection_contract(
+        blocked_artifact,
+        status="blocked",
+        blockers=["reviewed card is not selection-ready"],
+    )
+    blocked_report = audit_dnd_addon_readiness_components([blocked])
+    assert blocked_report["selection"]["complete"] is False
+    assert blocked_report["selection"]["blockers"][0]["reason"] == (
+        "reviewed card is not selection-ready"
+    )
+
     stale = copy.deepcopy(component)
     stale["payload"]["artifacts"][0]["card"]["name"] = "Changed"
     stale_report = audit_dnd_addon_readiness_components([stale])
@@ -218,6 +275,45 @@ def test_addon_resolution_audit_ignores_items_without_semantic_effects() -> None
     assert report["complete"] is True
     assert report["actor_entry_count"] == 0
     assert report["unresolved"] == []
+
+
+def test_addon_resolution_audit_is_independent_of_component_order() -> None:
+    empty_rule_readiness = {
+        "schema_version": 1,
+        "complete": True,
+        "artifact_count": 0,
+        "resolved_count": 0,
+        "modes": {},
+        "unresolved": [],
+        "first_use_compilation_required": False,
+    }
+
+    def component(component_id: str) -> dict:
+        return {
+            "kind": "rule_pack",
+            "id": component_id,
+            "version": "1.0.0",
+            "payload": {
+                "manifest": {
+                    "resolution_policy": "build_time_complete",
+                    "resolution_readiness": copy.deepcopy(empty_rule_readiness),
+                },
+                "artifacts": [],
+                "mechanics": [],
+            },
+        }
+
+    first = component("dnd5e.example.first")
+    second = component("dnd5e.example.second")
+
+    forward = audit_dnd_addon_resolution_components([first, second])
+    reverse = audit_dnd_addon_resolution_components([second, first])
+
+    assert reverse == forward
+    assert [item["id"] for item in reverse["rule_packs"]] == [
+        "dnd5e.example.first",
+        "dnd5e.example.second",
+    ]
 
 
 def test_addon_resolution_audit_rejects_partial_mechanic_refs_without_ruling() -> None:
