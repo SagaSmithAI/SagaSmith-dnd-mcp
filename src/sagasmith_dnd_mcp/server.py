@@ -1432,6 +1432,21 @@ def _canonical_statblock_artifact_for_mechanics(
     return matches[0] if len(matches) == 1 else None
 
 
+def _claim_catalog_artifact_for_source_review(
+    canonical_artifact: tuple[str, str] | None,
+    claimed_artifact_ids: set[str],
+) -> str:
+    """Return the audit disposition for one review-to-catalog projection."""
+
+    if canonical_artifact is None:
+        return "not_in_accepted_catalog"
+    artifact_id = canonical_artifact[1]
+    if artifact_id in claimed_artifact_ids:
+        return "duplicate_review_for_catalog_artifact"
+    claimed_artifact_ids.add(artifact_id)
+    return "accepted"
+
+
 def _reviewed_statblock_variants(card: dict[str, Any]) -> list[dict[str, str]]:
     """Validate full source-reviewed actor variants carried by one statblock card."""
 
@@ -1627,26 +1642,97 @@ def _statblock_ocr_discovery_needed(
 def _project_recovered_statblock_candidates(
     candidates: list[dict[str, Any]],
     recovered_candidates: list[dict[str, Any]],
+    *,
+    complete_pages: set[int] | None = None,
 ) -> list[dict[str, Any]]:
-    """Replace only pages that produced reviews, preserving other usable cards."""
+    """Project reviewed cards without discarding unrelated cards on partial pages.
 
-    recovered_pages = {
-        int(candidate.get("page_start") or 0) for candidate in recovered_candidates
-    }
-    retained = [
-        candidate
-        for candidate in candidates
-        if not (
-            candidate.get("kind") == "statblock"
-            and any(
-                page in recovered_pages
-                for page in range(
-                    int(candidate.get("page_start") or 0),
-                    int(candidate.get("page_end") or 0) + 1,
-                )
+    A catalog recovery can prove every structural slot on a page, in which case
+    its reviewed cards replace every extracted statblock on that page.  A later
+    Agent-named slot review is narrower: the rest of that page may still contain
+    usable cards.  On those partial pages replace only one same-name or
+    mechanically identical extracted card; otherwise append the reviewed card
+    and leave the ambiguous extraction for the explicit catalog review gate.
+    """
+
+    complete = set(complete_pages or ())
+    recovered_by_page: dict[int, list[dict[str, Any]]] = {}
+    recovered_identities: dict[str, str] = {}
+    for candidate in recovered_candidates:
+        page_number = int(candidate.get("page_start") or 0)
+        recovered_by_page.setdefault(page_number, []).append(candidate)
+        content = str(
+            dict(dict(candidate.get("artifact") or {}).get("card") or {}).get(
+                "normalized_content"
             )
+            or candidate.get("normalized_content")
+            or ""
+        ).strip()
+        try:
+            parsed = parse_2014_statblock_template_preview(
+                content,
+                source_key=str(candidate.get("id") or "recovered-statblock"),
+                rule_refs=[],
+            )
+        except (StatblockImportError, ValueError):
+            continue
+        recovered_identities[str(candidate.get("id") or "")] = (
+            _statblock_mechanical_identity(parsed)
         )
-    ]
+    fully_recovered_pages = complete.intersection(recovered_by_page)
+
+    retained: list[dict[str, Any]] = []
+    for candidate in candidates:
+        if candidate.get("kind") != "statblock":
+            retained.append(candidate)
+            continue
+        start = int(candidate.get("page_start") or 0)
+        end = int(candidate.get("page_end") or 0)
+        candidate_pages = set(range(start, end + 1))
+        if candidate_pages.intersection(fully_recovered_pages):
+            continue
+        page_reviews = [
+            review
+            for page_number in candidate_pages
+            for review in recovered_by_page.get(page_number, [])
+        ]
+        if not page_reviews:
+            retained.append(candidate)
+            continue
+        name_matches = [
+            review
+            for review in page_reviews
+            if _bounded_ocr_heading_equivalent(
+                str(candidate.get("name") or ""),
+                str(review.get("name") or ""),
+            )
+        ]
+        if len(name_matches) == 1:
+            continue
+        content = str(
+            dict(dict(candidate.get("artifact") or {}).get("card") or {}).get(
+                "normalized_content"
+            )
+            or candidate.get("normalized_content")
+            or ""
+        ).strip()
+        try:
+            parsed = parse_2014_statblock_template_preview(
+                content,
+                source_key=str(candidate.get("id") or "catalog-statblock"),
+                rule_refs=[],
+            )
+        except (StatblockImportError, ValueError):
+            retained.append(candidate)
+            continue
+        identity = _statblock_mechanical_identity(parsed)
+        identity_matches = [
+            review
+            for review in page_reviews
+            if recovered_identities.get(str(review.get("id") or "")) == identity
+        ]
+        if len(identity_matches) != 1:
+            retained.append(candidate)
     return [*retained, *recovered_candidates]
 
 
@@ -13270,8 +13356,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         for review in source_reviews:
             review = dict(review)
             page_number = int(review.get("page_number") or 0)
-            if page_number not in complete_pages:
-                continue
             content = str(review.get("normalized_content") or "").strip()
             checksum = hashlib.sha256(content.encode()).hexdigest()
             if not content or checksum != str(review.get("normalized_content_sha256") or ""):
@@ -13327,6 +13411,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             candidates = _project_recovered_statblock_candidates(
                 candidates,
                 recovered_candidates,
+                complete_pages=complete_pages,
             )
             inventory["candidate_count"] = len(candidates)
             counts: dict[str, int] = {}
@@ -48207,6 +48292,8 @@ Useful bounded guidance:
             dependent_templates: list[dict[str, Any]] = []
             bundled_core_reuses: list[dict[str, str]] = []
             reviewed_ocr_supersessions: list[dict[str, str]] = []
+            excluded_source_reviews: list[dict[str, str]] = []
+            claimed_review_artifact_ids: set[str] = set()
             bundled_core_card_ids: set[str] = set()
             seen_source_checksums: set[str] = set()
             reviewed_source_names: set[str] = set()
@@ -48444,22 +48531,43 @@ Useful bounded guidance:
                                     catalog_actor_mechanics_by_page.get(page_number, []),
                                 )
                             )
-                    if canonical_artifact is not None:
-                        canonical_name, canonical_artifact_id = canonical_artifact
-                        assert reviewed_heading is not None
-                        if canonical_name != reviewed_heading.group(1):
-                            source_text = (
-                                source_text[: reviewed_heading.start(1)]
-                                + canonical_name
-                                + source_text[reviewed_heading.end(1) :]
-                            )
-                            reviewed_ocr_supersessions.append(
-                                {
-                                    "artifact_id": canonical_artifact_id,
-                                    "reviewed_name": canonical_name,
-                                    "basis": "catalog_review_canonical_identity",
-                                }
-                            )
+                    claim_disposition = _claim_catalog_artifact_for_source_review(
+                        canonical_artifact,
+                        claimed_review_artifact_ids,
+                    )
+                    if claim_disposition != "accepted":
+                        excluded_source_reviews.append(
+                            {
+                                "review_id": str(review.get("id") or ""),
+                                "reviewed_name": (
+                                    canonical_artifact[0]
+                                    if canonical_artifact is not None
+                                    else (
+                                        reviewed_heading.group(1)
+                                        if reviewed_heading is not None
+                                        else ""
+                                    )
+                                ),
+                                "basis": claim_disposition,
+                            }
+                        )
+                        continue
+                    assert canonical_artifact is not None
+                    canonical_name, canonical_artifact_id = canonical_artifact
+                    assert reviewed_heading is not None
+                    if canonical_name != reviewed_heading.group(1):
+                        source_text = (
+                            source_text[: reviewed_heading.start(1)]
+                            + canonical_name
+                            + source_text[reviewed_heading.end(1) :]
+                        )
+                        reviewed_ocr_supersessions.append(
+                            {
+                                "artifact_id": canonical_artifact_id,
+                                "reviewed_name": canonical_name,
+                                "basis": "catalog_review_canonical_identity",
+                            }
+                        )
                     try:
                         reviewed_name = append_preset_card(
                             source_text=source_text,
@@ -48876,6 +48984,7 @@ Useful bounded guidance:
                     "license": "user-supplied",
                     "bundled_core_reuses": deepcopy(bundled_core_reuses),
                     "reviewed_ocr_supersessions": deepcopy(reviewed_ocr_supersessions),
+                    "excluded_source_reviews": deepcopy(excluded_source_reviews),
                     **requested_metadata,
                 },
                 dependencies=[
@@ -48897,6 +49006,7 @@ Useful bounded guidance:
                     "dependent_actor_templates": dependent_templates,
                     "bundled_core_reuses": bundled_core_reuses,
                     "reviewed_ocr_supersessions": reviewed_ocr_supersessions,
+                    "excluded_source_reviews": excluded_source_reviews,
                 },
                 **({"package": package} if data.get("include_package") is True else {}),
             }

@@ -27,6 +27,7 @@ from sagasmith_dnd_mcp.server import (
     _canonical_statblock_artifact_for_mechanics,
     _canonical_statblock_artifact_for_review,
     _catalog_identity_is_evidenced,
+    _claim_catalog_artifact_for_source_review,
     _compact_transcription_key,
     _matching_statblock_recovery_pair,
     _merge_statblock_discoveries,
@@ -376,12 +377,102 @@ def test_recovered_statblock_projection_preserves_unreviewed_usable_pages() -> N
                 "page_end": 307,
             }
         ],
+        complete_pages={307},
     )
 
     assert [item["id"] for item in projected] == [
         "steel-defender",
         "other-feature",
         "reviewed-kalaraq",
+    ]
+
+
+def test_source_reviews_claim_only_one_accepted_catalog_artifact() -> None:
+    claimed: set[str] = set()
+
+    assert (
+        _claim_catalog_artifact_for_source_review(("Fomorian", "artifact:fomorian"), claimed)
+        == "accepted"
+    )
+    assert (
+        _claim_catalog_artifact_for_source_review(("Fomorian", "artifact:fomorian"), claimed)
+        == "duplicate_review_for_catalog_artifact"
+    )
+    assert (
+        _claim_catalog_artifact_for_source_review(None, claimed)
+        == "not_in_accepted_catalog"
+    )
+
+
+def test_partial_page_statblock_projection_replaces_only_an_exact_review_match() -> None:
+    commoner = """# Commoner
+
+*Medium humanoid, any alignment*
+
+**Armor Class** 10
+**Hit Points** 4 (1d8)
+**Speed** 30 ft.
+
+| STR | DEX | CON | INT | WIS | CHA |
+|:---:|:---:|:---:|:---:|:---:|:---:|
+| 10 (+0) | 10 (+0) | 10 (+0) | 10 (+0) | 10 (+0) | 10 (+0) |
+
+**Senses** passive Perception 10
+**Languages** Common
+**Challenge** 0 (10 XP)
+
+###### Actions
+
+***Club***. *Melee Weapon Attack:* +2 to hit, reach 5 ft., one target.
+*Hit:* 2 (1d4) bludgeoning damage.
+"""
+    guard = commoner.replace("# Commoner", "# Guard").replace(
+        "**Armor Class** 10", "**Armor Class** 16"
+    )
+    projected = _project_recovered_statblock_candidates(
+        [
+            {
+                "id": "noisy-commoner",
+                "kind": "statblock",
+                "name": "C0MMONER",
+                "page_start": 1,
+                "page_end": 1,
+                "artifact": {"card": {"normalized_content": commoner}},
+            },
+            {
+                "id": "guard",
+                "kind": "statblock",
+                "name": "Guard",
+                "page_start": 1,
+                "page_end": 1,
+                "artifact": {"card": {"normalized_content": guard}},
+            },
+            {
+                "id": "ambiguous-noise",
+                "kind": "statblock",
+                "name": "ACTIONS",
+                "page_start": 1,
+                "page_end": 1,
+                "artifact": {"card": {"normalized_content": ""}},
+            },
+        ],
+        [
+            {
+                "id": "reviewed-commoner",
+                "kind": "statblock",
+                "name": "Reviewed Commoner",
+                "page_start": 1,
+                "page_end": 1,
+                "artifact": {"card": {"normalized_content": commoner}},
+            }
+        ],
+        complete_pages=set(),
+    )
+
+    assert [item["id"] for item in projected] == [
+        "guard",
+        "ambiguous-noise",
+        "reviewed-commoner",
     ]
 
 
