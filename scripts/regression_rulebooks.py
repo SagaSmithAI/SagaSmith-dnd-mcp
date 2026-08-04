@@ -7,6 +7,7 @@ import asyncio
 import fnmatch
 import hashlib
 import json
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -986,6 +987,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     idempotency_key=f"regression-augment-{review_id_key}",
                 )
                 candidates = augmented["candidates"]
+                catalog_revision = int(augmented["job_revision"])
                 catalog_augmentation = {
                     "added_candidate_ids": augmented["added_candidate_ids"],
                     "added": len(additions),
@@ -1014,7 +1016,11 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     relative_path=relative_path,
                     edition=args.edition,
                     run_id=args.run_id,
-                    id_key=review_id_key,
+                    # Candidate extraction is a deliberate invalidation
+                    # boundary. Even an identical re-extraction resets review
+                    # state, so its fresh revision must not reuse older
+                    # primary/critic mutation receipts.
+                    id_key=f"{review_id_key}-r{catalog_revision}",
                     addon_output_dir=addon_output_dir,
                     primary_reviewer=str(args.primary_reviewer),
                     primary_review_method=str(args.primary_review_method),
@@ -1635,6 +1641,7 @@ def _catalog_document_review(
         "expected_catalog",
         "expected_counts",
         "expected_actor_names",
+        "expected_actor_names_sha256",
         "runtime_probes",
         "dependency_addons",
         "text_reviews",
@@ -2225,12 +2232,19 @@ def _require_expected_actor_names(
     preset_export: dict[str, Any] | None,
 ) -> None:
     expected = review_spec.get("expected_actor_names")
-    if expected is None:
+    expected_sha256 = review_spec.get("expected_actor_names_sha256")
+    if expected is None and expected_sha256 is None:
         return
-    if not isinstance(expected, list) or any(
-        not isinstance(name, str) or not name.strip() for name in expected
+    if expected is not None and (
+        not isinstance(expected, list)
+        or any(not isinstance(name, str) or not name.strip() for name in expected)
     ):
         raise ValueError("expected_actor_names must be an array of nonempty strings")
+    if expected_sha256 is not None and (
+        not isinstance(expected_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None
+    ):
+        raise ValueError("expected_actor_names_sha256 must be a lowercase SHA-256")
     cards = (
         list(
             dict(dict(preset_export or {}).get("package") or {})
@@ -2246,13 +2260,27 @@ def _require_expected_actor_names(
         for card in cards
         if isinstance(card, dict)
     )
-    expected_names = Counter(_fold_text(name) for name in expected)
-    if actual_names != expected_names:
-        raise RuntimeError(
-            "actor preset names differ from the source-reviewed manifest: "
-            f"missing={sorted((expected_names - actual_names).elements())}, "
-            f"unexpected={sorted((actual_names - expected_names).elements())}"
+    if expected is not None:
+        expected_names = Counter(_fold_text(name) for name in expected)
+        if actual_names != expected_names:
+            raise RuntimeError(
+                "actor preset names differ from the source-reviewed manifest: "
+                f"missing={sorted((expected_names - actual_names).elements())}, "
+                f"unexpected={sorted((actual_names - expected_names).elements())}"
+            )
+    if expected_sha256 is not None:
+        canonical_names = json.dumps(
+            sorted(actual_names.elements()),
+            ensure_ascii=False,
+            separators=(",", ":"),
         )
+        actual_sha256 = hashlib.sha256(canonical_names.encode("utf-8")).hexdigest()
+        if actual_sha256 != expected_sha256:
+            raise RuntimeError(
+                "actor preset name manifest checksum differs from the "
+                f"source-reviewed manifest: expected={expected_sha256}, "
+                f"actual={actual_sha256}"
+            )
 
 
 def _matches_includes(

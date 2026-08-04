@@ -417,6 +417,20 @@ def test_actor_name_gate_requires_the_exact_reviewed_multiset() -> None:
             {"expected_actor_names": ["Cackler", "Skyjek Roc"]},
             package,
         )
+    reviewed_names = '["cackler","sire of insanity"]'
+    driver._require_expected_actor_names(
+        {
+            "expected_actor_names_sha256": hashlib.sha256(
+                reviewed_names.encode("utf-8")
+            ).hexdigest()
+        },
+        package,
+    )
+    with pytest.raises(RuntimeError, match="name manifest checksum differs"):
+        driver._require_expected_actor_names(
+            {"expected_actor_names_sha256": "0" * 64},
+            package,
+        )
 
 
 def test_publication_metadata_marks_only_core_dependencies_as_standard() -> None:
