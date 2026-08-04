@@ -14,6 +14,7 @@ from sagasmith_dnd_mcp.server import (
     _append_selected_proficiencies,
     _apply_skill_proficiency_or_expertise,
     _character_spell_card,
+    _materialize_feature_proficiency_groups,
     _validate_group_limited_choices,
     _validated_additive_choices,
     _validated_narrative_choices,
@@ -115,6 +116,32 @@ def test_selected_and_conditional_feature_proficiencies_mutate_exactly() -> None
     assert sheet["skills"]["persuasion"]["proficiency"] == "proficient"
     _apply_skill_proficiency_or_expertise(sheet, ["Persuasion"])
     assert sheet["skills"]["persuasion"]["proficiency"] == "expertise"
+
+    selected = _materialize_feature_proficiency_groups(
+        sheet,
+        value={"languages": ["Elvish", "Goblin"], "gaming": ["Dice"]},
+        groups=[
+            {
+                "id": "languages",
+                "kind": "language",
+                "count": 2,
+                "options": [],
+                "allow_unlisted": True,
+            },
+            {
+                "id": "gaming",
+                "kind": "tool",
+                "count": 1,
+                "options": ["Dice", "Dragonchess"],
+            },
+        ],
+    )
+    assert selected == {
+        "languages": ["Elvish", "Goblin"],
+        "gaming": ["Dice"],
+    }
+    assert sheet["traits"]["languages"] == ["Elvish", "Goblin"]
+    assert sheet["traits"]["proficiencies"]["tools"] == ["Dice"]
     with pytest.raises(ValueError, match="cannot duplicate a fixed grant"):
         _validated_additive_choices(
             ["common"],

@@ -860,6 +860,7 @@ SUPPORTED_FEATURE_SELECTION_REQUIREMENT_FIELDS = frozenset(
         "grants_tool_proficiency",
         "grants_weapon_proficiency",
         "grant_method",
+        "groups",
         "humanoid_race_count",
         "kind",
         "language_if_spoken",
@@ -1896,6 +1897,79 @@ def _apply_skill_proficiency_or_expertise(
         skill["proficiency"] = (
             "proficient" if skill.get("proficiency") == "none" else "expertise"
         )
+
+
+def _materialize_feature_proficiency_groups(
+    sheet: dict[str, Any], *, value: Any, groups: Any
+) -> dict[str, list[str]]:
+    if not isinstance(groups, list) or not groups:
+        raise RulesetUnavailableError("feature proficiency groups are not executable")
+    if not isinstance(value, dict):
+        raise ValueError("feature proficiency choices must be an object")
+    group_map: dict[str, dict[str, Any]] = {}
+    for raw_group in groups:
+        if not isinstance(raw_group, dict):
+            raise RulesetUnavailableError("feature proficiency group is not executable")
+        group_id = str(raw_group.get("id") or "").strip()
+        if not group_id or group_id.casefold() in group_map:
+            raise RulesetUnavailableError(
+                "feature proficiency group ids must be distinct and non-empty"
+            )
+        group_map[group_id.casefold()] = raw_group
+    supplied = {str(key).casefold(): raw for key, raw in value.items()}
+    if set(supplied) != set(group_map):
+        raise ValueError("feature proficiency choices must answer every reviewed group")
+
+    result: dict[str, list[str]] = {}
+    for group_key, group in group_map.items():
+        group_id = str(group["id"])
+        selected = _validated_distinct_choices(
+            supplied[group_key],
+            count=int(group.get("count", 0) or 0),
+            label=f"feature proficiency group {group_id}",
+        )
+        option_map = {
+            str(item).strip().casefold(): str(item).strip()
+            for item in group.get("options", [])
+            if str(item).strip()
+        }
+        if len(option_map) != len(group.get("options", [])):
+            raise RulesetUnavailableError(
+                f"feature proficiency group {group_id} options must be distinct"
+            )
+        if not option_map and group.get("allow_unlisted") is not True:
+            raise RulesetUnavailableError(
+                f"feature proficiency group {group_id} needs reviewed options"
+            )
+        if option_map and any(item.casefold() not in option_map for item in selected):
+            raise ValueError(
+                f"feature proficiency group {group_id} has an unavailable option"
+            )
+        normalized = [option_map.get(item.casefold(), item) for item in selected]
+        kind = str(group.get("kind") or "").casefold()
+        if kind == "skill":
+            for item in normalized:
+                skill_key = item.casefold().replace(" ", "_")
+                skill = sheet["skills"].get(skill_key)
+                if skill is None:
+                    raise ValueError("feature proficiency group names an unknown skill")
+                if skill.get("proficiency") != "none":
+                    raise ValueError("feature proficiency group skill is already proficient")
+                skill["proficiency"] = "proficient"
+        else:
+            targets = {
+                "language": sheet["traits"]["languages"],
+                "tool": sheet["traits"]["proficiencies"]["tools"],
+                "weapon": sheet["traits"]["proficiencies"]["weapons"],
+            }
+            target = targets.get(kind)
+            if target is None:
+                raise RulesetUnavailableError(
+                    f"feature proficiency group {group_id} kind is unsupported"
+                )
+            _append_selected_proficiencies(normalized, target=target, label=kind)
+        result[group_id] = normalized
+    return result
 
 
 def _validated_species_ability_choices(
@@ -43735,6 +43809,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         if language.casefold() in known_languages:
                             raise ValueError("feature language is already known")
                         sheet["traits"]["languages"].append(language)
+                    elif requirements.get("kind") == "proficiency_grants":
+                        selection[choice_field] = _materialize_feature_proficiency_groups(
+                            sheet,
+                            value=selection.get(choice_field),
+                            groups=requirements.get("groups"),
+                        )
                     elif requirements.get("kind") in {
                         "known_spell_grants",
                         "mystic_arcanum",
