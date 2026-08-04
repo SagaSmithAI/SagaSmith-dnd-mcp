@@ -441,6 +441,7 @@ from sagasmith_dnd.statblocks import (
     area_save_damage_spec,
     dependent_actor_template_solution_errors,
     discover_2014_statblock_names_from_layout,
+    discover_2014_statblock_slots_from_layout,
     effective_statblock_rating,
     finalize_imported_actor_rulings,
     frightful_presence_spec,
@@ -1363,11 +1364,18 @@ def _select_preferred_statblock_reviews(
             str(review.get("id") or ""),
         )
 
+    superseded_ids = {
+        str(item.get("derived_from_review_id") or "")
+        for item in reviews
+        if isinstance(item, dict) and str(item.get("derived_from_review_id") or "")
+    }
     ranked = sorted(
         (
             dict(item)
             for item in reviews
-            if isinstance(item, dict) and has_valid_heading(item)
+            if isinstance(item, dict)
+            and str(item.get("id") or "") not in superseded_ids
+            and has_valid_heading(item)
         ),
         key=preference,
         reverse=True,
@@ -13256,7 +13264,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     page_chunks.setdefault(page_number, []).append(str(chunk["id"]))
         recovered_candidates: list[dict[str, Any]] = []
         recovered_chunk_ids: set[str] = set()
-        for review in list(dict(job.result or {}).get("statblock_reviews") or []):
+        source_reviews = _select_preferred_statblock_reviews(
+            list(dict(job.result or {}).get("statblock_reviews") or [])
+        )
+        for review in source_reviews:
             review = dict(review)
             page_number = int(review.get("page_number") or 0)
             if page_number not in complete_pages:
@@ -37491,6 +37502,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 continue
             page_text, used_columns = ocr_layout_text(layout)
             confidences = [float(block.confidence) for block in layout.blocks]
+            statblock_slots = [
+                {
+                    key: value
+                    for key, value in item.items()
+                    if not key.startswith("_")
+                }
+                for item in discover_2014_statblock_slots_from_layout(
+                    layout.as_dict(),
+                    minimum_confidence=0.5,
+                )
+            ]
             variants.append(
                 {
                     "available": True,
@@ -37505,6 +37527,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         sum(confidences) / len(confidences) if confidences else 0.0
                     ),
                     "minimum_confidence": min(confidences) if confidences else 0.0,
+                    "statblock_slots": statblock_slots,
                     "text_sha256": hashlib.sha256(page_text.encode("utf-8")).hexdigest(),
                     "text": page_text[:50000],
                     "truncated": len(page_text) > 50000,
@@ -37809,6 +37832,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         target_name: str,
         candidate_pages: list[int],
         provider: RapidOcrProvider,
+        statblock_slot: int | None = None,
+        ocr_corrections: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Recover and independently corroborate one printed 2014 statblock."""
 
@@ -37848,6 +37873,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             layout.as_dict(),
                             name=target_name,
                             minimum_confidence=0.5,
+                            statblock_slot=statblock_slot,
+                            reviewed_ability_scores=dict(ocr_corrections or {}).get(
+                                "abilities"
+                            ),
                         )
                     except StatblockImportError:
                         continue
@@ -37961,6 +37990,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             secondary_layout.as_dict(),
                             name=target_name,
                             minimum_confidence=0.5,
+                            statblock_slot=statblock_slot,
+                            reviewed_ability_scores=dict(ocr_corrections or {}).get(
+                                "abilities"
+                            ),
                         )
                     except StatblockImportError as exc:
                         secondary_failures.append(f"{label}: {exc}")
@@ -38061,6 +38094,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
         agent_fill: dict[str, Any] | None = None,
+        statblock_slot: int | None = None,
+        ocr_corrections: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Recover and review one statblock through layout OCR for text-only agents."""
 
@@ -38085,6 +38120,49 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             isinstance(page_number, bool) or not isinstance(page_number, int) or page_number < 1
         ):
             raise ValueError("page_number must be a positive integer")
+        if statblock_slot is not None and (
+            isinstance(statblock_slot, bool)
+            or not isinstance(statblock_slot, int)
+            or statblock_slot < 1
+        ):
+            raise ValueError("statblock_slot must be a positive integer")
+        if statblock_slot is not None and page_number is None:
+            raise ValueError("statblock_slot requires an exact page_number")
+        if ocr_corrections is not None and (
+            statblock_slot is None or page_number is None
+        ):
+            raise ValueError(
+                "ocr_corrections require an exact page_number and statblock_slot"
+            )
+        normalized_ocr_corrections: dict[str, Any] | None = None
+        if ocr_corrections is not None:
+            if not isinstance(ocr_corrections, dict) or set(ocr_corrections) != {
+                "abilities"
+            }:
+                raise ValueError("ocr_corrections supports only an abilities object")
+            abilities = ocr_corrections.get("abilities")
+            if not isinstance(abilities, dict) or not abilities:
+                raise ValueError("ocr_corrections.abilities must be a non-empty object")
+            normalized_abilities: dict[str, str] = {}
+            page_fact_key = _ocr_fact_key(
+                extract_pdf_page_text(source_path, int(page_number))
+            )
+            for raw_ability, raw_value in abilities.items():
+                ability = str(raw_ability or "").strip().lower()
+                value = " ".join(str(raw_value or "").split())
+                if ability not in {"str", "dex", "con", "int", "wis", "cha"}:
+                    raise ValueError("ocr_corrections contains an unknown ability")
+                if re.fullmatch(r"(?:[1-9]|[12][0-9]|30) \([+\-][0-9]{1,2}\)", value) is None:
+                    raise ValueError(
+                        "ocr_corrections ability values must use 'score (+/-modifier)'"
+                    )
+                if _ocr_fact_key(f"{ability.upper()} {value}") not in page_fact_key:
+                    raise ValueError(
+                        "ocr_corrections ability value is not corroborated by the "
+                        f"staged page text: {ability}={value}"
+                    )
+                normalized_abilities[ability] = value
+            normalized_ocr_corrections = {"abilities": normalized_abilities}
         provider = storage.rule_ocr_provider()
         if provider is None or not hasattr(provider, "extract_layout"):
             raise RuntimeError("layout OCR recovery requires the configured RapidOCR provider")
@@ -38118,10 +38196,41 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             target_name=target_name,
             candidate_pages=candidate_pages,
             provider=provider,
+            statblock_slot=statblock_slot,
+            ocr_corrections=normalized_ocr_corrections,
         )
         recovered_page = int(recovered_result["page_number"])
         recovered = dict(recovered_result["recovery"])
         content = str(recovered["normalized_content"])
+        derived_from_review_id = None
+        if statblock_slot is not None:
+            parsed_recovery = parse_2014_statblock_template_preview(
+                content,
+                source_key=f"slot-recovery:{job.id}:{recovered_page}:{statblock_slot}",
+                rule_refs=[],
+            )
+            recovery_identity = _statblock_mechanical_identity(parsed_recovery)
+            mechanical_matches: list[dict[str, Any]] = []
+            for review in _select_preferred_statblock_reviews(
+                list(dict(job.result or {}).get("statblock_reviews") or [])
+            ):
+                if int(review.get("page_number") or 0) != recovered_page:
+                    continue
+                prior_content = str(review.get("normalized_content") or "").strip()
+                if not prior_content or prior_content == content:
+                    continue
+                try:
+                    prior_parsed = parse_2014_statblock_template_preview(
+                        prior_content,
+                        source_key=str(review.get("id") or "prior-slot-review"),
+                        rule_refs=[],
+                    )
+                except (StatblockImportError, ValueError):
+                    continue
+                if _statblock_mechanical_identity(prior_parsed) == recovery_identity:
+                    mechanical_matches.append(review)
+            if len(mechanical_matches) == 1:
+                derived_from_review_id = str(mechanical_matches[0]["id"])
         reviewed = rule_statblock_review(
             campaign_id,
             job_id,
@@ -38132,6 +38241,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             idempotency_key=idempotency_key,
             review_mode="layout_ocr",
             agent_fill=agent_fill,
+            derived_from_review_id=derived_from_review_id,
         )
         return {
             "campaign_id": campaign_id,
@@ -39197,6 +39307,43 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         content = str(normalized_content or "").strip()
         if not content or len(content) > 100_000:
             raise ValueError("normalized_content must contain 1 to 100000 characters")
+        if derived_from_review_id is not None:
+            parent_id = str(derived_from_review_id).strip()
+            reviews = list(dict(job.result or {}).get("statblock_reviews") or [])
+            parent_matches = [
+                dict(item)
+                for item in reviews
+                if str(item.get("id") or "") == parent_id
+            ]
+            if len(parent_matches) != 1:
+                raise ValueError(
+                    "derived_from_review_id does not identify one review on this import job"
+                )
+            parent = parent_matches[0]
+            if (
+                int(parent.get("page_number") or 0) != page_number
+                or str(parent.get("source_id") or "") != str(job.source_id)
+                or str(parent.get("asset_checksum") or "") != str(job.artifact_checksum)
+            ):
+                raise ValueError(
+                    "derived statblock review must retain the same source, asset, and page"
+                )
+            ancestors = {parent_id}
+            cursor = parent
+            while cursor.get("derived_from_review_id"):
+                ancestor_id = str(cursor["derived_from_review_id"])
+                if ancestor_id in ancestors:
+                    raise ValueError("statblock review derivation contains a cycle")
+                ancestors.add(ancestor_id)
+                matches = [
+                    dict(item)
+                    for item in reviews
+                    if str(item.get("id") or "") == ancestor_id
+                ]
+                if len(matches) != 1:
+                    raise ValueError("statblock review derivation ancestor is missing")
+                cursor = matches[0]
+            derived_from_review_id = parent_id
         reviewed_observation = str(observation or "").strip()
         if not 8 <= len(reviewed_observation) <= 2_000:
             raise ValueError("observation must contain 8 to 2000 characters")
@@ -46824,7 +46971,14 @@ Useful bounded guidance:
             data = strict_facade_payload(
                 payload,
                 action="rule_import(recover_statblock)",
-                allowed={"job_id", "name", "page_number", "agent_fill"},
+                allowed={
+                    "job_id",
+                    "name",
+                    "page_number",
+                    "statblock_slot",
+                    "agent_fill",
+                    "ocr_corrections",
+                },
                 required_names=("job_id", "name"),
             )
             return facade_result(
@@ -46837,6 +46991,8 @@ Useful bounded guidance:
                     principal_id,
                     idempotency_key,
                     data.get("agent_fill"),
+                    data.get("statblock_slot"),
+                    data.get("ocr_corrections"),
                 ),
             )
         if action == "recover_statblocks":

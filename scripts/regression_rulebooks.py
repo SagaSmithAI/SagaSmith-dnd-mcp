@@ -29,6 +29,7 @@ from sagasmith_dnd.core_content_2024 import (
 )
 from sagasmith_dnd.editions import SUPPORTED_DND_EDITIONS
 from sagasmith_dnd.statblocks import (
+    OCR_STATBLOCK_RECOVERY_VERSION,
     StatblockImportError,
     dependent_actor_template_solution_errors,
     parameterized_statblock_requirements,
@@ -166,6 +167,24 @@ def _key(relative_path: str, *, run_id: str = "default") -> str:
     return f"user.rulebook.{slug[:120] or 'rulebook'}.{digest}"
 
 
+def _catalog_review_token(review_spec: dict[str, Any]) -> str:
+    """Bind mutable review work to the exact replayable Agent decision set.
+
+    Staging, inspection, and ingestion remain content-addressed by the source
+    document and run. Candidate extraction, review, and compilation need a
+    narrower idempotency scope: an improved source-bound Agent review must be
+    able to reopen an uninstalled compiled job without rerunning page OCR.
+    """
+
+    canonical = json.dumps(
+        review_spec,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
 async def _call(server: Any, name: str, arguments: dict[str, Any]) -> Any:
     try:
         _, result = await server.call_tool(name, arguments)
@@ -293,6 +312,177 @@ def _transcription_review_specs(review_spec: dict[str, Any]) -> list[dict[str, A
             }
         )
     return reviews
+
+
+def _statblock_slot_review_specs(review_spec: dict[str, Any]) -> list[dict[str, Any]]:
+    """Validate replayable Agent names for mechanically proven page slots."""
+
+    raw_reviews = review_spec.get("statblock_slot_reviews") or []
+    if not isinstance(raw_reviews, list):
+        raise ValueError("statblock_slot_reviews must be an array")
+    normalized: list[dict[str, Any]] = []
+    seen: set[tuple[int, int]] = set()
+    allowed = {
+        "page_number",
+        "statblock_slot",
+        "name",
+        "expected_identity",
+        "note",
+        "ocr_corrections",
+    }
+    for index, raw in enumerate(raw_reviews):
+        if not isinstance(raw, dict) or set(raw) - allowed:
+            raise ValueError(
+                f"statblock_slot_reviews[{index}] contains unsupported fields"
+            )
+        page_number = raw.get("page_number")
+        statblock_slot = raw.get("statblock_slot")
+        name = " ".join(str(raw.get("name") or "").split())
+        if (
+            isinstance(page_number, bool)
+            or not isinstance(page_number, int)
+            or page_number < 1
+            or isinstance(statblock_slot, bool)
+            or not isinstance(statblock_slot, int)
+            or statblock_slot < 1
+            or not 2 <= len(name) <= 200
+        ):
+            raise ValueError(
+                f"statblock_slot_reviews[{index}] requires positive page/slot and a name"
+            )
+        identity = " ".join(str(raw.get("expected_identity") or "").split())
+        note = " ".join(str(raw.get("note") or "").split())
+        ocr_corrections = raw.get("ocr_corrections")
+        if raw.get("expected_identity") is not None and not identity:
+            raise ValueError(
+                f"statblock_slot_reviews[{index}].expected_identity must be nonempty"
+            )
+        if raw.get("note") is not None and not 8 <= len(note) <= 2000:
+            raise ValueError(
+                f"statblock_slot_reviews[{index}].note must contain 8 to 2000 characters"
+            )
+        if ocr_corrections is not None:
+            if not isinstance(ocr_corrections, dict) or set(ocr_corrections) != {
+                "abilities"
+            }:
+                raise ValueError(
+                    f"statblock_slot_reviews[{index}].ocr_corrections supports "
+                    "only abilities"
+                )
+            abilities = ocr_corrections.get("abilities")
+            if not isinstance(abilities, dict) or not abilities:
+                raise ValueError(
+                    f"statblock_slot_reviews[{index}].ocr_corrections.abilities "
+                    "must be nonempty"
+                )
+            normalized_abilities: dict[str, str] = {}
+            for raw_ability, raw_value in abilities.items():
+                ability = str(raw_ability or "").strip().lower()
+                value = " ".join(str(raw_value or "").split())
+                if ability not in {"str", "dex", "con", "int", "wis", "cha"}:
+                    raise ValueError(
+                        f"statblock_slot_reviews[{index}] has an unknown ability"
+                    )
+                if not value:
+                    raise ValueError(
+                        f"statblock_slot_reviews[{index}] has an empty ability value"
+                    )
+                normalized_abilities[ability] = value
+            ocr_corrections = {"abilities": normalized_abilities}
+        key = (page_number, statblock_slot)
+        if key in seen:
+            raise ValueError("statblock_slot_reviews must identify unique page slots")
+        seen.add(key)
+        normalized.append(
+            {
+                "page_number": page_number,
+                "statblock_slot": statblock_slot,
+                "name": name,
+                **({"expected_identity": identity} if identity else {}),
+                **({"note": note} if note else {}),
+                **(
+                    {"ocr_corrections": ocr_corrections}
+                    if ocr_corrections is not None
+                    else {}
+                ),
+            }
+        )
+    return normalized
+
+
+async def _apply_statblock_slot_reviews(
+    server: Any,
+    *,
+    campaign_id: str,
+    job_id: str,
+    review_spec: dict[str, Any],
+    id_key: str,
+) -> dict[str, Any] | None:
+    """Replay Agent semantic names while the engine owns numeric extraction."""
+
+    reviews = _statblock_slot_review_specs(review_spec)
+    if not reviews:
+        return None
+    applied: list[dict[str, Any]] = []
+    revision = 0
+    for index, spec in enumerate(reviews, start=1):
+        try:
+            response = await _call(
+                server,
+                "rule_import",
+                {
+                    "campaign_id": campaign_id,
+                    "action": "recover_statblock",
+                    "payload": {
+                        "job_id": job_id,
+                        "name": spec["name"],
+                        "page_number": spec["page_number"],
+                        "statblock_slot": spec["statblock_slot"],
+                        **(
+                            {"ocr_corrections": spec["ocr_corrections"]}
+                            if "ocr_corrections" in spec
+                            else {}
+                        ),
+                    },
+                    "idempotency_key": (
+                        "regression-agent-statblock-slot-"
+                        f"r{OCR_STATBLOCK_RECOVERY_VERSION}-{id_key}-{index}"
+                    ),
+                },
+            )
+        except RuntimeError as exc:
+            raise RuntimeError(
+                "Agent statblock slot review failed: "
+                f"index={index}, page={spec['page_number']}, "
+                f"slot={spec['statblock_slot']}, name={spec['name']!r}: {exc}"
+            ) from exc
+        result = dict(response["result"])
+        evidence = dict(dict(result["recovery"])["evidence"])
+        slot_summary = dict(evidence.get("statblock_slot_summary") or {})
+        expected_identity = spec.get("expected_identity")
+        if expected_identity and _fold_text(slot_summary.get("identity")) != _fold_text(
+            expected_identity
+        ):
+            raise RuntimeError(
+                "Agent statblock slot identity changed: "
+                f"page={spec['page_number']}, slot={spec['statblock_slot']}"
+            )
+        if evidence.get("heading_match_mode") != "agent_named_structural_slot":
+            raise RuntimeError("Agent statblock review did not use its exact structural slot")
+        revision = int(dict(result["job"])["revision"])
+        review = dict(result["review"])
+        applied.append(
+            {
+                **spec,
+                "review_id": review["id"],
+                "derived_from_review_id": review.get("derived_from_review_id"),
+                "source_checksum": review["source_checksum"],
+                "image_checksum": review["image_checksum"],
+                "normalized_content_sha256": review["normalized_content_sha256"],
+                "slot_summary": slot_summary,
+            }
+        )
+    return {"count": len(applied), "job_revision": revision, "reviews": applied}
 
 
 async def _apply_transcription_reviews(
@@ -590,6 +780,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 catalog_manifest,
                 relative_path,
             )
+            review_id_key = f"{id_key}-{_catalog_review_token(document_review)}"
             transcription_review = await _apply_transcription_reviews(
                 server,
                 campaign_id=str(campaign["id"]),
@@ -624,7 +815,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     "campaign_id": campaign["id"],
                     "action": "extract_candidates",
                     "payload": {"job_id": job_id},
-                    "idempotency_key": f"regression-extract-{id_key}",
+                    "idempotency_key": f"regression-extract-{review_id_key}",
                 },
             )
             candidates = extracted["result"]["candidates"]
@@ -632,8 +823,10 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             catalog_revision = int(extracted["result"]["job"]["revision"])
             source_chunks: list[dict[str, Any]] | None = None
             statblock_recovery: dict[str, Any] | None = None
+            statblock_slot_review: dict[str, Any] | None = None
             if args.edition == "2014":
                 source_chunks = await _source_chunks(server, source_id)
+                refresh_statblocks = False
                 if _statblock_recovery_needed(candidates, source_chunks):
                     recovery_response = await _call(
                         server,
@@ -647,25 +840,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     )
                     statblock_recovery = recovery_response["result"]
                     catalog_revision = int(statblock_recovery["job"]["revision"])
-                    # Recovery persists checksum-bound statblock reviews on the
-                    # import job. Re-extraction is the public operation that
-                    # projects those reviews back into catalog candidates; the
-                    # recovery summary alone is not a replacement catalog.
-                    refreshed = await _call(
-                        server,
-                        "rule_import",
-                        {
-                            "campaign_id": campaign["id"],
-                            "action": "extract_candidates",
-                            "payload": {"job_id": job_id},
-                            "idempotency_key": (
-                                f"regression-extract-recovered-{id_key}"
-                            ),
-                        },
-                    )
-                    candidates = refreshed["result"]["candidates"]
-                    inventory = refreshed["result"]["inventory"]
-                    catalog_revision = int(refreshed["result"]["job"]["revision"])
+                    refresh_statblocks = True
                 else:
                     statblock_recovery = {
                         "schema_version": 1,
@@ -675,6 +850,36 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                             "source-proven dependent actor templates"
                         ),
                     }
+                statblock_slot_review = await _apply_statblock_slot_reviews(
+                    server,
+                    campaign_id=str(campaign["id"]),
+                    job_id=job_id,
+                    review_spec=document_review,
+                    id_key=review_id_key,
+                )
+                if statblock_slot_review is not None:
+                    catalog_revision = int(statblock_slot_review["job_revision"])
+                    refresh_statblocks = True
+                if refresh_statblocks:
+                    # Both deterministic recovery and Agent-named slots persist
+                    # checksum-bound reviews. Re-extraction is the sole public
+                    # operation that projects their preferred versions back into
+                    # catalog candidates.
+                    refreshed = await _call(
+                        server,
+                        "rule_import",
+                        {
+                            "campaign_id": campaign["id"],
+                            "action": "extract_candidates",
+                            "payload": {"job_id": job_id},
+                            "idempotency_key": (
+                                f"regression-extract-recovered-{review_id_key}"
+                            ),
+                        },
+                    )
+                    candidates = refreshed["result"]["candidates"]
+                    inventory = refreshed["result"]["inventory"]
+                    catalog_revision = int(refreshed["result"]["job"]["revision"])
             catalog_augmentation: dict[str, Any] | None = None
             if document_review.get("additions"):
                 if source_chunks is None:
@@ -695,7 +900,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                         or "Agent reviewed the complete indexed source catalog."
                     ),
                     expected_revision=catalog_revision,
-                    idempotency_key=f"regression-augment-{id_key}",
+                    idempotency_key=f"regression-augment-{review_id_key}",
                 )
                 candidates = augmented["candidates"]
                 catalog_augmentation = {
@@ -726,7 +931,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     relative_path=relative_path,
                     edition=args.edition,
                     run_id=args.run_id,
-                    id_key=id_key,
+                    id_key=review_id_key,
                     addon_output_dir=addon_output_dir,
                     primary_reviewer=str(args.primary_reviewer),
                     primary_review_method=str(args.primary_review_method),
@@ -782,6 +987,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                         else None
                     ),
                     "statblock_recovery": statblock_recovery,
+                    "statblock_slot_review": statblock_slot_review,
                     "catalog_augmentation": catalog_augmentation,
                     "source_scoped_search_hit": bool(hits),
                     "portable": portable,
@@ -1349,6 +1555,7 @@ def _catalog_document_review(
         "runtime_probes",
         "dependency_addons",
         "text_reviews",
+        "statblock_slot_reviews",
     }
     if unknown:
         raise ValueError(

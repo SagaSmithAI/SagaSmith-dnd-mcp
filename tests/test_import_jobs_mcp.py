@@ -533,6 +533,21 @@ def test_preset_export_selects_one_strongest_review_per_source_card() -> None:
                 "observation": "layout",
                 "normalized_content": "# i\u00b7\n\nnot an actor identity",
             },
+            {
+                "id": "caption-base",
+                "page_number": 121,
+                "review_mode": "layout_ocr",
+                "observation": "layout",
+                "normalized_content": "# -PELLANISTRA THE DRIDER\n\ncomplete",
+            },
+            {
+                "id": "drider-agent-correction",
+                "page_number": 121,
+                "review_mode": "layout_ocr",
+                "observation": "Agent named structural slot",
+                "normalized_content": "# DRIDER\n\ncomplete",
+                "derived_from_review_id": "caption-base",
+            },
         ]
     )
 
@@ -542,6 +557,7 @@ def test_preset_export_selects_one_strongest_review_per_source_card() -> None:
         "female-steeder",
         "male-steeder",
         "category-one-digit",
+        "drider-agent-correction",
     }
     assert _valid_statblock_heading("Ox") is True
     assert _valid_statblock_heading("i\u00b7") is False
@@ -2076,6 +2092,30 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
         assert resumed_batch["result"]["recovered"][0]["validation"][
             "resumed_from_persisted_review"
         ] is True
+        _, agent_named = await server.call_tool(
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "recover_statblock",
+                "payload": {
+                    "job_id": job_id,
+                    "name": "Reviewed Commoner",
+                    "page_number": 1,
+                    "statblock_slot": 1,
+                },
+                "idempotency_key": "recover-agent-named-slot",
+            },
+        )
+        assert agent_named["result"]["recovery"]["evidence"][
+            "heading_match_mode"
+        ] == "agent_named_structural_slot"
+        assert agent_named["result"]["recovery"]["evidence"]["statblock_slot"] == 1
+        assert agent_named["result"]["review"]["normalized_content"].startswith(
+            "# Reviewed Commoner"
+        )
+        assert agent_named["result"]["review"]["derived_from_review_id"] == result[
+            "review"
+        ]["id"]
         if embedded_text:
             with pytest.raises(Exception, match="unsupported .* payload fields"):
                 await server.call_tool(

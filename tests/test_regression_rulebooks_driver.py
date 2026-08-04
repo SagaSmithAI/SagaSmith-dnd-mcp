@@ -25,6 +25,129 @@ class _FakeServer:
         return None, response
 
 
+def test_catalog_review_token_is_canonical_and_changes_with_agent_decisions() -> None:
+    first = {
+        "complete_review": True,
+        "decisions": [{"name": "Drider", "note": "source checked"}],
+    }
+    reordered = {
+        "decisions": [{"note": "source checked", "name": "Drider"}],
+        "complete_review": True,
+    }
+    revised = {
+        **first,
+        "decisions": [{"name": "Drider", "note": "page and heading checked"}],
+    }
+
+    assert driver._catalog_review_token(first) == driver._catalog_review_token(reordered)
+    assert driver._catalog_review_token(first) != driver._catalog_review_token(revised)
+    assert driver._catalog_review_token({}) != driver._catalog_review_token(first)
+
+
+def test_agent_statblock_slot_reviews_replay_bounded_ocr_corrections() -> None:
+    server = _FakeServer(
+        [
+            (
+                "rule_import",
+                {
+                    "result": {
+                        "job": {"revision": 7},
+                        "recovery": {
+                            "evidence": {
+                                "heading_match_mode": "agent_named_structural_slot",
+                                "statblock_slot_summary": {
+                                    "slot": 2,
+                                    "identity": "Large fiend (demon), chaotic evil",
+                                    "core": {
+                                        "Armor Class": "Armor Class 18",
+                                        "Hit Points": "Hit Points 184 (16d10 + 96)",
+                                        "Speed": "Speed 20 ft., fly 30 ft.",
+                                    },
+                                },
+                            }
+                        },
+                        "review": {
+                            "id": "review-1",
+                            "derived_from_review_id": "bad-caption",
+                            "source_checksum": "source",
+                            "image_checksum": "image",
+                            "normalized_content_sha256": "content",
+                        },
+                    }
+                },
+            )
+        ]
+    )
+
+    result = asyncio.run(
+        driver._apply_statblock_slot_reviews(
+            server,
+            campaign_id="campaign-1",
+            job_id="job-1",
+            review_spec={
+                "statblock_slot_reviews": [
+                    {
+                        "page_number": 63,
+                        "statblock_slot": 2,
+                        "name": "Nalfeshnee",
+                        "expected_identity": "Large fiend (demon), chaotic evil",
+                        "ocr_corrections": {"abilities": {"str": "21 (+5)"}},
+                        "note": "Agent identified the creature from its actions and page context.",
+                    }
+                ]
+            },
+            id_key="book-review",
+        )
+    )
+
+    assert result is not None
+    assert result["job_revision"] == 7
+    assert result["reviews"][0]["derived_from_review_id"] == "bad-caption"
+    name, arguments = server.calls[0]
+    assert name == "rule_import"
+    assert arguments["action"] == "recover_statblock"
+    assert arguments["payload"] == {
+        "job_id": "job-1",
+        "name": "Nalfeshnee",
+        "page_number": 63,
+        "statblock_slot": 2,
+        "ocr_corrections": {"abilities": {"str": "21 (+5)"}},
+    }
+
+
+def test_agent_statblock_slot_manifest_rejects_duplicate_or_unbounded_slots() -> None:
+    with pytest.raises(ValueError, match="unique page slots"):
+        driver._statblock_slot_review_specs(
+            {
+                "statblock_slot_reviews": [
+                    {"page_number": 1, "statblock_slot": 1, "name": "First"},
+                    {"page_number": 1, "statblock_slot": 1, "name": "Second"},
+                ]
+            }
+        )
+    with pytest.raises(ValueError, match="positive page/slot"):
+        driver._statblock_slot_review_specs(
+            {
+                "statblock_slot_reviews": [
+                    {"page_number": 1, "statblock_slot": 0, "name": "Invalid"}
+                ]
+            }
+        )
+    with pytest.raises(ValueError, match="unknown ability"):
+        driver._statblock_slot_review_specs(
+            {
+                "statblock_slot_reviews": [
+                    {
+                        "page_number": 1,
+                        "statblock_slot": 1,
+                        "name": "Invalid",
+                        "ocr_corrections": {"abilities": {"luck": "20 (+5)"}},
+                    }
+                ]
+            }
+        )
+
+
 def test_agent_transcription_reviews_replay_before_rulebook_ingest() -> None:
     base_hash = "a" * 64
     server = _FakeServer(
