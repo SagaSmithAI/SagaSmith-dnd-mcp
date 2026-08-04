@@ -158,6 +158,54 @@ async def _call(server: Any, name: str, arguments: dict[str, Any]) -> Any:
     return result
 
 
+async def _augment_catalog_batches(
+    server: Any,
+    *,
+    campaign_id: str,
+    job_id: str,
+    additions: list[dict[str, Any]],
+    rationale: str,
+    expected_revision: int,
+    idempotency_key: str,
+) -> dict[str, Any]:
+    """Apply a complete source review through bounded public MCP transactions."""
+
+    if not additions:
+        raise ValueError("catalog augmentation batches require at least one addition")
+    added_candidate_ids: list[str] = []
+    candidates: list[dict[str, Any]] = []
+    revision = expected_revision
+    batch_count = 0
+    for offset in range(0, len(additions), 100):
+        batch = additions[offset : offset + 100]
+        response = await _call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign_id,
+                "action": "augment_catalog",
+                "payload": {
+                    "job_id": job_id,
+                    "rationale": rationale,
+                    "additions": batch,
+                },
+                "expected_revision": revision,
+                "idempotency_key": f"{idempotency_key}-batch-{batch_count + 1}",
+            },
+        )
+        result = dict(response["result"])
+        revision = int(result["job"]["revision"])
+        candidates = list(result["candidates"])
+        added_candidate_ids.extend(result["added_candidate_ids"])
+        batch_count += 1
+    return {
+        "job_revision": revision,
+        "candidates": candidates,
+        "added_candidate_ids": added_candidate_ids,
+        "batch_count": batch_count,
+    }
+
+
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
     root = args.root.expanduser().resolve()
     home = args.home.expanduser().resolve()
@@ -415,28 +463,24 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     source_chunks,
                     relative_path=relative_path,
                 )
-                augmented = await _call(
+                additions = _bind_catalog_addition_replacements(additions, candidates)
+                augmented = await _augment_catalog_batches(
                     server,
-                    "rule_import",
-                    {
-                        "campaign_id": campaign["id"],
-                        "action": "augment_catalog",
-                        "payload": {
-                            "job_id": job_id,
-                            "rationale": str(
-                                document_review.get("rationale")
-                                or "Agent reviewed the complete indexed source catalog."
-                            ),
-                            "additions": additions,
-                        },
-                        "expected_revision": catalog_revision,
-                        "idempotency_key": f"regression-augment-{id_key}",
-                    },
+                    campaign_id=str(campaign["id"]),
+                    job_id=job_id,
+                    additions=additions,
+                    rationale=str(
+                        document_review.get("rationale")
+                        or "Agent reviewed the complete indexed source catalog."
+                    ),
+                    expected_revision=catalog_revision,
+                    idempotency_key=f"regression-augment-{id_key}",
                 )
-                candidates = augmented["result"]["candidates"]
+                candidates = augmented["candidates"]
                 catalog_augmentation = {
-                    "added_candidate_ids": augmented["result"]["added_candidate_ids"],
+                    "added_candidate_ids": augmented["added_candidate_ids"],
                     "added": len(additions),
+                    "batches": augmented["batch_count"],
                 }
             hits = await _call(
                 server,
@@ -1137,7 +1181,9 @@ def _resolve_catalog_additions(
                 raise ValueError("source selector match_all must be a boolean")
             if (not match_all and len(matches) != 1) or (match_all and not matches):
                 raise ValueError(
-                    f"source selector {selector_index} for {relative_path} matched "
+                    f"source selector {selector_index} for catalog addition {index} "
+                    f"{str(addition.get('kind') or '')}:{str(addition.get('name') or '')} "
+                    f"in {relative_path} matched "
                     f"{len(matches)} chunks; expected "
                     + ("one or more" if match_all else "exactly one")
                 )
@@ -1222,6 +1268,45 @@ def _resolve_catalog_additions(
             }
         )
     return resolved
+
+
+def _bind_catalog_addition_replacements(
+    additions: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Turn source-review entries into replacements when extraction found them."""
+
+    def identity(kind: Any, name: Any) -> tuple[str, str]:
+        return (
+            str(kind or "").casefold(),
+            "".join(
+                character
+                for character in str(name or "").casefold()
+                if character.isalnum()
+            ),
+        )
+
+    candidates_by_identity: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for candidate in candidates:
+        candidates_by_identity.setdefault(
+            identity(candidate.get("kind"), candidate.get("name")), []
+        ).append(candidate)
+    bound: list[dict[str, Any]] = []
+    for addition in additions:
+        item = json.loads(json.dumps(addition))
+        if "replace_existing" not in item:
+            matches = candidates_by_identity.get(
+                identity(item.get("kind"), item.get("name")), []
+            )
+            if len(matches) > 1:
+                raise ValueError(
+                    "catalog addition matches multiple extracted candidates: "
+                    f"{item.get('kind')}:{item.get('name')}"
+                )
+            if matches:
+                item["replace_existing"] = True
+        bound.append(item)
+    return bound
 
 
 def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:

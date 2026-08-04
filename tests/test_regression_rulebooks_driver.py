@@ -87,6 +87,50 @@ def test_include_globs_are_case_insensitive_and_optional() -> None:
     assert driver._matches_includes(path, [], empty=False) is False
 
 
+def test_large_catalog_augmentation_uses_revisioned_public_batches() -> None:
+    additions = [{"kind": "feature", "name": f"Feature {index}"} for index in range(205)]
+    server = _FakeServer(
+        [
+            (
+                "rule_import",
+                {
+                    "result": {
+                        "job": {"revision": revision},
+                        "candidates": [{"id": f"candidate-{revision}"}],
+                        "added_candidate_ids": [
+                            f"added-{index}" for index in range(start, end)
+                        ],
+                    }
+                },
+            )
+            for revision, start, end in ((8, 0, 100), (9, 100, 200), (10, 200, 205))
+        ]
+    )
+
+    result = asyncio.run(
+        driver._augment_catalog_batches(
+            server,
+            campaign_id="campaign",
+            job_id="job",
+            additions=additions,
+            rationale="Complete source review.",
+            expected_revision=7,
+            idempotency_key="augment",
+        )
+    )
+
+    assert result["job_revision"] == 10
+    assert result["batch_count"] == 3
+    assert len(result["added_candidate_ids"]) == 205
+    assert [call[1]["expected_revision"] for call in server.calls] == [7, 8, 9]
+    assert [len(call[1]["payload"]["additions"]) for call in server.calls] == [100, 100, 5]
+    assert [call[1]["idempotency_key"] for call in server.calls] == [
+        "augment-batch-1",
+        "augment-batch-2",
+        "augment-batch-3",
+    ]
+
+
 def test_catalog_manifest_resolves_stable_sources_and_review_actions(tmp_path) -> None:
     manifest_path = tmp_path / "catalog.json"
     manifest_path.write_text(
@@ -357,6 +401,31 @@ def test_catalog_manifest_can_bind_one_entry_to_all_matching_source_chunks() -> 
     assert [
         span["source_chunk_id"] for span in additions[0]["source_spans"]
     ] == ["heading", "continuation"]
+
+
+def test_catalog_additions_replace_only_one_exact_extracted_identity() -> None:
+    additions = [
+        {"kind": "subclass", "name": "Path of the Battlerager"},
+        {"kind": "feature", "name": "Reckless Abandon"},
+        {
+            "kind": "feature",
+            "name": "Explicit Addition",
+            "replace_existing": False,
+        },
+    ]
+
+    bound = driver._bind_catalog_addition_replacements(
+        additions,
+        [
+            {"kind": "subclass", "name": "PATH OF THE BATTLERAGER"},
+            {"kind": "feature", "name": "EXPLICIT ADDITION"},
+        ],
+    )
+
+    assert bound[0]["replace_existing"] is True
+    assert "replace_existing" not in bound[1]
+    assert bound[2]["replace_existing"] is False
+    assert "replace_existing" not in additions[0]
 
 
 def test_runtime_probe_expectations_support_nested_and_named_content() -> None:
