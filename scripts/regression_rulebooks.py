@@ -362,21 +362,25 @@ def _statblock_slot_review_specs(review_spec: dict[str, Any]) -> list[dict[str, 
                 f"statblock_slot_reviews[{index}].note must contain 8 to 2000 characters"
             )
         if ocr_corrections is not None:
-            if not isinstance(ocr_corrections, dict) or set(ocr_corrections) != {
-                "abilities"
-            }:
+            if (
+                not isinstance(ocr_corrections, dict)
+                or not ocr_corrections
+                or set(ocr_corrections) - {"abilities", "text_replacements"}
+            ):
                 raise ValueError(
                     f"statblock_slot_reviews[{index}].ocr_corrections supports "
-                    "only abilities"
+                    "only abilities and text_replacements"
                 )
             abilities = ocr_corrections.get("abilities")
-            if not isinstance(abilities, dict) or not abilities:
+            if abilities is not None and (
+                not isinstance(abilities, dict) or not abilities
+            ):
                 raise ValueError(
                     f"statblock_slot_reviews[{index}].ocr_corrections.abilities "
                     "must be nonempty"
                 )
             normalized_abilities: dict[str, str] = {}
-            for raw_ability, raw_value in abilities.items():
+            for raw_ability, raw_value in dict(abilities or {}).items():
                 ability = str(raw_ability or "").strip().lower()
                 value = " ".join(str(raw_value or "").split())
                 if ability not in {"str", "dex", "con", "int", "wis", "cha"}:
@@ -388,7 +392,66 @@ def _statblock_slot_review_specs(review_spec: dict[str, Any]) -> list[dict[str, 
                         f"statblock_slot_reviews[{index}] has an empty ability value"
                     )
                 normalized_abilities[ability] = value
-            ocr_corrections = {"abilities": normalized_abilities}
+            text_replacements = ocr_corrections.get("text_replacements")
+            if text_replacements is not None and (
+                not isinstance(text_replacements, list)
+                or not text_replacements
+                or len(text_replacements) > 20
+            ):
+                raise ValueError(
+                    f"statblock_slot_reviews[{index}].ocr_corrections."
+                    "text_replacements must contain 1 to 20 entries"
+                )
+            normalized_replacements: list[dict[str, str]] = []
+            seen_old: set[str] = set()
+            for replacement_index, raw_replacement in enumerate(
+                text_replacements or []
+            ):
+                if not isinstance(raw_replacement, dict) or set(raw_replacement) != {
+                    "old",
+                    "new",
+                }:
+                    raise ValueError(
+                        f"statblock_slot_reviews[{index}].ocr_corrections."
+                        f"text_replacements[{replacement_index}] requires old and new"
+                    )
+                old = " ".join(str(raw_replacement.get("old") or "").split())
+                new = " ".join(str(raw_replacement.get("new") or "").split())
+                if (
+                    not old
+                    or not new
+                    or old == new
+                    or len(old) > 500
+                    or len(new) > 2000
+                ):
+                    raise ValueError(
+                        f"statblock_slot_reviews[{index}] has an invalid OCR text "
+                        "replacement"
+                    )
+                old_key = old.casefold()
+                if old_key in seen_old:
+                    raise ValueError(
+                        f"statblock_slot_reviews[{index}] has duplicate OCR text "
+                        "replacement anchors"
+                    )
+                seen_old.add(old_key)
+                normalized_replacements.append({"old": old, "new": new})
+            ocr_corrections = {
+                **(
+                    {"abilities": normalized_abilities}
+                    if normalized_abilities
+                    else {}
+                ),
+                **(
+                    {"text_replacements": normalized_replacements}
+                    if normalized_replacements
+                    else {}
+                ),
+            }
+            if not ocr_corrections:
+                raise ValueError(
+                    f"statblock_slot_reviews[{index}].ocr_corrections must be nonempty"
+                )
         key = (page_number, statblock_slot)
         if key in seen:
             raise ValueError("statblock_slot_reviews must identify unique page slots")

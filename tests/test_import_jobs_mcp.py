@@ -1817,7 +1817,8 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
             b"(CHA) Tj T* (10 [+0]) Tj T* "
             b"(Senses passive Perception 10) Tj T* "
             b"(Languages Common) Tj T* "
-            b"(Challenge 0 [10 XP]) Tj ET"
+            b"(Challenge 0 [10 XP]) Tj T* "
+            b"(Club. Melee Weapon Attack: +2 to hit, reach 5 ft., one creature.) Tj ET"
         )
         page[NameObject("/Contents")] = writer._add_object(content)
     with source.open("wb") as stream:
@@ -2102,6 +2103,26 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
                     "name": "Reviewed Commoner",
                     "page_number": 1,
                     "statblock_slot": 1,
+                    **(
+                        {
+                            "ocr_corrections": {
+                                "text_replacements": [
+                                    {
+                                        "old": (
+                                            "Club. Melee Weapon Attack: +2 to hit, "
+                                            "reach 5 ft., one target."
+                                        ),
+                                        "new": (
+                                            "Club. Melee Weapon Attack: +2 to hit, "
+                                            "reach 5 ft., one creature."
+                                        ),
+                                    }
+                                ]
+                            }
+                        }
+                        if embedded_text
+                        else {}
+                    ),
                 },
                 "idempotency_key": "recover-agent-named-slot",
             },
@@ -2116,6 +2137,46 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
         assert agent_named["result"]["review"]["derived_from_review_id"] == result[
             "review"
         ]["id"]
+        if embedded_text:
+            assert agent_named["result"]["recovery"]["evidence"][
+                "reviewed_ocr_corrections"
+            ] == {
+                "text_replacements": [
+                    {
+                        "old": (
+                            "Club. Melee Weapon Attack: +2 to hit, reach 5 ft., "
+                            "one target."
+                        ),
+                        "new": (
+                            "Club. Melee Weapon Attack: +2 to hit, reach 5 ft., "
+                            "one creature."
+                        ),
+                    }
+                ]
+            }
+            with pytest.raises(Exception, match="not corroborated by the staged page"):
+                await server.call_tool(
+                    "rule_import",
+                    {
+                        "campaign_id": campaign["id"],
+                        "action": "recover_statblock",
+                        "payload": {
+                            "job_id": job_id,
+                            "name": "Invented Commoner",
+                            "page_number": 1,
+                            "statblock_slot": 1,
+                            "ocr_corrections": {
+                                "text_replacements": [
+                                    {
+                                        "old": "Hit: 2 (1d4) bludgeoning damage.",
+                                        "new": "Hit: 99 force damage.",
+                                    }
+                                ]
+                            },
+                        },
+                        "idempotency_key": "reject-invented-ocr-correction",
+                    },
+                )
         if embedded_text:
             with pytest.raises(Exception, match="unsupported .* payload fields"):
                 await server.call_tool(

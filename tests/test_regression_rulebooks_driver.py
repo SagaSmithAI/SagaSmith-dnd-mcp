@@ -91,7 +91,15 @@ def test_agent_statblock_slot_reviews_replay_bounded_ocr_corrections() -> None:
                         "statblock_slot": 2,
                         "name": "Nalfeshnee",
                         "expected_identity": "Large fiend (demon), chaotic evil",
-                        "ocr_corrections": {"abilities": {"str": "21 (+5)"}},
+                        "ocr_corrections": {
+                            "abilities": {"str": "21 (+5)"},
+                            "text_replacements": [
+                                {
+                                    "old": "ii g",
+                                    "new": "Hit: 2 (1d4) piercing damage.",
+                                }
+                            ],
+                        },
                         "note": "Agent identified the creature from its actions and page context.",
                     }
                 ]
@@ -111,7 +119,12 @@ def test_agent_statblock_slot_reviews_replay_bounded_ocr_corrections() -> None:
         "name": "Nalfeshnee",
         "page_number": 63,
         "statblock_slot": 2,
-        "ocr_corrections": {"abilities": {"str": "21 (+5)"}},
+        "ocr_corrections": {
+            "abilities": {"str": "21 (+5)"},
+            "text_replacements": [
+                {"old": "ii g", "new": "Hit: 2 (1d4) piercing damage."}
+            ],
+        },
     }
     normalized_spec = driver._statblock_slot_review_specs(
         {
@@ -121,7 +134,15 @@ def test_agent_statblock_slot_reviews_replay_bounded_ocr_corrections() -> None:
                     "statblock_slot": 2,
                     "name": "Nalfeshnee",
                     "expected_identity": "Large fiend (demon), chaotic evil",
-                    "ocr_corrections": {"abilities": {"str": "21 (+5)"}},
+                    "ocr_corrections": {
+                        "abilities": {"str": "21 (+5)"},
+                        "text_replacements": [
+                            {
+                                "old": "ii g",
+                                "new": "Hit: 2 (1d4) piercing damage.",
+                            }
+                        ],
+                    },
                     "note": (
                         "Agent identified the creature from its actions and page context."
                     ),
@@ -189,6 +210,24 @@ def test_agent_statblock_slot_manifest_rejects_duplicate_or_unbounded_slots() ->
                         "statblock_slot": 1,
                         "name": "Invalid",
                         "ocr_corrections": {"abilities": {"luck": "20 (+5)"}},
+                    }
+                ]
+            }
+        )
+    with pytest.raises(ValueError, match="duplicate OCR text replacement"):
+        driver._statblock_slot_review_specs(
+            {
+                "statblock_slot_reviews": [
+                    {
+                        "page_number": 1,
+                        "statblock_slot": 1,
+                        "name": "Invalid",
+                        "ocr_corrections": {
+                            "text_replacements": [
+                                {"old": "noise", "new": "first repair"},
+                                {"old": "NOISE", "new": "second repair"},
+                            ]
+                        },
                     }
                 ]
             }

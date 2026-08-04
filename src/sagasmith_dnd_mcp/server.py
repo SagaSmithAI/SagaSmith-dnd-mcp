@@ -37877,6 +37877,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             reviewed_ability_scores=dict(ocr_corrections or {}).get(
                                 "abilities"
                             ),
+                            reviewed_text_replacements=dict(
+                                ocr_corrections or {}
+                            ).get("text_replacements"),
                         )
                     except StatblockImportError:
                         continue
@@ -37994,6 +37997,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             reviewed_ability_scores=dict(ocr_corrections or {}).get(
                                 "abilities"
                             ),
+                            reviewed_text_replacements=dict(
+                                ocr_corrections or {}
+                            ).get("text_replacements"),
                         )
                     except StatblockImportError as exc:
                         secondary_failures.append(f"{label}: {exc}")
@@ -38136,18 +38142,25 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         normalized_ocr_corrections: dict[str, Any] | None = None
         if ocr_corrections is not None:
-            if not isinstance(ocr_corrections, dict) or set(ocr_corrections) != {
-                "abilities"
-            }:
-                raise ValueError("ocr_corrections supports only an abilities object")
+            allowed_corrections = {"abilities", "text_replacements"}
+            if (
+                not isinstance(ocr_corrections, dict)
+                or not ocr_corrections
+                or set(ocr_corrections) - allowed_corrections
+            ):
+                raise ValueError(
+                    "ocr_corrections supports only abilities and text_replacements"
+                )
             abilities = ocr_corrections.get("abilities")
-            if not isinstance(abilities, dict) or not abilities:
+            if abilities is not None and (
+                not isinstance(abilities, dict) or not abilities
+            ):
                 raise ValueError("ocr_corrections.abilities must be a non-empty object")
             normalized_abilities: dict[str, str] = {}
             page_fact_key = _ocr_fact_key(
                 extract_pdf_page_text(source_path, int(page_number))
             )
-            for raw_ability, raw_value in abilities.items():
+            for raw_ability, raw_value in dict(abilities or {}).items():
                 ability = str(raw_ability or "").strip().lower()
                 value = " ".join(str(raw_value or "").split())
                 if ability not in {"str", "dex", "con", "int", "wis", "cha"}:
@@ -38162,7 +38175,63 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         f"staged page text: {ability}={value}"
                     )
                 normalized_abilities[ability] = value
-            normalized_ocr_corrections = {"abilities": normalized_abilities}
+            text_replacements = ocr_corrections.get("text_replacements")
+            if text_replacements is not None and (
+                not isinstance(text_replacements, list)
+                or not text_replacements
+                or len(text_replacements) > 20
+            ):
+                raise ValueError(
+                    "ocr_corrections.text_replacements must contain 1 to 20 entries"
+                )
+            normalized_text_replacements: list[dict[str, str]] = []
+            seen_old: set[str] = set()
+            for index, raw_replacement in enumerate(text_replacements or []):
+                if not isinstance(raw_replacement, dict) or set(raw_replacement) != {
+                    "old",
+                    "new",
+                }:
+                    raise ValueError(
+                        "ocr_corrections.text_replacements entries require only old and new"
+                    )
+                old = " ".join(str(raw_replacement.get("old") or "").split())
+                new = " ".join(str(raw_replacement.get("new") or "").split())
+                if (
+                    not old
+                    or not new
+                    or old == new
+                    or len(old) > 500
+                    or len(new) > 2000
+                ):
+                    raise ValueError(
+                        "ocr_corrections text replacement is empty, unchanged, or too long"
+                    )
+                old_key = old.casefold()
+                if old_key in seen_old:
+                    raise ValueError(
+                        "ocr_corrections text replacements require unique old text"
+                    )
+                if _ocr_fact_key(new) not in page_fact_key:
+                    raise ValueError(
+                        "ocr_corrections replacement is not corroborated by the staged "
+                        f"page text at index {index}"
+                    )
+                seen_old.add(old_key)
+                normalized_text_replacements.append({"old": old, "new": new})
+            normalized_ocr_corrections = {
+                **(
+                    {"abilities": normalized_abilities}
+                    if normalized_abilities
+                    else {}
+                ),
+                **(
+                    {"text_replacements": normalized_text_replacements}
+                    if normalized_text_replacements
+                    else {}
+                ),
+            }
+            if not normalized_ocr_corrections:
+                raise ValueError("ocr_corrections must contain a non-empty correction")
         provider = storage.rule_ocr_provider()
         if provider is None or not hasattr(provider, "extract_layout"):
             raise RuntimeError("layout OCR recovery requires the configured RapidOCR provider")
