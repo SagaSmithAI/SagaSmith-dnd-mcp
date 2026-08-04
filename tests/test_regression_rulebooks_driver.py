@@ -798,7 +798,7 @@ def test_portable_receiver_enables_exact_core_dependency() -> None:
     )
 
 
-def test_parameterized_statblock_skips_visual_ocr_recovery() -> None:
+def test_only_parse_ready_parameterized_statblock_skips_visual_ocr_recovery() -> None:
     candidates = [
         {
             "id": "homunculus",
@@ -823,6 +823,24 @@ def test_parameterized_statblock_skips_visual_ocr_recovery() -> None:
         }
     ]
 
+    assert driver._statblock_recovery_needed(candidates, chunks) is True
+    candidates[0]["artifact"]["card"]["normalized_content"] = (
+        "# Alchemical Homunculus\n\n"
+        "*Tiny construct, neutral*\n\n"
+        "**Armor Class** 13 (natural armor)\n"
+        "**Hit Points** equal to five times your level in this class + your "
+        "Intelligence modifier\n"
+        "**Speed** 20 ft., fly 30 ft.\n\n"
+        "| STR | DEX | CON | INT | WIS | CHA |\n"
+        "|---:|---:|---:|---:|---:|---:|\n"
+        "| 4 (-3) | 15 (+2) | 12 (+1) | 10 (+0) | 10 (+0) | 7 (-2) |\n\n"
+        "**Senses** darkvision 60 ft., passive Perception 10\n"
+        "**Languages** understands the languages you speak\n"
+        "**Challenge** —\n\n"
+        "## Actions\n\n"
+        "***Force Strike.*** *Ranged Weapon Attack:* your spell attack modifier "
+        "to hit, range 30 ft., one target. *Hit:* 1d4 + PB force damage."
+    )
     assert driver._statblock_recovery_needed(candidates, chunks) is False
     assert driver._statblock_recovery_needed([], chunks) is True
     assert driver._statblock_recovery_needed(

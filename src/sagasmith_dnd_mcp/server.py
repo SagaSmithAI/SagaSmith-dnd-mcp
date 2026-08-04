@@ -14003,12 +14003,24 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "review required"
                     )
                 elif role in {"critic", "dm"}:
-                    if not has_primary or current_review.get("status") != "needs_review":
+                    if current_review.get("status") == "approved":
+                        if review_decision not in prior_decisions:
+                            raise ValueError(
+                                f"candidate {candidate.get('id')} is already approved by "
+                                "a different independent review"
+                            )
+                        # An exact idempotent retry can arrive after the first
+                        # request already advanced the durable candidate. Build
+                        # the same normalized payload so the stored response can
+                        # replay instead of treating the newer state as a new
+                        # critic attempt.
+                        decision["artifact"] = current_artifact
+                    elif not has_primary or current_review.get("status") != "needs_review":
                         raise ValueError(
                             f"candidate {candidate.get('id')} needs a primary catalog "
                             "review before independent approval"
                         )
-                    if "artifact" in decision:
+                    elif "artifact" in decision:
                         submitted = decision["artifact"]
                         if not isinstance(submitted, dict):
                             raise ValueError("candidate artifact must be an object")
@@ -14022,16 +14034,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             raise ValueError(
                                 "independent review must not replace review contracts"
                             )
-                    artifact = deepcopy(current_artifact)
-                    artifact["catalog_review"] = build_catalog_review(
-                        artifact,
-                        decisions=[*prior_decisions, review_decision],
-                        status="approved",
-                    )
-                    contract_errors = selection_contract_errors(artifact)
-                    if contract_errors:
-                        raise ValueError("; ".join(contract_errors))
-                    decision["artifact"] = artifact
+                    if current_review.get("status") != "approved":
+                        artifact = deepcopy(current_artifact)
+                        artifact["catalog_review"] = build_catalog_review(
+                            artifact,
+                            decisions=[*prior_decisions, review_decision],
+                            status="approved",
+                        )
+                        contract_errors = selection_contract_errors(artifact)
+                        if contract_errors:
+                            raise ValueError("; ".join(contract_errors))
+                        decision["artifact"] = artifact
                 else:
                     raise ValueError(
                         "catalog_review_decision.role must be primary, critic, or dm"
@@ -48351,9 +48364,30 @@ Useful bounded guidance:
                     )
                 template_requirement = card.get("dependent_actor_template")
                 if not isinstance(template_requirement, dict):
-                    template_requirement = parameterized_statblock_requirements(
-                        source_text or raw_template_source
+                    inferred_template_source = source_text or raw_template_source
+                    inferred_requirement = parameterized_statblock_requirements(
+                        inferred_template_source
                     )
+                    if (
+                        isinstance(inferred_requirement, dict)
+                        and not dependent_actor_template_solution_errors(
+                            inferred_requirement
+                        )
+                    ):
+                        try:
+                            parse_2014_statblock_template_preview(
+                                inferred_template_source,
+                                source_key=(
+                                    "dependent-template-preview:"
+                                    f"{artifact.get('id') or card.get('name') or 'catalog'}"
+                                ),
+                                rule_refs=[],
+                                name=str(card.get("name") or "").strip() or None,
+                            )
+                        except (StatblockImportError, ValueError):
+                            pass
+                        else:
+                            template_requirement = inferred_requirement
                 if isinstance(template_requirement, dict):
                     template_source = source_text or raw_template_source
                     if not template_source:
@@ -48364,15 +48398,20 @@ Useful bounded guidance:
                             }
                         )
                         continue
-                    append_dependent_template(
-                        name=str(card.get("name") or artifact.get("id") or ""),
-                        source_text=template_source,
-                        source_refs=[
-                            f"rule-pack:{pack_id}@{version}#artifact:{artifact['id']}"
-                        ],
-                        requirement=template_requirement,
-                        artifact_id=str(artifact.get("id") or ""),
-                    )
+                    try:
+                        append_dependent_template(
+                            name=str(card.get("name") or artifact.get("id") or ""),
+                            source_text=template_source,
+                            source_refs=[
+                                f"rule-pack:{pack_id}@{version}#artifact:{artifact['id']}"
+                            ],
+                            requirement=template_requirement,
+                            artifact_id=str(artifact.get("id") or ""),
+                        )
+                    except (StatblockImportError, ValueError) as error:
+                        failures.append(
+                            {"artifact_id": artifact.get("id"), "error": str(error)}
+                        )
                     continue
                 indexed_source_text = ""
                 if indexed_source_chunks:

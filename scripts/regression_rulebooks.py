@@ -30,8 +30,10 @@ from sagasmith_dnd.core_content_2024 import (
 from sagasmith_dnd.editions import SUPPORTED_DND_EDITIONS
 from sagasmith_dnd.statblocks import (
     StatblockImportError,
+    dependent_actor_template_solution_errors,
     parameterized_statblock_requirements,
     parse_2014_statblock,
+    parse_2014_statblock_template_preview,
 )
 
 from sagasmith_dnd_mcp.config import McpConfig
@@ -1183,7 +1185,19 @@ def _statblock_recovery_needed(
         probe = normalized or (
             f"# {str(candidate.get('name') or '').strip()}\n\n{raw_source}" if raw_source else ""
         )
-        if parameterized_statblock_requirements(probe) is not None:
+        template_requirement = parameterized_statblock_requirements(probe)
+        if template_requirement is not None:
+            if dependent_actor_template_solution_errors(template_requirement):
+                return True
+            try:
+                parse_2014_statblock_template_preview(
+                    probe,
+                    source_key=str(candidate.get("id") or "regression-template"),
+                    rule_refs=[],
+                    name=str(candidate.get("name") or "").strip() or None,
+                )
+            except (StatblockImportError, ValueError):
+                return True
             continue
         if not normalized:
             return True

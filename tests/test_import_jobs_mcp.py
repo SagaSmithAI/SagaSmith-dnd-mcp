@@ -2378,28 +2378,26 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
                     "idempotency_key": "rule-job-review-same-critic",
                 },
             )
-        reviewed = await call(
-            server,
-            "rule_import",
-            {
-                "campaign_id": campaign["id"],
-                "action": "review",
-                "payload": {
-                    "job_id": rule_job_id,
-                    "decisions": [
-                        {
-                            "id": spark["id"],
-                            "review_status": "accepted",
-                            "catalog_review_decision": _catalog_review_decision(
-                                "critic", "agent:critic"
-                            ),
-                        }
-                    ],
-                },
-                "idempotency_key": "rule-job-review-critic",
+        critic_arguments = {
+            "campaign_id": campaign["id"],
+            "action": "review",
+            "payload": {
+                "job_id": rule_job_id,
+                "decisions": [
+                    {
+                        "id": spark["id"],
+                        "review_status": "accepted",
+                        "catalog_review_decision": _catalog_review_decision(
+                            "critic", "agent:critic"
+                        ),
+                    }
+                ],
             },
-        )
+            "idempotency_key": "rule-job-review-critic",
+        }
+        reviewed = await call(server, "rule_import", critic_arguments)
         assert reviewed["job"]["state"] == "reviewed"
+        assert await call(server, "rule_import", critic_arguments) == reviewed
         compile_arguments = {
             "campaign_id": campaign["id"],
             "job_id": rule_job_id,
