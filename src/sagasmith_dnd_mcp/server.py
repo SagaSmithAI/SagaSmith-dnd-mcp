@@ -856,6 +856,9 @@ SUPPORTED_FEATURE_SELECTION_REQUIREMENT_FIELDS = frozenset(
         "eligible_classes",
         "field",
         "grants_skill_proficiency",
+        "grants_language_proficiency",
+        "grants_tool_proficiency",
+        "grants_weapon_proficiency",
         "grant_method",
         "humanoid_race_count",
         "kind",
@@ -1834,6 +1837,36 @@ def _validated_additive_choices(
         selected = [option_map[item.casefold()] for item in selected]
     combined = [*fixed_values, *selected]
     return selected, combined
+
+
+def _validate_group_limited_choices(
+    selected: list[str], *, groups: Any, label: str
+) -> None:
+    """Enforce reviewed category caps without weakening the flat option list."""
+
+    if not isinstance(groups, list):
+        raise RulesetUnavailableError(f"{label} option groups are not executable")
+    selected_keys = [item.casefold() for item in selected]
+    covered: set[str] = set()
+    for raw_group in groups:
+        if not isinstance(raw_group, dict):
+            raise RulesetUnavailableError(f"{label} option group is not executable")
+        group_options = {
+            str(item).strip().casefold()
+            for item in raw_group.get("options", [])
+            if str(item).strip()
+        }
+        maximum = int(raw_group.get("maximum", 0) or 0)
+        if sum(item in group_options for item in selected_keys) > maximum:
+            raise ValueError(
+                f"{label} choices exceed the reviewed group limit: "
+                f"{raw_group.get('id') or 'group'}"
+            )
+        covered.update(group_options)
+    if any(item not in covered for item in selected_keys):
+        raise RulesetUnavailableError(
+            f"{label} option groups do not cover a selected option"
+        )
 
 
 def _validated_species_ability_choices(
@@ -40590,6 +40623,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     ),
                     "tool_choice_count": tool_choice_count,
                     "tool_options": list(choices.get("tool_options") or []),
+                    "tool_option_groups": deepcopy(
+                        list(choices.get("tool_option_groups") or [])
+                    ),
                     "fixed_tools": list(grants.get("tools") or []),
                     "fixed_equipment": deepcopy(dict(grants.get("equipment") or {})),
                     "equipment_package_options": sorted(equipment_packages),
@@ -42193,6 +42229,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 fixed=grants.get("tools") or [],
                 options=requirements.get("tool_options") or [],
             )
+            raw_tool_groups = requirements.get("tool_option_groups") or []
+            if raw_tool_groups:
+                _validate_group_limited_choices(
+                    selected_tools,
+                    groups=raw_tool_groups,
+                    label="background tool",
+                )
             selected_skill_choices: list[str] = []
             if custom_name:
                 if not isinstance(custom_skills_raw, list):
@@ -44162,6 +44205,35 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                                         "feature proficiency choice must be an untrained skill"
                                     )
                                 skill["proficiency"] = "proficient"
+                        for flag, target_values, label in (
+                            (
+                                "grants_language_proficiency",
+                                sheet["traits"]["languages"],
+                                "language",
+                            ),
+                            (
+                                "grants_tool_proficiency",
+                                sheet["traits"]["proficiencies"]["tools"],
+                                "tool",
+                            ),
+                            (
+                                "grants_weapon_proficiency",
+                                sheet["traits"]["proficiencies"]["weapons"],
+                                "weapon",
+                            ),
+                        ):
+                            if not requirements.get(flag):
+                                continue
+                            known_values = {
+                                str(item).casefold() for item in target_values
+                            }
+                            for item in selected_values:
+                                if item.casefold() in known_values:
+                                    raise ValueError(
+                                        f"feature {label} choice is already proficient"
+                                    )
+                                target_values.append(item)
+                                known_values.add(item.casefold())
                 mechanical_grants = dict(card.get("mechanical_grants") or {})
                 unsupported_grants = set(mechanical_grants) - SUPPORTED_FEATURE_MECHANICAL_GRANTS
                 if unsupported_grants:

@@ -12,6 +12,7 @@ from sagasmith_dnd.statblocks import parameterized_statblock_requirements
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import (
     _character_spell_card,
+    _validate_group_limited_choices,
     _validated_additive_choices,
     _validated_narrative_choices,
     _validated_species_ability_choices,
@@ -79,6 +80,20 @@ def test_background_additive_choices_preserve_fixed_and_enforce_bounds() -> None
             label="background language",
             fixed=["Common"],
             options=["Goblin", "Vedalken"],
+        )
+
+
+def test_background_group_limits_reject_two_choices_from_one_category() -> None:
+    groups = [
+        {"id": "gaming", "maximum": 1, "options": ["Dice", "Dragonchess"]},
+        {"id": "instrument", "maximum": 1, "options": ["Lute"]},
+    ]
+    _validate_group_limited_choices(
+        ["Dice", "Lute"], groups=groups, label="background tool"
+    )
+    with pytest.raises(ValueError, match="reviewed group limit: gaming"):
+        _validate_group_limited_choices(
+            ["Dice", "Dragonchess"], groups=groups, label="background tool"
         )
     with pytest.raises(ValueError, match="cannot duplicate a fixed grant"):
         _validated_additive_choices(
