@@ -16,9 +16,7 @@ class _FakeServer:
         self.responses = list(responses)
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
-    async def call_tool(
-        self, name: str, arguments: dict[str, Any]
-    ) -> tuple[None, dict[str, Any]]:
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> tuple[None, dict[str, Any]]:
         self.calls.append((name, arguments))
         expected_name, response = self.responses.pop(0)
         assert name == expected_name
@@ -121,10 +119,9 @@ def test_agent_statblock_slot_reviews_replay_bounded_ocr_corrections() -> None:
         "statblock_slot": 2,
         "ocr_corrections": {
             "abilities": {"str": "21 (+5)"},
-            "text_replacements": [
-                {"old": "ii g", "new": "Hit: 2 (1d4) piercing damage."}
-            ],
+            "text_replacements": [{"old": "ii g", "new": "Hit: 2 (1d4) piercing damage."}],
         },
+        "correction_evidence_basis": "staged_text",
     }
     normalized_spec = driver._statblock_slot_review_specs(
         {
@@ -143,9 +140,7 @@ def test_agent_statblock_slot_reviews_replay_bounded_ocr_corrections() -> None:
                             }
                         ],
                     },
-                    "note": (
-                        "Agent identified the creature from its actions and page context."
-                    ),
+                    "note": ("Agent identified the creature from its actions and page context."),
                 }
             ]
         }
@@ -183,6 +178,67 @@ def test_agent_statblock_slot_token_is_local_to_one_correction() -> None:
     )
 
 
+def test_agent_statblock_slot_review_binds_rendered_page_corrections() -> None:
+    checksum = "b" * 64
+    server = _FakeServer(
+        [
+            ("rule_import", {"image_checksum": checksum, "transcription": {}}),
+            (
+                "rule_import",
+                {
+                    "result": {
+                        "job": {"revision": 8},
+                        "recovery": {
+                            "evidence": {
+                                "heading_match_mode": "agent_named_structural_slot",
+                                "statblock_slot_summary": {
+                                    "slot": 1,
+                                    "identity": "Large fiend (devil), lawful evil",
+                                },
+                            }
+                        },
+                        "review": {
+                            "id": "review-rendered",
+                            "derived_from_review_id": None,
+                            "source_checksum": "source",
+                            "image_checksum": checksum,
+                            "normalized_content_sha256": "content",
+                        },
+                    }
+                },
+            ),
+        ]
+    )
+
+    result = asyncio.run(
+        driver._apply_statblock_slot_reviews(
+            server,
+            campaign_id="campaign-1",
+            job_id="job-1",
+            review_spec={
+                "statblock_slot_reviews": [
+                    {
+                        "page_number": 170,
+                        "statblock_slot": 1,
+                        "name": "Orthon",
+                        "expected_identity": "Large fiend (devil), lawful evil",
+                        "ocr_corrections": {"abilities": {"con": "21 (+5)"}},
+                        "correction_evidence_basis": "rendered_page",
+                        "rendered_image_checksum": checksum,
+                    }
+                ]
+            },
+            id_key="rendered-review",
+        )
+    )
+
+    assert result is not None
+    assert result["job_revision"] == 8
+    assert server.calls[0][1]["action"] == "render_page"
+    assert server.calls[1][1]["payload"]["correction_evidence_basis"] == "rendered_page"
+    assert server.calls[1][1]["payload"]["rendered_image_checksum"] == checksum
+
+
 def test_agent_statblock_slot_manifest_rejects_duplicate_or_unbounded_slots() -> None:
     with pytest.raises(ValueError, match="unique page slots"):
         driver._statblock_slot_review_specs(
@@ -195,11 +251,7 @@ def test_agent_statblock_slot_manifest_rejects_duplicate_or_unbounded_slots() ->
         )
     with pytest.raises(ValueError, match="positive page/slot"):
         driver._statblock_slot_review_specs(
-            {
-                "statblock_slot_reviews": [
-                    {"page_number": 1, "statblock_slot": 0, "name": "Invalid"}
-                ]
-            }
+            {"statblock_slot_reviews": [{"page_number": 1, "statblock_slot": 0, "name": "Invalid"}]}
         )
     with pytest.raises(ValueError, match="unknown ability"):
         driver._statblock_slot_review_specs(
@@ -232,9 +284,37 @@ def test_agent_statblock_slot_manifest_rejects_duplicate_or_unbounded_slots() ->
                 ]
             }
         )
+    with pytest.raises(ValueError, match="rendered_page evidence requires"):
+        driver._statblock_slot_review_specs(
+            {
+                "statblock_slot_reviews": [
+                    {
+                        "page_number": 1,
+                        "statblock_slot": 1,
+                        "name": "Invalid",
+                        "ocr_corrections": {"abilities": {"str": "20 (+5)"}},
+                        "correction_evidence_basis": "rendered_page",
+                    }
+                ]
+            }
+        )
+    with pytest.raises(ValueError, match="checksum requires rendered_page"):
+        driver._statblock_slot_review_specs(
+            {
+                "statblock_slot_reviews": [
+                    {
+                        "page_number": 1,
+                        "statblock_slot": 1,
+                        "name": "Invalid",
+                        "ocr_corrections": {"abilities": {"str": "20 (+5)"}},
+                        "rendered_image_checksum": "a" * 64,
+                    }
+                ]
+            }
+        )
 
 
-def test_agent_transcription_reviews_replay_before_rulebook_ingest() -> None:
+def test_agent_transcription_reviews_allow_idempotent_replay_after_page_changed() -> None:
     base_hash = "a" * 64
     server = _FakeServer(
         [
@@ -242,9 +322,7 @@ def test_agent_transcription_reviews_replay_before_rulebook_ingest() -> None:
                 "rule_import",
                 {
                     "image_checksum": "b" * 64,
-                    "transcription": {
-                        "normalized": {"text_sha256": base_hash}
-                    },
+                    "transcription": {"normalized": {"text_sha256": "c" * 64}},
                 },
             ),
             (
@@ -354,11 +432,7 @@ def test_dependency_addons_require_exact_review_selection(tmp_path) -> None:
 
     available = driver._load_dependency_addons([path])
     selected = driver._selected_dependency_addons(
-        {
-            "dependency_addons": [
-                {"id": package["id"], "version": package["version"]}
-            ]
-        },
+        {"dependency_addons": [{"id": package["id"], "version": package["version"]}]},
         available,
     )
 
@@ -366,11 +440,7 @@ def test_dependency_addons_require_exact_review_selection(tmp_path) -> None:
     assert driver._dependency_rule_components(selected) == [component]
     with pytest.raises(ValueError, match="was not supplied"):
         driver._selected_dependency_addons(
-            {
-                "dependency_addons": [
-                    {"id": "missing.addon", "version": "1.0.0"}
-                ]
-            },
+            {"dependency_addons": [{"id": "missing.addon", "version": "1.0.0"}]},
             available,
         )
 
@@ -419,11 +489,7 @@ def test_actor_name_gate_requires_the_exact_reviewed_multiset() -> None:
         )
     reviewed_names = '["cackler","sire of insanity"]'
     driver._require_expected_actor_names(
-        {
-            "expected_actor_names_sha256": hashlib.sha256(
-                reviewed_names.encode("utf-8")
-            ).hexdigest()
-        },
+        {"expected_actor_names_sha256": hashlib.sha256(reviewed_names.encode("utf-8")).hexdigest()},
         package,
     )
     with pytest.raises(RuntimeError, match="name manifest checksum differs"):
@@ -431,6 +497,46 @@ def test_actor_name_gate_requires_the_exact_reviewed_multiset() -> None:
             {"expected_actor_names_sha256": "0" * 64},
             package,
         )
+
+
+def test_actor_card_gate_rejects_source_boundary_leaks() -> None:
+    source_text = "# Tiny Servant\n\n***Slam.*** Hit: 5 bludgeoning damage."
+    package = {
+        "package": {
+            "payload": {
+                "cards": [
+                    {
+                        "payload": {
+                            "name": "Tiny Servant",
+                            "sheet": {
+                                "inventory": {"items": [{"name": "Slam"}]},
+                                "content": {"activities": []},
+                            },
+                            "provenance": {"source_text": source_text},
+                        }
+                    }
+                ]
+            }
+        }
+    }
+    contract = {
+        "expected_actor_cards": [
+            {
+                "name": "TINY SERVANT",
+                "source_text_sha256": hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+                "inventory_item_names": ["Slam"],
+                "activity_names": [],
+                "forbidden_text": ["At Higher Levels"],
+            }
+        ]
+    }
+
+    driver._require_expected_actor_cards(contract, package)
+    package["package"]["payload"]["cards"][0]["payload"]["sheet"]["content"]["activities"] = [
+        {"name": "At Higher Levels"}
+    ]
+    with pytest.raises(RuntimeError, match="activities differ"):
+        driver._require_expected_actor_cards(contract, package)
 
 
 def test_publication_metadata_marks_only_core_dependencies_as_standard() -> None:
@@ -442,9 +548,10 @@ def test_publication_metadata_marks_only_core_dependencies_as_standard() -> None
         "mm2014",
         "core",
     )
-    assert driver._publication_metadata(
-        "D&D 5E - Xanathar's Guide to Everything.pdf"
-    ) == ("xgte2014", "supplement")
+    assert driver._publication_metadata("D&D 5E - Xanathar's Guide to Everything.pdf") == (
+        "xgte2014",
+        "supplement",
+    )
     assert driver._core_content_dependency("2014") == {
         "id": "dnd5e.content.srd2014",
         "version": "1.20.0",
@@ -501,9 +608,7 @@ def test_large_catalog_augmentation_uses_revisioned_public_batches() -> None:
                     "result": {
                         "job": {"revision": revision},
                         "candidates": [{"id": f"candidate-{revision}"}],
-                        "added_candidate_ids": [
-                            f"added-{index}" for index in range(start, end)
-                        ],
+                        "added_candidate_ids": [f"added-{index}" for index in range(start, end)],
                     }
                 },
             )
@@ -576,9 +681,7 @@ def test_catalog_manifest_resolves_stable_sources_and_review_actions(tmp_path) -
                                 },
                             },
                         ],
-                        "expected_catalog": [
-                            {"kind": "subclass", "name": "Gunsmith"}
-                        ],
+                        "expected_catalog": [{"kind": "subclass", "name": "Gunsmith"}],
                         "expected_counts": {"subclass": 1},
                     }
                 },
@@ -721,6 +824,50 @@ def test_catalog_review_recovers_bounded_ocr_spacing_in_identity() -> None:
     assert decisions[0]["artifact"]["card"]["name"] == "Boots of False Tracks"
 
 
+def test_catalog_statblock_boundary_patch_refreshes_exact_review_evidence() -> None:
+    original = "# Tiny Servant\n\n***Slam.*** Hit: 5 damage. Narrative leak."
+    repaired = "# Tiny Servant\n\n***Slam.*** Hit: 5 damage."
+    decisions = driver._review_spec_decisions(
+        [
+            {
+                "id": "tiny-servant",
+                "kind": "statblock",
+                "name": "Tiny Servant",
+                "artifact": {
+                    "kind": "statblock",
+                    "card": {
+                        "name": "Tiny Servant",
+                        "normalized_content": original,
+                        "review_evidence": {
+                            "normalized_content_sha256": hashlib.sha256(
+                                original.encode("utf-8")
+                            ).hexdigest()
+                        },
+                    },
+                },
+            }
+        ],
+        {
+            "decisions": [
+                {
+                    "kind": "statblock",
+                    "name": "Tiny Servant",
+                    "artifact_patch": {"card": {"normalized_content": repaired}},
+                }
+            ]
+        },
+        reviewer="agent:catalog",
+        method="agent",
+    )
+
+    card = decisions[0]["artifact"]["card"]
+    assert card["normalized_content"] == repaired
+    assert (
+        card["review_evidence"]["normalized_content_sha256"]
+        == hashlib.sha256(repaired.encode("utf-8")).hexdigest()
+    )
+
+
 def test_catalog_manifest_can_accept_only_fully_reviewed_content_kinds() -> None:
     candidates = [
         {
@@ -803,6 +950,61 @@ def test_catalog_manifest_rejects_ambiguous_source_selectors() -> None:
             ],
             relative_path="Artificer.pdf",
         )
+    with pytest.raises(ValueError, match="replacement 0 is invalid"):
+        driver._transcription_review_specs(
+            {
+                "text_reviews": [
+                    {
+                        "page_number": 1,
+                        "base_text_sha256": "a" * 64,
+                        "replacements": [{"old": "", "new": "Recovered page"}],
+                        "rationale": "Agent attempts an unbound whole-page recovery.",
+                        "evidence_basis": "agent_context",
+                    }
+                ]
+            }
+        )
+
+
+def test_transcription_review_manifest_allows_rendered_empty_page_recovery() -> None:
+    review = driver._transcription_review_specs(
+        {
+            "text_reviews": [
+                {
+                    "page_number": 3,
+                    "base_text_sha256": "a" * 64,
+                    "replacements": [{"old": "", "new": "# CLASS FEATURES"}],
+                    "rationale": "Agent restores a wholly missed page from its rendered image.",
+                    "evidence_basis": "rendered_page",
+                    "rendered_image_checksum": "b" * 64,
+                }
+            ]
+        }
+    )[0]
+
+    assert review["replacements"] == [{"old": "", "new": "# CLASS FEATURES"}]
+    assert review["evidence_basis"] == "rendered_page"
+
+
+def test_catalog_manifest_rejects_empty_heading_as_source_evidence() -> None:
+    with pytest.raises(ValueError, match="heading with no indexed text"):
+        driver._resolve_catalog_additions(
+            [
+                {
+                    "kind": "species",
+                    "name": "Mark of Making",
+                    "source_selectors": [{"heading_exact": "VARIANT HUMAN: MARK OF MAKING"}],
+                }
+            ],
+            [
+                {
+                    "id": "decorative-heading",
+                    "heading_path": ["VARIANT HUMAN: MARK OF MAKING"],
+                    "content": "",
+                }
+            ],
+            relative_path="Eberron.pdf",
+        )
 
 
 def test_catalog_manifest_can_bind_one_entry_to_all_matching_source_chunks() -> None:
@@ -811,9 +1013,7 @@ def test_catalog_manifest_can_bind_one_entry_to_all_matching_source_chunks() -> 
             {
                 "kind": "subclass",
                 "name": "Order of the Mutant",
-                "source_selectors": [
-                    {"heading_exact": "ORDER OF THE MUTANT", "match_all": True}
-                ],
+                "source_selectors": [{"heading_exact": "ORDER OF THE MUTANT", "match_all": True}],
             }
         ],
         [
@@ -834,9 +1034,10 @@ def test_catalog_manifest_can_bind_one_entry_to_all_matching_source_chunks() -> 
     )
 
     assert additions[0]["source_chunk_ids"] == ["heading", "continuation"]
-    assert [
-        span["source_chunk_id"] for span in additions[0]["source_spans"]
-    ] == ["heading", "continuation"]
+    assert [span["source_chunk_id"] for span in additions[0]["source_spans"]] == [
+        "heading",
+        "continuation",
+    ]
 
 
 def test_catalog_additions_replace_only_one_exact_extracted_identity() -> None:
@@ -924,9 +1125,7 @@ def test_runtime_probe_expectations_support_nested_and_named_content() -> None:
         {
             "sheet": {
                 "combat": {"speed": {"swim": 30}},
-                "content": {
-                    "spells": [{"name": "Gust"}, {"name": "Gust of Wind"}]
-                },
+                "content": {"spells": [{"name": "GUST"}, {"name": "Gust of Wind"}]},
             }
         },
         [
@@ -940,15 +1139,26 @@ def test_runtime_probe_expectations_support_nested_and_named_content() -> None:
     )
 
 
+def test_runtime_probe_artifact_identity_ignores_source_display_case() -> None:
+    assert driver._runtime_probe_artifact_matches(
+        {"kind": "item", "card": {"name": "CLOCKWORK AMULET"}},
+        kind="Item",
+        name="Clockwork Amulet",
+    )
+    assert not driver._runtime_probe_artifact_matches(
+        {"kind": "item", "card": {"name": "Clockwork Amulet"}},
+        kind="spell",
+        name="Clockwork Amulet",
+    )
+
+
 def test_catalog_manifest_keeps_empty_heading_chunk_as_identity_evidence() -> None:
     additions = driver._resolve_catalog_additions(
         [
             {
                 "kind": "subclass",
                 "name": "Onomancy",
-                "source_selectors": [
-                    {"heading_contains": "Onomancy", "match_all": True}
-                ],
+                "source_selectors": [{"heading_contains": "Onomancy", "match_all": True}],
             }
         ],
         [
@@ -969,9 +1179,7 @@ def test_catalog_manifest_keeps_empty_heading_chunk_as_identity_evidence() -> No
     )
 
     assert additions[0]["source_chunk_ids"] == ["heading", "body"]
-    assert [
-        span["source_chunk_id"] for span in additions[0]["source_spans"]
-    ] == ["body"]
+    assert [span["source_chunk_id"] for span in additions[0]["source_spans"]] == ["body"]
 
 
 def test_portable_receiver_enables_exact_core_dependency() -> None:
@@ -1016,9 +1224,7 @@ def test_portable_receiver_enables_exact_core_dependency() -> None:
         "version": "1.20.0",
     }
     assert server.calls[1][1]["expected_revision"] == 4
-    assert server.calls[1][1]["idempotency_key"].endswith(
-        f"{driver._run_token('reviewed-v2')}-r4"
-    )
+    assert server.calls[1][1]["idempotency_key"].endswith(f"{driver._run_token('reviewed-v2')}-r4")
 
 
 def test_only_parse_ready_parameterized_statblock_skips_visual_ocr_recovery() -> None:
@@ -1066,18 +1272,21 @@ def test_only_parse_ready_parameterized_statblock_skips_visual_ocr_recovery() ->
     )
     assert driver._statblock_recovery_needed(candidates, chunks) is False
     assert driver._statblock_recovery_needed([], chunks) is True
-    assert driver._statblock_recovery_needed(
-        [
-            {
-                "id": "broken",
-                "kind": "statblock",
-                "name": "Broken Creature",
-                "source_chunk_ids": ["broken"],
-                "artifact": {"kind": "statblock", "card": {"name": "Broken"}},
-            }
-        ],
-        [{"id": "broken", "content": "Armor Class unreadable"}],
-    ) is True
+    assert (
+        driver._statblock_recovery_needed(
+            [
+                {
+                    "id": "broken",
+                    "kind": "statblock",
+                    "name": "Broken Creature",
+                    "source_chunk_ids": ["broken"],
+                    "artifact": {"kind": "statblock", "card": {"name": "Broken"}},
+                }
+            ],
+            [{"id": "broken", "content": "Armor Class unreadable"}],
+        )
+        is True
+    )
 
 
 def test_statblock_index_triggers_recovery_for_a_missing_visual_card() -> None:
@@ -1098,10 +1307,7 @@ def test_statblock_index_triggers_recovery_for_a_missing_visual_card() -> None:
             "page_start": 2,
             "page_end": 2,
             "heading_path": ["Index of Statblocks"],
-            "content": (
-                "Alpha ..... 10\nBeta ..... 11\nGamma ..... 12\n"
-                "Missing Horror ..... 13"
-            ),
+            "content": ("Alpha ..... 10\nBeta ..... 11\nGamma ..... 12\nMissing Horror ..... 13"),
         },
         {"id": "last", "page_start": 20, "page_end": 20, "content": ""},
     ]
@@ -1142,6 +1348,96 @@ def test_unclaimed_statblock_core_triggers_recovery_without_a_printed_index() ->
     ]
 
     assert driver._statblock_recovery_needed([candidate], chunks) is True
+
+
+def test_agent_reviewed_statblock_boundary_precedes_visual_ocr_recovery() -> None:
+    source_text = (
+        "Clawfoot Raptor Medium beast, unaligned Armor Class 14 (natural armor) "
+        "Hit Points 16 (3d8 + 3) Speed 50 ft. STR DEX CON INT WIS CHA "
+        "17 (+3) 17 (+3) 13 (+1) 2 (-4) 12 (+1) 10 (+0) "
+        "Challenge 1/2 (100 XP) Actions Claws. Melee Weapon Attack: +5 to hit, "
+        "reach 5 ft., one target. Hit: 10 (2d6 + 3) slashing damage."
+    )
+    normalized = (
+        "# Clawfoot Raptor\n\n"
+        "*Medium beast, unaligned*\n\n"
+        "**Armor Class** 14 (natural armor)\n"
+        "**Hit Points** 16 (3d8 + 3)\n"
+        "**Speed** 50 ft.\n\n"
+        "| STR | DEX | CON | INT | WIS | CHA |\n"
+        "|---:|---:|---:|---:|---:|---:|\n"
+        "| 17 (+3) | 17 (+3) | 13 (+1) | 2 (-4) | 12 (+1) | 10 (+0) |\n\n"
+        "**Senses** passive Perception 11\n"
+        "**Languages** —\n"
+        "**Challenge** 1/2 (100 XP)\n\n"
+        "## Actions\n\n"
+        "***Claws.*** *Melee Weapon Attack:* +5 to hit, reach 5 ft., one target. "
+        "*Hit:* 10 (2d6 + 3) slashing damage."
+    )
+    candidates = [
+        {
+            "id": "broken-layout-card",
+            "kind": "statblock",
+            "name": "CLAWFOOT RAPTOR",
+            "source_chunk_ids": ["clawfoot"],
+            "artifact": {"kind": "statblock", "card": {"name": "CLAWFOOT RAPTOR"}},
+        }
+    ]
+    additions = [
+        {
+            "kind": "statblock",
+            "name": "Clawfoot Raptor",
+            "source_chunk_ids": ["clawfoot"],
+            "source_spans": [],
+            "card": {"name": "Clawfoot Raptor", "normalized_content": normalized},
+        }
+    ]
+    chunks = [
+        {
+            "id": "clawfoot",
+            "page_start": 81,
+            "page_end": 81,
+            "heading_path": ["Clawfoot Raptor"],
+            "content": source_text,
+        }
+    ]
+
+    preferred = driver._prefer_reviewed_statblock_additions(candidates, additions, chunks)
+
+    assert [item["name"] for item in preferred] == ["Clawfoot Raptor"]
+    assert preferred[0]["page_start"] == 81
+    assert driver._statblock_recovery_needed(preferred, chunks) is False
+
+
+def test_expected_actor_inventory_detects_nested_layout_omission() -> None:
+    hawk = {
+        "kind": "statblock",
+        "name": "VALENAR HAWK",
+        "artifact": {"kind": "statblock", "card": {"name": "Valenar Hawk"}},
+    }
+    hound = {
+        "kind": "statblock",
+        "name": "Valenar Hound",
+        "artifact": {"kind": "statblock", "card": {"name": "Valenar Hound"}},
+    }
+
+    assert (
+        driver._expected_actor_recovery_needed(
+            [hawk],
+            ["Valenar Hawk", "Valenar Hound"],
+        )
+        is True
+    )
+    assert (
+        driver._expected_actor_recovery_needed(
+            [hawk, hound],
+            ["Valenar Hawk", "Valenar Hound"],
+        )
+        is False
+    )
+    assert driver._expected_actor_recovery_needed([hawk], None) is False
+    with pytest.raises(ValueError, match="expected_actor_names"):
+        driver._expected_actor_recovery_needed([hawk], [""])
 
 
 def test_strict_catalog_manifest_requires_every_selected_document() -> None:
@@ -1224,9 +1520,51 @@ def test_catalog_decisions_distinguish_same_named_contextual_features() -> None:
         method="agent",
     )
 
-    assert [
-        item["artifact"]["card"]["subclass_name"] for item in decisions
-    ] == ["Alchemist", "Artillerist"]
+    assert [item["artifact"]["card"]["subclass_name"] for item in decisions] == [
+        "Alchemist",
+        "Artillerist",
+    ]
+
+
+def test_catalog_decisions_distinguish_extracted_cards_from_agent_additions() -> None:
+    candidates = [
+        {
+            "id": "raw",
+            "kind": "subclass",
+            "name": "CLERIC: ORDER DOMAIN",
+            "source_heading_path": ["CLERIC: ORDER DOMAIN"],
+            "artifact": {"kind": "subclass", "card": {}},
+        },
+        {
+            "id": "agent",
+            "kind": "subclass",
+            "name": "Order Domain",
+            "source_heading_path": ["CLERIC: ORDER DOMAIN"],
+            "agent_catalog_addition": {"principal_id": "agent:catalog"},
+            "artifact": {"kind": "subclass", "card": {"name": "Order Domain"}},
+        },
+    ]
+    review = {
+        "default_status": "accepted",
+        "decisions": [
+            {
+                "kind": "subclass",
+                "name": "CLERIC: ORDER DOMAIN",
+                "candidate_origin": "extracted",
+                "status": "rejected",
+            }
+        ],
+        "expected_counts": {"subclass": 1},
+    }
+
+    decisions = driver._review_spec_decisions(
+        candidates,
+        review,
+        reviewer="agent:catalog",
+        method="agent",
+    )
+
+    assert [item["review_status"] for item in decisions] == ["rejected", "accepted"]
 
 
 def test_portable_roundtrip_uses_public_facades_and_preserves_package() -> None:
@@ -1254,7 +1592,7 @@ def test_portable_roundtrip_uses_public_facades_and_preserves_package() -> None:
                     "complete": True,
                     "first_use_compilation_required": False,
                     "unresolved": [],
-                }
+                },
             }
         },
     }
@@ -1337,10 +1675,10 @@ def test_portable_roundtrip_uses_public_facades_and_preserves_package() -> None:
             source_campaign_id="source-campaign",
             target_server=target,
             target_campaign_id="target-campaign",
-                source_id="local-source",
-                source_key="regression.book",
-                job_id="job",
-                candidates=[],
+            source_id="local-source",
+            source_key="regression.book",
+            job_id="job",
+            candidates=[],
             relative_path="book.pdf",
             edition="2014",
             run_id="one",
@@ -1365,13 +1703,11 @@ def test_portable_roundtrip_uses_public_facades_and_preserves_package() -> None:
     ]
     fallback_compile = source.calls[1][1]["payload"]
     assert len(fallback_compile["artifacts"]) == 2
-    assert all(
-        item["mechanical_scope"] == "mechanical"
-        for item in fallback_compile["artifacts"]
-    )
-    assert [
-        item["source_chunk_ids"] for item in fallback_compile["artifacts"]
-    ] == [["source-chunk"], ["source-chunk-two"]]
+    assert all(item["mechanical_scope"] == "mechanical" for item in fallback_compile["artifacts"])
+    assert [item["source_chunk_ids"] for item in fallback_compile["artifacts"]] == [
+        ["source-chunk"],
+        ["source-chunk-two"],
+    ]
     assert fallback_compile["provenance"]["source_catalog_fallback"] == (
         "per_chunk_source_bound_agent_ruling"
     )
@@ -1391,12 +1727,8 @@ def test_portable_roundtrip_uses_public_facades_and_preserves_package() -> None:
         "rule_pack_query",
         "rule_pack_query",
     ]
-    assert target.calls[2][1]["idempotency_key"] == (
-        "regression-addon-enable-request-r1"
-    )
-    assert target.calls[4][1]["idempotency_key"] == (
-        "regression-addon-disable-request-r2"
-    )
+    assert target.calls[2][1]["idempotency_key"] == ("regression-addon-enable-request-r1")
+    assert target.calls[4][1]["idempotency_key"] == ("regression-addon-disable-request-r2")
 
 
 def test_portable_roundtrip_rejects_deferred_actor_presets() -> None:
@@ -1434,32 +1766,32 @@ def test_portable_roundtrip_rejects_deferred_actor_presets() -> None:
                     ]
                 },
             ),
-                (
-                    "rule_import",
-                    {
-                        "result": {
-                            "candidates": [
-                                {
-                                    "id": candidate["id"],
-                                    "review_status": "needs_revision",
-                                }
-                            ]
-                        }
-                    },
-                ),
-                (
-                    "rule_import",
-                    {
-                        "result": {
-                            "candidates": [
-                                {
-                                    "id": candidate["id"],
-                                    "review_status": "accepted",
-                                }
-                            ]
-                        }
-                    },
-                ),
+            (
+                "rule_import",
+                {
+                    "result": {
+                        "candidates": [
+                            {
+                                "id": candidate["id"],
+                                "review_status": "needs_revision",
+                            }
+                        ]
+                    }
+                },
+            ),
+            (
+                "rule_import",
+                {
+                    "result": {
+                        "candidates": [
+                            {
+                                "id": candidate["id"],
+                                "review_status": "accepted",
+                            }
+                        ]
+                    }
+                },
+            ),
             ("rule_import", {"result": {"draft": {"status": "validated"}}}),
             (
                 "rule_pack_query",
@@ -1548,10 +1880,10 @@ def test_portable_roundtrip_rejects_deferred_actor_presets() -> None:
     assert preset_call[0] == "rule_pack_query"
     assert preset_call[1]["view"] == "preset_package"
     assert preset_call[1]["payload"]["allow_partial"] is True
-    assert [
-        item["role"]
-        for item in preset_call[1]["payload"]["catalog_review_decisions"]
-    ] == ["primary", "critic"]
+    assert [item["role"] for item in preset_call[1]["payload"]["catalog_review_decisions"]] == [
+        "primary",
+        "critic",
+    ]
     assert len(source.calls) == 6
     assert target.calls == []
 
@@ -1617,3 +1949,171 @@ def test_release_check_is_inspection_only() -> None:
     assert result["auto_activate"] is False
     assert result["all_components_installed"] is True
     assert result["all_envelope_checksums_match"] is True
+
+
+def test_wayfinder_review_preserves_printed_typos_as_source_evidence() -> None:
+    manifest = json.loads(
+        (Path(__file__).parents[1] / "fixtures" / "books_catalog_review_v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    review = manifest["documents"]["D&D 5E - Wayfinders Guide to Eberron.pdf"]
+    assert "text_reviews" not in review
+    assert review["expected_counts"]["item"] == 16
+    assert any(
+        item["kind"] == "species"
+        and item["name"] == "KALASHTAR QUIRKS"
+        and item["status"] == "rejected"
+        for item in review["decisions"]
+    )
+
+    additions = {(item["kind"], item["name"]): item for item in review["additions"]}
+    house_agents = [
+        item
+        for (kind, name), item in additions.items()
+        if kind == "background" and name.startswith("House Agent (")
+    ]
+    assert len(house_agents) == 13
+    assert {item["source_selectors"][0]["heading_exact"] for item in house_agents} == {
+        "HOUSE AGENT"
+    }
+    assert additions[("species", "Mark of Handling")]["source_selectors"] == [
+        {"page_start": 98, "match_all": True}
+    ]
+    assert additions[("species", "Mark of Storm")]["source_selectors"] == [
+        {"page_start": 106, "match_all": True}
+    ]
+    assert "without rewriting the source" in additions[("species", "Mark of Handling")]["note"]
+    assert "printed body retains" in additions[("species", "Mark of Storm")]["note"]
+
+
+def test_mordenkainen_review_uses_recovered_actor_identities() -> None:
+    manifest = json.loads(
+        (
+            Path(__file__).parents[1] / "fixtures" / "books_catalog_review_mordenkainen_v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    review = manifest["documents"]["D&D 5E - Mordenkainen's Tome of Foes.pdf"]
+
+    assert "Oinoloth" in review["expected_actor_names"]
+    assert not any(
+        item["kind"] == "statblock" and item["name"] == "I" for item in review["decisions"]
+    )
+    assert not any(
+        item["kind"] == "statblock" and item["name"] == "0RTHON" for item in review["decisions"]
+    )
+    assert review["statblock_slot_reviews"] == [
+        {
+            "page_number": 170,
+            "statblock_slot": 1,
+            "name": "Orthon",
+            "expected_identity": "Large fiend (devil), lawful evil",
+            "ocr_corrections": {
+                "abilities": {
+                    "str": "22 (+6)",
+                    "dex": "16 (+3)",
+                    "con": "21 (+5)",
+                    "int": "15 (+2)",
+                    "wis": "15 (+2)",
+                    "cha": "16 (+3)",
+                }
+            },
+            "correction_evidence_basis": "rendered_page",
+            "rendered_image_checksum": (
+                "984b5f0dec025c01667f0dce4a1b47136d58369ec9033d51e151ae71e0a751ac"
+            ),
+            "note": (
+                "Agent read the six ability cells from the rendered Orthon statblock; "
+                "the text layer confused the printed +5 modifier with +S."
+            ),
+        }
+    ]
+    tieflings = [
+        item
+        for item in review["additions"]
+        if item["kind"] == "species" and item["name"].startswith("Tiefling (")
+    ]
+    assert len(tieflings) == 8
+    assert all(
+        item["card"]["replaces_base_traits"] == ["Ability Score Increase", "Infernal Legacy"]
+        for item in tieflings
+    )
+
+
+def test_small_source_reviews_restore_complete_agent_authored_cards() -> None:
+    manifest = json.loads(
+        (Path(__file__).parents[1] / "fixtures" / "books_catalog_review_v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    blood = manifest["documents"]["UO\\D&D 5E - UA - Blood Hunter Class 1.2.pdf"]
+    review = blood["text_reviews"][0]
+    assert review["page_number"] == 3
+    assert review["evidence_basis"] == "rendered_page"
+    assert review["replacements"][0]["old"] == ""
+    assert "##### CLASS FEATURES" in review["replacements"][0]["new"]
+    blood_class = next(
+        item
+        for item in blood["additions"]
+        if item["kind"] == "class" and item["name"] == "Blood Hunter"
+    )
+    assert blood_class["card"]["class_definition"]["hit_die"] == 10
+    assert blood_class["card"]["class_definition"]["skill_choice_count"] == 2
+    assert not any(str(item["name"]).startswith("Source fragment:") for item in blood["decisions"])
+
+    revised = manifest["documents"]["UO\\D&D 5E - UA - RevisedRanger.pdf"]
+    revised_class = next(
+        item
+        for item in revised["decisions"]
+        if item["kind"] == "class" and item["name"] == "Revised Ranger"
+    )
+    assert revised_class["artifact_patch"]["card"]["class_definition"]["hit_die"] == 10
+
+    twilight = manifest["documents"]["UO\\D&D 5E - UA-TwilightFireNames.pdf"]
+    additions = {(item["kind"], item["name"]): item for item in twilight["additions"]}
+    assert (
+        additions[("feature", "Bonus Proficiencies")]["card"]["selection_requirements"]["groups"][
+            0
+        ]["kind"]
+        == "language"
+    )
+    assert ("feature", "Fateful Naming") in additions
+    assert ("feature", "Resonant Utterance") in additions
+
+
+def test_phb_review_replays_agent_corrected_demiplane_transcription() -> None:
+    manifest = json.loads(
+        (
+            Path(__file__).parents[1] / "fixtures" / "core_rulebooks_catalog_review_v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    review = manifest["documents"]["D&D 5E - Player's Handbook.pdf"]
+
+    assert "additions" not in review
+    assert "decisions" not in review
+    assert review["text_reviews"] == [
+        {
+            "page_number": 232,
+            "base_text_sha256": (
+                "2475fa719660ec0220ca4c8d791dce073a16e3edfa8ffbc092dc6fe9bf556db4"
+            ),
+            "replacements": [
+                {
+                    "old": (
+                        "8th./evel conjuratian Casling Time: I action Range: 60 feet "
+                        "Components: S Duralion: I hour"
+                    ),
+                    "new": (
+                        "8th-level conjuration Casting Time: 1 action Range: 60 feet "
+                        "Components: S Duration: 1 hour"
+                    ),
+                }
+            ],
+            "rationale": review["text_reviews"][0]["rationale"],
+            "evidence_basis": "rendered_page",
+            "rendered_image_checksum": (
+                "4e9328a48f9e688f839aa9138d2902dc68853c52529e584421e3a306c66c4ced"
+            ),
+            "review_method": "agent",
+        }
+    ]

@@ -8,6 +8,7 @@ import fnmatch
 import hashlib
 import json
 import re
+import secrets
 import sys
 from collections import Counter
 from pathlib import Path
@@ -235,24 +236,15 @@ def _transcription_review_specs(review_spec: dict[str, Any]) -> list[dict[str, A
             "review_method",
         }
         if unknown:
-            raise ValueError(
-                f"text review {index} has unsupported fields: {sorted(unknown)}"
-            )
+            raise ValueError(f"text review {index} has unsupported fields: {sorted(unknown)}")
         page_number = raw_review.get("page_number")
-        if (
-            isinstance(page_number, bool)
-            or not isinstance(page_number, int)
-            or page_number < 1
-        ):
+        if isinstance(page_number, bool) or not isinstance(page_number, int) or page_number < 1:
             raise ValueError(f"text review {index} page_number must be positive")
         base_text_sha256 = str(raw_review.get("base_text_sha256") or "")
-        if (
-            len(base_text_sha256) != 64
-            or any(character not in "0123456789abcdef" for character in base_text_sha256)
+        if len(base_text_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in base_text_sha256
         ):
-            raise ValueError(
-                f"text review {index} base_text_sha256 must be lowercase SHA-256"
-            )
+            raise ValueError(f"text review {index} base_text_sha256 must be lowercase SHA-256")
         replacements = raw_review.get("replacements")
         if not isinstance(replacements, list) or not replacements:
             raise ValueError(f"text review {index} replacements must be nonempty")
@@ -264,13 +256,15 @@ def _transcription_review_specs(review_spec: dict[str, Any]) -> list[dict[str, A
                 )
             if (
                 not isinstance(replacement["old"], str)
-                or not replacement["old"]
                 or not isinstance(replacement["new"], str)
+                or not replacement["new"]
                 or replacement["old"] == replacement["new"]
-            ):
-                raise ValueError(
-                    f"text review {index} replacement {replacement_index} is invalid"
+                or (
+                    not replacement["old"]
+                    and str(raw_review.get("evidence_basis") or "") != "rendered_page"
                 )
+            ):
+                raise ValueError(f"text review {index} replacement {replacement_index} is invalid")
         rationale = str(raw_review.get("rationale") or "").strip()
         if len(rationale) < 8:
             raise ValueError(f"text review {index} rationale is too short")
@@ -283,12 +277,8 @@ def _transcription_review_specs(review_spec: dict[str, Any]) -> list[dict[str, A
         rendered_image_checksum = raw_review.get("rendered_image_checksum")
         if evidence_basis == "rendered_page":
             rendered_image_checksum = str(rendered_image_checksum or "")
-            if (
-                len(rendered_image_checksum) != 64
-                or any(
-                    character not in "0123456789abcdef"
-                    for character in rendered_image_checksum
-                )
+            if len(rendered_image_checksum) != 64 or any(
+                character not in "0123456789abcdef" for character in rendered_image_checksum
             ):
                 raise ValueError(
                     f"text review {index} rendered_image_checksum must be lowercase SHA-256"
@@ -330,12 +320,12 @@ def _statblock_slot_review_specs(review_spec: dict[str, Any]) -> list[dict[str, 
         "expected_identity",
         "note",
         "ocr_corrections",
+        "correction_evidence_basis",
+        "rendered_image_checksum",
     }
     for index, raw in enumerate(raw_reviews):
         if not isinstance(raw, dict) or set(raw) - allowed:
-            raise ValueError(
-                f"statblock_slot_reviews[{index}] contains unsupported fields"
-            )
+            raise ValueError(f"statblock_slot_reviews[{index}] contains unsupported fields")
         page_number = raw.get("page_number")
         statblock_slot = raw.get("statblock_slot")
         name = " ".join(str(raw.get("name") or "").split())
@@ -354,13 +344,36 @@ def _statblock_slot_review_specs(review_spec: dict[str, Any]) -> list[dict[str, 
         identity = " ".join(str(raw.get("expected_identity") or "").split())
         note = " ".join(str(raw.get("note") or "").split())
         ocr_corrections = raw.get("ocr_corrections")
+        correction_evidence_basis = str(
+            raw.get("correction_evidence_basis") or "staged_text"
+        ).strip()
+        rendered_image_checksum = str(raw.get("rendered_image_checksum") or "").strip().lower()
         if raw.get("expected_identity") is not None and not identity:
-            raise ValueError(
-                f"statblock_slot_reviews[{index}].expected_identity must be nonempty"
-            )
+            raise ValueError(f"statblock_slot_reviews[{index}].expected_identity must be nonempty")
         if raw.get("note") is not None and not 8 <= len(note) <= 2000:
             raise ValueError(
                 f"statblock_slot_reviews[{index}].note must contain 8 to 2000 characters"
+            )
+        if correction_evidence_basis not in {"staged_text", "rendered_page"}:
+            raise ValueError(
+                f"statblock_slot_reviews[{index}].correction_evidence_basis is invalid"
+            )
+        if ocr_corrections is None and (
+            correction_evidence_basis != "staged_text" or rendered_image_checksum
+        ):
+            raise ValueError(
+                f"statblock_slot_reviews[{index}] correction evidence requires ocr_corrections"
+            )
+        if correction_evidence_basis == "rendered_page":
+            if re.fullmatch(r"[0-9a-f]{64}", rendered_image_checksum) is None:
+                raise ValueError(
+                    f"statblock_slot_reviews[{index}] rendered_page evidence requires "
+                    "rendered_image_checksum"
+                )
+        elif rendered_image_checksum:
+            raise ValueError(
+                f"statblock_slot_reviews[{index}] rendered_image_checksum requires "
+                "rendered_page evidence"
             )
         if ocr_corrections is not None:
             if (
@@ -373,25 +386,18 @@ def _statblock_slot_review_specs(review_spec: dict[str, Any]) -> list[dict[str, 
                     "only abilities and text_replacements"
                 )
             abilities = ocr_corrections.get("abilities")
-            if abilities is not None and (
-                not isinstance(abilities, dict) or not abilities
-            ):
+            if abilities is not None and (not isinstance(abilities, dict) or not abilities):
                 raise ValueError(
-                    f"statblock_slot_reviews[{index}].ocr_corrections.abilities "
-                    "must be nonempty"
+                    f"statblock_slot_reviews[{index}].ocr_corrections.abilities must be nonempty"
                 )
             normalized_abilities: dict[str, str] = {}
             for raw_ability, raw_value in dict(abilities or {}).items():
                 ability = str(raw_ability or "").strip().lower()
                 value = " ".join(str(raw_value or "").split())
                 if ability not in {"str", "dex", "con", "int", "wis", "cha"}:
-                    raise ValueError(
-                        f"statblock_slot_reviews[{index}] has an unknown ability"
-                    )
+                    raise ValueError(f"statblock_slot_reviews[{index}] has an unknown ability")
                 if not value:
-                    raise ValueError(
-                        f"statblock_slot_reviews[{index}] has an empty ability value"
-                    )
+                    raise ValueError(f"statblock_slot_reviews[{index}] has an empty ability value")
                 normalized_abilities[ability] = value
             text_replacements = ocr_corrections.get("text_replacements")
             if text_replacements is not None and (
@@ -405,9 +411,7 @@ def _statblock_slot_review_specs(review_spec: dict[str, Any]) -> list[dict[str, 
                 )
             normalized_replacements: list[dict[str, str]] = []
             seen_old: set[str] = set()
-            for replacement_index, raw_replacement in enumerate(
-                text_replacements or []
-            ):
+            for replacement_index, raw_replacement in enumerate(text_replacements or []):
                 if not isinstance(raw_replacement, dict) or set(raw_replacement) != {
                     "old",
                     "new",
@@ -418,16 +422,9 @@ def _statblock_slot_review_specs(review_spec: dict[str, Any]) -> list[dict[str, 
                     )
                 old = " ".join(str(raw_replacement.get("old") or "").split())
                 new = " ".join(str(raw_replacement.get("new") or "").split())
-                if (
-                    not old
-                    or not new
-                    or old == new
-                    or len(old) > 500
-                    or len(new) > 2000
-                ):
+                if not old or not new or old == new or len(old) > 500 or len(new) > 2000:
                     raise ValueError(
-                        f"statblock_slot_reviews[{index}] has an invalid OCR text "
-                        "replacement"
+                        f"statblock_slot_reviews[{index}] has an invalid OCR text replacement"
                     )
                 old_key = old.casefold()
                 if old_key in seen_old:
@@ -438,11 +435,7 @@ def _statblock_slot_review_specs(review_spec: dict[str, Any]) -> list[dict[str, 
                 seen_old.add(old_key)
                 normalized_replacements.append({"old": old, "new": new})
             ocr_corrections = {
-                **(
-                    {"abilities": normalized_abilities}
-                    if normalized_abilities
-                    else {}
-                ),
+                **({"abilities": normalized_abilities} if normalized_abilities else {}),
                 **(
                     {"text_replacements": normalized_replacements}
                     if normalized_replacements
@@ -464,8 +457,16 @@ def _statblock_slot_review_specs(review_spec: dict[str, Any]) -> list[dict[str, 
                 "name": name,
                 **({"expected_identity": identity} if identity else {}),
                 **({"note": note} if note else {}),
+                **({"ocr_corrections": ocr_corrections} if ocr_corrections is not None else {}),
                 **(
-                    {"ocr_corrections": ocr_corrections}
+                    {
+                        "correction_evidence_basis": correction_evidence_basis,
+                        **(
+                            {"rendered_image_checksum": rendered_image_checksum}
+                            if correction_evidence_basis == "rendered_page"
+                            else {}
+                        ),
+                    }
                     if ocr_corrections is not None
                     else {}
                 ),
@@ -509,6 +510,28 @@ async def _apply_statblock_slot_reviews(
             f"slot {spec['statblock_slot']}: {spec['name']}",
             flush=True,
         )
+        if spec.get("correction_evidence_basis") == "rendered_page":
+            rendered = await server.call_tool(
+                "rule_import",
+                {
+                    "campaign_id": campaign_id,
+                    "action": "render_page",
+                    "payload": {
+                        "job_id": job_id,
+                        "page_number": spec["page_number"],
+                        "scale": 1.5,
+                        "include_ocr_text": False,
+                    },
+                },
+            )
+            rendered_metadata = _rendered_page_metadata(rendered)
+            if str(rendered_metadata.get("image_checksum") or "") != str(
+                spec["rendered_image_checksum"]
+            ):
+                raise RuntimeError(
+                    "Agent statblock correction image checksum drifted: "
+                    f"page={spec['page_number']}, slot={spec['statblock_slot']}"
+                )
         try:
             response = await _call(
                 server,
@@ -524,6 +547,18 @@ async def _apply_statblock_slot_reviews(
                         **(
                             {"ocr_corrections": spec["ocr_corrections"]}
                             if "ocr_corrections" in spec
+                            else {}
+                        ),
+                        **(
+                            {
+                                "correction_evidence_basis": spec["correction_evidence_basis"],
+                                **(
+                                    {"rendered_image_checksum": spec["rendered_image_checksum"]}
+                                    if "rendered_image_checksum" in spec
+                                    else {}
+                                ),
+                            }
+                            if "correction_evidence_basis" in spec
                             else {}
                         ),
                     },
@@ -601,23 +636,16 @@ async def _apply_transcription_reviews(
             },
         )
         metadata = _rendered_page_metadata(rendered)
-        actual_base = str(
-            dict(dict(metadata.get("transcription") or {}).get("normalized") or {}).get(
-                "text_sha256"
-            )
-            or ""
-        )
-        if actual_base != review["base_text_sha256"]:
+        # A resumed run sees the already revised page here.  Submit the exact
+        # original request again so the public idempotency record can replay;
+        # if no replay exists, the server still rejects the stale base hash
+        # before writing anything.
+        if (
+            review["evidence_basis"] == "rendered_page"
+            and str(metadata.get("image_checksum") or "") != review["rendered_image_checksum"]
+        ):
             raise RuntimeError(
-                f"text review {index} base hash drifted on page {review['page_number']}: "
-                f"expected {review['base_text_sha256']}, found {actual_base}"
-            )
-        if review["evidence_basis"] == "rendered_page" and str(
-            metadata.get("image_checksum") or ""
-        ) != review["rendered_image_checksum"]:
-            raise RuntimeError(
-                f"text review {index} image checksum drifted on page "
-                f"{review['page_number']}"
+                f"text review {index} image checksum drifted on page {review['page_number']}"
             )
         response = await _call(
             server,
@@ -696,6 +724,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     document_cache = args.document_cache.expanduser().resolve() if args.document_cache else None
     catalog_manifest = _load_catalog_manifest(args.catalog_manifest)
     dependency_addons = _load_dependency_addons(args.dependency_addon)
+    probe_attempt_id = secrets.token_hex(8)
     addon_output_dir = (
         args.addon_output_dir.expanduser().resolve() if args.addon_output_dir else None
     )
@@ -810,6 +839,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             },
         },
         "run_id": args.run_id,
+        "probe_attempt_id": probe_attempt_id,
         "document_count": len(documents),
         "discovered_document_count": len(discovered_documents),
         "include": list(args.include),
@@ -906,12 +936,30 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             inventory = extracted["result"]["inventory"]
             catalog_revision = int(extracted["result"]["job"]["revision"])
             source_chunks: list[dict[str, Any]] | None = None
+            resolved_catalog_additions: list[dict[str, Any]] | None = None
             statblock_recovery: dict[str, Any] | None = None
             statblock_slot_review: dict[str, Any] | None = None
             if args.edition == "2014":
                 source_chunks = await _source_chunks(server, source_id)
+                if document_review.get("additions"):
+                    resolved_catalog_additions = _resolve_catalog_additions(
+                        document_review["additions"],
+                        source_chunks,
+                        relative_path=relative_path,
+                    )
                 refresh_statblocks = False
-                if _statblock_recovery_needed(candidates, source_chunks):
+                recovery_candidates = _prefer_reviewed_statblock_additions(
+                    candidates,
+                    resolved_catalog_additions or [],
+                    source_chunks,
+                )
+                if _statblock_recovery_needed(
+                    recovery_candidates,
+                    source_chunks,
+                ) or _expected_actor_recovery_needed(
+                    recovery_candidates,
+                    document_review.get("expected_actor_names"),
+                ):
                     recovery_response = await _call(
                         server,
                         "rule_import",
@@ -956,9 +1004,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                             "campaign_id": campaign["id"],
                             "action": "extract_candidates",
                             "payload": {"job_id": job_id},
-                            "idempotency_key": (
-                                f"regression-extract-recovered-{review_id_key}"
-                            ),
+                            "idempotency_key": (f"regression-extract-recovered-{review_id_key}"),
                         },
                     )
                     candidates = refreshed["result"]["candidates"]
@@ -966,13 +1012,17 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     catalog_revision = int(refreshed["result"]["job"]["revision"])
             catalog_augmentation: dict[str, Any] | None = None
             if document_review.get("additions"):
+                if resolved_catalog_additions is None:
+                    if source_chunks is None:
+                        source_chunks = await _source_chunks(server, source_id)
+                    resolved_catalog_additions = _resolve_catalog_additions(
+                        document_review["additions"],
+                        source_chunks,
+                        relative_path=relative_path,
+                    )
+                additions = resolved_catalog_additions
                 if source_chunks is None:
                     source_chunks = await _source_chunks(server, source_id)
-                additions = _resolve_catalog_additions(
-                    document_review["additions"],
-                    source_chunks,
-                    relative_path=relative_path,
-                )
                 additions = _bind_catalog_addition_replacements(additions, candidates)
                 augmented = await _augment_catalog_batches(
                     server,
@@ -1021,6 +1071,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     # state, so its fresh revision must not reuse older
                     # primary/critic mutation receipts.
                     id_key=f"{review_id_key}-r{catalog_revision}",
+                    probe_attempt_id=probe_attempt_id,
                     addon_output_dir=addon_output_dir,
                     primary_reviewer=str(args.primary_reviewer),
                     primary_review_method=str(args.primary_review_method),
@@ -1171,9 +1222,7 @@ def _assert_runtime_expectations(value: Any, expectations: Any) -> None:
             if key in raw_expectation
         ]
         if not path or len(operators) != 1:
-            raise ValueError(
-                f"runtime probe expect[{index}] needs a path and exactly one operator"
-            )
+            raise ValueError(f"runtime probe expect[{index}] needs a path and exactly one operator")
         actual = _runtime_path_value(value, path)
         operator = operators[0]
         expected = raw_expectation[operator]
@@ -1186,11 +1235,9 @@ def _assert_runtime_expectations(value: Any, expectations: Any) -> None:
                 passed = False
             else:
                 actual_names = [
-                    str(item.get("name") or "")
-                    for item in actual
-                    if isinstance(item, dict)
+                    _fold_text(item.get("name")) for item in actual if isinstance(item, dict)
                 ]
-                passed = all(str(item) in actual_names for item in expected)
+                passed = all(_fold_text(item) in actual_names for item in expected)
         else:
             passed = hasattr(actual, "__len__") and len(actual) == expected
         if not passed:
@@ -1198,6 +1245,19 @@ def _assert_runtime_expectations(value: Any, expectations: Any) -> None:
                 f"runtime probe expectation failed at {path}: "
                 f"{operator}={expected!r}, actual={actual!r}"
             )
+
+
+def _runtime_probe_artifact_matches(
+    artifact: dict[str, Any],
+    *,
+    kind: str,
+    name: str,
+) -> bool:
+    """Match reviewed display identities without depending on source capitalization."""
+
+    return _fold_text(artifact.get("kind")) == _fold_text(kind) and _fold_text(
+        dict(artifact.get("card") or {}).get("name")
+    ) == _fold_text(name)
 
 
 def _unwrapped_tool_result(value: Any) -> Any:
@@ -1222,8 +1282,7 @@ def _complete_probe_hit_points(sheet: dict[str, Any], *, source: str) -> None:
     gains = [
         max(
             1,
-            (hit_die if current_level == 1 else hit_die // 2 + 1)
-            + constitution_modifier,
+            (hit_die if current_level == 1 else hit_die // 2 + 1) + constitution_modifier,
         )
         for current_level in range(1, level + 1)
     ]
@@ -1305,6 +1364,7 @@ async def _run_content_runtime_probes(
             sheet["abilities"][normalized_ability]["score"] = score
         _complete_probe_hit_points(sheet, source=f"addon runtime probe {probe_name}")
         probe_key = f"{id_key}-content-{probe_index}"
+        probe_identity = hashlib.sha256(probe_key.encode("utf-8")).hexdigest()[:10]
         created_response = await _call(
             server,
             "character_create_from",
@@ -1312,7 +1372,7 @@ async def _run_content_runtime_probes(
                 "mode": "direct",
                 "payload": {
                     "campaign_id": campaign_id,
-                    "name": f"Addon runtime probe {probe_name}",
+                    "name": f"Addon runtime probe {probe_name} [{probe_identity}]",
                     "sheet": sheet,
                 },
                 "idempotency_key": f"regression-addon-content-character-{probe_key}",
@@ -1339,8 +1399,11 @@ async def _run_content_runtime_probes(
             matches = [
                 artifact
                 for artifact in artifacts
-                if str(artifact.get("kind") or "") == kind
-                and str(dict(artifact.get("card") or {}).get("name") or "") == artifact_name
+                if _runtime_probe_artifact_matches(
+                    artifact,
+                    kind=kind,
+                    name=artifact_name,
+                )
             ]
             if len(matches) != 1:
                 raise RuntimeError(
@@ -1384,9 +1447,7 @@ async def _run_content_runtime_probes(
             applied_response = await _call(server, "character_content_apply", arguments)
             applied = dict(_unwrapped_tool_result(applied_response))
             if applied.get("status") in {"pending_choice", "pending_ruling"}:
-                raise RuntimeError(
-                    f"runtime probe did not materialize {artifact_name}: {applied}"
-                )
+                raise RuntimeError(f"runtime probe did not materialize {artifact_name}: {applied}")
             _assert_runtime_expectations(applied, raw_step.get("expect") or [])
             current = applied
             step_summaries.append(
@@ -1428,10 +1489,7 @@ def _statblock_recovery_needed(
     if not statblocks:
         return True
     page_count = max(
-        (
-            int(chunk.get("page_end") or chunk.get("page_start") or 0)
-            for chunk in source_chunks
-        ),
+        (int(chunk.get("page_end") or chunk.get("page_start") or 0) for chunk in source_chunks),
         default=0,
     )
     index_hints = _statblock_index_recovery_hints(
@@ -1439,9 +1497,7 @@ def _statblock_recovery_needed(
         statblocks,
         page_count=page_count,
     )
-    indexed_names = [
-        name for names in index_hints["by_page"].values() for name in names
-    ]
+    indexed_names = [name for names in index_hints["by_page"].values() for name in names]
     if any(
         not any(
             _bounded_ocr_heading_equivalent(
@@ -1505,6 +1561,116 @@ def _statblock_recovery_needed(
         except (StatblockImportError, ValueError):
             return True
     return False
+
+
+def _expected_actor_recovery_needed(
+    candidates: list[dict[str, Any]],
+    expected_actor_names: Any,
+) -> bool:
+    """Require every source-reviewed actor before skipping visual recovery.
+
+    Layout parsing can attach a complete card to the preceding actor, leaving no
+    unclaimed AC/HP/Speed chunk for the generic recovery heuristic to notice.
+    The review manifest is the authoritative bounded inventory. Agent-authored
+    corrected additions participate as candidates before this check, so a
+    source-bound correction prevents redundant OCR while an unexplained omission
+    still forces recovery.
+    """
+
+    if expected_actor_names is None:
+        return False
+    if not isinstance(expected_actor_names, list) or any(
+        not isinstance(name, str) or not name.strip() for name in expected_actor_names
+    ):
+        raise ValueError("expected_actor_names must be an array of nonempty strings")
+    statblock_names = [
+        str(dict(dict(candidate.get("artifact") or {}).get("card") or {}).get("name") or "")
+        or str(candidate.get("name") or "")
+        for candidate in candidates
+        if str(candidate.get("kind") or "") == "statblock"
+    ]
+    return any(
+        not any(
+            _bounded_ocr_heading_equivalent(expected_name, candidate_name)
+            for candidate_name in statblock_names
+        )
+        for expected_name in expected_actor_names
+    )
+
+
+def _prefer_reviewed_statblock_additions(
+    candidates: list[dict[str, Any]],
+    additions: list[dict[str, Any]],
+    source_chunks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Let an exact Agent-authored card satisfy recovery before visual OCR.
+
+    A complete catalog review can bind a corrected statblock directly to the
+    indexed source chunks.  Running full-page OCR first wastes substantial CPU
+    and can reintroduce layout contamination that the reviewed boundary already
+    removed.  The normal recovery gate still parses every preferred card and
+    falls back to OCR if the Agent supplied incomplete mechanics.
+    """
+
+    reviewed = [
+        addition
+        for addition in additions
+        if str(addition.get("kind") or "") == "statblock"
+        and str(dict(addition.get("card") or {}).get("normalized_content") or "").strip()
+    ]
+    if not reviewed:
+        return list(candidates)
+    for index, addition in enumerate(reviewed):
+        if any(
+            _bounded_ocr_heading_equivalent(
+                str(addition.get("name") or ""),
+                str(other.get("name") or ""),
+            )
+            for other in reviewed[index + 1 :]
+        ):
+            raise ValueError(
+                "reviewed statblock additions contain an ambiguous identity: "
+                f"{addition.get('name')}"
+            )
+    retained = [
+        candidate
+        for candidate in candidates
+        if str(candidate.get("kind") or "") != "statblock"
+        or not any(
+            _bounded_ocr_heading_equivalent(
+                str(candidate.get("name") or ""),
+                str(addition.get("name") or ""),
+            )
+            for addition in reviewed
+        )
+    ]
+    chunks_by_id = {
+        str(chunk.get("id") or ""): chunk for chunk in source_chunks if str(chunk.get("id") or "")
+    }
+    for index, addition in enumerate(reviewed):
+        source_chunk_ids = [
+            str(chunk_id) for chunk_id in addition.get("source_chunk_ids") or [] if str(chunk_id)
+        ]
+        page_starts = [
+            int(chunks_by_id[chunk_id]["page_start"])
+            for chunk_id in source_chunk_ids
+            if chunk_id in chunks_by_id
+            and isinstance(chunks_by_id[chunk_id].get("page_start"), int)
+            and not isinstance(chunks_by_id[chunk_id].get("page_start"), bool)
+        ]
+        card = json.loads(json.dumps(addition["card"]))
+        card.setdefault("name", str(addition.get("name") or "").strip())
+        retained.append(
+            {
+                "id": f"agent-reviewed-statblock-{index}",
+                "kind": "statblock",
+                "name": str(addition.get("name") or "").strip(),
+                "source_chunk_ids": source_chunk_ids,
+                "page_start": min(page_starts) if page_starts else None,
+                "artifact": {"kind": "statblock", "card": card},
+            }
+        )
+    return retained
 
 
 async def _enable_core_content_pack(
@@ -1576,8 +1742,7 @@ def _load_catalog_manifest(path: Path | None) -> dict[str, Any]:
             raise ValueError("catalog manifest documents must be an object")
         raw_includes = payload.get("includes") or []
         if not isinstance(raw_includes, list) or any(
-            not isinstance(item, str) or not item.strip()
-            for item in raw_includes
+            not isinstance(item, str) or not item.strip() for item in raw_includes
         ):
             raise ValueError("catalog manifest includes must be an array of paths")
         documents: dict[str, Any] = {}
@@ -1587,16 +1752,12 @@ def _load_catalog_manifest(path: Path | None) -> dict[str, Any]:
             duplicates = set(documents).intersection(included["documents"])
             if duplicates:
                 raise ValueError(
-                    "catalog manifest includes duplicate documents: "
-                    f"{sorted(duplicates)}"
+                    f"catalog manifest includes duplicate documents: {sorted(duplicates)}"
                 )
             documents.update(included["documents"])
         duplicates = set(documents).intersection(own_documents)
         if duplicates:
-            raise ValueError(
-                "catalog manifest includes duplicate documents: "
-                f"{sorted(duplicates)}"
-            )
+            raise ValueError(f"catalog manifest includes duplicate documents: {sorted(duplicates)}")
         documents.update(own_documents)
         return {
             **payload,
@@ -1642,6 +1803,7 @@ def _catalog_document_review(
         "expected_counts",
         "expected_actor_names",
         "expected_actor_names_sha256",
+        "expected_actor_cards",
         "runtime_probes",
         "dependency_addons",
         "text_reviews",
@@ -1711,9 +1873,7 @@ def _selected_dependency_addons(
             )
         expected_checksum = str(requirement.get("checksum") or "")
         if expected_checksum and expected_checksum != str(package.get("checksum") or ""):
-            raise ValueError(
-                f"dependency addon checksum mismatch: {identity[0]}@{identity[1]}"
-            )
+            raise ValueError(f"dependency addon checksum mismatch: {identity[0]}@{identity[1]}")
         selected.append(package)
         seen.add(identity)
     return selected
@@ -1812,8 +1972,7 @@ def _source_selector_matches(
     if "heading_contains" in selector:
         expected_heading = str(selector["heading_contains"])
         if _fold_text(expected_heading) not in _fold_text(heading) and not any(
-            _bounded_ocr_heading_equivalent(expected_heading, part)
-            for part in heading_parts
+            _bounded_ocr_heading_equivalent(expected_heading, part) for part in heading_parts
         ):
             return False
     if "content_contains" in selector and _fold_text(
@@ -1881,21 +2040,9 @@ def _resolve_catalog_additions(
                 ),
             ):
                 chunk_id = str(chunk["id"])
-                chunk_ids.append(chunk_id)
                 content = str(chunk.get("content") or "")
+                chunk_ids.append(chunk_id)
                 if not content:
-                    if any(
-                        key in selector
-                        for key in (
-                            "start_contains",
-                            "end_before_contains",
-                            "end_contains",
-                        )
-                    ):
-                        raise ValueError(
-                            f"source selector {selector_index} for {relative_path} "
-                            "cannot slice an empty heading chunk"
-                        )
                     continue
                 start = 0
                 if "start_contains" in selector:
@@ -1942,6 +2089,12 @@ def _resolve_catalog_additions(
                         "checksum": hashlib.sha256(exact_text.encode("utf-8")).hexdigest(),
                     }
                 )
+        if not source_spans:
+            raise ValueError(
+                f"catalog addition {index} {str(addition.get('kind') or '')}:"
+                f"{str(addition.get('name') or '')} in {relative_path} "
+                "matched a heading with no indexed text"
+            )
         resolved.append(
             {
                 key: addition[key]
@@ -1965,11 +2118,7 @@ def _bind_catalog_addition_replacements(
     def identity(kind: Any, name: Any) -> tuple[str, str]:
         return (
             str(kind or "").casefold(),
-            "".join(
-                character
-                for character in str(name or "").casefold()
-                if character.isalnum()
-            ),
+            "".join(character for character in str(name or "").casefold() if character.isalnum()),
         )
 
     candidates_by_identity: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -1982,21 +2131,16 @@ def _bind_catalog_addition_replacements(
     for addition in additions:
         item = json.loads(json.dumps(addition))
         if "replace_existing" not in item:
-            matches = candidates_by_identity.get(
-                identity(item.get("kind"), item.get("name")), []
-            )
+            matches = candidates_by_identity.get(identity(item.get("kind"), item.get("name")), [])
             source_chunk_ids = {
-                str(chunk_id)
-                for chunk_id in item.get("source_chunk_ids", [])
-                if str(chunk_id)
+                str(chunk_id) for chunk_id in item.get("source_chunk_ids", []) if str(chunk_id)
             }
             if source_chunk_ids:
                 matches = [
                     candidate
                     for candidate in matches
                     if source_chunk_ids.intersection(
-                        str(chunk_id)
-                        for chunk_id in candidate.get("source_chunk_ids", [])
+                        str(chunk_id) for chunk_id in candidate.get("source_chunk_ids", [])
                     )
                 ]
             if len(matches) > 1:
@@ -2026,6 +2170,28 @@ def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _refresh_patched_statblock_evidence(
+    artifact: dict[str, Any],
+    patch: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind a catalog Agent's boundary repair to its exact reviewed text."""
+
+    if artifact.get("kind") != "statblock":
+        return artifact
+    patched_card = patch.get("card")
+    if not isinstance(patched_card, dict) or "normalized_content" not in patched_card:
+        return artifact
+    card = dict(artifact.get("card") or {})
+    source_text = str(card.get("normalized_content") or "").strip()
+    evidence = card.get("review_evidence")
+    if not source_text or not isinstance(evidence, dict):
+        return artifact
+    evidence = dict(evidence)
+    evidence["normalized_content_sha256"] = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+    card["review_evidence"] = evidence
+    return {**artifact, "card": card}
+
+
 def _review_spec_decisions(
     candidates: list[dict[str, Any]],
     review_spec: dict[str, Any],
@@ -2043,6 +2209,7 @@ def _review_spec_decisions(
         unknown = set(rule) - {
             "kind",
             "name",
+            "candidate_origin",
             "source_heading_exact",
             "source_heading_contains",
             "status",
@@ -2054,27 +2221,26 @@ def _review_spec_decisions(
         key = (_fold_text(rule.get("kind")), _fold_text(rule.get("name")))
         if not all(key):
             raise ValueError(f"catalog decision {index} has an invalid identity")
+        candidate_origin = rule.get("candidate_origin")
+        if candidate_origin not in {None, "extracted", "agent_addition"}:
+            raise ValueError(
+                f"catalog decision {index}.candidate_origin must be extracted or agent_addition"
+            )
         rules.append(rule)
     default_status = str(review_spec.get("default_status") or "accepted")
     if default_status not in {"accepted", "rejected"}:
         raise ValueError("catalog manifest default_status must be accepted or rejected")
-    addition_default_status = str(
-        review_spec.get("addition_default_status") or default_status
-    )
+    addition_default_status = str(review_spec.get("addition_default_status") or default_status)
     if addition_default_status not in {"accepted", "rejected"}:
-        raise ValueError(
-            "catalog manifest addition_default_status must be accepted or rejected"
-        )
+        raise ValueError("catalog manifest addition_default_status must be accepted or rejected")
     raw_defaults_by_kind = review_spec.get("default_status_by_kind") or {}
     if not isinstance(raw_defaults_by_kind, dict):
         raise ValueError("catalog manifest default_status_by_kind must be an object")
     defaults_by_kind = {
-        _fold_text(kind): str(status)
-        for kind, status in raw_defaults_by_kind.items()
+        _fold_text(kind): str(status) for kind, status in raw_defaults_by_kind.items()
     }
     if any(not kind for kind in defaults_by_kind) or any(
-        status not in {"accepted", "rejected"}
-        for status in defaults_by_kind.values()
+        status not in {"accepted", "rejected"} for status in defaults_by_kind.values()
     ):
         raise ValueError(
             "catalog manifest default_status_by_kind must map nonempty kinds "
@@ -2095,6 +2261,12 @@ def _review_spec_decisions(
                     str(rule.get("name") or ""),
                 )
             ):
+                continue
+            candidate_origin = rule.get("candidate_origin")
+            is_agent_addition = bool(candidate.get("agent_catalog_addition"))
+            if candidate_origin == "extracted" and is_agent_addition:
+                continue
+            if candidate_origin == "agent_addition" and not is_agent_addition:
                 continue
             exact = rule.get("source_heading_exact")
             if exact is not None:
@@ -2122,11 +2294,7 @@ def _review_spec_decisions(
             matched.add(matching_rules[0][0])
         status = str(
             rule.get("status")
-            or (
-                addition_default_status
-                if candidate.get("agent_catalog_addition")
-                else None
-            )
+            or (addition_default_status if candidate.get("agent_catalog_addition") else None)
             or defaults_by_kind.get(key[0])
             or default_status
         )
@@ -2154,8 +2322,12 @@ def _review_spec_decisions(
             if artifact_patch is not None:
                 if not isinstance(artifact_patch, dict):
                     raise ValueError(f"artifact_patch for {key} must be an object")
-                decision["artifact"] = _deep_merge(
+                patched_artifact = _deep_merge(
                     dict(candidate.get("artifact") or {}),
+                    artifact_patch,
+                )
+                decision["artifact"] = _refresh_patched_statblock_evidence(
+                    patched_artifact,
                     artifact_patch,
                 )
         elif rule.get("artifact_patch") is not None:
@@ -2201,9 +2373,7 @@ def _review_spec_decisions(
             for candidate, decision in zip(candidates, decisions, strict=True)
             if decision["review_status"] == "accepted"
         ]
-        actual_counts = dict(
-            sorted(Counter(kind for kind, _name in accepted_identities).items())
-        )
+        actual_counts = dict(sorted(Counter(kind for kind, _name in accepted_identities).items()))
         normalized_expected = {
             str(kind): count for kind, count in sorted(expected_counts.items()) if count
         }
@@ -2247,9 +2417,7 @@ def _require_expected_actor_names(
         raise ValueError("expected_actor_names_sha256 must be a lowercase SHA-256")
     cards = (
         list(
-            dict(dict(preset_export or {}).get("package") or {})
-            .get("payload", {})
-            .get("cards")
+            dict(dict(preset_export or {}).get("package") or {}).get("payload", {}).get("cards")
             or []
         )
         if preset_export is not None
@@ -2280,6 +2448,115 @@ def _require_expected_actor_names(
                 "actor preset name manifest checksum differs from the "
                 f"source-reviewed manifest: expected={expected_sha256}, "
                 f"actual={actual_sha256}"
+            )
+
+
+def _require_expected_actor_cards(
+    review_spec: dict[str, Any],
+    preset_export: dict[str, Any] | None,
+) -> None:
+    """Verify source-reviewed actor payload boundaries, not only their names."""
+
+    expected = review_spec.get("expected_actor_cards")
+    if expected is None:
+        return
+    if not isinstance(expected, list) or any(not isinstance(item, dict) for item in expected):
+        raise ValueError("expected_actor_cards must be an array of objects")
+    cards = list(
+        dict(dict(preset_export or {}).get("package") or {}).get("payload", {}).get("cards") or []
+    )
+    by_name: dict[str, list[dict[str, Any]]] = {}
+    for card in cards:
+        if not isinstance(card, dict):
+            continue
+        payload = dict(card.get("payload") or {})
+        by_name.setdefault(_fold_text(payload.get("name")), []).append(payload)
+    seen: set[str] = set()
+    allowed = {
+        "name",
+        "source_text_sha256",
+        "inventory_item_names",
+        "activity_names",
+        "forbidden_text",
+    }
+    for index, contract in enumerate(expected):
+        unknown = set(contract) - allowed
+        if unknown:
+            raise ValueError(
+                f"expected_actor_cards[{index}] has unsupported fields: {sorted(unknown)}"
+            )
+        name = str(contract.get("name") or "").strip()
+        folded_name = _fold_text(name)
+        if not folded_name or folded_name in seen:
+            raise ValueError("expected_actor_cards must name unique nonempty actors")
+        seen.add(folded_name)
+        matches = by_name.get(folded_name, [])
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"expected actor card {name!r} resolved to {len(matches)} exported cards"
+            )
+        payload = matches[0]
+        for field in ("inventory_item_names", "activity_names", "forbidden_text"):
+            value = contract.get(field)
+            if value is not None and (
+                not isinstance(value, list)
+                or any(not isinstance(item, str) or not item.strip() for item in value)
+            ):
+                raise ValueError(
+                    f"expected_actor_cards[{index}].{field} must be an array of nonempty strings"
+                )
+        sheet = dict(payload.get("sheet") or {})
+        if "inventory_item_names" in contract:
+            inventory = dict(sheet.get("inventory") or {})
+            actual_items = Counter(
+                _fold_text(dict(item).get("name"))
+                for item in inventory.get("items") or []
+                if isinstance(item, dict)
+            )
+            expected_items = Counter(_fold_text(item) for item in contract["inventory_item_names"])
+            if actual_items != expected_items:
+                raise RuntimeError(
+                    f"actor card {name!r} inventory differs from source review: "
+                    f"expected={sorted(expected_items.elements())}, "
+                    f"actual={sorted(actual_items.elements())}"
+                )
+        if "activity_names" in contract:
+            content = dict(sheet.get("content") or {})
+            actual_activities = Counter(
+                _fold_text(dict(item).get("name"))
+                for item in content.get("activities") or []
+                if isinstance(item, dict)
+            )
+            expected_activities = Counter(_fold_text(item) for item in contract["activity_names"])
+            if actual_activities != expected_activities:
+                raise RuntimeError(
+                    f"actor card {name!r} activities differ from source review: "
+                    f"expected={sorted(expected_activities.elements())}, "
+                    f"actual={sorted(actual_activities.elements())}"
+                )
+        expected_source_hash = contract.get("source_text_sha256")
+        if expected_source_hash is not None:
+            if (
+                not isinstance(expected_source_hash, str)
+                or re.fullmatch(r"[0-9a-f]{64}", expected_source_hash) is None
+            ):
+                raise ValueError(
+                    f"expected_actor_cards[{index}].source_text_sha256 must be a lowercase SHA-256"
+                )
+            source_text = str(dict(payload.get("provenance") or {}).get("source_text") or "")
+            actual_source_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+            if actual_source_hash != expected_source_hash:
+                raise RuntimeError(
+                    f"actor card {name!r} source boundary checksum differs: "
+                    f"expected={expected_source_hash}, actual={actual_source_hash}"
+                )
+        serialized = json.dumps(payload, ensure_ascii=False).casefold()
+        leaked = [
+            item for item in contract.get("forbidden_text") or [] if item.casefold() in serialized
+        ]
+        if leaked:
+            raise RuntimeError(
+                f"actor card {name!r} contains source-reviewed forbidden text: {leaked}"
             )
 
 
@@ -2340,9 +2617,8 @@ async def _portable_roundtrip(
     critic_reviewer: str,
     critic_review_method: str,
     review_spec: dict[str, Any] | None = None,
-    available_dependency_addons: dict[
-        tuple[str, str], dict[str, Any]
-    ] | None = None,
+    available_dependency_addons: dict[tuple[str, str], dict[str, Any]] | None = None,
+    probe_attempt_id: str = "test",
 ) -> dict[str, Any]:
     """Compile the entire reviewed catalog and round-trip its self-contained addon."""
 
@@ -2375,10 +2651,7 @@ async def _portable_roundtrip(
         for component in dependency_rule_components
     )
     manifest_dependencies = list(
-        {
-            (item["id"], item["version"]): item
-            for item in manifest_dependencies
-        }.values()
+        {(item["id"], item["version"]): item for item in manifest_dependencies}.values()
     )
     chunks = await _source_chunks(source_server, source_id)
     if not chunks:
@@ -2649,6 +2922,7 @@ async def _portable_roundtrip(
                 f"failures={preset_summary.get('failures', [])}"
             )
     _require_expected_actor_names(review_spec or {}, preset_export)
+    _require_expected_actor_cards(review_spec or {}, preset_export)
     addon_id = f"{pack_id}.addon"
     classification = _addon_classification(relative_path)
     addon_response = await _call(
@@ -2757,13 +3031,14 @@ async def _portable_roundtrip(
     )
     if activated_response["result"]["activation"]["enabled"] is not True:
         raise RuntimeError("addon did not activate its exact branch lock")
+    runtime_probe_key = f"{id_key}-attempt-{probe_attempt_id}"
     content_runtime_probes = await _run_content_runtime_probes(
         server=target_server,
         campaign_id=target_campaign_id,
         edition=edition,
         package=package,
         probes=dict(review_spec or {}).get("runtime_probes") or [],
-        id_key=id_key,
+        id_key=runtime_probe_key,
     )
     dependent_actor_runtime_probes: list[dict[str, Any]] = []
     for template_index, template in enumerate(
@@ -2806,7 +3081,7 @@ async def _portable_roundtrip(
             owner_sheet,
             source=f"addon dependent actor owner {artifact_id}",
         )
-        probe_key = f"{id_key}-{template_index}"
+        probe_key = f"{runtime_probe_key}-{template_index}"
         owner_response = await _call(
             target_server,
             "character_create_from",
