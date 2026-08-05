@@ -437,9 +437,7 @@ def test_addon_export_finalizes_stale_resolved_agent_state() -> None:
                             {
                                 "source": "rule-source:example",
                                 "source_ref": {"page_number": 1},
-                                "source_excerpt": (
-                                    "Use the exact source-defined procedure."
-                                ),
+                                "source_excerpt": ("Use the exact source-defined procedure."),
                             }
                         ],
                         "settlement": {
@@ -476,8 +474,7 @@ def test_addon_export_finalizes_stale_resolved_agent_state() -> None:
     assert artifact["execution_state"] == "ruling_ready"
     assert before["complete"] is False
     assert any(
-        item["artifact_id"].endswith(":resolution-manifest")
-        for item in before["unresolved"]
+        item["artifact_id"].endswith(":resolution-manifest") for item in before["unresolved"]
     )
     assert manifest["resolution_policy"] == "build_time_complete"
     assert manifest["resolution_readiness"]["complete"] is True
@@ -578,14 +575,14 @@ def test_character_card_export_and_import_uses_fresh_identity(tmp_path: Path) ->
         assert imported["actor_knowledge_imported"] is False
         assert exported["artifact"]["artifact"].endswith(".sagasmith.json")
         assert "campaign_id" not in exported["card"]["payload"]
-        requirement = exported["card"]["payload"]["sheet"]["content"][
-            "features"
-        ][0]["ruling_requirements"][0]
+        requirement = exported["card"]["payload"]["sheet"]["content"]["features"][0][
+            "ruling_requirements"
+        ][0]
         assert requirement["policy_ref"] == "actor_card.import.v1"
         assert requirement["default_resolver"] == "agent"
-        assert imported["character"]["sheet"]["content"]["features"][0][
-            "ruling_requirements"
-        ] == [requirement]
+        assert imported["character"]["sheet"]["content"]["features"][0]["ruling_requirements"] == [
+            requirement
+        ]
 
     asyncio.run(exercise())
 
@@ -755,9 +752,7 @@ def test_module_package_round_trip_recreates_cast_bindings(tmp_path: Path) -> No
                 "idempotency_key": "import-addon",
             },
         )
-        assert addon_imported["components"][0]["status"] == (
-            "campaign_import_required"
-        )
+        assert addon_imported["components"][0]["status"] == ("campaign_import_required")
         profile = await _call(
             addon_server,
             "campaign_rules",
@@ -881,9 +876,7 @@ def test_bundled_srd_monster_presets_are_catalog_imports(tmp_path: Path) -> None
                 "payload": {"edition": "2014", "include_package": True},
             },
         )
-        preset_readiness = audit_dnd_addon_resolution_components(
-            [shared["portable_package"]]
-        )
+        preset_readiness = audit_dnd_addon_resolution_components([shared["portable_package"]])
         imported = await _call(
             server,
             "character_create_from",
@@ -1153,9 +1146,7 @@ def test_extension_rule_pack_export_import_rebinds_sources_and_stays_inactive(
         serialized = json.dumps(package, ensure_ascii=False)
         assert package["kind"] == "rule_pack"
         readiness = package["payload"]["manifest"]["resolution_readiness"]
-        assert package["payload"]["manifest"]["resolution_policy"] == (
-            "build_time_complete"
-        )
+        assert package["payload"]["manifest"]["resolution_policy"] == ("build_time_complete")
         assert readiness["complete"] is True
         assert readiness["unresolved"] == []
         assert readiness["first_use_compilation_required"] is False
@@ -1235,9 +1226,10 @@ def test_extension_rule_pack_export_import_rebinds_sources_and_stays_inactive(
             },
         )
         dependent_package = dependent_export["package"]
-        assert dependent_package["dependencies"][0]["checksum"] == package["metadata"][
-            "definition_checksum"
-        ]
+        assert (
+            dependent_package["dependencies"][0]["checksum"]
+            == package["metadata"]["definition_checksum"]
+        )
         assert dependent_package["dependencies"][0]["checksum"] != package["checksum"]
 
         release = await _call(
@@ -1306,14 +1298,32 @@ def test_extension_rule_pack_export_import_rebinds_sources_and_stays_inactive(
         addon = addon_export["package"]
         assert addon_export["summary"]["components"] == 2
         readiness = addon["payload"]["manifest"]["resolution_readiness"]
-        assert addon["payload"]["manifest"]["resolution_policy"] == (
-            "build_time_complete"
-        )
+        assert addon["payload"]["manifest"]["resolution_policy"] == ("build_time_complete")
         assert readiness["complete"] is True
         assert readiness["first_use_compilation_required"] is False
         assert readiness["modes"] == {
             "descriptive": 2,
             "primitive_plan": 1,
+        }
+
+        local_addon_import = await _call(
+            source_server,
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "import_addon",
+                "payload": {"addon": addon},
+                "idempotency_key": "reuse-equivalent-local-rule-packs",
+            },
+        )
+        assert local_addon_import["installed"] is True
+        assert {
+            (component["id"], component["status"])
+            for component in local_addon_import["components"]
+            if component["kind"] == "rule_pack"
+        } == {
+            ("dnd5e.example.luminous-ward", "installed"),
+            ("dnd5e.example.prismatic-aegis", "installed"),
         }
 
         addon_server = create_server(_config(tmp_path / "addon-target"))
@@ -1332,12 +1342,8 @@ def test_extension_rule_pack_export_import_rebinds_sources_and_stays_inactive(
             "payload": {"addon": addon},
             "idempotency_key": "addon-import",
         }
-        addon_imported = await _call(
-            addon_server, "rule_import", addon_import_arguments
-        )
-        assert await _call(
-            addon_server, "rule_import", addon_import_arguments
-        ) == addon_imported
+        addon_imported = await _call(addon_server, "rule_import", addon_import_arguments)
+        assert await _call(addon_server, "rule_import", addon_import_arguments) == addon_imported
         assert addon_imported["installed"] is True
         assert [item["status"] for item in addon_imported["components"]] == [
             "installed",
@@ -1370,9 +1376,7 @@ def test_extension_rule_pack_export_import_rebinds_sources_and_stays_inactive(
             "idempotency_key": "addon-enable",
         }
         enabled = await _call(addon_server, "campaign_rules", enable_arguments)
-        assert await _call(
-            addon_server, "campaign_rules", enable_arguments
-        ) == enabled
+        assert await _call(addon_server, "campaign_rules", enable_arguments) == enabled
         assert enabled["activation"]["enabled"] is True
         assert len(enabled["effective_ruleset"]["lock"]) == 2
         listed_addons = await _call(
@@ -1598,8 +1602,7 @@ def test_extension_rule_pack_export_import_rebinds_sources_and_stays_inactive(
             },
         )
         assert all(
-            item["local_status"] == "installed"
-            for item in inspected_after_import["components"]
+            item["local_status"] == "installed" for item in inspected_after_import["components"]
         )
         assert all(
             item["portable_checksum_status"] == "match"

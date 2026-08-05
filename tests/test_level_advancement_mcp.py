@@ -644,7 +644,7 @@ def test_feature_granted_spells_and_invocation_prerequisites_are_settled(
             "dnd5e.content.srd2014.spell.fireball",
             "dnd5e.content.srd2014.spell.eldritch-blast",
         }
-        secrets_character = secrets["character"]
+        secrets_character = secrets
         assert {
             spell["grant"]["source_key"]
             for spell in secrets_character["sheet"]["content"]["spells"]
@@ -692,7 +692,7 @@ def test_feature_granted_spells_and_invocation_prerequisites_are_settled(
                 "idempotency_key": "arcanum",
             },
         )
-        arcanum_character = arcanum["character"]
+        arcanum_character = arcanum
         assert (
             arcanum_character["sheet"]["resources"][
                 "mystic_arcanum:dnd5e.content.srd2014.spell.mass-suggestion"
@@ -774,7 +774,7 @@ def test_feature_granted_spells_and_invocation_prerequisites_are_settled(
                 "idempotency_key": "invocations",
             },
         )
-        invocation_character = invocations["character"]
+        invocation_character = invocations
         mage_armor = next(
             spell
             for spell in invocation_character["sheet"]["content"]["spells"]
@@ -1621,7 +1621,7 @@ def test_signature_spells_are_always_prepared_and_use_explicit_free_resources(
                 "idempotency_key": "signature",
             },
         )
-        applied_character = applied["character"]
+        applied_character = applied
         by_id = {spell["id"]: spell for spell in applied_character["sheet"]["content"]["spells"]}
         for spell_id in spell_ids:
             assert by_id[spell_id]["access"]["always_prepared"] is True
@@ -1809,7 +1809,7 @@ def test_spell_mastery_preserves_existing_preparation_state(
                 "idempotency_key": "mastery",
             },
         )
-        by_id = {spell["id"]: spell for spell in applied["character"]["sheet"]["content"]["spells"]}
+        by_id = {spell["id"]: spell for spell in applied["sheet"]["content"]["spells"]}
         assert by_id[spell_ids[0]]["access"]["prepared"] is True
         assert by_id[spell_ids[1]]["access"]["prepared"] is False
         assert all(by_id[spell_id]["access"]["at_will"] for spell_id in spell_ids[:2])
@@ -1858,7 +1858,7 @@ def test_spell_mastery_preserves_existing_preparation_state(
                         "replace_existing": True,
                         "study_started_elapsed_minutes": 0,
                     },
-                    "expected_revision": applied["character"]["revision"],
+                    "expected_revision": applied["revision"],
                     "idempotency_key": "too-early",
                 },
             )
@@ -1893,19 +1893,17 @@ def test_spell_mastery_preserves_existing_preparation_state(
                     "replace_existing": True,
                     "study_started_elapsed_minutes": 0,
                 },
-                "expected_revision": applied["character"]["revision"],
+                "expected_revision": applied["revision"],
                 "idempotency_key": "replace",
             },
         )
         assert advanced["world_time"]["elapsed_minutes"] == 480
-        by_id = {
-            spell["id"]: spell for spell in replaced["character"]["sheet"]["content"]["spells"]
-        }
+        by_id = {spell["id"]: spell for spell in replaced["sheet"]["content"]["spells"]}
         assert all(by_id[spell_id]["access"]["at_will"] is False for spell_id in spell_ids[:2])
         assert all(by_id[spell_id]["access"]["at_will"] is True for spell_id in spell_ids[2:])
         mastery = next(
             item
-            for item in replaced["character"]["sheet"]["content"]["features"]
+            for item in replaced["sheet"]["content"]["features"]
             if item["id"].endswith("wizard-spell-mastery")
         )
         assert mastery["choices"]["spell_artifact_ids"] == spell_ids[2:]
@@ -2307,19 +2305,14 @@ def test_prepared_spell_limit_tracks_spellcasting_ability_score_improvement(
                 "idempotency_key": "level-4",
             },
         )
-        assert (
-            level_four["character"]["sheet"]["spellcasting"]["preparation"]["max_prepared"]
-            == 7
-        )
+        assert level_four["character"]["sheet"]["spellcasting"]["preparation"]["max_prepared"] == 7
 
         applied = await _call(
             server,
             "character_content_apply",
             {
                 "character_id": actor["id"],
-                "artifact_id": (
-                    "dnd5e.content.srd2014.feature.cleric-ability-score-improvement"
-                ),
+                "artifact_id": ("dnd5e.content.srd2014.feature.cleric-ability-score-improvement"),
                 "selection": {
                     "grant_level": 4,
                     "ability_score_increases": {"wisdom": 1, "constitution": 1},
@@ -2363,10 +2356,7 @@ def test_prepared_spell_limit_tracks_spellcasting_ability_score_improvement(
                 "idempotency_key": "repair-prepared-limit",
             },
         )
-        assert (
-            repaired["character"]["sheet"]["spellcasting"]["preparation"]["max_prepared"]
-            == 8
-        )
+        assert repaired["character"]["sheet"]["spellcasting"]["preparation"]["max_prepared"] == 8
         assert repaired["changes"][-1] == {
             "target": "spellcasting.preparation.max_prepared",
             "old_value": 7,

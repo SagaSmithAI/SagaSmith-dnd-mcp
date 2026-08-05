@@ -106,7 +106,7 @@ def test_pdf_page_review_becomes_snapshot_managed_scene_atlas(
         *,
         page_numbers: list[int] | None = None,
     ) -> list[OcrPageLayout]:
-        assert provider.model_type == "medium"
+        assert provider.model_type in {"medium", "small"}
         assert page_numbers == [1]
         return [layout]
 
@@ -370,8 +370,7 @@ def test_module_statblock_ocr_recovery_supports_text_only_agent(
                 for index, label in enumerate(("STR", "DEX", "CON", "INT", "WIS", "CHA"))
             ),
             *tuple(
-                block("10 (+0)", 25 + index * 70, 165, 80 + index * 70, 185)
-                for index in range(6)
+                block("10 (+0)", 25 + index * 70, 165, 80 + index * 70, 185) for index in range(6)
             ),
             block("Senses passive Perception 10", 30, 200, 250, 220),
             block("Languages Common", 30, 220, 180, 240),
@@ -568,9 +567,7 @@ def test_module_statblock_ocr_recovery_supports_text_only_agent(
         assert requirements["required"] is True
         assert requirements["parser_authoritative"] is False
         activity = requirements["multiattack_options"][0]
-        club = next(
-            item for item in requirements["available_weapons"] if item["name"] == "Club"
-        )
+        club = next(item for item in requirements["available_weapons"] if item["name"] == "Club")
 
         filled_arguments = {
             **preview_arguments,

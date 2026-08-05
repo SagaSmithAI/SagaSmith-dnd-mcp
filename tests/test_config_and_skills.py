@@ -96,9 +96,7 @@ def test_environment_config_has_separate_rule_and_module_import_roots(monkeypatc
     assert config.bound_principal_id == "trusted-user"
     assert config.document_cache_dir is not None
     assert config.document_cache_dir.name == "shared-documents"
-    assert config.ocr_page_cache_dir == (
-        config.document_cache_dir / "ocr-page-cache"
-    )
+    assert config.ocr_page_cache_dir == (config.document_cache_dir / "ocr-page-cache")
 
 
 def test_default_rule_import_roots_include_the_dnd_skill_corpus(monkeypatch) -> None:
@@ -658,6 +656,7 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
         assert capabilities["features"]["per_page_ocr_confidence_fallback"] is True
         assert capabilities["features"]["lexical_pdf_damage_detection"] is True
         assert capabilities["features"]["agent_bounded_ocr_text_review"] is True
+        assert capabilities["features"]["agent_rendered_empty_page_recovery"] is True
         assert capabilities["module_import"]["stage_inputs"] == [
             "source_path",
             "name+content",
@@ -687,10 +686,23 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
             ],
             "raw_source_immutable": True,
             "unique_exact_page_replacements": True,
+            "rendered_empty_page_recovery": {
+                "replacement_shape": [{"old": "", "new": "full_transcript"}],
+                "requires_wholly_empty_normalized_page": True,
+                "rendered_page_checksum_required": True,
+                "review_methods": ["agent", "human"],
+            },
             "max_revisions_per_page": 8,
             "post_ingest_revision": "new_import_job_required",
             "vision_required": False,
             "agent_context_numeric_changes": False,
+            "agent_context_written_quantity_changes": False,
+            "submission_ocr": {
+                "cross_text": "required",
+                "agent_context": "not_run",
+                "rendered_page": "not_run",
+            },
+            "printed_source_typo_policy": "preserve_source_text_author_structured_card",
         }
         assert capabilities["module_import"]["normalizer"].startswith("sagasmith-core/pdf-layout-v")
         assert capabilities["module_import"]["parser"] == (
@@ -750,10 +762,30 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
             ],
             "raw_source_immutable": True,
             "unique_exact_page_replacements": True,
+            "rendered_empty_page_recovery": {
+                "replacement_shape": [{"old": "", "new": "full_transcript"}],
+                "requires_wholly_empty_normalized_page": True,
+                "rendered_page_checksum_required": True,
+                "review_methods": ["agent", "human"],
+            },
             "max_revisions_per_page": 8,
             "post_ingest_revision": "new_import_job_required",
             "vision_required": False,
             "agent_context_numeric_changes": False,
+            "agent_context_written_quantity_changes": False,
+            "submission_ocr": {
+                "cross_text": "required",
+                "agent_context": "not_run",
+                "rendered_page": "not_run",
+            },
+            "printed_source_typo_policy": "preserve_source_text_author_structured_card",
+        }
+        assert capabilities["rulebook_import"]["statblock_ocr_correction"] == {
+            "evidence_bases": ["staged_text", "rendered_page"],
+            "rendered_page_checksum_required": True,
+            "vision_required": False,
+            "agent_authored_values": True,
+            "engine_owned_layout_and_normalization": True,
         }
         assert capabilities["rulebook_import"]["normalization_cache"] == "content-addressed"
         assert capabilities["rulebook_import"]["page_extraction_cache"] == "content-addressed"

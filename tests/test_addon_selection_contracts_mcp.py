@@ -60,15 +60,9 @@ def test_active_addon_options_extend_selector_without_granting_extra_choices() -
 
     assert extended["count"] == 1
     assert extended["options"] == ["Armor of Shadows", "Shroud of Shadow"]
-    assert extended["option_artifact_ids"] == {
-        "Shroud of Shadow": option["id"]
-    }
-    assert extended["option_prerequisites"] == {
-        "Shroud of Shadow": {"minimum_level": 15}
-    }
-    assert extended["at_will_spells"] == {
-        "Shroud of Shadow": "Invisibility"
-    }
+    assert extended["option_artifact_ids"] == {"Shroud of Shadow": option["id"]}
+    assert extended["option_prerequisites"] == {"Shroud of Shadow": {"minimum_level": 15}}
+    assert extended["at_will_spells"] == {"Shroud of Shadow": "Invisibility"}
 
 
 def test_active_addon_option_rejects_conflicting_selector_identity() -> None:
@@ -203,9 +197,7 @@ def test_background_group_limits_reject_two_choices_from_one_category() -> None:
         {"id": "gaming", "maximum": 1, "options": ["Dice", "Dragonchess"]},
         {"id": "instrument", "maximum": 1, "options": ["Lute"]},
     ]
-    _validate_group_limited_choices(
-        ["Dice", "Lute"], groups=groups, label="background tool"
-    )
+    _validate_group_limited_choices(["Dice", "Lute"], groups=groups, label="background tool")
     with pytest.raises(ValueError, match="reviewed group limit: gaming"):
         _validate_group_limited_choices(
             ["Dice", "Dragonchess"], groups=groups, label="background tool"
@@ -214,14 +206,10 @@ def test_background_group_limits_reject_two_choices_from_one_category() -> None:
 
 def test_selected_and_conditional_feature_proficiencies_mutate_exactly() -> None:
     languages = ["Common"]
-    _append_selected_proficiencies(
-        ["Elvish"], target=languages, label="language"
-    )
+    _append_selected_proficiencies(["Elvish"], target=languages, label="language")
     assert languages == ["Common", "Elvish"]
     with pytest.raises(ValueError, match="already proficient"):
-        _append_selected_proficiencies(
-            ["elvish"], target=languages, label="language"
-        )
+        _append_selected_proficiencies(["elvish"], target=languages, label="language")
 
     sheet = default_character_sheet()
     _apply_skill_proficiency_or_expertise(sheet, ["Persuasion"])
@@ -455,9 +443,7 @@ def test_reviewed_addon_feat_materializes_bounded_spell_sources(tmp_path: Path) 
             ],
             "card": {
                 "name": "Aberrant Dragonmark",
-                "prerequisites": [
-                    {"kind": "feature_forbidden", "feature": "dragonmark"}
-                ],
+                "prerequisites": [{"kind": "feature_forbidden", "feature": "dragonmark"}],
                 "repeatable": False,
                 "selection_requirements": {
                     "field": "spell_choices",
@@ -562,9 +548,7 @@ def test_reviewed_addon_feat_materializes_bounded_spell_sources(tmp_path: Path) 
                 "selection": {
                     "spell_choices": {
                         "cantrip": ["dnd5e.content.srd2014.spell.light"],
-                        "level_1_spell": [
-                            "dnd5e.content.srd2014.spell.burning-hands"
-                        ],
+                        "level_1_spell": ["dnd5e.content.srd2014.spell.burning-hands"],
                     }
                 },
                 "expected_revision": character["revision"],
@@ -573,9 +557,7 @@ def test_reviewed_addon_feat_materializes_bounded_spell_sources(tmp_path: Path) 
         )
 
         assert applied["sheet"]["abilities"]["constitution"]["score"] == 11
-        spells = {
-            item["id"]: item for item in applied["sheet"]["content"]["spells"]
-        }
+        spells = {item["id"]: item for item in applied["sheet"]["content"]["spells"]}
         burning_hands = spells["dnd5e.content.srd2014.spell.burning-hands"]
         casting_source = burning_hands["access"]["feature_casting_sources"][0]
         assert casting_source["spellcasting_ability"] == "constitution"
@@ -782,8 +764,30 @@ to hit, reach 5 ft., one target. *Hit:* 1d8 + PB force damage.
                 "idempotency_key": "addon-actor-create",
             },
         )
+        second_owner = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Second Owner",
+                "sheet": owner_sheet,
+                "idempotency_key": "addon-actor-second-owner",
+            },
+        )
+        second_created = await _call(
+            server,
+            "addon_actor_instantiate",
+            {
+                "campaign_id": campaign["id"],
+                "artifact_id": artifact["id"],
+                "owner_character_id": second_owner["id"],
+                "idempotency_key": "addon-actor-second-create",
+            },
+        )
 
         assert created["character"]["id"] == replay["character"]["id"]
+        assert created["character"]["name"] == "Steel Defender (Owner)"
+        assert second_created["character"]["name"] == "Steel Defender (Second Owner)"
         assert created["character"]["sheet"]["combat"]["hp"]["max"] == 31
         assert created["content_receipt"]["numeric_parameters"] == {
             "owner_class_level": 5,
@@ -1120,6 +1124,8 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
                 "name": "Aid",
                 "classes": ["Cleric", "Paladin"],
                 "level": 2,
+                "description": "Catalog retrieval text must not enter a character card.",
+                "source_title": "Guild addon source",
                 "definition": {
                     "school": "abjuration",
                     "casting_time": "1 action",
@@ -1213,9 +1219,7 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
                             "allow_slot_cast": False,
                             "minimum_level": 1,
                             "ritual_only": False,
-                            "casting_overrides": {
-                                "ignore_material_components": True
-                            },
+                            "casting_overrides": {"ignore_material_components": True},
                         },
                         {
                             "name": "Nondetection",
@@ -1228,9 +1232,7 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
                             "allow_slot_cast": False,
                             "minimum_level": 1,
                             "ritual_only": False,
-                            "casting_overrides": {
-                                "ignore_material_components": True
-                            },
+                            "casting_overrides": {"ignore_material_components": True},
                         },
                         {
                             "name": "Burning Hands",
@@ -1371,12 +1373,8 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
                 "name": "Circle of Spores",
                 "class_name": "Druid",
                 "minimum_level": 2,
-                "always_prepared_spells": [
-                    {"name": "Blindness/Deafness", "minimum_level": 3}
-                ],
-                "spell_grants": [
-                    {"name": "Chill Touch", "minimum_level": 2, "method": "known"}
-                ],
+                "always_prepared_spells": [{"name": "Blindness/Deafness", "minimum_level": 3}],
+                "spell_grants": [{"name": "Chill Touch", "minimum_level": 2, "method": "known"}],
                 "spell_list_expansion": ["Aid"],
             },
             "rule_refs": ["book:addon:p2"],
@@ -1528,12 +1526,10 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
         assert applied["sheet"]["inventory"]["wallet"]["gp"] == 12
         assert applied["sheet"]["skills"]["investigation"]["proficiency"] == "proficient"
         assert applied["sheet"]["skills"]["persuasion"]["proficiency"] == "proficient"
-        assert applied["sheet"]["progression"]["background_grants"][
-            "equipment_item_ids"
-        ] == [item["id"] for item in items]
-        assert applied["sheet"]["progression"]["background_grants"][
-            "spell_list_expansion"
-        ] == [
+        assert applied["sheet"]["progression"]["background_grants"]["equipment_item_ids"] == [
+            item["id"] for item in items
+        ]
+        assert applied["sheet"]["progression"]["background_grants"]["spell_list_expansion"] == [
             {
                 "artifact_id": "dnd5e.addon.guild.spell.aid",
                 "name": "Aid",
@@ -1569,6 +1565,8 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
             "source_key": "wizard",
             "method": "spellbook",
         }
+        assert "description" not in aid
+        assert "source_title" not in aid
 
         marked_character = await _call(
             server,
@@ -1596,9 +1594,7 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
                 "idempotency_key": "species-apply",
             },
         )
-        assert marked["sheet"]["progression"]["species_grants"][
-            "spell_list_expansion"
-        ] == [
+        assert marked["sheet"]["progression"]["species_grants"]["spell_list_expansion"] == [
             {
                 "artifact_id": "dnd5e.addon.guild.spell.aid",
                 "name": "Aid",
@@ -1606,9 +1602,7 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
                 "pack_version": "1.0.0",
             }
         ]
-        assert marked["sheet"]["traits"]["proficiencies"]["armor"] == [
-            "Light Armor"
-        ]
+        assert marked["sheet"]["traits"]["proficiencies"]["armor"] == ["Light Armor"]
         assert marked["sheet"]["combat"]["speed"]["fly"] == 30
         assert marked["sheet"]["abilities"]["strength"]["score"] == 8
         assert marked["sheet"]["abilities"]["intelligence"]["score"] == 11
@@ -1622,40 +1616,30 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
         )
         assert derive_character_sheet(marked["sheet"])["armor_class"] == 13
         detect_magic = next(
-            item
-            for item in marked["sheet"]["content"]["spells"]
-            if item["name"] == "Detect Magic"
+            item for item in marked["sheet"]["content"]["spells"] if item["name"] == "Detect Magic"
         )
-        assert detect_magic["access"]["feature_casting_sources"][0][
-            "casting_overrides"
-        ] == {"ignore_material_components": True}
+        assert detect_magic["access"]["feature_casting_sources"][0]["casting_overrides"] == {
+            "ignore_material_components": True
+        }
         nondetection = next(
-            item
-            for item in marked["sheet"]["content"]["spells"]
-            if item["name"] == "Nondetection"
+            item for item in marked["sheet"]["content"]["spells"] if item["name"] == "Nondetection"
         )
         assert nondetection["access"]["at_will"] is True
-        assert nondetection["access"]["feature_casting_sources"][0]["method"] == (
-            "at_will"
-        )
+        assert nondetection["access"]["feature_casting_sources"][0]["method"] == ("at_will")
         burning_hands = next(
-            item
-            for item in marked["sheet"]["content"]["spells"]
-            if item["name"] == "Burning Hands"
+            item for item in marked["sheet"]["content"]["spells"] if item["name"] == "Burning Hands"
         )
-        assert burning_hands["access"]["feature_casting_sources"][0][
-            "casting_overrides"
-        ] == {"fixed_cast_level": 2}
+        assert burning_hands["access"]["feature_casting_sources"][0]["casting_overrides"] == {
+            "fixed_cast_level": 2
+        }
         assert (
             detect_magic["access"]["feature_casting_sources"][0]["resource_key"]
             == burning_hands["access"]["feature_casting_sources"][0]["resource_key"]
         )
-        assert marked["sheet"]["resources"]["species:marked-human:insight"][
-            "value"
-        ] == 1
-        assert [
-            item["name"] for item in marked["sheet"]["content"]["features"]
-        ] == ["Marked Awareness"]
+        assert marked["sheet"]["resources"]["species:marked-human:insight"]["value"] == 1
+        assert [item["name"] for item in marked["sheet"]["content"]["features"]] == [
+            "Marked Awareness"
+        ]
         marked_awareness = marked["sheet"]["content"]["features"][0]
         assert marked_awareness["id"].endswith(".feature.marked-awareness")
         assert marked_awareness["source_key"] == "Marked Human"
@@ -1692,15 +1676,13 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
             },
         )
         advanced_marked = marked_level_four["character"]
-        assert [
-            item["name"]
-            for item in advanced_marked["sheet"]["content"]["features"]
-        ] == ["Marked Awareness", "Greater Mark"]
+        assert [item["name"] for item in advanced_marked["sheet"]["content"]["features"]] == [
+            "Marked Awareness",
+            "Greater Mark",
+        ]
         assert marked_level_four["advancement"]["species_feature_grants"] == [
             {
-                "artifact_id": (
-                    "dnd5e.addon.guild.species.marked-human.feature.greater-mark"
-                ),
+                "artifact_id": ("dnd5e.addon.guild.species.marked-human.feature.greater-mark"),
                 "name": "Greater Mark",
                 "minimum_level": 4,
                 "source_species": "Marked Human",
@@ -1717,12 +1699,8 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
             },
         )
         dragonborn_id = "dnd5e.content.standard2014.species.dragonborn"
-        dragonborn_entry = next(
-            item for item in dragonborn_catalog if item["id"] == dragonborn_id
-        )
-        assert dragonborn_entry["selection_requirements"]["fields"] == [
-            "damage_affinity"
-        ]
+        dragonborn_entry = next(item for item in dragonborn_catalog if item["id"] == dragonborn_id)
+        assert dragonborn_entry["selection_requirements"]["fields"] == ["damage_affinity"]
         dragonborn_character = await _call(
             server,
             "character_create",
@@ -1750,9 +1728,7 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
             for item in dragonborn_applied["sheet"]["content"]["activities"]
             if item["name"] == "Breath Weapon"
         )
-        breath_spec = area_save_damage_spec(
-            dragonborn_applied["sheet"], breath["id"]
-        )
+        breath_spec = area_save_damage_spec(dragonborn_applied["sheet"], breath["id"])
         assert breath_spec is not None
         assert breath_spec["kind"] == "self_cone_save_damage"
         assert breath_spec["save_dc"] == 10
@@ -1813,18 +1789,13 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
             },
         )
         subclass_spells = {
-            item["name"]: item
-            for item in subclass_applied["sheet"]["content"]["spells"]
+            item["name"]: item for item in subclass_applied["sheet"]["content"]["spells"]
         }
         assert subclass_spells["Chill Touch"]["grant"]["method"] == "known"
         assert subclass_spells["Chill Touch"]["access"]["known"] is True
         assert subclass_spells["Chill Touch"]["access"]["always_prepared"] is False
-        assert subclass_spells["Blindness/Deafness"]["grant"]["method"] == (
-            "class_prepared"
-        )
-        assert subclass_spells["Blindness/Deafness"]["access"][
-            "always_prepared"
-        ] is True
+        assert subclass_spells["Blindness/Deafness"]["grant"]["method"] == ("class_prepared")
+        assert subclass_spells["Blindness/Deafness"]["access"]["always_prepared"] is True
         assert "Aid" not in subclass_spells
         assert subclass_applied["sheet"]["progression"]["subclass_grants"][
             "spell_list_expansion"
@@ -1861,6 +1832,262 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
             "source_key": "druid",
             "method": "class_prepared",
         }
+
+    import asyncio
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.fresh_database
+def test_subclass_spell_prefers_exact_reviewed_dependency_over_bundled_duplicate(
+    tmp_path: Path,
+) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=workspace / "SagaSmith-module-gen-skills",
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Pinned dependency spell",
+                "idempotency_key": "dependency-spell-campaign",
+            },
+        )
+        profile = await _call(
+            server,
+            "campaign_rule_profile_set",
+            {
+                "campaign_id": campaign["id"],
+                "edition": "2014",
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "dependency-spell-profile",
+            },
+        )
+        dependency_spell = {
+            "id": "dnd5e.addon.reviewed-dependency.spell.identify",
+            "kind": "spell",
+            "application_state": "selection_ready",
+            "mechanical_scope": "descriptive",
+            "execution_state": "descriptive_ready",
+            "semantic_resolution": {
+                "status": "resolved",
+                "mode": "descriptive",
+                "first_use_compilation_required": False,
+            },
+            "card": {
+                "name": "Identify",
+                "classes": ["Bard", "Wizard"],
+                "level": 1,
+                "definition": {
+                    "school": "divination",
+                    "casting_time": "1 minute",
+                    "range": {
+                        "kind": "touch",
+                        "normal_ft": 0,
+                        "long_ft": 0,
+                        "area": "",
+                    },
+                    "duration": {
+                        "kind": "instantaneous",
+                        "value": 0,
+                        "unit": "special",
+                        "concentration": False,
+                    },
+                    "components": {
+                        "verbal": True,
+                        "somatic": True,
+                        "material": True,
+                        "material_description": "a reviewed dependency component",
+                        "material_cost_cp": 10000,
+                        "consumed": False,
+                    },
+                    "effect": "The dependency's reviewed Identify printing.",
+                },
+            },
+            "rule_refs": ["book:dependency:p1"],
+        }
+        dependency_spell["selection_contract"] = build_selection_contract(
+            dependency_spell,
+            status="ready",
+            references=["book:dependency:p1"],
+        )
+        dependency_draft = await _call(
+            server,
+            "rule_pack_draft",
+            {
+                "manifest": {
+                    "id": "dnd5e.addon.reviewed-dependency",
+                    "version": "1.0.0",
+                    "title": "Reviewed dependency",
+                    "namespace": "dnd5e.addon.reviewed-dependency",
+                    "system_id": "dnd5e",
+                    "editions": ["2014"],
+                    "capabilities": [],
+                },
+                "artifacts": [dependency_spell],
+                "mechanics": [],
+            },
+        )
+        assert dependency_draft["status"] == "validated", str(dependency_draft)
+        await _call(
+            server,
+            "rule_pack_install",
+            {
+                "pack_id": "dnd5e.addon.reviewed-dependency",
+                "version": "1.0.0",
+            },
+        )
+
+        subclass = {
+            "id": "dnd5e.addon.dependent-domain.subclass.dependency-domain",
+            "kind": "subclass",
+            "application_state": "selection_ready",
+            "mechanical_scope": "mechanical",
+            "execution_state": "engine_ready",
+            "semantic_resolution": {
+                "status": "resolved",
+                "mode": "static_grant",
+                "first_use_compilation_required": False,
+                "clause_ids": ["dependency-domain-spells"],
+            },
+            "rule_clauses": [
+                {
+                    "schema_version": 1,
+                    "id": "dependency-domain-spells",
+                    "title": "Dependency Domain spells",
+                    "scope": "mechanical",
+                    "source_citations": [
+                        {
+                            "source": "book:dependent-domain",
+                            "source_ref": {"page": 2},
+                            "source_excerpt": "Identify is always prepared.",
+                        }
+                    ],
+                    "settlement": {
+                        "mode": "static_grant",
+                        "grant_refs": ["card.always_prepared_spells"],
+                    },
+                }
+            ],
+            "card": {
+                "name": "Dependency Domain",
+                "class_name": "Cleric",
+                "minimum_level": 1,
+                "always_prepared_spells": [{"name": "Identify", "minimum_level": 1}],
+            },
+            "rule_refs": ["book:dependent-domain:p2"],
+        }
+        subclass["selection_contract"] = build_selection_contract(
+            subclass,
+            status="ready",
+            references=["book:dependent-domain:p2"],
+        )
+        source_draft = await _call(
+            server,
+            "rule_pack_draft",
+            {
+                "manifest": {
+                    "id": "dnd5e.addon.dependent-domain",
+                    "version": "1.0.0",
+                    "title": "Dependent domain",
+                    "namespace": "dnd5e.addon.dependent-domain",
+                    "system_id": "dnd5e",
+                    "editions": ["2014"],
+                    "capabilities": [],
+                    "dependencies": [
+                        {
+                            "id": "dnd5e.addon.reviewed-dependency",
+                            "version": "1.0.0",
+                        }
+                    ],
+                },
+                "artifacts": [subclass],
+                "mechanics": [],
+            },
+        )
+        assert source_draft["status"] == "validated", str(source_draft)
+        await _call(
+            server,
+            "rule_pack_install",
+            {"pack_id": "dnd5e.addon.dependent-domain", "version": "1.0.0"},
+        )
+        dependency_enabled = await _call(
+            server,
+            "campaign_rule_pack_set",
+            {
+                "campaign_id": campaign["id"],
+                "pack_id": "dnd5e.addon.reviewed-dependency",
+                "version": "1.0.0",
+                "expected_revision": profile["campaign_revision"],
+                "idempotency_key": "dependency-spell-enable",
+            },
+        )
+        await _call(
+            server,
+            "campaign_rule_pack_set",
+            {
+                "campaign_id": campaign["id"],
+                "pack_id": "dnd5e.addon.dependent-domain",
+                "version": "1.0.0",
+                "expected_revision": dependency_enabled["campaign_revision"],
+                "idempotency_key": "dependent-domain-enable",
+            },
+        )
+
+        sheet = default_character_sheet()
+        sheet["progression"]["level"] = 1
+        sheet["progression"]["classes"] = [
+            {"name": "Cleric", "level": 1, "subclass": "", "hit_die": 8}
+        ]
+        sheet["spellcasting"].update(
+            {
+                "ability": "wisdom",
+                "class_lists": ["cleric"],
+                "preparation": {
+                    "mode": "prepared",
+                    "max_prepared": 4,
+                    "changes_on": "long_rest",
+                    "selected_spell_ids": [],
+                },
+            }
+        )
+        character = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Dependency Cleric",
+                "sheet": sheet,
+                "idempotency_key": "dependency-cleric-create",
+            },
+        )
+        applied = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": character["id"],
+                "artifact_id": subclass["id"],
+                "selection": {"target_class_name": "Cleric"},
+                "expected_revision": character["revision"],
+                "idempotency_key": "dependency-domain-apply",
+            },
+        )
+
+        identify = next(
+            item for item in applied["sheet"]["content"]["spells"] if item["name"] == "Identify"
+        )
+        assert identify["pack_id"] == "dnd5e.addon.reviewed-dependency"
+        assert identify["pack_version"] == "1.0.0"
+        assert identify["definition"]["effect"] == ("The dependency's reviewed Identify printing.")
 
     import asyncio
 
@@ -1931,8 +2158,26 @@ def test_reviewed_addon_base_class_uses_bound_level_one_materializer(tmp_path: P
                         "ritual_casting": True,
                         "spellbook": False,
                         "cantrips_known_by_level": [
-                            2, 2, 2, 2, 2, 2, 2, 2, 2, 3,
-                            3, 3, 3, 4, 4, 4, 4, 4, 4, 4,
+                            2,
+                            2,
+                            2,
+                            2,
+                            2,
+                            2,
+                            2,
+                            2,
+                            2,
+                            3,
+                            3,
+                            3,
+                            3,
+                            4,
+                            4,
+                            4,
+                            4,
+                            4,
+                            4,
+                            4,
                         ],
                         "leveled_spells_known_by_level": [],
                         "prepared_limit": {
@@ -1992,15 +2237,15 @@ def test_reviewed_addon_base_class_uses_bound_level_one_materializer(tmp_path: P
                 "repeatable_selection_levels": [],
                 "selection_requirements": {},
                 "selection_requirements_by_level": {},
-                    "mechanical_grants": {
-                        "tool_expertise_all": True,
-                        "tool_proficiencies": ["Alchemist's Supplies"],
-                        "tool_proficiency_replacement_options": {
-                            "Alchemist's Supplies": [
-                                "Smith's Tools",
-                                "Weaver's Tools",
-                            ]
-                        },
+                "mechanical_grants": {
+                    "tool_expertise_all": True,
+                    "tool_proficiencies": ["Alchemist's Supplies"],
+                    "tool_proficiency_replacement_options": {
+                        "Alchemist's Supplies": [
+                            "Smith's Tools",
+                            "Weaver's Tools",
+                        ]
+                    },
                     "weapon_proficiencies": ["Martial Weapons"],
                     "skill_proficiencies": ["History"],
                 },
@@ -2147,8 +2392,9 @@ def test_reviewed_addon_base_class_uses_bound_level_one_materializer(tmp_path: P
             },
         )
         assert applied["sheet"]["progression"]["classes"][0]["name"] == "Artificer"
-        assert applied["sheet"]["progression"]["classes"][0]["spellcasting"] == (
-            artifact["card"]["class_definition"]["spellcasting"]
+        assert (
+            applied["sheet"]["progression"]["classes"][0]["spellcasting"]
+            == (artifact["card"]["class_definition"]["spellcasting"])
         )
         assert applied["sheet"]["combat"]["hp"]["max"] == 10
         assert applied["sheet"]["spellcasting"]["ability"] == "intelligence"
@@ -2160,9 +2406,7 @@ def test_reviewed_addon_base_class_uses_bound_level_one_materializer(tmp_path: P
             "constitution",
             "intelligence",
         ]
-        assert applied["class_materialization"]["tool_proficiency_choices"] == [
-            "weaver's tools"
-        ]
+        assert applied["class_materialization"]["tool_proficiency_choices"] == ["weaver's tools"]
         assert applied["rule_receipts"][0]["mechanic_id"] == ("dnd5e.character.base_class.v1")
         assert applied["sheet"]["content"]["selections"][0]["selection"] == {
             "skills": ["arcana", "investigation"],
@@ -2194,9 +2438,7 @@ def test_reviewed_addon_base_class_uses_bound_level_one_materializer(tmp_path: P
         ]
         assert proficiencies["tool_expertise_all"] is True
         assert proficiencies["tool_expertise"] == proficiencies["tools"]
-        assert feature_applied["sheet"]["skills"]["history"]["proficiency"] == (
-            "proficient"
-        )
+        assert feature_applied["sheet"]["skills"]["history"]["proficiency"] == ("proficient")
         infused = await _call(
             server,
             "character_content_apply",

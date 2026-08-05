@@ -86,13 +86,9 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
                 "query": "Witch Bolt",
             },
         )
-        witch_bolt = next(
-            item for item in standard_spells if item["name"] == "Witch Bolt"
-        )
+        witch_bolt = next(item for item in standard_spells if item["name"] == "Witch Bolt")
         assert witch_bolt["pack_id"] == "dnd5e.content.standard2014"
-        assert witch_bolt["rule_refs"] == [
-            "book:players-handbook-2014:p289"
-        ]
+        assert witch_bolt["rule_refs"] == ["book:players-handbook-2014:p289"]
         sheet = default_character_sheet()
         sheet["progression"].update(
             {
@@ -169,9 +165,7 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
             },
         )
         assert spell_source_choice["status"] == "pending_choice"
-        assert spell_source_choice["reason"] == (
-            "multiclass spell selection requires source_class"
-        )
+        assert spell_source_choice["reason"] == ("multiclass spell selection requires source_class")
         selected = await call(
             server,
             "character_content_apply",
@@ -619,7 +613,7 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
                     {
                         "kind": "constitution_modifier_change",
                         "amount": 1,
-                        "source": "Hill Dwarf: Constitution ability score increase",
+                        "source": "Hill Dwarf: Constitution ability score adjustment",
                         "previous_score": 10,
                         "new_score": 12,
                     },
@@ -1573,8 +1567,9 @@ def test_current_core_relock_is_revision_and_snapshot_noop(tmp_path: Path) -> No
             "campaign_rule_profile_get",
             {"campaign_id": campaign["id"]},
         )
-        assert profile["available_core_pack"]["fingerprint"] == (
-            profile["profile"]["options"]["_core_rule_pack_lock"]["fingerprint"]
+        assert (
+            profile["available_core_pack"]["fingerprint"]
+            == (profile["profile"]["options"]["_core_rule_pack_lock"]["fingerprint"])
         )
         snapshot = await call(
             server,
@@ -1610,9 +1605,7 @@ def test_current_core_relock_is_revision_and_snapshot_noop(tmp_path: Path) -> No
             "campaign_id": campaign["id"],
             "action": "core_relock",
             "payload": {
-                "expected_core_fingerprint": profile["available_core_pack"][
-                    "fingerprint"
-                ],
+                "expected_core_fingerprint": profile["available_core_pack"]["fingerprint"],
                 "reason": "Prove an already-current Core is a strict no-op.",
                 "expected_head_snapshot_id": snapshot["id"],
             },

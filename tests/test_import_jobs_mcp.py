@@ -27,6 +27,7 @@ from sagasmith_dnd_mcp.server import (
     _canonical_statblock_artifact_for_mechanics,
     _canonical_statblock_artifact_for_review,
     _catalog_identity_is_evidenced,
+    _catalog_statblock_text_superseding_source_review,
     _claim_catalog_artifact_for_source_review,
     _compact_transcription_key,
     _matching_statblock_recovery_pair,
@@ -95,9 +96,7 @@ def test_catalog_identity_can_span_ordered_sibling_headings_only() -> None:
         "2nd-level Twilight Domain feature"
     )
 
-    assert _catalog_identity_is_evidenced(
-        "Channel Divinity: Twilight Sanctuary", evidence
-    )
+    assert _catalog_identity_is_evidenced("Channel Divinity: Twilight Sanctuary", evidence)
     assert _catalog_identity_is_evidenced(
         "The Right Tool for the Job",
         "THE RIGHT TO OL FOR THE OB Create artisan tools at 3rd level",
@@ -105,9 +104,7 @@ def test_catalog_identity_can_span_ordered_sibling_headings_only() -> None:
     assert not _catalog_identity_is_evidenced(
         "Channel Divinity: Solar Twilight Sanctuary", evidence
     )
-    assert not _catalog_identity_is_evidenced(
-        "Sanctuary Twilight", evidence
-    )
+    assert not _catalog_identity_is_evidenced("Sanctuary Twilight", evidence)
     assert _catalog_identity_is_evidenced(
         "House Agent (Cannith)",
         "HOUSE AGENT Tool Proficiency: Two tools by house: Cannith",
@@ -181,24 +178,33 @@ def test_bundled_mm_actor_reuse_is_book_bound_and_requires_one_match() -> None:
 
     assert matched == cards[0]
     assert matched is not cards[0]
-    assert _bundled_mm2014_actor_card(
-        name="Tiger",
-        edition="2014",
-        publication_id="vgm2014",
-        cards=cards,
-    ) is None
-    assert _bundled_mm2014_actor_card(
-        name="Tiger",
-        edition="2024",
-        publication_id="mm2014",
-        cards=cards,
-    ) is None
-    assert _bundled_mm2014_actor_card(
-        name="Tiger",
-        edition="2014",
-        publication_id="mm2014",
-        cards=[*cards, {"id": "actor.tiger.duplicate", "payload": {"name": "Tiger"}}],
-    ) is None
+    assert (
+        _bundled_mm2014_actor_card(
+            name="Tiger",
+            edition="2014",
+            publication_id="vgm2014",
+            cards=cards,
+        )
+        is None
+    )
+    assert (
+        _bundled_mm2014_actor_card(
+            name="Tiger",
+            edition="2024",
+            publication_id="mm2014",
+            cards=cards,
+        )
+        is None
+    )
+    assert (
+        _bundled_mm2014_actor_card(
+            name="Tiger",
+            edition="2014",
+            publication_id="mm2014",
+            cards=[*cards, {"id": "actor.tiger.duplicate", "payload": {"name": "Tiger"}}],
+        )
+        is None
+    )
 
 
 def test_noisy_review_heading_match_requires_visible_ocr_damage() -> None:
@@ -287,11 +293,14 @@ def test_source_statblock_hints_fill_only_unclaimed_layout_identities() -> None:
     ]
     discoveries = [{"name": "CHANGELING"}, {"name": "KALASHTAR"}]
 
-    assert _source_statblock_hint_additions(
-        discoveries,
-        ["AS A KALASHTAR"],
-        layout_blocks=identities,
-    ) == []
+    assert (
+        _source_statblock_hint_additions(
+            discoveries,
+            ["AS A KALASHTAR"],
+            layout_blocks=identities,
+        )
+        == []
+    )
     assert _source_statblock_hint_additions(
         [],
         ["RADIANT IDOL"],
@@ -398,9 +407,41 @@ def test_source_reviews_claim_only_one_accepted_catalog_artifact() -> None:
         _claim_catalog_artifact_for_source_review(("Fomorian", "artifact:fomorian"), claimed)
         == "duplicate_review_for_catalog_artifact"
     )
+    assert _claim_catalog_artifact_for_source_review(None, claimed) == "not_in_accepted_catalog"
+
+
+def test_catalog_reviewed_boundary_supersedes_only_a_distinct_evidenced_review() -> None:
+    source_text = "# Tiny Servant\n\n***Slam.*** Hit: 5 bludgeoning damage."
+    source_checksum = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+    artifact = {
+        "kind": "statblock",
+        "card": {
+            "normalized_content": source_text,
+            "review_evidence": {"normalized_content_sha256": source_checksum},
+        },
+    }
+
     assert (
-        _claim_catalog_artifact_for_source_review(None, claimed)
-        == "not_in_accepted_catalog"
+        _catalog_statblock_text_superseding_source_review(
+            artifact,
+            "0" * 64,
+        )
+        == source_text
+    )
+    assert (
+        _catalog_statblock_text_superseding_source_review(
+            artifact,
+            source_checksum,
+        )
+        == ""
+    )
+    artifact["card"]["review_evidence"]["normalized_content_sha256"] = "f" * 64
+    assert (
+        _catalog_statblock_text_superseding_source_review(
+            artifact,
+            "0" * 64,
+        )
+        == ""
     )
 
 
@@ -486,10 +527,7 @@ def test_source_statblock_hints_skip_structural_page_headers() -> None:
                     "Dusk Hag",
                     "CHAPTER 6 | FRIENDS AND FOES",
                 ],
-                "content": (
-                    "Medium fey, neutral evil Armor Class 17 "
-                    "Hit Points 82 Speed 30 ft."
-                ),
+                "content": ("Medium fey, neutral evil Armor Class 17 Hit Points 82 Speed 30 ft."),
             },
             {
                 "page_start": 294,
@@ -505,8 +543,7 @@ def test_source_statblock_hints_skip_structural_page_headers() -> None:
                     "COMMANDER",
                 ],
                 "content": (
-                    "Medium humanoid, lawful evil Armor Class 18 "
-                    "Hit Points 187 Speed 30 ft."
+                    "Medium humanoid, lawful evil Armor Class 18 Hit Points 187 Speed 30 ft."
                 ),
             },
         ]
@@ -549,9 +586,7 @@ def test_statblock_corroboration_can_select_a_later_exact_scale_pair() -> None:
     first = {"critical_facts": {"name": "Deer", "fields": {"Languages": "-"}}}
     later = {"critical_facts": {"name": "Deer", "fields": {}}}
 
-    pair = _matching_statblock_recovery_pair(
-        [(2.5, first), (3.0, later), (3.5, later)]
-    )
+    pair = _matching_statblock_recovery_pair([(2.5, first), (3.0, later), (3.5, later)])
 
     assert pair is not None
     assert [item[0] for item in pair] == [3.0, 3.5]
@@ -674,13 +709,9 @@ def test_statblock_mechanical_identity_matches_corrected_ocr_heading() -> None:
 Hit: 8 (1d8 + 4) slashing damage.
 """
     damaged = parse_2014_statblock(f'# • • "-\n{body}', source_key="damaged")
-    reviewed = parse_2014_statblock(
-        f"# SWORD WRAITH WARRIOR\n{body}", source_key="reviewed"
-    )
+    reviewed = parse_2014_statblock(f"# SWORD WRAITH WARRIOR\n{body}", source_key="reviewed")
 
-    assert _statblock_mechanical_identity(damaged) == (
-        _statblock_mechanical_identity(reviewed)
-    )
+    assert _statblock_mechanical_identity(damaged) == (_statblock_mechanical_identity(reviewed))
 
 
 def test_rule_import_agent_can_add_only_source_bound_catalog_entities(tmp_path: Path) -> None:
@@ -799,9 +830,7 @@ def test_rule_import_agent_can_add_only_source_bound_catalog_entities(tmp_path: 
                                 "source_chunk_id": gunsmith_chunk["id"],
                                 "start": evidence_start,
                                 "end": evidence_start + len(evidence),
-                                "checksum": hashlib.sha256(
-                                    evidence.encode("utf-8")
-                                ).hexdigest(),
+                                "checksum": hashlib.sha256(evidence.encode("utf-8")).hexdigest(),
                             }
                         ],
                         "card": {
@@ -830,9 +859,7 @@ def test_rule_import_agent_can_add_only_source_bound_catalog_entities(tmp_path: 
         replay = await _call(server, "rule_import", arguments)
         assert replay["job"]["revision"] == augmented["job"]["revision"]
 
-        master_smiths = [
-            item for item in augmented["candidates"] if item["name"] == "Master Smith"
-        ]
+        master_smiths = [item for item in augmented["candidates"] if item["name"] == "Master Smith"]
         assert len(master_smiths) == 2
         master_smith = next(
             item
@@ -848,9 +875,7 @@ def test_rule_import_agent_can_add_only_source_bound_catalog_entities(tmp_path: 
                 "action": "augment_catalog",
                 "payload": {
                     "job_id": job_id,
-                    "rationale": (
-                        "The automatic card omitted the bounded class feature fields."
-                    ),
+                    "rationale": ("The automatic card omitted the bounded class feature fields."),
                     "additions": [
                         {
                             "kind": "feature",
@@ -863,9 +888,7 @@ def test_rule_import_agent_can_add_only_source_bound_catalog_entities(tmp_path: 
                                 "minimum_level": 1,
                                 "selection_requirements": {},
                                 "selection_requirements_by_level": {},
-                                "mechanical_grants": {
-                                    "tool_proficiencies": ["Smith's Tools"]
-                                },
+                                "mechanical_grants": {"tool_proficiencies": ["Smith's Tools"]},
                             },
                         }
                     ],
@@ -875,11 +898,10 @@ def test_rule_import_agent_can_add_only_source_bound_catalog_entities(tmp_path: 
             },
         )
         assert replacement["replaced_candidate_ids"] == [master_smith["id"]]
-        assert all(
-            item["id"] != master_smith["id"] for item in replacement["candidates"]
-        )
+        assert all(item["id"] != master_smith["id"] for item in replacement["candidates"])
         assert any(
-            item["id"] == next(
+            item["id"]
+            == next(
                 candidate["id"]
                 for candidate in master_smiths
                 if candidate["id"] != master_smith["id"]
@@ -891,9 +913,10 @@ def test_rule_import_agent_can_add_only_source_bound_catalog_entities(tmp_path: 
             for item in replacement["candidates"]
             if item["id"] in replacement["added_candidate_ids"]
         )
-        assert replacement_card["agent_catalog_addition"][
-            "replaced_candidate_id"
-        ] == master_smith["id"]
+        assert (
+            replacement_card["agent_catalog_addition"]["replaced_candidate_id"]
+            == master_smith["id"]
+        )
 
         with pytest.raises(Exception, match="outside the indexed source"):
             await _call(
@@ -1018,6 +1041,8 @@ def test_rule_import_renders_a_checksum_bound_review_page(
         ),
     )
 
+    layout_calls: list[str] = []
+
     def extract_layout(
         provider: RapidOcrProvider,
         path: Path,
@@ -1026,6 +1051,7 @@ def test_rule_import_renders_a_checksum_bound_review_page(
     ) -> list[OcrPageLayout]:
         assert provider.model_type in {"medium", "small"}
         assert page_numbers == [1]
+        layout_calls.append(provider.model_type)
         return [layout]
 
     monkeypatch.setattr(RapidOcrProvider, "extract_layout", extract_layout)
@@ -1078,9 +1104,7 @@ def test_rule_import_renders_a_checksum_bound_review_page(
         assert metadata["ocr"]["included"] is True
         assert metadata["ocr"]["available"] is True
         assert metadata["ocr"]["provider"] == "rapidocr"
-        assert ":ocr=PP-OCRv6:model=medium:scale=2.00" in metadata["ocr"][
-            "profile"
-        ]
+        assert ":ocr=PP-OCRv6:model=medium:scale=2.00" in metadata["ocr"]["profile"]
         assert metadata["ocr"]["model"] == "medium"
         assert metadata["ocr"]["scale"] == 2.0
         assert metadata["ocr"]["page_number"] == 1
@@ -1088,18 +1112,18 @@ def test_rule_import_renders_a_checksum_bound_review_page(
         assert metadata["ocr"]["block_count"] == 1
         assert metadata["ocr"]["average_confidence"] == 0.98
         assert metadata["ocr"]["minimum_confidence"] == 0.98
-        assert metadata["ocr"]["text_sha256"] == hashlib.sha256(
-            b"Commoner rulebook review page"
-        ).hexdigest()
+        assert (
+            metadata["ocr"]["text_sha256"]
+            == hashlib.sha256(b"Commoner rulebook review page").hexdigest()
+        )
         assert metadata["ocr"]["text"] == "Commoner rulebook review page"
         assert metadata["ocr"]["truncated"] is False
         assert [item["model"] for item in metadata["ocr"]["variants"]] == [
             "medium",
             "small",
         ]
-        assert metadata["transcription"]["source_checksum"] == staged["result"][
-            "checksum"
-        ]
+        assert layout_calls == ["medium", "small"]
+        assert metadata["transcription"]["source_checksum"] == staged["result"]["checksum"]
         assert metadata["transcription"]["normalized"]["text_sha256"]
         assert metadata["transcription"]["native_text"]["text_sha256"]
         assert rendered.structuredContent == metadata
@@ -1123,9 +1147,7 @@ def test_rule_import_renders_a_checksum_bound_review_page(
                     "payload": {
                         "job_id": job_id,
                         "page_number": 1,
-                        "base_text_sha256": metadata["transcription"]["normalized"][
-                            "text_sha256"
-                        ],
+                        "base_text_sha256": metadata["transcription"]["normalized"]["text_sha256"],
                         "replacements": [
                             {
                                 "old": "Commoner rulebook review page",
@@ -1139,18 +1161,72 @@ def test_rule_import_renders_a_checksum_bound_review_page(
                     "idempotency_key": "reject-numeric-text-change",
                 },
             )
+        with pytest.raises(Exception, match="cannot alter numeric evidence"):
+            await server.call_tool(
+                "rule_import",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "review_text",
+                    "payload": {
+                        "job_id": job_id,
+                        "page_number": 1,
+                        "base_text_sha256": metadata["transcription"]["normalized"]["text_sha256"],
+                        "replacements": [
+                            {
+                                "old": "Commoner rulebook review page",
+                                "new": "Commoner rulebook review page two",
+                            }
+                        ],
+                        "rationale": "An invalid Agent attempt to invent a written number.",
+                        "evidence_basis": "agent_context",
+                    },
+                    "expected_revision": inspected["result"]["job"]["revision"],
+                    "idempotency_key": "reject-written-number-text-change",
+                },
+            )
+        cross_text_arguments = {
+            "campaign_id": campaign["id"],
+            "action": "review_text",
+            "payload": {
+                "job_id": job_id,
+                "page_number": 1,
+                "base_text_sha256": metadata["transcription"]["normalized"]["text_sha256"],
+                "replacements": [{"old": "rulebook", "new": "RULEBOOK"}],
+                "rationale": "Native text and both OCR variants corroborate this token.",
+                "evidence_basis": "cross_text",
+            },
+            "expected_revision": inspected["result"]["job"]["revision"],
+            "idempotency_key": "review-cross-text",
+        }
+        _, cross_text_reviewed = await server.call_tool("rule_import", cross_text_arguments)
+        assert cross_text_reviewed["result"]["review"]["evidence"]["basis"] == "cross_text"
+        assert [
+            item["model"]
+            for item in cross_text_reviewed["result"]["review"]["evidence"]["ocr_variants"]
+        ] == ["medium", "small"]
+        current_render = await server.call_tool(
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "render_page",
+                "payload": {
+                    "job_id": job_id,
+                    "page_number": 1,
+                    "include_ocr_text": False,
+                },
+            },
+        )
+        current_metadata = json.loads(current_render.content[0].text)
         text_review_arguments = {
             "campaign_id": campaign["id"],
             "action": "review_text",
             "payload": {
                 "job_id": job_id,
                 "page_number": 1,
-                "base_text_sha256": metadata["transcription"]["normalized"][
-                    "text_sha256"
-                ],
+                "base_text_sha256": current_metadata["transcription"]["normalized"]["text_sha256"],
                 "replacements": [
                     {
-                        "old": "Commoner rulebook review page",
+                        "old": "Commoner RULEBOOK review page",
                         "new": "## COMMONER RULEBOOK REVIEW PAGE",
                     }
                 ],
@@ -1160,20 +1236,19 @@ def test_rule_import_renders_a_checksum_bound_review_page(
                 ),
                 "evidence_basis": "agent_context",
             },
-            "expected_revision": inspected["result"]["job"]["revision"],
+            "expected_revision": cross_text_reviewed["result"]["job"]["revision"],
             "idempotency_key": "review-text",
         }
-        _, text_reviewed = await server.call_tool(
-            "rule_import", text_review_arguments
-        )
-        _, text_review_replayed = await server.call_tool(
-            "rule_import", text_review_arguments
-        )
+        _, text_reviewed = await server.call_tool("rule_import", text_review_arguments)
+        _, text_review_replayed = await server.call_tool("rule_import", text_review_arguments)
         assert text_review_replayed == text_reviewed
+        assert layout_calls == ["medium", "small"]
         assert text_reviewed["result"]["review"]["review_method"] == "agent"
-        assert text_reviewed["result"]["inspection"]["page_revisions"][0][
-            "evidence"
-        ]["basis"] == "agent_context"
+        assert (
+            text_reviewed["result"]["inspection"]["page_revisions"][1]["evidence"]["basis"]
+            == "agent_context"
+        )
+        assert text_reviewed["result"]["review"]["evidence"]["ocr_variants"] == []
         rerendered = await server.call_tool(
             "rule_import",
             {
@@ -1195,9 +1270,9 @@ def test_rule_import_renders_a_checksum_bound_review_page(
                 "payload": {
                     "job_id": job_id,
                     "page_number": 1,
-                    "base_text_sha256": revised_metadata["transcription"][
-                        "normalized"
-                    ]["text_sha256"],
+                    "base_text_sha256": revised_metadata["transcription"]["normalized"][
+                        "text_sha256"
+                    ],
                     "replacements": [
                         {
                             "old": "## COMMONER RULEBOOK REVIEW PAGE",
@@ -1211,7 +1286,7 @@ def test_rule_import_renders_a_checksum_bound_review_page(
                 "idempotency_key": "refine-text-review",
             },
         )
-        assert len(text_refined["result"]["inspection"]["page_revisions"]) == 2
+        assert len(text_refined["result"]["inspection"]["page_revisions"]) == 3
         _, ingested = await server.call_tool(
             "rule_import",
             {
@@ -1219,9 +1294,7 @@ def test_rule_import_renders_a_checksum_bound_review_page(
                 "action": "ingest",
                 "payload": {
                     "job_id": job_id,
-                    "acknowledge_warnings": bool(
-                        text_refined["result"]["inspection"]["warnings"]
-                    ),
+                    "acknowledge_warnings": bool(text_refined["result"]["inspection"]["warnings"]),
                 },
                 "idempotency_key": "ingest",
             },
@@ -1355,14 +1428,12 @@ def test_rule_import_renders_a_checksum_bound_review_page(
             "default_resolver": "engine",
             "ruling_kind": "standard_rule",
             "parser_authoritative": True,
-                "allowed_resolutions": ["engine"],
-                "source_bound_rulings": [],
-                "multiattack_options": [
+            "allowed_resolutions": ["engine"],
+            "source_bound_rulings": [],
+            "multiattack_options": [
                 {
                     "activity_id": "multiattack-activity",
-                    "source_excerpt": (
-                        "The hunter makes one bite attack and one claw attack."
-                    ),
+                    "source_excerpt": ("The hunter makes one bite attack and one claw attack."),
                     "options": [
                         {
                             "id": "melee",
@@ -1389,12 +1460,8 @@ def test_rule_import_renders_a_checksum_bound_review_page(
             "multiattack_options": [
                 {
                     "activity_id": "multiattack-activity",
-                    "source_excerpt": (
-                        "The hunter makes one bite attack and one claw attack."
-                    ),
-                    "reason": (
-                        "The reviewed sentence explicitly requires one bite and one claw."
-                    ),
+                    "source_excerpt": ("The hunter makes one bite attack and one claw attack."),
+                    "reason": ("The reviewed sentence explicitly requires one bite and one claw."),
                     "options": [
                         {
                             "id": "bite-and-claw",
@@ -1425,9 +1492,7 @@ def test_rule_import_renders_a_checksum_bound_review_page(
                         "job_id": job_id,
                         "page_number": 1,
                         "normalized_content": reviewed_monster,
-                        "observation": (
-                            "Attempted to override an engine-parsed standard rule."
-                        ),
+                        "observation": ("Attempted to override an engine-parsed standard rule."),
                         "agent_fill": agent_fill,
                     },
                     "idempotency_key": "reject-standard-rule-agent-fill",
@@ -1454,16 +1519,15 @@ def test_rule_import_renders_a_checksum_bound_review_page(
                 },
             )
             direct_validation = direct_ruling_response["result"]["validation"]
-            assert direct_ruling_response["result"]["review"][
-                "agent_statblock_fill"
-            ] is None
+            assert direct_ruling_response["result"]["review"]["agent_statblock_fill"] is None
             assert direct_validation["default_dm_resolver"] == "agent"
-            assert direct_validation["agent_fill_requirements"][
-                "source_bound_rulings"
-            ] == ["Multiattack: Multiattack composition requires a DM ruling"]
-            assert direct_validation["agent_fill_requirements"][
-                "allowed_resolutions"
-            ] == ["engine", "agent_dm_adjudication"]
+            assert direct_validation["agent_fill_requirements"]["source_bound_rulings"] == [
+                "Multiattack: Multiattack composition requires a DM ruling"
+            ]
+            assert direct_validation["agent_fill_requirements"]["allowed_resolutions"] == [
+                "engine",
+                "agent_dm_adjudication",
+            ]
 
         _, engine_actor_response = await server.call_tool(
             "character_create_from",
@@ -1491,19 +1555,20 @@ def test_rule_import_renders_a_checksum_bound_review_page(
         ]
         assert engine_actor["statblock"]["warnings"] == []
         assert engine_actor["statblock"]["agent_fill"] is None
-        assert "Agent statblock fill:" not in (
-            engine_actor["character"]["notes"]["profile"]["dm_notes"]
+        assert (
+            "Agent statblock fill:"
+            not in (engine_actor["character"]["notes"]["profile"]["dm_notes"])
         )
 
         evidence_chunks = [
             {
                 "id": "commoner-core",
                 "ordinal": 0,
-                    "heading_path": ["COMMONER"],
-                    "content": (
-                        "Medium humanoid (any race), any alignment Armor Class l0 "
-                        "Hit Points 4 (1d8) Speed 30 ft."
-                    ),
+                "heading_path": ["COMMONER"],
+                "content": (
+                    "Medium humanoid (any race), any alignment Armor Class l0 "
+                    "Hit Points 4 (1d8) Speed 30 ft."
+                ),
                 "page_start": 1,
                 "page_end": 1,
             },
@@ -1513,8 +1578,7 @@ def test_rule_import_renders_a_checksum_bound_review_page(
                     "ordinal": index,
                     "heading_path": [ability],
                     "content": (
-                        "10 (+0) Senses passive Perception 10 Languages Common "
-                        "Challenge 0 (10 XP)"
+                        "10 (+0) Senses passive Perception 10 Languages Common Challenge 0 (10 XP)"
                         if ability == "WIS"
                         else "l0 (+0)"
                         if ability == "STR"
@@ -1532,11 +1596,11 @@ def test_rule_import_renders_a_checksum_bound_review_page(
                 "id": "commoner-actions",
                 "ordinal": 7,
                 "heading_path": ["ACTIONS"],
-                    "content": (
-                        "Club. Melee Weapon Attack: +2 to hit, reach 5 ft., one target. "
-                        "Hit: 2 (1d4) bludgeoning damage. "
-                        "Commoners include laborers, servants, and ordinary travelers."
-                    ),
+                "content": (
+                    "Club. Melee Weapon Attack: +2 to hit, reach 5 ft., one target. "
+                    "Hit: 2 (1d4) bludgeoning damage. "
+                    "Commoners include laborers, servants, and ordinary travelers."
+                ),
                 "page_start": 1,
                 "page_end": 1,
             },
@@ -1576,9 +1640,7 @@ def test_rule_import_renders_a_checksum_bound_review_page(
         agent_review = agent_reviewed["result"]["review"]
         assert agent_review["review_mode"] == "agent_text"
         assert agent_review["confidence"] == "reviewed_text"
-        assert agent_review["evidence_chunk_ids"] == [
-            item["id"] for item in evidence_chunks
-        ]
+        assert agent_review["evidence_chunk_ids"] == [item["id"] for item in evidence_chunks]
         assert agent_review["text_evidence"][0]["ordinal"] == 0
 
         base_actions_content = evidence_chunks[-1]["content"]
@@ -1631,8 +1693,7 @@ def test_rule_import_renders_a_checksum_bound_review_page(
         evidence_chunks[-1]["content"] = base_actions_content
 
         adjacent_column = (
-            " Large dragon, chaotic evil Armor Class 17 Hit Points 133 "
-            "Challenge 6 (2,300 XP)."
+            " Large dragon, chaotic evil Armor Class 17 Hit Points 133 Challenge 6 (2,300 XP)."
         )
         evidence_chunks[-1]["content"] += adjacent_column
         _, excluded_reviewed = await server.call_tool(
@@ -1699,14 +1760,172 @@ def test_rule_import_renders_a_checksum_bound_review_page(
                     "payload": {
                         **agent_arguments["payload"],
                         "evidence_chunk_ids": [
-                            item["id"]
-                            for item in evidence_chunks
-                            if item["ordinal"] != 3
+                            item["id"] for item in evidence_chunks if item["ordinal"] != 3
                         ],
                     },
                     "idempotency_key": "review-statblock-agent-gap",
                 },
             )
+
+    asyncio.run(exercise())
+
+
+def test_rule_import_recovers_wholly_empty_page_from_rendered_agent_review(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import_root = tmp_path / "imports"
+    import_root.mkdir()
+    source = import_root / "missed-page.pdf"
+    writer = PdfWriter()
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    font_ref = writer._add_object(font)
+    for page_number in range(1, 6):
+        page = writer.add_blank_page(width=300, height=200)
+        if page_number == 5:
+            continue
+        page[NameObject("/Resources")] = DictionaryObject(
+            {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font_ref})}
+        )
+        content = DecodedStreamObject()
+        content.set_data(
+            (
+                "BT /F1 12 Tf 20 160 Td "
+                f"(Usable rule page {page_number} contains enough ordinary text for inspection.) "
+                "Tj ET"
+            ).encode()
+        )
+        page[NameObject("/Contents")] = writer._add_object(content)
+    with source.open("wb") as stream:
+        writer.write(stream)
+
+    def extract_layout(
+        provider: RapidOcrProvider,
+        path: Path,
+        *,
+        page_numbers: list[int] | None = None,
+    ) -> list[OcrPageLayout]:
+        assert provider.model_type in {"medium", "small"}
+        assert path.name.endswith("missed-page.pdf")
+        assert page_numbers is not None
+        return [
+            OcrPageLayout(
+                page_number=page_number,
+                width=450,
+                height=300,
+                blocks=(
+                    ()
+                    if page_number == 5
+                    else (
+                        OcrTextBlock(
+                            (
+                                f"Usable rule page {page_number} contains enough ordinary text "
+                                "for inspection."
+                            ),
+                            0.99,
+                            20,
+                            20,
+                            250,
+                            45,
+                        ),
+                    )
+                ),
+            )
+            for page_number in page_numbers
+        ]
+
+    monkeypatch.setattr(RapidOcrProvider, "extract_layout", extract_layout)
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        rule_import_roots=(import_root,),
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        _, campaign = await server.call_tool(
+            "campaign_create",
+            {"name": "Empty page recovery", "edition": "2014", "idempotency_key": "campaign"},
+        )
+        _, staged = await server.call_tool(
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "stage",
+                "payload": {
+                    "source_path": str(source),
+                    "source_key": "missed-page",
+                    "title": "Missed Page",
+                    "edition": "2014",
+                    "publication_id": "homebrew",
+                },
+                "idempotency_key": "stage",
+            },
+        )
+        job_id = staged["result"]["job"]["id"]
+        _, inspected = await server.call_tool(
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "inspect",
+                "payload": {"job_id": job_id},
+                "idempotency_key": "inspect",
+            },
+        )
+        rendered = await server.call_tool(
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "render_page",
+                "payload": {
+                    "job_id": job_id,
+                    "page_number": 5,
+                    "include_ocr_text": False,
+                },
+            },
+        )
+        metadata = json.loads(rendered.content[0].text)
+        normalized = metadata["transcription"]["normalized"]
+        assert not normalized["text"].strip()
+
+        _, reviewed = await server.call_tool(
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "review_text",
+                "payload": {
+                    "job_id": job_id,
+                    "page_number": 5,
+                    "base_text_sha256": normalized["text_sha256"],
+                    "replacements": [
+                        {
+                            "old": "",
+                            "new": (
+                                "\n\n# CLASS FEATURES\n\nRecovered exact page transcription.\n\n"
+                            ),
+                        }
+                    ],
+                    "rationale": "Agent transcribed the page that both text extractors omitted.",
+                    "evidence_basis": "rendered_page",
+                    "rendered_image_checksum": metadata["image_checksum"],
+                },
+                "expected_revision": inspected["result"]["job"]["revision"],
+                "idempotency_key": "recover-empty-page",
+            },
+        )
+
+        assert reviewed["result"]["inspection"]["outline"][0]["title"] == "CLASS FEATURES"
+        assert reviewed["result"]["review"]["evidence"]["basis"] == "rendered_page"
 
     asyncio.run(exercise())
 
@@ -1733,8 +1952,7 @@ def test_module_import_accepts_checksum_bound_agent_transcript_review(
     )
     content = DecodedStreamObject()
     content.set_data(
-        b"BT /F1 12 Tf 20 160 Td "
-        b"(Arrival transcript contains enough exact source words.) Tj ET"
+        b"BT /F1 12 Tf 20 160 Td (Arrival transcript contains enough exact source words.) Tj ET"
     )
     page[NameObject("/Contents")] = writer._add_object(content)
     with source.open("wb") as stream:
@@ -1755,6 +1973,8 @@ def test_module_import_accepts_checksum_bound_agent_transcript_review(
         ),
     )
 
+    layout_calls: list[str] = []
+
     def extract_layout(
         provider: RapidOcrProvider,
         path: Path,
@@ -1764,6 +1984,7 @@ def test_module_import_accepts_checksum_bound_agent_transcript_review(
         assert provider.model_type in {"medium", "small"}
         assert path.name.endswith("transcript.pdf")
         assert page_numbers == [1]
+        layout_calls.append(provider.model_type)
         if provider.model_type == "medium":
             raise RuntimeError("primary OCR model unavailable")
         return [layout]
@@ -1818,26 +2039,24 @@ def test_module_import_accepts_checksum_bound_agent_transcript_review(
         )
         metadata = json.loads(rendered.content[0].text)
         assert isinstance(rendered.content[1], ImageContent)
-        assert [
-            item["model"] for item in metadata["transcription"]["ocr"]["variants"]
-        ] == ["medium", "small"]
-        assert [
-            item["available"]
-            for item in metadata["transcription"]["ocr"]["variants"]
-        ] == [False, True]
+        assert [item["model"] for item in metadata["transcription"]["ocr"]["variants"]] == [
+            "medium",
+            "small",
+        ]
+        assert [item["available"] for item in metadata["transcription"]["ocr"]["variants"]] == [
+            False,
+            True,
+        ]
         assert metadata["transcription"]["ocr"]["model"] == "small"
+        assert layout_calls == ["medium", "small"]
         review_arguments = {
             "campaign_id": campaign["id"],
             "action": "submit_transcript",
             "payload": {
                 "job_id": job_id,
                 "page_number": 1,
-                "base_text_sha256": metadata["transcription"]["normalized"][
-                    "text_sha256"
-                ],
-                "replacements": [
-                    {"old": "Arrival transcript", "new": "ARRIVAL TRANSCRIPT"}
-                ],
+                "base_text_sha256": metadata["transcription"]["normalized"]["text_sha256"],
+                "replacements": [{"old": "Arrival transcript", "new": "ARRIVAL TRANSCRIPT"}],
                 "rationale": "Restore the display-heading capitalization.",
                 "evidence_basis": "agent_context",
             },
@@ -1848,10 +2067,11 @@ def test_module_import_accepts_checksum_bound_agent_transcript_review(
         _, replayed = await server.call_tool("module_review", review_arguments)
 
         assert replayed == reviewed
+        assert layout_calls == ["medium", "small"]
         assert reviewed["result"]["job"]["state"] == "inspected"
-        assert reviewed["result"]["inspection"]["page_revisions"][0][
-            "replacements"
-        ] == [{"old": "Arrival transcript", "new": "ARRIVAL TRANSCRIPT"}]
+        assert reviewed["result"]["inspection"]["page_revisions"][0]["replacements"] == [
+            {"old": "Arrival transcript", "new": "ARRIVAL TRANSCRIPT"}
+        ]
 
     asyncio.run(exercise())
 
@@ -1993,9 +2213,7 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
                     page_number=layout.page_number,
                     width=layout.width,
                     height=layout.height,
-                    blocks=tuple(
-                        block for block in layout.blocks if block.text != "CON"
-                    ),
+                    blocks=tuple(block for block in layout.blocks if block.text != "CON"),
                 )
             ]
         return [layout]
@@ -2056,9 +2274,7 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
                 "action": "ingest",
                 "payload": {
                     "job_id": job_id,
-                    "acknowledge_warnings": bool(
-                        inspected["result"]["inspection"]["warnings"]
-                    ),
+                    "acknowledge_warnings": bool(inspected["result"]["inspection"]["warnings"]),
                 },
                 "idempotency_key": "ingest",
             },
@@ -2091,14 +2307,10 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
             else ["medium", "medium"]
         )
         assert result["corroboration_mode"] == (
-            "embedded_text"
-            if embedded_text and not corrupt_embedded_text
-            else "dual_layout_ocr"
+            "embedded_text" if embedded_text and not corrupt_embedded_text else "dual_layout_ocr"
         )
         assert result["corroboration_scales"] == (
-            [2.0]
-            if embedded_text and not corrupt_embedded_text
-            else [2.0, 3.0]
+            [2.0] if embedded_text and not corrupt_embedded_text else [2.0, 3.0]
         )
         assert result["recovery"]["evidence"]["text_only"] is True
         assert result["recovery"]["evidence"]["matching_heading_count"] == 2
@@ -2125,9 +2337,7 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
             return
         recovered_content = str(result["recovery"]["normalized_content"])
 
-        def contaminated_inventory(
-            chunks: list[dict], *, source_title: str
-        ) -> dict:
+        def contaminated_inventory(chunks: list[dict], *, source_title: str) -> dict:
             del source_title
             return {
                 "candidates": [
@@ -2138,13 +2348,9 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
                         "page_start": 1,
                         "page_end": 1,
                         "execution_state": "review_ready",
-                        "normalized_content": recovered_content.replace(
-                            "| 10 (+0)", "| 23 (+6)", 1
-                        )
+                        "normalized_content": recovered_content.replace("| 10 (+0)", "| 23 (+6)", 1)
                         + "\n\nGIANT APE Huge beast, unaligned.",
-                        "source_chunk_ids": [
-                            str(item["id"]) for item in chunks
-                        ],
+                        "source_chunk_ids": [str(item["id"]) for item in chunks],
                     }
                 ]
             }
@@ -2165,9 +2371,7 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
         assert batch_replay == batch
         assert batch["result"]["status"] == "complete"
         assert batch["result"]["complete_pages"] == [1]
-        assert [item["name"] for item in batch["result"]["recovered"]] == [
-            "COMMONER"
-        ]
+        assert [item["name"] for item in batch["result"]["recovered"]] == ["COMMONER"]
         assert batch["result"]["failures"] == []
         assert len(batch["result"]["indexed_fallbacks"]) == 1
         assert batch["result"]["unresolved_indexed_fallbacks"] == []
@@ -2190,9 +2394,10 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
         _, resumed_batch = await server.call_tool("rule_import", batch_arguments)
         assert resumed_batch["result"]["status"] == "complete"
         assert resumed_batch["result"]["failures"] == []
-        assert resumed_batch["result"]["recovered"][0]["validation"][
-            "resumed_from_persisted_review"
-        ] is True
+        assert (
+            resumed_batch["result"]["recovered"][0]["validation"]["resumed_from_persisted_review"]
+            is True
+        )
         agent_named_arguments = {
             "campaign_id": campaign["id"],
             "action": "recover_statblock",
@@ -2235,33 +2440,87 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
         )
         assert replayed_agent_named == agent_named
         assert len(layout_calls) == agent_named_layout_call_count
-        assert agent_named["result"]["recovery"]["evidence"][
-            "heading_match_mode"
-        ] == "agent_named_structural_slot"
+        assert (
+            agent_named["result"]["recovery"]["evidence"]["heading_match_mode"]
+            == "agent_named_structural_slot"
+        )
         assert agent_named["result"]["recovery"]["evidence"]["statblock_slot"] == 1
         assert agent_named["result"]["review"]["normalized_content"].startswith(
             "# Reviewed Commoner"
         )
-        assert agent_named["result"]["review"]["derived_from_review_id"] == result[
-            "review"
-        ]["id"]
+        assert agent_named["result"]["review"]["derived_from_review_id"] == result["review"]["id"]
         if embedded_text:
-            assert agent_named["result"]["recovery"]["evidence"][
-                "reviewed_ocr_corrections"
-            ] == {
+            assert agent_named["result"]["recovery"]["evidence"]["reviewed_ocr_corrections"] == {
                 "text_replacements": [
                     {
-                        "old": (
-                            "Club. Melee Weapon Attack: +2 to hit, reach 5 ft., "
-                            "one target."
-                        ),
-                        "new": (
-                            "Club. Melee Weapon Attack: +2 to hit, reach 5 ft., "
-                            "one creature."
-                        ),
+                        "old": ("Club. Melee Weapon Attack: +2 to hit, reach 5 ft., one target."),
+                        "new": ("Club. Melee Weapon Attack: +2 to hit, reach 5 ft., one creature."),
                     }
                 ]
             }
+            if not corrupt_embedded_text:
+                rendered_page = await server.call_tool(
+                    "rule_import",
+                    {
+                        "campaign_id": campaign["id"],
+                        "action": "render_page",
+                        "payload": {
+                            "job_id": job_id,
+                            "page_number": 1,
+                            "scale": 1.5,
+                            "include_ocr_text": False,
+                        },
+                    },
+                )
+                rendered_metadata = json.loads(rendered_page.content[0].text)
+                rendered_arguments = {
+                    "campaign_id": campaign["id"],
+                    "action": "recover_statblock",
+                    "payload": {
+                        "job_id": job_id,
+                        "name": "Rendered Commoner",
+                        "page_number": 1,
+                        "statblock_slot": 1,
+                        "ocr_corrections": {
+                            "text_replacements": [
+                                {
+                                    "old": (
+                                        "Club. Melee Weapon Attack: +2 to hit, "
+                                        "reach 5 ft., one target."
+                                    ),
+                                    "new": (
+                                        "Club. Melee Weapon Attack: +2 to hit, "
+                                        "reach 5 ft., one creature."
+                                    ),
+                                }
+                            ]
+                        },
+                        "correction_evidence_basis": "rendered_page",
+                        "rendered_image_checksum": rendered_metadata["image_checksum"],
+                    },
+                    "idempotency_key": "recover-rendered-agent-correction",
+                }
+                _, rendered_review = await server.call_tool(
+                    "rule_import",
+                    rendered_arguments,
+                )
+                assert rendered_review["result"]["recovery"]["evidence"]["correction_evidence"] == {
+                    "basis": "rendered_page",
+                    "rendered_image_checksum": rendered_metadata["image_checksum"],
+                    "page_number": 1,
+                }
+                with pytest.raises(Exception, match="checksum does not match"):
+                    await server.call_tool(
+                        "rule_import",
+                        {
+                            **rendered_arguments,
+                            "payload": {
+                                **rendered_arguments["payload"],
+                                "rendered_image_checksum": "0" * 64,
+                            },
+                            "idempotency_key": "reject-wrong-rendered-checksum",
+                        },
+                    )
             with pytest.raises(Exception, match="not corroborated by the staged page"):
                 await server.call_tool(
                     "rule_import",
@@ -2562,9 +2821,12 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
             },
         )
         assert reviewed["job"]["state"] == "review_required"
-        assert next(
-            item for item in reviewed["candidates"] if item["id"] == spark["id"]
-        )["review_status"] == "needs_revision"
+        assert (
+            next(item for item in reviewed["candidates"] if item["id"] == spark["id"])[
+                "review_status"
+            ]
+            == "needs_revision"
+        )
         with pytest.raises(Exception, match="independent reviewer"):
             await call(
                 server,
@@ -2629,9 +2891,41 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
         assert compiled["draft"]["manifest"]["native_mechanic_refs"] == [
             "dnd5e.core.spell.structured_resolution"
         ]
-        assert compiled["draft"]["manifest"]["native_provider_locks"][0][
-            "mechanic_refs"
-        ] == ["dnd5e.core.spell.structured_resolution"]
+        assert compiled["draft"]["manifest"]["native_provider_locks"][0]["mechanic_refs"] == [
+            "dnd5e.core.spell.structured_resolution"
+        ]
+        exported = await call(
+            server,
+            "rule_pack_query",
+            {
+                "view": "package",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "pack_id": "dnd5e.xgte.import-job",
+                    "version": "1.0.0",
+                    "include_package": True,
+                },
+            },
+        )
+        portable_package = exported["package"]
+        serialized_package = json.dumps(portable_package, ensure_ascii=False)
+        assert all(chunk_id not in serialized_package for chunk_id in spark["source_chunk_ids"])
+        portable_chunk_keys = {
+            chunk["key"]
+            for source in portable_package["payload"]["sources"]
+            for section in source["sections"]
+            for chunk in section["chunks"]
+        }
+        portable_references = {
+            reference
+            for artifact in portable_package["payload"]["artifacts"]
+            for reference in artifact["selection_contract"]["references"]
+            if reference.startswith("rule-source-chunk:")
+        }
+        assert portable_references
+        assert {
+            reference.removeprefix("rule-source-chunk:") for reference in portable_references
+        } <= portable_chunk_keys
         install_arguments = {
             "campaign_id": campaign["id"],
             "job_id": rule_job_id,
@@ -2698,9 +2992,7 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
         )
         assert catalog[0]["application_state"] == "selection_ready"
         assert catalog[0]["source_citations"][0]["source_key"] == "xgte-pilot"
-        assert "1st-level evocation spell" in catalog[0]["source_citations"][0][
-            "source_excerpt"
-        ]
+        assert "1st-level evocation spell" in catalog[0]["source_citations"][0]["source_excerpt"]
 
         artifact = await call(
             server,
@@ -2823,10 +3115,7 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
             "module_write",
             {
                 "name": "import-job-module",
-                "content": (
-                    "# Chapter One\n\n## Finale\n\n"
-                    "#### B1. Observatory\n25 by 25 feet\n"
-                ),
+                "content": ("# Chapter One\n\n## Finale\n\n#### B1. Observatory\n25 by 25 feet\n"),
             },
         )
         revision_job = await call(
@@ -2866,10 +3155,7 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
         assert len(progress_impact) == 1
         assert progress_impact[0]["action"] == "needs_dm_review"
         assert progress_impact[0]["ruling_requirement"]["default_resolver"] == "agent"
-        assert (
-            progress_impact[0]["ruling_requirement"]["ruling_kind"]
-            == "source_or_scene_fact"
-        )
+        assert progress_impact[0]["ruling_requirement"]["ruling_kind"] == "source_or_scene_fact"
         aggregate = revision_validation["validation"]["ruling_requirements"]
         assert len(aggregate) == 1
         assert aggregate[0]["scope_id"] == "party"
@@ -2930,9 +3216,7 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
             },
         )
         assert activated_revision["activation"]["progress_migrations"][0]["mode"] == "dm_ruling"
-        assert activated_revision["activation"]["progress_remap_rulings"][0][
-            "resolver"
-        ] == "agent"
+        assert activated_revision["activation"]["progress_remap_rulings"][0]["resolver"] == "agent"
         current_scene = await call(
             server,
             "module_current",
@@ -3032,12 +3316,8 @@ def test_core_import_reuses_trusted_standard_schemas_but_homebrew_does_not(
                 "idempotency_key": f"extract-{authority}",
             },
         )
-        acolyte = next(
-            item for item in extracted["candidates"] if item["name"] == "ACOLYTE"
-        )
-        fireball = next(
-            item for item in extracted["candidates"] if item["name"] == "FIREBALL"
-        )
+        acolyte = next(item for item in extracted["candidates"] if item["name"] == "ACOLYTE")
+        fireball = next(item for item in extracted["candidates"] if item["name"] == "FIREBALL")
         reviewed = await call(
             server,
             "rule_import",
@@ -3113,9 +3393,7 @@ def test_core_import_reuses_trusted_standard_schemas_but_homebrew_does_not(
             }
         ]
         assert core_fireball["card"]["resolution"]["kind"] == "saving_throw"
-        assert core_fireball["mechanic_refs"] == [
-            "dnd5e.core.spell.structured_resolution"
-        ]
+        assert core_fireball["mechanic_refs"] == ["dnd5e.core.spell.structured_resolution"]
         assert "selection_schema_references" not in homebrew_artifacts["FIREBALL"]
         assert "resolution" not in homebrew_artifacts["FIREBALL"]["card"]
 
@@ -3204,11 +3482,7 @@ def test_rule_review_rejects_clause_excerpts_not_in_the_cited_chunk(
                 "idempotency_key": "extract",
             },
         )
-        candidate = next(
-            item
-            for item in extracted["candidates"]
-            if item["name"] == "Spark"
-        )
+        candidate = next(item for item in extracted["candidates"] if item["name"] == "Spark")
         artifact = {
             "kind": candidate["kind"],
             "application_state": "catalog_only",
@@ -3221,15 +3495,9 @@ def test_rule_review_rejects_clause_excerpts_not_in_the_cited_chunk(
                     "scope": "descriptive",
                     "source_citations": [
                         {
-                            "source": candidate["source_citations"][0][
-                                "source"
-                            ],
-                            "source_ref": {
-                                "chunk_id": candidate["source_chunk_ids"][0]
-                            },
-                            "source_excerpt": (
-                                "The gold ward flashes when a giant enters."
-                            ),
+                            "source": candidate["source_citations"][0]["source"],
+                            "source_ref": {"chunk_id": candidate["source_chunk_ids"][0]},
+                            "source_excerpt": ("The gold ward flashes when a giant enters."),
                         }
                     ],
                     "settlement": {"mode": "descriptive"},
@@ -3239,9 +3507,7 @@ def test_rule_review_rejects_clause_excerpts_not_in_the_cited_chunk(
         decision = {
             "id": candidate["id"],
             "review_status": "accepted",
-            "catalog_review_decision": _catalog_review_decision(
-                "primary", "agent:extractor"
-            ),
+            "catalog_review_decision": _catalog_review_decision("primary", "agent:extractor"),
             "artifact": artifact,
         }
         await call(
@@ -3260,9 +3526,7 @@ def test_rule_review_rejects_clause_excerpts_not_in_the_cited_chunk(
         critic_decision = {
             "id": candidate["id"],
             "review_status": "accepted",
-            "catalog_review_decision": _catalog_review_decision(
-                "critic", "agent:critic"
-            ),
+            "catalog_review_decision": _catalog_review_decision("critic", "agent:critic"),
         }
         with pytest.raises(Exception, match="not exact text"):
             await call(
@@ -3278,9 +3542,9 @@ def test_rule_review_rejects_clause_excerpts_not_in_the_cited_chunk(
                     "idempotency_key": "review-inexact-critic",
                 },
             )
-        decision["artifact"]["rule_clauses"][0]["source_citations"][0][
-            "source_excerpt"
-        ] = exact_excerpt
+        decision["artifact"]["rule_clauses"][0]["source_citations"][0]["source_excerpt"] = (
+            exact_excerpt
+        )
         revised = await call(
             server,
             "rule_import",
