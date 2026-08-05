@@ -523,11 +523,11 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
             == PROFILE_TOOL_LIMITS
             == {
                 "lobby": 64,
-                "play": 49,
-                "combat": 48,
+                "play": 50,
+                "combat": 49,
             }
         )
-        assert schema_bytes == TARGET_INPUT_SCHEMA_BYTES == 53_441
+        assert schema_bytes == TARGET_INPUT_SCHEMA_BYTES == 53_380
         assert schema_bytes < BASELINE_INPUT_SCHEMA_BYTES
         by_name = {tool.name: tool for tool in tools}
         assert by_name["chase"].inputSchema["properties"]["action"]["enum"] == [
@@ -583,7 +583,6 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
             "resolve_defense",
             "on_hit_ruling",
             "execute_plan",
-            "resolve_death_trigger",
         ]
         assert by_name["combat_query"].inputSchema["properties"]["view"]["enum"] == [
             "status",
@@ -610,7 +609,6 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
             "sustain_spell",
             "use_object",
             "utilize",
-            "detach_attachment",
         ]
 
         expected_budget = {

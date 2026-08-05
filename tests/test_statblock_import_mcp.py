@@ -384,14 +384,17 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
                         "damage_resistances": ["fire"],
                         "damage_immunities": ["cold"],
                         "damage_vulnerabilities": ["radiant"],
-                        "relentless_endurance": {
-                            "feature_id": "relentless-endurance",
-                            "source_excerpt": (
-                                "When reduced to 0 hit points, he drops to 1 hit point "
-                                "instead (but can't do this again until he finishes a "
-                                "long rest)."
-                            ),
-                        },
+                        "add_features": [
+                            {
+                                "id": "last-defiance",
+                                "name": "Last Defiance",
+                                "description": (
+                                    "When reduced to 0 hit points, he drops to 1 hit "
+                                    "point instead once, then must finish a long rest "
+                                    "before doing so again."
+                                ),
+                            }
+                        ],
                         "action_overrides": {
                             "club": {
                                 "id": "gauntlet-slam",
@@ -429,17 +432,11 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
         feature = next(
             item
             for item in variant_actor["sheet"]["content"]["features"]
-            if item["id"] == "relentless-endurance"
+            if item["id"] == "last-defiance"
         )
-        assert {
-            key: feature["uses"][key]
-            for key in ("label", "value", "max", "recovers_on")
-        } == {
-            "label": "uses",
-            "value": 1,
-            "max": 1,
-            "recovers_on": "long_rest",
-        }
+        assert feature["description"].startswith("When reduced to 0 hit points")
+        assert feature["choices"] == {}
+        assert feature["mechanic_refs"] == []
         assert variant_actor["derived"]["inventory"]["weapon_attacks"][0]["item_id"] == (
             "gauntlet-slam"
         )
@@ -464,37 +461,6 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
             "campaign_get",
             {"campaign_id": campaign["id"]},
         )
-        endured = await _call(
-            server,
-            "combat_apply_damage",
-            {
-                "campaign_id": campaign["id"],
-                "target_id": variant_actor["id"],
-                "parts": [{"amount": 1, "damage_type": "force"}],
-                "expected_revision": current_campaign["revision"],
-                "idempotency_key": "variant-relentless-endurance",
-            },
-        )
-        after_endurance = await _call(
-            server,
-            "character_get",
-            {"character_id": variant_actor["id"]},
-        )
-        assert endured["after_hp"] == 1
-        assert endured["relentless_endurance_triggered"] is True
-        assert endured["relentless_endurance_use"]["after_uses"] == 0
-        persisted_feature = next(
-            item
-            for item in after_endurance["sheet"]["content"]["features"]
-            if item["id"] == "relentless-endurance"
-        )
-        assert persisted_feature["uses"]["value"] == 0
-
-        current_campaign = await _call(
-            server,
-            "campaign_get",
-            {"campaign_id": campaign["id"]},
-        )
         immune = await _call(
             server,
             "combat_apply_damage",
@@ -514,7 +480,7 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
             "campaign_get",
             {"campaign_id": campaign["id"]},
         )
-        spent = await _call(
+        downed_by_damage = await _call(
             server,
             "combat_apply_damage",
             {
@@ -522,11 +488,10 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
                 "target_id": variant_actor["id"],
                 "parts": [{"amount": 1, "damage_type": "force"}],
                 "expected_revision": current_campaign["revision"],
-                "idempotency_key": "variant-relentless-spent",
+                "idempotency_key": "variant-force-damage",
             },
         )
-        assert spent["after_hp"] == 0
-        assert spent["relentless_endurance_triggered"] is False
+        assert downed_by_damage["after_hp"] == 0
 
         downed = await _call(
             server,
@@ -1012,9 +977,7 @@ def test_standard_statblock_prefills_open_multiattack_as_direct_agent_ruling(
                 "before, between, or after them."
             ),
         }
-        assert multiattack["mechanic_refs"] == [
-            "dnd5e.core.action.multiattack_choice"
-        ]
+        assert multiattack["mechanic_refs"] == []
         assert created["statblock"]["settlement"] == "mixed"
 
     asyncio.run(exercise())
@@ -1504,17 +1467,11 @@ def test_statblock_reconstruction_preserves_reaction_heading_paths(tmp_path: Pat
         assert parry["activation"] == {
             "type": "reaction",
             "cost": 1,
-            "trigger": "hit by a melee attack",
+            "trigger": "",
         }
-        assert parry["choices"]["reaction_defense"] == {
-            "kind": "armor_class_bonus",
-            "bonus": 2,
-            "attack_modes": ["melee"],
-            "requires_visible_attacker": False,
-            "requires_wielded_melee_weapon": False,
-        }
-        assert created["statblock"]["settlement"] == "automatic"
-        assert created["statblock"]["warnings"] == []
+        assert parry["choices"]["manual_ruling"]["default_resolver"] == "agent"
+        assert created["statblock"]["settlement"] == "mixed"
+        assert created["statblock"]["warnings"]
         variant = await _call(
             server,
             "character_create_from",

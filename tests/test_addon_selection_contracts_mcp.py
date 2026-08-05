@@ -7,10 +7,7 @@ from sagasmith_dnd.content_readiness import (
     build_catalog_review,
     build_selection_contract,
 )
-from sagasmith_dnd.statblocks import (
-    area_save_damage_spec,
-    parameterized_statblock_requirements,
-)
+from sagasmith_dnd.statblocks import parameterized_statblock_requirements
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import (
@@ -1728,11 +1725,17 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
             for item in dragonborn_applied["sheet"]["content"]["activities"]
             if item["name"] == "Breath Weapon"
         )
-        breath_spec = area_save_damage_spec(dragonborn_applied["sheet"], breath["id"])
-        assert breath_spec is not None
-        assert breath_spec["kind"] == "self_cone_save_damage"
-        assert breath_spec["save_dc"] == 10
-        assert breath_spec["damage_formula"] == "2d6"
+        breath_spec = breath["choices"]["standard_resolution"]
+        assert breath_spec["kind"] == "area_save_damage"
+        assert breath["mechanic_refs"] == [
+            "dnd5e.core.activity.dragonborn_breath_weapon"
+        ]
+        assert breath_spec["save_dc_formula"] == {
+            "base": 8,
+            "ability": "constitution",
+            "include_proficiency": True,
+        }
+        assert breath_spec["damage_formula_by_level"]["1"] == "2d6"
 
         druid_sheet = default_character_sheet()
         druid_sheet["progression"]["level"] = 3

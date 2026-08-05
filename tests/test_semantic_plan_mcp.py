@@ -882,7 +882,7 @@ def test_content_solution_accepts_only_exact_active_rule_chunk_evidence(
                 "idempotency_key": "enter-play",
             },
         )
-        with pytest.raises(Exception, match="only available during lobby"):
+        with pytest.raises(Exception, match="already has a compiled solution"):
             await _call(
                 server,
                 "content_solution",
@@ -1125,6 +1125,9 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
         wielder_sheet["inventory"]["equipment_slots"]["main_hand"] = (
             "binding-blade"
         )
+        item_plan = deepcopy(
+            wielder_sheet["inventory"]["items"][0].pop("resolution_plan")
+        )
         wielder_sheet["content"]["features"] = [
             {
                 "id": "ward-lore",
@@ -1297,11 +1300,39 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
                 "idempotency_key": "attack",
             },
         )
-        semantic = attacked["result"]["semantic_plan"]
-        contract = semantic["contract"]
+        semantic = attacked["result"]["semantic_solution"]
         assert attacked["status"] == "pending_ruling"
-        assert semantic["status"] == "payment_recorded"
+        assert semantic["status"] == "content_authoring_required"
+        assert semantic["first_use_compilation_required"] is True
         assert semantic["application_id"]
+        wielder_at_first_use = await _call(
+            server,
+            "character_get",
+            {"character_id": wielder["id"]},
+        )
+        compiled_item = await _call(
+            server,
+            "content_solution",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": wielder["id"],
+                "action": "compile",
+                "source_card_id": "binding-blade",
+                "source_card_kind": "item",
+                "payload": {
+                    "resolution_plan": item_plan,
+                    "agent_ruling": {
+                        "default_resolver": "agent",
+                        "ruling_kind": "module_specific_procedure",
+                        "decision": "Store the blade's quoted on-hit procedure.",
+                        "reason": "The active module chunk contains the exact mechanic.",
+                    },
+                },
+                "expected_revision": wielder_at_first_use["revision"],
+                "idempotency_key": "compile-item-at-first-use",
+            },
+        )
+        contract = compiled_item["resolution_plan_contract"]
         assert contract["plan_id"] == plan_id
         assert contract["trigger_filter"]["weapon_id"] == "binding-blade"
         agent_ruling = {
@@ -1374,7 +1405,9 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
         assert stored_item["resolution_plan"]["fingerprint"] == (
             contract["plan_fingerprint"]
         )
-        assert "resolution_solution" not in stored_item
+        assert stored_item["resolution_solution"]["plan_fingerprint"] == (
+            contract["plan_fingerprint"]
+        )
         assert all(
             item.get("id") != semantic["application_id"]
             for item in settled["combat"].get("pending", [])

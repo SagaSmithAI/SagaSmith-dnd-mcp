@@ -3438,7 +3438,7 @@ def test_core_import_reuses_trusted_standard_schemas_but_homebrew_does_not(
         assert core_artifact["selection_schema_references"] == [
             {
                 "pack_id": "dnd5e.content.srd2014",
-                "pack_version": "1.20.0",
+                    "pack_version": "1.21.0",
                 "artifact_id": "dnd5e.content.srd2014.background.acolyte",
             }
         ]
@@ -3449,7 +3449,7 @@ def test_core_import_reuses_trusted_standard_schemas_but_homebrew_does_not(
         assert core_fireball["selection_schema_references"] == [
             {
                 "pack_id": "dnd5e.content.srd2014",
-                "pack_version": "1.20.0",
+                    "pack_version": "1.21.0",
                 "artifact_id": "dnd5e.content.srd2014.spell.fireball",
             }
         ]

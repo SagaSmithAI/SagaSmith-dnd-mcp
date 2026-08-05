@@ -8,15 +8,14 @@ import pytest
 
 from scripts.regression_encounter import (
     GUIDING_BOLT_ID,
-    GUIDING_BOLT_ON_HIT,
     HEALING_WORD_ID,
     HYPNOTIC_PATTERN_ID,
     MAGIC_MISSILE_ID,
     EncounterRulingRequiredError,
+    _activate_content_solution,
     _agent_attack_contexts,
     _agent_casting_perception_rulings,
     _agent_common_action_priorities,
-    _agent_death_trigger_rulings,
     _agent_object_interactions,
     _agent_party_absences,
     _agent_positions,
@@ -25,15 +24,11 @@ from scripts.regression_encounter import (
     _agent_target_priorities,
     _agent_target_reaction_contexts,
     _agent_turn_rulings,
-    _agent_turn_transaction_token,
     _agent_weapon_priorities,
     _apply_agent_positions,
     _apply_party_loadouts,
-    _apply_source_casualty_rolls,
     _apply_source_separations,
     _area_spell_target_ids,
-    _body_thief_sides,
-    _body_thief_target_ids,
     _captured_hostile_ids,
     _character_summary,
     _characters,
@@ -43,6 +38,7 @@ from scripts.regression_encounter import (
     _completed_source_opening_weapon_actor_ids,
     _consume_agent_forced_target,
     _consume_agent_target_reaction,
+    _content_solutions,
     _defense_selection,
     _destination_within_range,
     _encounter_actor_groups,
@@ -64,7 +60,6 @@ from scripts.regression_encounter import (
     _pending_agent_forced_targets,
     _pending_resolution_made_progress,
     _postcombat_stabilization_target,
-    _postcombat_unavailable_grapple_effect_ids,
     _preflight_attack,
     _prepared_actor_ids,
     _primary_hostile_source_excerpt,
@@ -77,49 +72,30 @@ from scripts.regression_encounter import (
     _require_committed_encounter_start,
     _require_encounter_readiness,
     _require_live_active_party,
-    _require_pending_on_hit_choice_id,
     _required_source_opening_weapon,
-    _resolve_pending,
     _roll_total,
     _safe_single_target_spell_declaration,
+    _scheduled_content_solution,
     _selected_prepared_actor_ids,
     _settle_agent_turn_ruling,
-    _settle_source_casualty_pool_turn,
     _should_stand,
     _source_ammunition_selections,
-    _source_attack_environments,
     _source_avoidances,
-    _source_casualty_pools,
-    _source_contest_activities,
     _source_declared_conditions,
     _source_declared_surprise,
-    _source_delayed_actions,
     _source_departure_patch,
-    _source_extra_damage_action_rulings,
-    _source_extra_damage_history,
-    _source_extra_damage_rulings,
-    _source_extra_damage_turn_history,
     _source_flee_damage_history,
     _source_flee_ready,
-    _source_on_hit_rulings,
     _source_opening_casts,
-    _source_opening_weapons,
     _source_outcome,
     _source_outcome_allows_checkpoint,
     _source_passive_allies,
-    _source_precombat_casts,
-    _source_random_activities,
-    _source_save_activities,
     _source_separation_target,
     _source_separations,
     _source_surprise_evidence_from_report,
     _source_surrender_outcome,
     _source_target_priorities,
-    _source_traits,
     _source_truce_outcome,
-    _source_zero_hp_finisher,
-    _source_zero_hp_finisher_stage,
-    _source_zero_hp_stabilization,
     _spell_cast_blocks_turn_progress,
     _start_or_resume_auto_run,
     _status,
@@ -139,53 +115,175 @@ PERYTON_DIVE_ATTACK = (
 )
 
 
-def test_postcombat_cleanup_detects_only_unavailable_source_grapples() -> None:
-    combat = {
-        "combatants": [
-            {"actor_id": "dead-source", "conditions": ["dead", "prone"]},
+def test_content_solution_input_is_generic_and_source_card_bound() -> None:
+    value = {
+        "actor_id": "emberling-1",
+        "source_card_id": "ash-step",
+        "source_card_kind": "monster_action",
+        "resolution_plan": {"id": "ash-step-plan", "trigger": "action"},
+        "compile_ruling": {
+            "default_resolver": "agent",
+            "ruling_kind": "agent_dm_adjudication",
+            "decision": "Compile the exact reviewed card.",
+            "reason": "The imported card has no standard mechanic.",
+        },
+        "bindings": {"source_actor": "emberling-1", "targets": ["hero-1"]},
+        "execution_ruling": {
+            "default_resolver": "agent",
+            "ruling_kind": "source_or_scene_fact",
+            "decision": "The hero is inside the recorded area.",
+            "reason": "The active map places the hero within ten feet.",
+            "source_ref": {"scene_id": "scene-1"},
+            "source_excerpt": "The hero stands beside the emberling.",
+        },
+        "activations": [
             {
-                "actor_id": "departed-source",
-                "conditions": [],
-                "departed": {"reason": "The source fled."},
-            },
-            {"actor_id": "present-source", "conditions": []},
-        ],
-        "ongoing_effects": [
-            {
-                "id": "dead-grapple",
-                "kind": "on_hit_condition",
-                "condition": "grappled",
-                "source_actor_id": "dead-source",
-                "active": True,
-            },
-            {
-                "id": "departed-grapple",
-                "kind": "on_hit_condition",
-                "condition": "grappled",
-                "source_actor_id": "departed-source",
-                "active": True,
-            },
-            {
-                "id": "present-grapple",
-                "kind": "on_hit_condition",
-                "condition": "grappled",
-                "source_actor_id": "present-source",
-                "active": True,
-            },
-            {
-                "id": "independent-web",
-                "kind": "on_hit_condition",
-                "condition": "restrained",
-                "source_actor_id": "dead-source",
-                "active": True,
-            },
+                "round": 2,
+                "bindings": {
+                    "source_actor": "emberling-1",
+                    "targets": ["hero-1"],
+                },
+                "execution_ruling": {
+                    "default_resolver": "agent",
+                    "ruling_kind": "source_or_scene_fact",
+                    "decision": "The hero remains inside the recorded area.",
+                    "reason": "The active map still places the hero within ten feet.",
+                    "source_ref": {"scene_id": "scene-1"},
+                    "source_excerpt": "The hero stands beside the emberling.",
+                },
+            }
         ],
     }
 
-    assert _postcombat_unavailable_grapple_effect_ids(combat) == [
-        "dead-grapple",
-        "departed-grapple",
-    ]
+    normalized = _content_solutions(
+        [value],
+        participant_ids=["emberling-1", "hero-1"],
+    )
+
+    assert normalized[("emberling-1", "ash-step", "monster_action")] == value
+    scheduled = _scheduled_content_solution(
+        normalized,
+        actor_id="emberling-1",
+        round_number=2,
+    )
+    assert scheduled is not None
+    assert scheduled[0]["source_card_id"] == "ash-step"
+    assert scheduled[1]["bindings"]["targets"] == ["hero-1"]
+    with pytest.raises(ValueError, match="unique participant/source-card"):
+        _content_solutions(
+            [value, value],
+            participant_ids=["emberling-1", "hero-1"],
+        )
+
+
+@pytest.mark.parametrize(
+    ("source_card_kind", "payment_tool", "identity_field"),
+    [
+        ("monster_action", "combat_use_activity", "activity_id"),
+        ("spell", "combat_cast_spell", "spell_id"),
+    ],
+)
+def test_active_content_solution_pays_then_executes_generic_plan(
+    source_card_kind: str,
+    payment_tool: str,
+    identity_field: str,
+) -> None:
+    calls: list[tuple[str, dict]] = []
+
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict) -> dict:
+            calls.append((tool_id, arguments))
+            if tool_id == payment_tool:
+                commitment = arguments["declaration"][
+                    "agent_resolution_commitment"
+                ]
+                result = (
+                    {"semantic_plan": {"commitment": commitment}}
+                    if source_card_kind == "spell"
+                    else {
+                        "declaration": {
+                            "agent_resolution_commitment": commitment,
+                        }
+                    }
+                )
+                return {
+                    "status": "pending_ruling",
+                    "result": result,
+                    "campaign_revision": 12,
+                }
+            if tool_id == "combat_choice":
+                return {"status": "committed", "campaign_revision": 13}
+            raise AssertionError(tool_id)
+
+    solution = {
+        "actor_id": "emberling-1",
+        "source_card_id": "ash-step",
+        "source_card_kind": source_card_kind,
+        "resolution_plan": {"id": "ash-step-plan", "trigger": "action"},
+        "compile_ruling": {},
+        "bindings": {"source_actor": "emberling-1", "targets": ["hero-1"]},
+        "execution_ruling": {},
+    }
+    activation = {
+        "round": 2,
+        **({"cast_level": 3} if source_card_kind == "spell" else {}),
+        "bindings": deepcopy(solution["bindings"]),
+        "execution_ruling": {
+            "default_resolver": "agent",
+            "ruling_kind": "source_or_scene_fact",
+            "decision": "The target is inside the recorded area.",
+        },
+    }
+    args = SimpleNamespace(
+        campaign_id="campaign-1",
+        operation_scope="scope-1",
+        run_id="run-1",
+    )
+    with (
+        patch(
+            "scripts.regression_encounter._compile_content_solution",
+            new=AsyncMock(
+                return_value={
+                    "status": "compiled",
+                    "resolution_plan_contract": {
+                        "plan_id": "ash-step-plan",
+                        "plan_fingerprint": "fingerprint-1",
+                    },
+                }
+            ),
+        ),
+        patch(
+            "scripts.regression_encounter._campaign",
+            new=AsyncMock(return_value={"revision": 11}),
+        ),
+    ):
+        result = asyncio.run(
+            _activate_content_solution(
+                Client(),
+                args,
+                branch_id="branch-1",
+                solution=solution,
+                activation=activation,
+                component_ruling={"observers": []},
+            )
+        )
+
+    assert [call[0] for call in calls] == [payment_tool, "combat_choice"]
+    payment_arguments = calls[0][1]
+    assert payment_arguments[identity_field] == "ash-step"
+    assert payment_arguments["expected_revision"] == 11
+    if source_card_kind == "spell":
+        assert payment_arguments["cast_level"] == 3
+        assert payment_arguments["component_ruling"] == {"observers": []}
+    else:
+        assert "cast_level" not in payment_arguments
+        assert "component_ruling" not in payment_arguments
+    commitment = payment_arguments["declaration"]["agent_resolution_commitment"]
+    assert commitment["source_card_kind"] == source_card_kind
+    assert commitment["agent_ruling"]["application_id"] == result["application_id"]
+    assert calls[1][1]["action"] == "execute_plan"
+    assert calls[1][1]["payload"]["commitment"] == commitment
+    assert calls[1][1]["expected_revision"] == 12
 
 
 def test_encounter_readiness_rejects_source_participants_before_other_calls() -> None:
@@ -464,298 +562,18 @@ def test_agent_target_reaction_contexts_bind_source_and_target() -> None:
     assert ruling["agent_ruling"]["source_ref"] == source_ref
 
 
-def test_agent_turn_rulings_reject_descriptive_passive_as_combat_action() -> None:
-    actor_excerpt = (
-        "The creature can innately cast suggestion (save DC 13), requiring no "
-        "material components."
-    )
-    encounter_excerpt = (
-        "The creature uses suggestion to tell a character that a fellow party "
-        "member is a spy and should be attacked."
-    )
-    source_ref = {
-        "module_id": "module-1",
-        "scene_id": "scene-1",
-        "chunk_id": "chunk-1",
-        "content_sha256": "a" * 64,
-    }
-    actors = {
-        "caster": {
-            "sheet": {
-                "content": {
-                    "features": [
-                        {
-                            "id": "innate-spellcasting",
-                            "description": actor_excerpt,
-                            "choices": {
-                                "manual_ruling": {
-                                    "kind": "descriptive_passive",
-                                    "default_resolver": "agent",
-                                    "source_excerpt": actor_excerpt,
-                                }
-                            },
-                        }
-                    ]
-                }
-            }
-        }
-    }
-
-    with pytest.raises(ValueError, match="cannot activate a descriptive passive"):
-        _agent_turn_rulings(
-            [
-                {
-                    "actor_id": "caster",
-                    "feature_id": "innate-spellcasting",
-                    "round": 1,
-                    "source_ref": source_ref,
-                    "actor_source_excerpt": actor_excerpt,
-                    "encounter_source_excerpt": encounter_excerpt,
-                    "decision": "The caster uses the reviewed feature on the scout.",
-                    "ruling_reason": "The cited encounter explicitly selects this tactic.",
-                    "target_id": "scout",
-                    "save_ability": "wisdom",
-                    "save_dc": 13,
-                    "success_outcome": "The scout recognizes and rejects the compulsion.",
-                    "failure_outcome": "The scout attacks the named ally once.",
-                    "forced_target_id": "ally",
-                    "ends_if_source_incapacitated": True,
-                }
-            ],
-            participant_ids=["caster", "scout", "ally"],
-            actors=actors,
-            scene_id="scene-1",
-            encounter_source_excerpt=encounter_excerpt,
-        )
-
-
-def test_agent_turn_rulings_bind_reviewed_area_save_damage() -> None:
-    actor_excerpt = (
-        "The dragon exhales poisonous gas in a 60-foot cone. Each creature in "
-        "that area must make a DC 18 Constitution saving throw, taking 56 "
-        "(16d6) poison damage on a failed save, or half as much damage on a "
-        "successful one."
-    )
-    encounter_excerpt = (
-        "If Chuth is encountered here, he uses his breath weapon, legendary "
-        "actions, and lair actions indiscriminately."
-    )
-    source_ref = {
-        "module_id": "module-1",
-        "scene_id": "scene-1",
-        "chunk_id": "chunk-1",
-        "content_sha256": "a" * 64,
-    }
-    actors = {
-        "dragon": {
-            "sheet": {
-                "content": {
-                    "activities": [
-                        {
-                            "id": "poison-breath-activity",
-                            "description": actor_excerpt,
-                            "choices": {
-                                "manual_ruling": {
-                                    "kind": "descriptive_activity",
-                                    "default_resolver": "agent",
-                                    "source_excerpt": actor_excerpt,
-                                }
-                            },
-                        }
-                    ]
-                }
-            }
-        }
-    }
-
-    rulings = _agent_turn_rulings(
-        [
-            {
-                "actor_id": "dragon",
-                "activity_id": "poison-breath-activity",
-                "round": 1,
-                "source_ref": source_ref,
-                "actor_source_excerpt": actor_excerpt,
-                "encounter_source_excerpt": encounter_excerpt,
-                "decision": "Chuth catches both clustered intruders in the cone.",
-                "ruling_reason": "The cited lair tactic directs indiscriminate breath use.",
-                "target_ids": ["pc-1", "pc-2"],
-                "save_ability": "constitution",
-                "save_dc": 18,
-                "success_outcome": "The target takes half of the shared damage roll.",
-                "failure_outcome": "The target takes the full shared damage roll.",
-                "damage_expression": "16d6",
-                "damage_type": "poison",
-                "half_on_success": True,
-            }
-        ],
-        participant_ids=["dragon", "pc-1", "pc-2"],
-        actors=actors,
-        scene_id="scene-1",
-        encounter_source_excerpt=encounter_excerpt,
-    )
-
-    ruling = rulings[("dragon", 1)]
-    assert ruling["target_ids"] == ["pc-1", "pc-2"]
-    assert ruling["save"]["damage"] == {
-        "expression": "16d6",
-        "damage_type": "poison",
-        "half_on_success": True,
-    }
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("save_ability", "wisdom"),
-        ("save_dc", 17),
-        ("half_on_success", False),
-    ],
-)
-def test_agent_turn_rulings_reject_area_save_damage_not_matching_source(
-    field: str,
-    value: object,
+@pytest.mark.parametrize("card_field", ["feature_id", "activity_id", "spell_id"])
+def test_agent_turn_rulings_route_actor_card_mechanics_to_content_solutions(
+    card_field: str,
 ) -> None:
-    actor_excerpt = (
-        "The dragon exhales poisonous gas in a 60-foot cone. Each creature in "
-        "that area must make a DC 18 Constitution saving throw, taking 56 "
-        "(16d6) poison damage on a failed save, or half as much damage on a "
-        "successful one."
-    )
-    encounter_excerpt = "The dragon uses its breath weapon."
-    source_ref = {
-        "module_id": "module-1",
-        "scene_id": "scene-1",
-        "chunk_id": "chunk-1",
-        "content_sha256": "a" * 64,
-    }
-    actors = {
-        "dragon": {
-            "sheet": {
-                "content": {
-                    "activities": [
-                        {
-                            "id": "poison-breath-activity",
-                            "description": actor_excerpt,
-                            "choices": {
-                                "manual_ruling": {
-                                    "kind": "descriptive_activity",
-                                    "default_resolver": "agent",
-                                    "source_excerpt": actor_excerpt,
-                                }
-                            },
-                        }
-                    ]
-                }
-            }
-        }
-    }
-    declaration: dict[str, object] = {
-        "actor_id": "dragon",
-        "activity_id": "poison-breath-activity",
-        "round": 1,
-        "source_ref": source_ref,
-        "actor_source_excerpt": actor_excerpt,
-        "encounter_source_excerpt": encounter_excerpt,
-        "decision": "The dragon catches both clustered intruders in the cone.",
-        "ruling_reason": "The cited encounter directs this breath attack.",
-        "target_ids": ["pc-1", "pc-2"],
-        "save_ability": "constitution",
-        "save_dc": 18,
-        "success_outcome": "Half damage.",
-        "failure_outcome": "Full damage.",
-        "damage_expression": "16d6",
-        "damage_type": "poison",
-        "half_on_success": True,
-    }
-    declaration[field] = value
-
-    with pytest.raises(ValueError, match="must match the reviewed descriptive card"):
+    with pytest.raises(ValueError, match=f"unsupported fields: {card_field}"):
         _agent_turn_rulings(
-            [declaration],
-            participant_ids=["dragon", "pc-1", "pc-2"],
-            actors=actors,
+            [{"actor_id": "actor", card_field: "custom-card", "round": 1}],
+            participant_ids=["actor"],
+            actors={"actor": {"sheet": {"content": {}}}},
             scene_id="scene-1",
-            encounter_source_excerpt=encounter_excerpt,
+            encounter_source_excerpt="The scene uses the custom card.",
         )
-
-
-def test_agent_turn_rulings_bind_innate_spell_resource_and_concentration() -> None:
-    actor_excerpt = (
-        "The creature can innately cast suggestion 3/day (save DC 13), "
-        "requiring no material components."
-    )
-    encounter_excerpt = (
-        "The creature uses suggestion to tell a character that a fellow party "
-        "member is a spy and should be attacked."
-    )
-    source_ref = {
-        "module_id": "module-1",
-        "scene_id": "scene-1",
-        "chunk_id": "chunk-1",
-        "content_sha256": "a" * 64,
-    }
-    actors = {
-        "caster": {
-            "sheet": {
-                "content": {
-                    "features": [
-                        {
-                            "id": "innate-spellcasting",
-                            "name": "Innate Spellcasting",
-                            "description": actor_excerpt,
-                        }
-                    ],
-                    "spells": [
-                        {
-                            "id": "suggestion",
-                            "name": "Suggestion",
-                            "grant": {"method": "innate"},
-                            "access": {
-                                "known": True,
-                                "always_prepared": True,
-                                "at_will": False,
-                            },
-                            "definition": {
-                                "duration": {"concentration": True}
-                            },
-                        }
-                    ],
-                }
-            }
-        }
-    }
-
-    rulings = _agent_turn_rulings(
-        [
-            {
-                "actor_id": "caster",
-                "spell_id": "suggestion",
-                "round": 1,
-                "source_ref": source_ref,
-                "actor_source_excerpt": actor_excerpt,
-                "encounter_source_excerpt": encounter_excerpt,
-                "decision": "The caster innately casts Suggestion on the scout.",
-                "ruling_reason": "The cited encounter explicitly selects this tactic.",
-                "target_id": "scout",
-                "save_ability": "wisdom",
-                "save_dc": 13,
-                "success_outcome": "The scout recognizes and rejects the compulsion.",
-                "failure_outcome": "The scout attacks the named ally once.",
-                "forced_target_id": "ally",
-                "ends_if_source_incapacitated": True,
-            }
-        ],
-        participant_ids=["caster", "scout", "ally"],
-        actors=actors,
-        scene_id="scene-1",
-        encounter_source_excerpt=encounter_excerpt,
-    )
-
-    ruling = rulings[("caster", 1)]
-    assert ruling["spell_id"] == "suggestion"
-    assert ruling["spell_payment_economies"] == ["innate_spell"]
-    assert ruling["concentration_required"] is True
 
 
 def test_agent_turn_rulings_bind_source_cited_scene_procedure() -> None:
@@ -914,69 +732,6 @@ def test_agent_turn_rulings_reject_cross_edition_check_action() -> None:
         **arguments,
     )[("bard", 1)]
     assert ruling["check"]["action"] == "influence"
-
-
-def test_agent_turn_rulings_bind_unstructured_prepared_spell() -> None:
-    spell_excerpt = (
-        "You create a seismic disturbance at a point on the ground that you "
-        "can see within range."
-    )
-    source_ref = {
-        "module_id": "module-1",
-        "scene_id": "scene-1",
-        "chunk_id": "chunk-1",
-        "content_sha256": "a" * 64,
-    }
-    encounter_excerpt = (
-        "Severe damage is inflicted to the Temple of Tiamat, as from an "
-        "earthquake spell."
-    )
-    actors = {
-        "cleric": {
-            "sheet": {
-                "content": {
-                    "spells": [
-                        {
-                            "id": "earthquake",
-                            "level": 8,
-                            "grant": {"method": "class_prepared"},
-                            "access": {"prepared": True},
-                            "definition": {
-                                "effect": spell_excerpt,
-                                "duration": {"concentration": True},
-                            },
-                        }
-                    ]
-                }
-            }
-        }
-    }
-
-    rulings = _agent_turn_rulings(
-        [
-            {
-                "actor_id": "cleric",
-                "spell_id": "earthquake",
-                "round": 1,
-                "source_ref": source_ref,
-                "actor_source_excerpt": spell_excerpt,
-                "encounter_source_excerpt": encounter_excerpt,
-                "decision": "The cleric centers Earthquake on the ritual temple.",
-                "ruling_reason": (
-                    "The module explicitly identifies this spell as severe "
-                    "temple damage that disrupts the summoning."
-                ),
-            }
-        ],
-        participant_ids=["cleric"],
-        actors=actors,
-        scene_id="scene-1",
-        encounter_source_excerpt=encounter_excerpt,
-    )
-
-    ruling = rulings[("cleric", 1)]
-    assert ruling["spell_payment_economies"] == ["slots", "pact_magic"]
-    assert ruling["concentration_required"] is True
 
 
 def test_agent_turn_ruling_pays_action_rolls_save_and_persists_world_patch() -> None:
@@ -1189,489 +944,6 @@ def test_completed_agent_turn_combat_outcome_requires_successful_server_check() 
         match="not backed by a successful server check",
     ):
         _completed_agent_turn_combat_outcome(combat)
-
-
-def test_agent_turn_ruling_settles_area_save_damage_atomically() -> None:
-    class Client:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, dict]] = []
-
-        async def domain(self, tool_id: str, arguments: dict) -> dict:
-            self.calls.append((tool_id, arguments))
-            if tool_id == "combat_use_activity":
-                return {
-                    "status": "pending_ruling",
-                    "result": {"requires_ruling": True},
-                }
-            if tool_id == "combat_hp_change":
-                assert arguments["action"] == "save_damage"
-                return {
-                    "status": "committed",
-                    "result": {
-                        "damage_roll": {"total": 56},
-                        "targets": [
-                            {
-                                "target_id": "pc-1",
-                                "success": True,
-                                "save": {"success": True},
-                                "damage_amount": 28,
-                                "damage": {"applied_amount": 28},
-                            },
-                            {
-                                "target_id": "pc-2",
-                                "success": False,
-                                "save": {"success": False},
-                                "damage_amount": 56,
-                                "damage": {"applied_amount": 56},
-                            },
-                        ],
-                    },
-                    "combat": {},
-                }
-            if tool_id == "combat_map_patch":
-                return {"status": "committed", "world_patches": arguments["patches"]}
-            raise AssertionError(tool_id)
-
-    ruling = {
-        "application_id": "turn-ruling-breath-1",
-        "actor_id": "dragon",
-        "feature_id": "",
-        "activity_id": "poison-breath-activity",
-        "spell_id": "",
-        "round": 1,
-        "target_id": "",
-        "target_ids": ["pc-1", "pc-2"],
-        "mechanic_source_excerpt": (
-            "Poison Breath. Each creature in the area must make a DC 18 "
-            "Constitution saving throw, taking 16d6 poison damage on a failed "
-            "save, or half as much damage on a successful one."
-        ),
-        "save": {
-            "ability": "constitution",
-            "dc": 18,
-            "advantage": False,
-            "disadvantage": False,
-            "success_outcome": "Half damage.",
-            "failure_outcome": "Full damage.",
-            "forced_target_id": "",
-            "ends_if_source_incapacitated": False,
-            "damage": {
-                "expression": "16d6",
-                "damage_type": "poison",
-                "half_on_success": True,
-            },
-        },
-        "agent_ruling": {
-            "default_resolver": "agent",
-            "ruling_kind": "agent_dm_adjudication",
-            "decision": "The dragon catches both targets in its breath.",
-            "reason": "The cited encounter directs this breath attack.",
-            "encounter_source_excerpt": (
-                "The dragon catches both heroes in the cone and uses Poison Breath."
-            ),
-            "source_ref": {
-                "module_id": "module-1",
-                "scene_id": "scene-1",
-                "chunk_id": "chunk-1",
-                "content_sha256": "a" * 64,
-            },
-        },
-    }
-    client = Client()
-    args = SimpleNamespace(campaign_id="campaign-1", run_id="run-1")
-    with patch(
-        "scripts.regression_encounter.campaign_view",
-        new=AsyncMock(
-            side_effect=[{"revision": revision} for revision in range(10, 17)]
-        ),
-    ):
-        result = asyncio.run(
-            _settle_agent_turn_ruling(
-                client,
-                args,
-                branch_id="branch-1",
-                ruling=ruling,
-                sequence=4,
-            )
-        )
-
-    assert [name for name, _arguments in client.calls] == [
-        "combat_use_activity",
-        "combat_hp_change",
-        "combat_map_patch",
-    ]
-    assert client.calls[0][1]["idempotency_key"] == (
-        "encounter-agent-turn-activity-"
-        + _agent_turn_transaction_token(
-            args,
-            branch_id="branch-1",
-            application_id=ruling["application_id"],
-            parts=("action", "combat_use_activity"),
-        )
-    )
-    payment_commitment = client.calls[0][1]["declaration"][
-        "agent_ruling_commitment"
-    ]
-    settlement_payload = client.calls[1][1]["payload"]
-    assert payment_commitment["target_ids"] == ["pc-1", "pc-2"]
-    assert payment_commitment["agent_ruling"] == settlement_payload["agent_ruling"]
-    assert settlement_payload["target_ids"] == ["pc-1", "pc-2"]
-    assert [item["applied_amount"] for item in result["damage_results"]] == [28, 56]
-    assert result["save_results"][0]["success"] is True
-    assert result["save_results"][1]["success"] is False
-
-
-def test_agent_turn_ruling_recovers_legacy_action_payment_after_interruption() -> None:
-    class Client:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, dict]] = []
-            self.activity_attempts = 0
-
-        async def domain(self, tool_id: str, arguments: dict) -> dict:
-            self.calls.append((tool_id, arguments))
-            if tool_id == "combat_use_activity":
-                self.activity_attempts += 1
-                if self.activity_attempts < 3:
-                    raise RuntimeError("actor has no action remaining")
-                return {
-                    "status": "pending_ruling",
-                    "result": {"requires_ruling": True},
-                }
-            if tool_id == "combat_query":
-                return {
-                    "round": 1,
-                    "turn_index": 5,
-                    "combatants": [{"actor_id": f"actor-{index}"} for index in range(6)],
-                }
-            if tool_id == "combat_map_patch":
-                return {"status": "committed", "world_patches": arguments["patches"]}
-            raise AssertionError(tool_id)
-
-    ruling = {
-        "application_id": "turn-ruling-interrupted-1",
-        "actor_id": "dragon",
-        "feature_id": "",
-        "activity_id": "poison-breath-activity",
-        "spell_id": "",
-        "round": 1,
-        "target_id": "",
-        "target_ids": [],
-        "save": {},
-        "agent_ruling": {
-            "default_resolver": "agent",
-            "ruling_kind": "agent_dm_adjudication",
-            "decision": "The dragon uses its reviewed breath activity.",
-            "reason": "The cited encounter directs this opening action.",
-            "source_ref": {
-                "module_id": "module-1",
-                "scene_id": "scene-1",
-                "chunk_id": "chunk-1",
-                "content_sha256": "a" * 64,
-            },
-        },
-    }
-    client = Client()
-    with patch(
-        "scripts.regression_encounter.campaign_view",
-        new=AsyncMock(
-            side_effect=[{"revision": revision} for revision in range(10, 14)]
-        ),
-    ):
-        result = asyncio.run(
-            _settle_agent_turn_ruling(
-                client,
-                SimpleNamespace(campaign_id="campaign-1", run_id="run-1"),
-                branch_id="branch-1",
-                ruling=ruling,
-                sequence=1,
-            )
-        )
-
-    activity_calls = [
-        arguments
-        for name, arguments in client.calls
-        if name == "combat_use_activity"
-    ]
-    assert len(activity_calls) == 3
-    assert len({call["idempotency_key"] for call in activity_calls}) == 3
-    assert result["action_result"]["recovered_legacy_action_payment"] is True
-    assert result["action_result"]["legacy_turn_sequence"] == 6
-
-
-def test_agent_turn_ruling_recovers_action_roll_and_save_from_public_history() -> None:
-    class Client:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, dict]] = []
-
-        async def domain(self, tool_id: str, arguments: dict) -> dict | list[dict]:
-            self.calls.append((tool_id, arguments))
-            if tool_id == "combat_use_activity":
-                raise RuntimeError("actor has no action remaining")
-            if tool_id == "combat_query":
-                view = arguments["view"]
-                if view == "status":
-                    return {
-                        "round": 1,
-                        "turn_index": 1,
-                        "combatants": [
-                            {"actor_id": "pc-1"},
-                            {"actor_id": "dragon"},
-                        ],
-                    }
-                if view == "transaction_history":
-                    return [
-                        {
-                            "sequence": 13,
-                            "operation": "combat.save",
-                            "idempotency_key": "old-save",
-                            "mutation_group_id": "save-group",
-                        },
-                        {
-                            "sequence": 12,
-                            "operation": "dnd.dice.roll",
-                            "idempotency_key": "old-roll",
-                            "mutation_group_id": "roll-group",
-                        },
-                        {
-                            "sequence": 11,
-                            "operation": "combat.activity.use",
-                            "idempotency_key": "old-action",
-                            "mutation_group_id": "action-group",
-                        },
-                        {
-                            "sequence": 10,
-                            "operation": "combat.activity.use",
-                            "idempotency_key": "old-action",
-                            "mutation_group_id": "action-group",
-                        },
-                    ]
-                if view == "transaction_receipt":
-                    key = arguments["payload"]["idempotency_key"]
-                    if key == "old-action":
-                        return {
-                            "response": {
-                                "status": "pending_ruling",
-                                "result": {
-                                    "activity_id": "poison-breath-activity",
-                                    "requires_ruling": True,
-                                },
-                                "combat": {
-                                    "active": True,
-                                    "round": 1,
-                                    "turn_index": 1,
-                                    "combatants": [
-                                        {"actor_id": "pc-1"},
-                                        {"actor_id": "dragon"},
-                                    ],
-                                    "log": [],
-                                },
-                            }
-                        }
-                    if key == "old-roll":
-                        return {
-                            "response": {
-                                "expression": "16d6",
-                                "total": 56,
-                                "rolls": [3] * 16,
-                                "random_stream_receipt": {"before": 100, "after": 116},
-                            }
-                        }
-                    if key == "old-save":
-                        return {
-                            "response": {
-                                "status": "committed",
-                                "result": {
-                                    "kind": "save",
-                                    "dc": 18,
-                                    "success": False,
-                                },
-                                "combat": {
-                                    "log": [
-                                        {
-                                            "type": "save",
-                                            "actor_id": "pc-1",
-                                        }
-                                    ]
-                                },
-                            }
-                        }
-                    raise AssertionError(key)
-            if tool_id == "combat_hp_change":
-                return {
-                    "status": "committed",
-                    "result": {"applied_amount": 56},
-                }
-            if tool_id == "combat_map_patch":
-                return {"status": "committed", "world_patches": arguments["patches"]}
-            if tool_id in {"dnd_dice_roll", "combat_check"}:
-                raise AssertionError(f"{tool_id} must be recovered, not rerolled")
-            raise AssertionError(tool_id)
-
-    ruling = {
-        "application_id": "turn-ruling-history-1",
-        "actor_id": "dragon",
-        "feature_id": "",
-        "activity_id": "poison-breath-activity",
-        "spell_id": "",
-        "round": 1,
-        "target_id": "",
-        "target_ids": ["pc-1"],
-        "mechanic_source_excerpt": (
-            "Poison Breath. The target must make a DC 18 Constitution saving "
-            "throw, taking 16d6 poison damage on a failed save, or half as "
-            "much damage on a successful one."
-        ),
-        "save": {
-            "ability": "constitution",
-            "dc": 18,
-            "advantage": False,
-            "disadvantage": False,
-            "success_outcome": "Half damage.",
-            "failure_outcome": "Full damage.",
-            "forced_target_id": "",
-            "ends_if_source_incapacitated": False,
-            "damage": {
-                "expression": "16d6",
-                "damage_type": "poison",
-                "half_on_success": True,
-            },
-        },
-        "agent_ruling": {
-            "default_resolver": "agent",
-            "ruling_kind": "agent_dm_adjudication",
-            "decision": "The dragon catches the target in its breath.",
-            "reason": "The cited encounter directs this opening action.",
-            "encounter_source_excerpt": (
-                "The dragon opens with Poison Breath against the hero."
-            ),
-            "source_ref": {
-                "module_id": "module-1",
-                "scene_id": "scene-1",
-                "chunk_id": "chunk-1",
-                "content_sha256": "a" * 64,
-            },
-        },
-    }
-    client = Client()
-    with patch(
-        "scripts.regression_encounter.campaign_view",
-        new=AsyncMock(
-            side_effect=[{"revision": revision} for revision in range(10, 15)]
-        ),
-    ):
-        result = asyncio.run(
-            _settle_agent_turn_ruling(
-                client,
-                SimpleNamespace(campaign_id="campaign-1", run_id="run-1"),
-                branch_id="branch-1",
-                ruling=ruling,
-                sequence=1,
-            )
-        )
-
-    assert result["action_result"]["legacy_idempotency_key"] == "old-action"
-    assert result["damage_roll"]["legacy_idempotency_key"] == "old-roll"
-    assert result["save_results"][0]["result"]["legacy_idempotency_key"] == "old-save"
-    assert result["damage_results"][0]["applied_amount"] == 56
-    assert not {
-        "dnd_dice_roll",
-        "combat_check",
-    } & {name for name, _arguments in client.calls}
-
-
-@pytest.mark.parametrize(
-    ("payment_economy", "allowed_payment_economies"),
-    [
-        ("innate_spell", ["innate_spell"]),
-        ("slots", ["slots", "pact_magic"]),
-    ],
-)
-def test_agent_turn_spell_pays_use_and_starts_concentration(
-    payment_economy: str,
-    allowed_payment_economies: list[str],
-) -> None:
-    class Client:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, dict]] = []
-
-        async def domain(self, tool_id: str, arguments: dict) -> dict:
-            self.calls.append((tool_id, arguments))
-            if tool_id == "combat_cast_spell":
-                return {
-                    "status": "pending_ruling",
-                    "default_resolver": "agent",
-                    "result": {
-                        "payment": {"economy": payment_economy},
-                        "concentration_started": True,
-                    },
-                }
-            if tool_id == "combat_check":
-                return {"status": "committed", "result": {"success": False}}
-            if tool_id == "combat_map_patch":
-                return {"status": "committed", "world_patches": arguments["patches"]}
-            raise AssertionError(tool_id)
-
-    ruling = {
-        "application_id": "turn-ruling-innate-1",
-        "actor_id": "caster",
-        "feature_id": "",
-        "activity_id": "",
-        "spell_id": "suggestion",
-        "spell_payment_economies": allowed_payment_economies,
-        "concentration_required": True,
-        "round": 1,
-        "target_id": "scout",
-        "save": {
-            "ability": "wisdom",
-            "dc": 13,
-            "advantage": False,
-            "disadvantage": False,
-            "success_outcome": "The effect fails.",
-            "failure_outcome": "The scout attacks the named ally once.",
-            "forced_target_id": "ally",
-            "ends_if_source_incapacitated": True,
-        },
-        "agent_ruling": {
-            "default_resolver": "agent",
-            "ruling_kind": "agent_dm_adjudication",
-            "decision": "The caster innately casts Suggestion on the scout.",
-            "reason": "The cited encounter explicitly selects this tactic.",
-            "source_ref": {
-                "module_id": "module-1",
-                "scene_id": "scene-1",
-                "chunk_id": "chunk-1",
-                "content_sha256": "a" * 64,
-            },
-        },
-    }
-    client = Client()
-    with patch(
-        "scripts.regression_encounter.campaign_view",
-        new=AsyncMock(
-            side_effect=[
-                {"revision": 10},
-                {"revision": 11},
-                {"revision": 12},
-            ]
-        ),
-    ):
-        result = asyncio.run(
-            _settle_agent_turn_ruling(
-                client,
-                SimpleNamespace(campaign_id="campaign-1", run_id="run-1"),
-                branch_id="branch-1",
-                ruling=ruling,
-                sequence=4,
-            )
-        )
-
-    assert [name for name, _arguments in client.calls] == [
-        "combat_cast_spell",
-        "combat_check",
-        "combat_map_patch",
-    ]
-    assert result["save_success"] is False
-    assert result["spell_id"] == "suggestion"
 
 
 def test_agent_forced_target_receipts_resume_and_close_through_map_patch() -> None:
@@ -2253,308 +1525,8 @@ def test_captured_hostile_ids_uses_actual_public_character_state() -> None:
     assert captured == {"stable-1"}
 
 
-def test_source_extra_damage_ruling_binds_exact_agent_passive_and_application() -> None:
-    actor = {
-        "id": "peryton-1",
-        "sheet": {
-            "content": {
-                "features": [
-                    {
-                        "id": "dive-attack-passive",
-                        "name": "Dive Attack",
-                        "description": PERYTON_DIVE_ATTACK,
-                        "choices": {
-                            "manual_ruling": {
-                                "kind": "descriptive_passive",
-                                "default_resolver": "agent",
-                                "source_excerpt": PERYTON_DIVE_ATTACK,
-                            }
-                        },
-                        "resolution_plan": {
-                            "schema_version": 2,
-                            "source_card_id": "dive-attack-passive",
-                            "source_card_kind": "feature",
-                            "trigger": "attack.after_hit",
-                            "steps": [
-                                {
-                                    "op": "damage.apply",
-                                    "args": {"expression": "2d8"},
-                                }
-                            ],
-                            "fingerprint": "a" * 64,
-                        },
-                        "resolution_solution": {
-                            "status": "compiled",
-                            "plan_fingerprint": "a" * 64,
-                        },
-                    }
-                ]
-            }
-        },
-        "derived": {
-            "inventory": {
-                "weapon_attacks": [
-                    {"item_id": "gore", "attack_type": "melee"},
-                    {"item_id": "shortbow", "attack_type": "ranged"},
-                ]
-            }
-        },
-    }
-    declaration = {
-        "actor_id": actor["id"],
-        "feature_id": "dive-attack-passive",
-        "weapon_ids": ["gore", "shortbow"],
-        "target_actor_ids": ["target-1"],
-        "rounds": [1],
-        "max_applications": 1,
-        "damage_expression": "2d8",
-        "damage_type": "weapon",
-        "source_excerpt": PERYTON_DIVE_ATTACK,
-        "trigger_facts": {
-            "flying": True,
-            "straight_dive_ft": 30,
-            "requires_attack_advantage": True,
-            "max_applications_per_turn": 1,
-        },
-        "decision": "The first round starts with the source-defined dive.",
-        "reason": "The encounter starts the peryton high above the road.",
-    }
-
-    normalized = _source_extra_damage_rulings(
-        [declaration],
-        participant_ids=[actor["id"], "target-1"],
-        actors={actor["id"]: actor},
-    )
-    action_rulings = _source_extra_damage_action_rulings(
-        normalized,
-        actor_id=actor["id"],
-        target_id="target-1",
-        weapon_id="shortbow",
-        round_number=1,
-        applications={},
-    )
-
-    assert len(action_rulings) == 1
-    assert action_rulings[0]["source"] == "dm_ruling"
-    assert action_rulings[0]["damage_expression"] == "2d8"
-    assert action_rulings[0]["solution_plan_fingerprint"] == "a" * 64
-    assert action_rulings[0]["trigger_facts"]["straight_dive_ft"] == 30
-    conditional_declarations = deepcopy(normalized)
-    conditional_declarations[actor["id"]][0]["trigger_facts"] = {
-        "applicability_mode": (
-            "attack_advantage_or_target_adjacent_to_ally_without_disadvantage"
-        ),
-        "max_applications_per_turn": 1,
-    }
-    adjacent = _source_extra_damage_action_rulings(
-        conditional_declarations,
-        actor_id=actor["id"],
-        target_id="target-1",
-        weapon_id="gore",
-        round_number=1,
-        applications={},
-        plan={"advantage": False, "disadvantage": False},
-        combat={
-            "combatants": [
-                {
-                    "actor_id": actor["id"],
-                    "disposition": "hostile",
-                    "position": {"x": 0, "y": 0},
-                    "conditions": [],
-                },
-                {
-                    "actor_id": "target-1",
-                    "disposition": "friendly",
-                    "position": {"x": 2, "y": 0},
-                    "conditions": [],
-                },
-                {
-                    "actor_id": "ally-1",
-                    "disposition": "hostile",
-                    "position": {"x": 1, "y": 0},
-                    "conditions": [],
-                },
-            ]
-        },
-    )
-    assert adjacent[0]["trigger_facts"]["applicability_branch"] == "adjacent_ally"
-    assert adjacent[0]["trigger_facts"]["qualifying_ally_actor_ids"] == ["ally-1"]
-    incapacitated_combat = {
-        "combatants": deepcopy(
-            [
-                {
-                    "actor_id": actor["id"],
-                    "disposition": "hostile",
-                    "position": {"x": 0, "y": 0},
-                    "conditions": [],
-                },
-                {
-                    "actor_id": "target-1",
-                    "disposition": "friendly",
-                    "position": {"x": 2, "y": 0},
-                    "conditions": [],
-                },
-                {
-                    "actor_id": "ally-1",
-                    "disposition": "hostile",
-                    "position": {"x": 1, "y": 0},
-                    "conditions": ["unconscious"],
-                },
-            ]
-        )
-    }
-    assert (
-        _source_extra_damage_action_rulings(
-            conditional_declarations,
-            actor_id=actor["id"],
-            target_id="target-1",
-            weapon_id="gore",
-            round_number=1,
-            applications={},
-            plan={"advantage": False, "disadvantage": False},
-            combat=incapacitated_combat,
-        )
-        == []
-    )
-    assert (
-        _source_extra_damage_action_rulings(
-            normalized,
-            actor_id=actor["id"],
-            target_id="target-1",
-            weapon_id="gore",
-            round_number=1,
-            applications={(actor["id"], "dive-attack-passive"): 1},
-        )
-        == []
-    )
-    assert (
-        _source_extra_damage_action_rulings(
-            normalized,
-            actor_id=actor["id"],
-            target_id="target-1",
-            weapon_id="gore",
-            round_number=1,
-            applications={},
-            turn_applications={
-                (actor["id"], "dive-attack-passive", 1): 1
-            },
-        )
-        == []
-    )
-
-    with pytest.raises(ValueError, match="exact Agent-owned passive"):
-        _source_extra_damage_rulings(
-            [{**declaration, "source_excerpt": "It dives and deals 2d8."}],
-            participant_ids=[actor["id"], "target-1"],
-            actors={actor["id"]: actor},
-        )
-    unresolved_actor = {
-        **actor,
-        "sheet": {
-            "content": {
-                "features": [
-                    {
-                        key: value
-                        for key, value in actor["sheet"]["content"]["features"][0].items()
-                        if key not in {"resolution_plan", "resolution_solution"}
-                    }
-                ]
-            }
-        },
-    }
-    direct_only = _source_extra_damage_rulings(
-        [declaration],
-        participant_ids=[actor["id"], "target-1"],
-        actors={actor["id"]: unresolved_actor},
-    )
-    assert direct_only[actor["id"]][0]["solution_plan_fingerprint"] == ""
-
-    different_excerpt = PERYTON_DIVE_ATTACK.replace("(2d8)", "(12d8)")
-    different_actor = {
-        **actor,
-        "sheet": {
-            "content": {
-                "features": [
-                    {
-                        **actor["sheet"]["content"]["features"][0],
-                        "description": different_excerpt,
-                        "choices": {
-                            "manual_ruling": {
-                                "kind": "descriptive_passive",
-                                "default_resolver": "agent",
-                                "source_excerpt": different_excerpt,
-                            }
-                        },
-                        "resolution_plan": {
-                            **actor["sheet"]["content"]["features"][0][
-                                "resolution_plan"
-                            ],
-                        },
-                        "resolution_solution": {
-                            **actor["sheet"]["content"]["features"][0][
-                                "resolution_solution"
-                            ],
-                        },
-                    }
-                ]
-            }
-        },
-    }
-    with pytest.raises(ValueError, match="printed dice expression"):
-        _source_extra_damage_rulings(
-            [
-                {
-                    **declaration,
-                    "source_excerpt": different_excerpt,
-                    "damage_expression": "2d8",
-                }
-            ],
-            participant_ids=[actor["id"], "target-1"],
-            actors={actor["id"]: different_actor},
-        )
 
 
-def test_source_extra_damage_history_recovers_bounded_successes() -> None:
-    declarations = {
-        "peryton-1": [
-            {
-                "feature_id": "dive-attack-passive",
-                "max_applications": 1,
-            }
-        ]
-    }
-    combat = {
-        "log": [
-            {
-                "type": "attack",
-                "result": {
-                    "damage": {
-                        "roll_parts": [
-                            {
-                                "expression": "2d8",
-                                "source": (
-                                    "agent-ruling:peryton-1:"
-                                    "dive-attack-passive:1:1"
-                                ),
-                            }
-                        ]
-                    }
-                },
-            }
-        ]
-    }
-
-    assert _source_extra_damage_history(combat, declarations) == {
-        ("peryton-1", "dive-attack-passive"): 1
-    }
-    assert _source_extra_damage_turn_history(combat, declarations) == {
-        ("peryton-1", "dive-attack-passive", 1): 1
-    }
-    with pytest.raises(RuntimeError, match="exceeds"):
-        _source_extra_damage_history(
-            {"log": [*combat["log"], *combat["log"]]},
-            declarations,
-        )
 
 
 def test_preflight_tries_a_recorded_thrown_weapon_at_range() -> None:
@@ -2748,7 +1720,8 @@ def test_preflight_returns_agent_ruling_instead_of_misclassifying_it_as_on_hit()
     assert requirement["actor_id"] == "kobold-1"
     assert requirement["target_id"] == "pc-1"
     assert requirement["ruling"] == pending
-    assert "--source-attack-environment-json" in requirement["retry_hint"]
+    assert "documented scene facts" in requirement["retry_hint"]
+    assert "source-attack-environment" not in requirement["retry_hint"]
 
 
 def test_preflight_agent_declines_unsatisfied_positional_attack_and_continues() -> None:
@@ -2837,31 +1810,6 @@ def test_unclassified_encounter_ruling_defaults_to_agent_reasoning() -> None:
     assert ruling["status"] == "pending_ruling"
     assert ruling["default_resolver"] == "agent"
     assert ruling["ruling_kind"] == "agent_dm_adjudication"
-
-
-def test_precommit_attack_ruling_is_not_treated_as_owned_on_hit_window() -> None:
-    pending = {
-        "status": "pending_ruling",
-        "default_resolver": "agent",
-        "ruling_kind": "environmental_consequence",
-        "reason": "direct sunlight must be established from the scene",
-        "committed": False,
-        "result": {},
-    }
-
-    with pytest.raises(EncounterRulingRequiredError) as raised:
-        _require_pending_on_hit_choice_id(
-            pending,
-            operation="combat_resolve_attack.guiding_bolt",
-            actor_id="cleric",
-            target_id="kobold",
-            action={"spell_id": GUIDING_BOLT_ID},
-            retry_hint="Resolve the environmental fact and retry.",
-        )
-
-    assert raised.value.requirement["ruling"]["ruling_kind"] == (
-        "environmental_consequence"
-    )
 
 
 def test_pending_combat_start_returns_to_agent_before_combat_exposure() -> None:
@@ -3262,300 +2210,18 @@ def test_source_passive_allies_require_unique_allies_and_exact_evidence() -> Non
         )
 
 
-def test_source_random_activity_requires_exact_actor_card_evidence() -> None:
-    values = [
-        {
-            "actor_id": "gazer",
-            "activity_id": "eye-rays-action",
-            "source_excerpt": ("shoots two of the following magical eye rays at random"),
-        }
-    ]
-    actors = {
-        "gazer": {
-            "sheet": {
-                "content": {
-                    "activities": [
-                        {
-                            "id": "eye-rays-action",
-                            "description": (
-                                "The gazer shoots two of the following magical eye "
-                                "rays at random (reroll duplicates)."
-                            ),
-                        }
-                    ]
-                }
-            }
-        }
-    }
-
-    assert _source_random_activities(
-        values,
-        participant_ids=["gazer", "pc"],
-        actors=actors,
-    ) == {
-        "gazer": {
-            "actor_id": "gazer",
-            "activity_id": "eye-rays-action",
-            "source_excerpt": ("shoots two of the following magical eye rays at random"),
-        }
-    }
-    with pytest.raises(ValueError, match="contain the exact excerpt"):
-        _source_random_activities(
-            [
-                {
-                    **values[0],
-                    "source_excerpt": "invented automatic rays",
-                }
-            ],
-            participant_ids=["gazer", "pc"],
-            actors=actors,
-        )
-    with pytest.raises(ValueError, match="unique participant"):
-        _source_random_activities(
-            [{**values[0], "actor_id": "not-present"}],
-            participant_ids=["gazer", "pc"],
-        )
 
 
-def test_source_save_activity_requires_structured_card_and_brain_ruling() -> None:
-    excerpt = "The target must succeed on a DC 12 Intelligence saving throw against this magic"
-    values = [
-        {
-            "actor_id": "devourer",
-            "activity_id": "devour-intellect-action",
-            "target_has_brain": True,
-            "source_excerpt": excerpt,
-        }
-    ]
-    actors = {
-        "devourer": {
-            "sheet": {
-                "content": {
-                    "activities": [
-                        {
-                            "id": "devour-intellect-action",
-                            "description": excerpt,
-                            "choices": {"source_save_effect": {"target_requirement": "has_brain"}},
-                        }
-                    ]
-                }
-            }
-        }
-    }
-
-    assert _source_save_activities(
-        values,
-        participant_ids=["devourer", "pc"],
-        actors=actors,
-    ) == {"devourer": values[0]}
-    with pytest.raises(ValueError, match="true target_has_brain"):
-        _source_save_activities(
-            [{**values[0], "target_has_brain": False}],
-            participant_ids=["devourer", "pc"],
-            actors=actors,
-        )
-    with pytest.raises(ValueError, match="structured actor card"):
-        _source_save_activities(
-            values,
-            participant_ids=["devourer", "pc"],
-            actors={
-                "devourer": {
-                    "sheet": {
-                        "content": {
-                            "activities": [
-                                {
-                                    "id": "devour-intellect-action",
-                                    "description": excerpt,
-                                    "choices": {},
-                                }
-                            ]
-                        }
-                    }
-                }
-            },
-        )
 
 
-def test_source_contest_activity_requires_body_thief_card_and_humanoid_ruling() -> None:
-    excerpt = (
-        "The intellect devourer initiates an Intelligence contest with an "
-        "incapacitated humanoid within 5 feet of it."
-    )
-    values = [
-        {
-            "actor_id": "devourer",
-            "activity_id": "body-thief-action",
-            "target_is_humanoid": True,
-            "source_excerpt": excerpt,
-        }
-    ]
-    actors = {
-        "devourer": {
-            "sheet": {
-                "content": {
-                    "activities": [
-                        {
-                            "id": "body-thief-action",
-                            "description": excerpt,
-                            "choices": {
-                                "source_contest_effect": {
-                                    "kind": ("intellect_devourer_body_thief_2014"),
-                                    "target_requirements": [
-                                        "incapacitated",
-                                        "humanoid",
-                                    ],
-                                }
-                            },
-                        }
-                    ]
-                }
-            }
-        }
-    }
-
-    assert _source_contest_activities(
-        values,
-        participant_ids=["devourer", "pc"],
-        actors=actors,
-    ) == {"devourer": values[0]}
-    with pytest.raises(ValueError, match="true target_is_humanoid"):
-        _source_contest_activities(
-            [{**values[0], "target_is_humanoid": False}],
-            participant_ids=["devourer", "pc"],
-            actors=actors,
-        )
-    with pytest.raises(ValueError, match="structured actor card"):
-        _source_contest_activities(
-            values,
-            participant_ids=["devourer", "pc"],
-            actors={
-                "devourer": {
-                    "sheet": {
-                        "content": {
-                            "activities": [
-                                {
-                                    "id": "body-thief-action",
-                                    "description": excerpt,
-                                    "choices": {},
-                                }
-                            ]
-                        }
-                    }
-                }
-            },
-        )
 
 
-def test_body_thief_sides_substitutes_host_without_erasing_actors() -> None:
-    combat = {
-        "combatants": [
-            {
-                "actor_id": "devourer",
-                "inside_host": {
-                    "host_actor_id": "pc-1",
-                    "total_cover": True,
-                },
-            },
-            {
-                "actor_id": "pc-1",
-                "controlled_by_actor_id": "devourer",
-                "body_thief_host": {"source_actor_id": "devourer"},
-            },
-            {"actor_id": "pc-2"},
-            {"actor_id": "kobold"},
-        ]
-    }
-
-    sides = _body_thief_sides(
-        combat,
-        party_ids=["pc-1", "pc-2"],
-        hostile_ids=["devourer", "kobold"],
-    )
-
-    assert sides["controlled_hosts"] == {"pc-1": "devourer"}
-    assert sides["inside_sources"] == {"devourer"}
-    assert sides["effective_party_ids"] == ["pc-2"]
-    assert sides["attackable_hostile_ids"] == ["kobold", "pc-1"]
-    assert sides["hostile_turn_actor_ids"] == {"kobold", "pc-1"}
 
 
-def test_queued_reinforcements_are_potential_but_not_attackable_sides() -> None:
-    sides = _body_thief_sides(
-        {
-            "combatants": [
-                {"actor_id": "pc-1"},
-                {"actor_id": "orc-1"},
-            ],
-            "reinforcements": [
-                {"actor_id": "scout-1"},
-                {"actor_id": "orc-2"},
-            ],
-        },
-        party_ids=["pc-1", "scout-1"],
-        hostile_ids=["orc-1", "orc-2"],
-    )
-
-    assert sides["potential_party_ids"] == ["pc-1", "scout-1"]
-    assert sides["effective_party_ids"] == ["pc-1"]
-    assert sides["attackable_hostile_ids"] == ["orc-1"]
 
 
-def test_body_thief_targets_living_zero_hp_incapacitated_creature() -> None:
-    combat = {
-        "combatants": [
-            {"actor_id": "devourer", "position": {"x": 3, "y": 2}},
-            {"actor_id": "downed", "position": {"x": 2, "y": 2}},
-            {"actor_id": "dead", "position": {"x": 3, "y": 3}},
-            {"actor_id": "far", "position": {"x": 5, "y": 2}},
-        ]
-    }
-    actors = {
-        "downed": {
-            "sheet": {
-                "combat": {"hp": {"value": 0, "max": 10}},
-                "conditions": ["unconscious", "stable"],
-            }
-        },
-        "dead": {
-            "sheet": {
-                "combat": {"hp": {"value": 0, "max": 10}},
-                "conditions": ["dead", "unconscious"],
-            }
-        },
-        "far": {
-            "sheet": {
-                "combat": {"hp": {"value": 5, "max": 10}},
-                "conditions": ["stunned"],
-            }
-        },
-    }
-
-    assert _body_thief_target_ids(
-        combat,
-        actors=actors,
-        source_actor_id="devourer",
-        party_ids=["downed", "dead", "far"],
-        range_ft=5,
-    ) == ["downed"]
 
 
-def test_body_thief_requires_unspent_action_budget() -> None:
-    combat = {
-        "combatants": [
-            {
-                "actor_id": "devourer",
-                "turn_budget": {
-                    "main_action": 0,
-                    "extra_action": 0,
-                    "attack_budget": 1,
-                },
-            }
-        ]
-    }
-
-    assert not _has_action_budget(combat, "devourer")
-    combat["combatants"][0]["turn_budget"]["extra_action"] = 1
-    assert _has_action_budget(combat, "devourer")
 
 
 def test_action_budget_preserves_bonus_action_spell_followup() -> None:
@@ -5060,345 +3726,16 @@ def test_source_flee_damage_history_restores_interrupted_combat_counter() -> Non
     assert critical == {"lennithon"}
 
 
-def test_source_casualty_pool_requires_exact_cohort_dice_and_reviewed_recharge() -> None:
-    source_excerpt = (
-        "There are twenty NPC defenders on the walls at the beginning of the mission. "
-        "Every breath attack not directed at them kills 1d4 NPC defenders and injures "
-        "1d6 more. After each attack, Lennithon swoops away until his breath weapon "
-        "recharges, then swings in for another attack."
-    )
-    pools = _source_casualty_pools(
-        [
-            {
-                "actor_id": "lennithon",
-                "pool_key": "greenest-wall-defenders",
-                "initial_count": 20,
-                "activity_name": "Lightning Breath (Recharge 5-6)",
-                "kill_expression": "1d4",
-                "injury_expression": "1d6",
-                "source_excerpt": source_excerpt,
-            }
-        ],
-        hostile_ids=["lennithon"],
-        actors={
-            "lennithon": {
-                "sheet": {
-                    "content": {
-                        "activities": [
-                            {
-                                "id": "lightning-breath",
-                                "name": "Lightning Breath (Recharge 5-6)",
-                                "source_key": "monster-manual/adult-blue-dragon",
-                                "rule_refs": [{"page": 92}],
-                                "description": "The dragon exhales lightning.",
-                                "choices": {
-                                    "manual_ruling": {
-                                        "kind": "descriptive_activity",
-                                        "source_excerpt": (
-                                            "The dragon exhales lightning."
-                                        ),
-                                    }
-                                },
-                            }
-                        ]
-                    }
-                }
-            }
-        },
-        encounter_source_excerpt=f"Dragon Attack. {source_excerpt} Rewards.",
-    )
-
-    assert pools["lennithon"] == {
-        "actor_id": "lennithon",
-        "pool_key": "greenest-wall-defenders",
-        "initial_count": 20,
-        "activity_id": "lightning-breath",
-        "activity_name": "Lightning Breath (Recharge 5-6)",
-        "activity_source_key": "monster-manual/adult-blue-dragon",
-        "activity_rule_refs": [{"page": 92}],
-        "kill_expression": "1d4",
-        "injury_expression": "1d6",
-        "recharge_expression": "1d6",
-        "recharge_minimum": 5,
-        "recharge_maximum": 6,
-        "source_excerpt": source_excerpt,
-    }
 
 
-@pytest.mark.parametrize(
-    ("field", "value", "message"),
-    [
-        ("initial_count", 19, "does not match"),
-        ("kill_expression", "1d6", "does not match"),
-        ("activity_name", "Lightning Breath", "reviewed rechargeable"),
-    ],
-)
-def test_source_casualty_pool_fails_closed_on_uncorroborated_facts(
-    field: str,
-    value: object,
-    message: str,
-) -> None:
-    source_excerpt = (
-        "There are twenty NPC defenders on the walls. Every breath attack kills "
-        "1d4 NPC defenders and injures 1d6 more. Lennithon swoops away until his "
-        "breath weapon recharges."
-    )
-    declaration = {
-        "actor_id": "lennithon",
-        "pool_key": "greenest-wall-defenders",
-        "initial_count": 20,
-        "activity_name": "Lightning Breath (Recharge 5-6)",
-        "kill_expression": "1d4",
-        "injury_expression": "1d6",
-        "source_excerpt": source_excerpt,
-    }
-    declaration[field] = value
-    with pytest.raises(ValueError, match=message):
-        _source_casualty_pools(
-            [declaration],
-            hostile_ids=["lennithon"],
-            actors={
-                "lennithon": {
-                    "sheet": {
-                        "content": {
-                            "activities": [
-                                {
-                                    "id": "lightning-breath",
-                                    "name": "Lightning Breath (Recharge 5-6)",
-                                }
-                            ]
-                        }
-                    }
-                }
-            },
-            encounter_source_excerpt=source_excerpt,
-        )
 
 
-def test_source_casualty_pool_requires_a_descriptive_agent_ruling_marker() -> None:
-    source_excerpt = (
-        "There are twenty NPC defenders on the walls. Every breath attack kills "
-        "1d4 NPC defenders and injures 1d6 more. Lennithon swoops away until his "
-        "breath weapon recharges."
-    )
-
-    with pytest.raises(ValueError, match="descriptive activity"):
-        _source_casualty_pools(
-            [
-                {
-                    "actor_id": "lennithon",
-                    "pool_key": "greenest-wall-defenders",
-                    "initial_count": 20,
-                    "activity_name": "Lightning Breath (Recharge 5-6)",
-                    "kill_expression": "1d4",
-                    "injury_expression": "1d6",
-                    "source_excerpt": source_excerpt,
-                }
-            ],
-            hostile_ids=["lennithon"],
-            actors={
-                "lennithon": {
-                    "sheet": {
-                        "content": {
-                            "activities": [
-                                {
-                                    "id": "lightning-breath",
-                                    "name": "Lightning Breath (Recharge 5-6)",
-                                    "description": "The dragon exhales lightning.",
-                                    "choices": {},
-                                }
-                            ]
-                        }
-                    }
-                }
-            },
-            encounter_source_excerpt=source_excerpt,
-        )
 
 
-def test_source_casualty_pool_state_is_bounded_and_idempotent() -> None:
-    declaration = {
-        "actor_id": "lennithon",
-        "initial_count": 5,
-        "activity_name": "Lightning Breath (Recharge 5-6)",
-        "kill_expression": "1d4",
-        "injury_expression": "1d6",
-        "recharge_minimum": 5,
-        "recharge_maximum": 6,
-    }
-    first, event, replayed = _apply_source_casualty_rolls(
-        None,
-        declaration=declaration,
-        combat_id="combat-1",
-        round_number=1,
-        recharge_roll=None,
-        kill_roll=4,
-        injury_roll=6,
-    )
-    assert replayed is False
-    assert event["killed"] == 4
-    assert event["injured"] == 1
-    assert first["able"] == 0
-    assert first["killed"] == 4
-    assert first["injured"] == 1
-
-    restored, repeated, replayed = _apply_source_casualty_rolls(
-        first,
-        declaration=declaration,
-        combat_id="combat-1",
-        round_number=1,
-        recharge_roll=None,
-        kill_roll=1,
-        injury_roll=1,
-    )
-    assert replayed is True
-    assert repeated == event
-    assert restored == first
-
-    waited, wait_event, replayed = _apply_source_casualty_rolls(
-        first,
-        declaration=declaration,
-        combat_id="combat-1",
-        round_number=2,
-        recharge_roll=4,
-        kill_roll=None,
-        injury_roll=None,
-    )
-    assert replayed is False
-    assert wait_event["recharged"] is False
-    assert waited["attacks"] == 1
-    assert waited["able"] == 0
 
 
-def test_source_casualty_pool_turn_uses_only_public_action_dice_and_manifest() -> None:
-    calls: list[tuple[str, dict]] = []
-
-    class Client:
-        revision = 7
-
-        async def core(self, tool_id: str, arguments: dict) -> dict:
-            assert tool_id == "campaign_query"
-            return {"revision": self.revision}
-
-        async def domain(self, tool_id: str, arguments: dict) -> dict:
-            calls.append((tool_id, arguments))
-            if tool_id == "playthrough_manifest" and arguments["action"] == "get":
-                return {"manifest": {"world_state": {}}}
-            if tool_id == "combat_use_activity":
-                self.revision += 1
-                return {
-                    "status": "pending_ruling",
-                    "result": {
-                        "activity_id": "lightning-breath",
-                        "payment": {"kind": "main_action"},
-                    },
-                }
-            if tool_id == "dnd_dice_roll":
-                self.revision += 1
-                return {"total": 2 if arguments["expression"] == "1d4" else 3}
-            if tool_id == "playthrough_manifest" and arguments["action"] == "replace":
-                self.revision += 1
-                return {"manifest": arguments["payload"]["manifest"]}
-            raise AssertionError((tool_id, arguments))
-
-    result = asyncio.run(
-        _settle_source_casualty_pool_turn(
-            Client(),
-            SimpleNamespace(
-                campaign_id="campaign-1",
-                run_id="run-1",
-                operation_scope="encounter-1",
-            ),
-            branch_id="branch-1",
-            combat={"id": "combat-1", "round": 1},
-            declaration={
-                "actor_id": "lennithon",
-                "pool_key": "greenest-wall-defenders",
-                "initial_count": 20,
-                "activity_id": "lightning-breath",
-                "activity_name": "Lightning Breath (Recharge 5-6)",
-                "kill_expression": "1d4",
-                "injury_expression": "1d6",
-                "recharge_expression": "1d6",
-                "recharge_minimum": 5,
-                "recharge_maximum": 6,
-                "source_excerpt": "Exact module excerpt.",
-            },
-        )
-    )
-
-    assert [item[0] for item in calls] == [
-        "playthrough_manifest",
-        "combat_use_activity",
-        "dnd_dice_roll",
-        "dnd_dice_roll",
-        "playthrough_manifest",
-        "playthrough_manifest",
-    ]
-    assert result["event"]["killed"] == 2
-    assert result["event"]["injured"] == 3
-    replaced_manifest = calls[-1][1]["payload"]["manifest"]
-    pool = replaced_manifest["world_state"]["source_casualty_pools"][
-        "greenest-wall-defenders"
-    ]
-    assert pool["able"] == 15
-    assert calls[1][1]["activity_id"] == "lightning-breath"
-    assert calls[1][1]["declaration"]["kind"] == "source_casualty_pool_activity"
-    assert calls[2][1]["branch_id"] == "branch-1"
 
 
-def test_source_casualty_pool_stops_on_precommit_activity_ruling() -> None:
-    calls: list[str] = []
-
-    class Client:
-        async def core(self, tool_id: str, arguments: dict) -> dict:
-            assert tool_id == "campaign_query"
-            return {"revision": 7}
-
-        async def domain(self, tool_id: str, arguments: dict) -> dict:
-            calls.append(tool_id)
-            if tool_id == "playthrough_manifest":
-                return {"manifest": {"world_state": {}}}
-            if tool_id == "combat_use_activity":
-                return {
-                    "status": "pending_ruling",
-                    "default_resolver": "agent",
-                    "ruling_kind": "module_specific_procedure",
-                    "reason": "the scene fact must be adjudicated before payment",
-                    "committed": False,
-                    "result": {"activity_id": "lightning-breath"},
-                }
-            raise AssertionError("casualty dice must not roll before activity payment")
-
-    with pytest.raises(EncounterRulingRequiredError) as raised:
-        asyncio.run(
-            _settle_source_casualty_pool_turn(
-                Client(),
-                SimpleNamespace(
-                    campaign_id="campaign-1",
-                    run_id="run-1",
-                    operation_scope="encounter-1",
-                ),
-                branch_id="branch-1",
-                combat={"id": "combat-1", "round": 1},
-                declaration={
-                    "actor_id": "lennithon",
-                    "pool_key": "greenest-wall-defenders",
-                    "initial_count": 20,
-                    "activity_id": "lightning-breath",
-                    "activity_name": "Lightning Breath (Recharge 5-6)",
-                    "kill_expression": "1d4",
-                    "injury_expression": "1d6",
-                    "recharge_expression": "",
-                    "recharge_minimum": 5,
-                    "recharge_maximum": 6,
-                    "source_excerpt": "Exact module excerpt.",
-                },
-            )
-        )
-
-    assert calls == ["playthrough_manifest", "combat_use_activity"]
-    assert raised.value.requirement["ruling"]["default_resolver"] == "agent"
 
 
 def test_source_separation_is_cited_and_places_dragon_at_least_twenty_five_feet_away() -> None:
@@ -5798,106 +4135,6 @@ def test_agent_object_interactions_require_an_exact_source_condition() -> None:
         )
 
 
-def test_source_traits_and_allied_npcs_preserve_distinct_zero_hp_rules() -> None:
-    traits = _source_traits(
-        [
-            {
-                "actor_id": "troll",
-                "kind": "regeneration",
-                "feature_id": "regeneration-passive",
-                "source_excerpt": ("The troll regains 10 hit points at the start of its turn."),
-            }
-        ],
-        participant_ids=["pc-1", "durnan", "troll"],
-    )
-
-    config = _participant_config(
-        ["pc-1"],
-        ["troll"],
-        ally_ids=["durnan"],
-        surprise_by_actor={},
-        source_traits_by_actor=traits,
-    )
-    by_actor = {item["actor_id"]: item for item in config}
-
-    assert by_actor["pc-1"]["death_saves"] is True
-    assert by_actor["durnan"]["disposition"] == "friendly"
-    assert by_actor["durnan"]["death_saves"] is False
-    assert by_actor["troll"]["death_saves"] is False
-    assert by_actor["troll"]["source_traits"] == [
-        {
-            "kind": "regeneration",
-            "feature_id": "regeneration-passive",
-            "source_excerpt": ("The troll regains 10 hit points at the start of its turn."),
-        }
-    ]
-
-
-def test_source_zero_hp_finisher_requires_module_and_oil_rule_evidence() -> None:
-    source = (
-        "Durnan calls on the characters to focus on slaying the stirges and then "
-        "douse the troll with lamp oil and set it on fire when it falls."
-    )
-    oil_rule = (
-        "If the target takes any fire damage before the oil dries (after 1 minute), "
-        "the target takes an additional 5 fire damage from the burning oil."
-    )
-    finisher = _source_zero_hp_finisher(
-        {
-            "target_id": "troll",
-            "actor_ids": ["pc-1", "pc-2"],
-            "source_excerpt": ("douse the troll with lamp oil and set it on fire when it falls"),
-            "oil_rule_excerpt": oil_rule,
-        },
-        participant_ids=["pc-1", "pc-2", "troll"],
-        encounter_source_excerpt=source,
-    )
-
-    assert finisher is not None
-    assert finisher["fire_damage"] == 5
-    assert _source_zero_hp_finisher_stage(
-        {"round": 3, "log": []},
-        finisher,
-    ) == ("douse", None)
-    douse_event = {
-        "type": "common_action",
-        "payload": {
-            "source_finisher_id": finisher["id"],
-            "stage": "douse",
-            "round": 3,
-        },
-    }
-    assert _source_zero_hp_finisher_stage(
-        {"round": 4, "log": [douse_event]},
-        finisher,
-    ) == ("ignite", douse_event)
-    assert _source_zero_hp_finisher_stage(
-        {"round": 13, "log": [douse_event]},
-        finisher,
-    ) == ("douse", douse_event)
-
-
-def test_source_zero_hp_stabilization_requires_exact_pc_only_instruction() -> None:
-    excerpt = (
-        "If any of the characters are reduced to 0 hit points during the fight, "
-        "employees of the Yawning Portal step forward to stabilize them."
-    )
-
-    assert _source_zero_hp_stabilization(
-        {"actor_ids": ["pc-1", "pc-2"], "source_excerpt": excerpt},
-        participant_ids=["pc-1", "pc-2"],
-    ) == {
-        "actor_ids": ["pc-1", "pc-2"],
-        "source_excerpt": excerpt,
-    }
-    with pytest.raises(ValueError, match="unique participant PCs"):
-        _source_zero_hp_stabilization(
-            {
-                "actor_ids": ["pc-1", "anonymous-employee"],
-                "source_excerpt": excerpt,
-            },
-            participant_ids=["pc-1", "pc-2"],
-        )
 
 
 def test_source_target_priorities_preserve_authored_roles_and_tactical_order() -> None:
@@ -6079,76 +4316,6 @@ def test_source_opening_item_casts_preserve_authored_order_and_evidence() -> Non
     assert all(item["source_item_id"] == "staff-of-defense" for item in casts)
 
 
-def test_source_attack_environment_requires_the_structured_actor_trait() -> None:
-    excerpt = (
-        "While in sunlight, the kobold has disadvantage on attack rolls, "
-        "as well as on Wisdom (Perception) checks that rely on sight."
-    )
-    actors = {
-        "kobold": {
-            "sheet": {
-                "content": {
-                    "features": [
-                        {
-                            "name": "Sunlight Sensitivity",
-                            "description": excerpt,
-                            "choices": {
-                                "source_trait": {
-                                    "kind": "sunlight_sensitivity",
-                                }
-                            },
-                        }
-                    ]
-                }
-            }
-        }
-    }
-
-    environments = _source_attack_environments(
-        [
-            {
-                "actor_id": "kobold",
-                "direct_sunlight": False,
-                "source_excerpt": excerpt,
-                "ruling_reason": "The encounter occurs after midnight.",
-            }
-        ],
-        participant_ids=["kobold"],
-        actors=actors,
-    )
-    assert environments["kobold"] == {
-        "actor_id": "kobold",
-        "direct_sunlight": False,
-        "source_excerpt": excerpt,
-        "ruling_reason": "The encounter occurs after midnight.",
-    }
-
-    with pytest.raises(ValueError, match="ruling reason"):
-        _source_attack_environments(
-            [
-                {
-                    "actor_id": "kobold",
-                    "direct_sunlight": False,
-                    "source_excerpt": excerpt,
-                }
-            ],
-            participant_ids=["kobold"],
-            actors=actors,
-        )
-
-    with pytest.raises(ValueError, match="must match"):
-        _source_attack_environments(
-            [
-                {
-                    "actor_id": "other",
-                    "direct_sunlight": True,
-                    "source_excerpt": excerpt,
-                    "ruling_reason": "The encounter occurs at noon.",
-                }
-            ],
-            participant_ids=["other"],
-            actors={"other": {"sheet": {"content": {"features": []}}}},
-        )
 
 
 @pytest.mark.parametrize(
@@ -6206,382 +4373,12 @@ def test_source_avoidance_requires_public_actor_knowledge(
     assert evidence[0]["source_ref"] == {"chunk_id": "chunk-1"}
 
 
-def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
-    precombat = _source_precombat_casts(
-        [
-            {
-                "actor_id": "nezznar",
-                "spell_id": "invisibility",
-                "cast_level": 2,
-                "source_excerpt": "Nezznar casts invisibility on himself.",
-                "target_actor_ids": ["nezznar"],
-                "willing_target_ids": ["nezznar"],
-            }
-        ],
-        participant_ids=["nezznar", "spider-1"],
-    )
-    openings = _source_opening_weapons(
-        [
-            {
-                "actor_id": "spider-1",
-                "weapon_id": "web",
-                "source_excerpt": (
-                    "The spiders try to web the characters before closing to melee."
-                ),
-            }
-        ],
-        participant_ids=["nezznar", "spider-1"],
-    )
-    rulings = _source_on_hit_rulings(
-        [
-            {
-                "actor_id": "durnan",
-                "weapon_id": "grimvault",
-                "id": "critical_followup",
-                "target_has_limbs": True,
-                "source_excerpt": (
-                    "If the target is a creature and Durnan rolls a 20 on the "
-                    "d20 for the attack roll, the target takes an extra 14 "
-                    "slashing damage, and Durnan rolls another d20."
-                ),
-            },
-            {
-                "actor_id": "stirge",
-                "weapon_id": "blood-drain",
-                "id": "attachment",
-                "source_excerpt": (
-                    "the stirge attaches to the target. While attached, the stirge doesn't attack."
-                ),
-            },
-            {
-                "actor_id": "duergar",
-                "weapon_id": "war-pick",
-                "id": "conditional_extra_damage",
-                "applies": False,
-                "trigger_facts": {"attacker_enlarged": False},
-                "default_resolver": "agent",
-                "ruling_kind": "agent_dm_adjudication",
-                "decision": "The conditional damage does not apply.",
-                "reason": "The duergar is not enlarged for this attack.",
-                "source_excerpt": ("or 11 (2d8 + 2) piercing damage while enlarged."),
-            },
-            {
-                "actor_id": "jamna",
-                "weapon_id": "shortsword",
-                "id": "conditional_extra_damage",
-                "applies": True,
-                "damage_formula": "1d6",
-                "damage_type": "piercing",
-                "trigger_facts": {"target_size": "medium"},
-                "default_resolver": "agent",
-                "ruling_kind": "agent_dm_adjudication",
-                "decision": "Apply the additional 1d6 piercing damage.",
-                "reason": "The target is Medium, satisfying the exact source threshold.",
-                "source_excerpt": (
-                    "or 9 (1d6 + 3 plus 1d6) piercing damage if the target "
-                    "is Medium or larger."
-                ),
-            },
-            {
-                "actor_id": "spider-1",
-                "weapon_id": "web",
-                "condition": "restrained",
-                "escape_dc": 12,
-                "escape_abilities": ["strength"],
-                "source_excerpt": (
-                    "The target is restrained by webbing. As an action, the restrained "
-                    "target can make a DC 12 Strength check, bursting the webbing on "
-                    "a success."
-                ),
-            },
-            {
-                "actor_id": "spider-1",
-                "weapon_id": "bite",
-                "id": "saving_throw_damage",
-                "save_ability": "constitution",
-                "save_dc": 11,
-                "damage_formula": "2d8",
-                "damage_type": "poison",
-                "half_on_success": True,
-                "zero_hp_effect": {
-                    "stable": True,
-                    "conditions": ["poisoned", "paralyzed"],
-                    "duration": {"period": "hour", "remaining": 1},
-                },
-                "source_excerpt": (
-                    "The target must make a DC 11 Constitution saving throw, "
-                    "taking 9 (2d8) poison damage on a failed save, or half as "
-                    "much damage on a successful one. If the poison damage "
-                    "reduces the target to 0 hit points, the target is stable but "
-                    "poisoned for 1 hour, even after regaining hit points, and is "
-                    "paralyzed while poisoned in this way."
-                ),
-            },
-            {
-                "actor_id": "ettercap-1",
-                "weapon_id": "bite",
-                "id": "saving_throw_condition",
-                "condition": "poisoned",
-                "save_ability": "constitution",
-                "save_dc": 11,
-                "repeat_save_timing": "turn_end",
-                "duration": {"period": "minute", "remaining": 1},
-                "source_excerpt": (
-                    "The target must succeed on a DC 11 Constitution saving throw "
-                    "or be poisoned for 1 minute. The creature can repeat the saving "
-                    "throw at the end of each of its turns, ending the effect on "
-                    "itself on a success."
-                ),
-            },
-            {
-                "actor_id": "worg-1",
-                "weapon_id": "bite",
-                "id": "saving_throw_condition",
-                "condition": "prone",
-                "save_ability": "strength",
-                "save_dc": 13,
-                "source_excerpt": (
-                    "If the target is a creature, it must succeed on a DC 13 "
-                    "Strength saving throw or be knocked prone."
-                ),
-            },
-            {
-                "actor_id": "ettercap-1",
-                "weapon_id": "web-garrote",
-                "condition": "grappled",
-                "escape_dc": 12,
-                "escape_checks": ["athletics", "acrobatics"],
-                "source_excerpt": (
-                    "and the target is grappled (escape DC 12). Until this "
-                    "grapple ends, the target can't breathe."
-                ),
-            },
-        ],
-        participant_ids=[
-            "nezznar",
-            "spider-1",
-            "ettercap-1",
-            "durnan",
-            "stirge",
-            "duergar",
-            "jamna",
-            "worg-1",
-        ],
-    )
-    delayed = _source_delayed_actions(
-        [
-            {
-                "actor_id": "nezznar",
-                "until_round": 2,
-                "source_excerpt": ("Nezznar joins the fray in the round after the spiders attack."),
-            }
-        ],
-        participant_ids=["nezznar", "spider-1"],
-    )
-
-    assert precombat[0]["cast_level"] == 2
-    assert precombat[0]["target_actor_ids"] == ["nezznar"]
-    assert precombat[0]["willing_target_ids"] == ["nezznar"]
-    assert openings["spider-1"]["weapon_id"] == "web"
-    assert rulings[("spider-1", "web")]["escape_dc"] == 12
-    assert rulings[("spider-1", "bite")]["id"] == "saving_throw_damage"
-    assert rulings[("spider-1", "bite")]["zero_hp_effect"]["stable"] is True
-    assert rulings[("ettercap-1", "bite")] == {
-        "actor_id": "ettercap-1",
-        "weapon_id": "bite",
-        "id": "saving_throw_condition",
-        "condition": "poisoned",
-        "save_ability": "constitution",
-        "save_dc": 11,
-        "repeat_save_timing": "turn_end",
-        "duration": {"period": "minute", "remaining": 1},
-        "source_excerpt": (
-            "The target must succeed on a DC 11 Constitution saving throw or be "
-            "poisoned for 1 minute. The creature can repeat the saving throw at "
-            "the end of each of its turns, ending the effect on itself on a success."
-        ),
-    }
-    assert rulings[("ettercap-1", "web-garrote")] == {
-        "actor_id": "ettercap-1",
-        "weapon_id": "web-garrote",
-        "id": "apply_condition",
-        "condition": "grappled",
-        "escape_dc": 12,
-        "escape_checks": ["athletics", "acrobatics"],
-        "source_excerpt": (
-            "and the target is grappled (escape DC 12). Until this grapple "
-            "ends, the target can't breathe."
-        ),
-    }
-    assert rulings[("worg-1", "bite")] == {
-        "actor_id": "worg-1",
-        "weapon_id": "bite",
-        "id": "saving_throw_condition",
-        "condition": "prone",
-        "save_ability": "strength",
-        "save_dc": 13,
-        "source_excerpt": (
-            "If the target is a creature, it must succeed on a DC 13 "
-            "Strength saving throw or be knocked prone."
-        ),
-    }
-    assert rulings[("durnan", "grimvault")]["target_has_limbs"] is True
-    assert rulings[("stirge", "blood-drain")]["id"] == "attachment"
-    assert rulings[("duergar", "war-pick")] == {
-        "actor_id": "duergar",
-        "weapon_id": "war-pick",
-        "id": "conditional_extra_damage",
-        "applies": False,
-        "trigger_facts": {"attacker_enlarged": False},
-        "default_resolver": "agent",
-        "ruling_kind": "agent_dm_adjudication",
-        "decision": "The conditional damage does not apply.",
-        "reason": "The duergar is not enlarged for this attack.",
-        "source_excerpt": "or 11 (2d8 + 2) piercing damage while enlarged.",
-    }
-    assert rulings[("jamna", "shortsword")] == {
-        "actor_id": "jamna",
-        "weapon_id": "shortsword",
-        "id": "conditional_extra_damage",
-        "applies": True,
-        "damage_formula": "1d6",
-        "damage_type": "piercing",
-        "trigger_facts": {"target_size": "medium"},
-        "default_resolver": "agent",
-        "ruling_kind": "agent_dm_adjudication",
-        "decision": "Apply the additional 1d6 piercing damage.",
-        "reason": "The target is Medium, satisfying the exact source threshold.",
-        "source_excerpt": (
-            "or 9 (1d6 + 3 plus 1d6) piercing damage if the target "
-            "is Medium or larger."
-        ),
-    }
-    assert delayed["nezznar"]["until_round"] == 2
 
 
-def test_source_on_hit_ruling_accepts_agent_selected_direct_damage_type() -> None:
-    excerpt = (
-        "22 (5d8) damage of the type to which the dragonfang has damage resistance."
-    )
-
-    rulings = _source_on_hit_rulings(
-        [
-            {
-                "actor_id": "dragonfang",
-                "weapon_id": "orb",
-                "id": "direct_damage",
-                "damage_formula": "5d8",
-                "damage_type": "acid",
-                "trigger_facts": {"selected_damage_resistance": "acid"},
-                "default_resolver": "agent",
-                "ruling_kind": "agent_dm_adjudication",
-                "decision": "Apply the reviewed orb damage as acid.",
-                "reason": "The reviewed variant records acid resistance.",
-                "source_excerpt": excerpt,
-            }
-        ],
-        participant_ids=["dragonfang"],
-        actors={
-            "dragonfang": {
-                "derived": {
-                    "inventory": {
-                        "weapon_attacks": [
-                            {
-                                "item_id": "orb",
-                                "on_hit_effect": excerpt,
-                            }
-                        ]
-                    }
-                }
-            }
-        },
-    )
-
-    assert rulings[("dragonfang", "orb")] == {
-        "actor_id": "dragonfang",
-        "weapon_id": "orb",
-        "id": "direct_damage",
-        "damage_formula": "5d8",
-        "damage_type": "acid",
-        "trigger_facts": {"selected_damage_resistance": "acid"},
-        "default_resolver": "agent",
-        "ruling_kind": "agent_dm_adjudication",
-        "decision": "Apply the reviewed orb damage as acid.",
-        "reason": "The reviewed variant records acid resistance.",
-        "source_excerpt": excerpt,
-    }
 
 
-def test_periodic_on_hit_damage_requires_an_explicit_agent_declaration() -> None:
-    excerpt = (
-        "If the target is a creature or a flammable object, it ignites. Until "
-        "a creature takes an action to douse the fire, the target takes 5 "
-        "(1d10) fire damage at the start of each of its turns."
-    )
-    ruling = {
-        "actor_id": "fire-elemental",
-        "weapon_id": "touch",
-        "id": "ongoing_damage",
-        "applies": True,
-        "damage_formula": "1d10",
-        "damage_type": "fire",
-        "trigger_timing": "turn_start",
-        "end_action": "improvise",
-        "end_action_description": "douse the fire",
-        "trigger_facts": {
-            "target_id": "hero",
-            "target_is_creature": True,
-        },
-        "default_resolver": "agent",
-        "ruling_kind": "agent_dm_adjudication",
-        "decision": "Apply the printed ongoing fire damage to the target.",
-        "reason": "The target is a creature and the hit ignites it.",
-        "source_excerpt": excerpt,
-    }
-
-    assert _source_on_hit_rulings(
-        [ruling],
-        participant_ids=["fire-elemental"],
-    )[("fire-elemental", "touch")]["source_excerpt"] == excerpt
 
 
-def test_source_on_hit_ruling_rejects_nonexact_actor_card_effect() -> None:
-    excerpt = (
-        "22 (5d8) damage of the type to which the dragonfang has damage resistance."
-    )
-    declaration = {
-        "actor_id": "dragonfang",
-        "weapon_id": "orb",
-        "id": "direct_damage",
-        "damage_formula": "5d8",
-        "damage_type": "acid",
-        "trigger_facts": {"selected_damage_resistance": "acid"},
-        "default_resolver": "agent",
-        "ruling_kind": "agent_dm_adjudication",
-        "decision": "Apply the reviewed orb damage as acid.",
-        "reason": "The reviewed variant records acid resistance.",
-        "source_excerpt": f"Hit: {excerpt}",
-    }
-
-    with pytest.raises(ValueError, match="exactly match"):
-        _source_on_hit_rulings(
-            [declaration],
-            participant_ids=["dragonfang"],
-            actors={
-                "dragonfang": {
-                    "derived": {
-                        "inventory": {
-                            "weapon_attacks": [
-                                {
-                                    "item_id": "orb",
-                                    "on_hit_effect": excerpt,
-                                }
-                            ]
-                        }
-                    }
-                }
-            },
-        )
 
 
 def test_source_ammunition_selection_requires_owned_source_stack() -> None:
@@ -6628,40 +4425,6 @@ def test_source_ammunition_selection_requires_owned_source_stack() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    "ruling",
-    [
-        {
-            "actor_id": "ettercap-1",
-            "weapon_id": "bite",
-            "id": "saving_throw_condition",
-            "condition": "poisoned",
-            "save_ability": "constitution",
-            "save_dc": 11,
-            "repeat_save_timing": "turn_end",
-            "duration": {"period": "minute", "remaining": 0},
-            "source_excerpt": "Exact attack text.",
-        },
-        {
-            "actor_id": "ettercap-1",
-            "weapon_id": "web",
-            "id": "apply_condition",
-            "condition": "restrained",
-            "escape_dc": 11,
-            "escape_abilities": ["strength"],
-            "save_ability": "strength",
-            "source_excerpt": "Exact attack text.",
-        },
-    ],
-)
-def test_source_on_hit_rulings_reject_mixed_or_invalid_condition_terms(
-    ruling: dict,
-) -> None:
-    with pytest.raises(ValueError):
-        _source_on_hit_rulings(
-            [ruling],
-            participant_ids=["ettercap-1"],
-        )
 
 
 def test_auto_run_starts_from_play_before_loading_combat_tools() -> None:
@@ -6938,431 +4701,18 @@ def test_auto_run_does_not_finalize_a_different_completed_encounter() -> None:
     }
 
 
-def test_interrupted_guiding_bolt_ruling_resumes_with_exact_effect() -> None:
-    calls: list[tuple[str, dict]] = []
-
-    class Client:
-        async def core(self, tool_id: str, arguments: dict) -> dict:
-            assert tool_id == "campaign_query"
-            return {"revision": 17}
-
-        async def domain(self, tool_id: str, arguments: dict) -> dict:
-            calls.append((tool_id, arguments))
-            return {"status": "committed"}
-
-    result = asyncio.run(
-        _resolve_pending(
-            Client(),
-            SimpleNamespace(campaign_id="campaign-1"),
-            "branch-1",
-            {
-                "pending": [
-                    {
-                        "id": "choice-1",
-                        "kind": "ruling",
-                        "actor_id": "target-1",
-                        "target_id": "target-1",
-                        "trigger": "attack_on_hit_effect",
-                        "effect": GUIDING_BOLT_ON_HIT,
-                        "status": "pending",
-                    }
-                ]
-            },
-        )
-    )
-
-    assert result == {"status": "committed"}
-    assert calls[0][0] == "combat_choice"
-    assert calls[0][1]["action"] == "on_hit_ruling"
-    assert calls[0][1]["payload"]["selection"] == {
-        "id": "next_attack_advantage",
-        "source_excerpt": GUIDING_BOLT_ON_HIT,
-    }
 
 
-def test_agent_death_trigger_rulings_bind_only_scene_facts() -> None:
-    rulings = _agent_death_trigger_rulings(
-        [
-            {
-                "actor_id": "magmin-1",
-                "decision": "The loose straw bale in the burst area catches fire.",
-                "ruling_reason": (
-                    "The recorded object is flammable, unattended, and within "
-                    "ten feet of the dying creature."
-                ),
-                "ignited_objects": [
-                    {
-                        "id": "loose-straw-bale",
-                        "description": (
-                            "An unattended loose straw bale beside the combatants."
-                        ),
-                    }
-                ],
-            }
-        ],
-        participant_ids=["magmin-1", "hero-1"],
-    )
-
-    assert rulings["magmin-1"] == {
-        "actor_id": "magmin-1",
-        "environment_ruling": {
-            "default_resolver": "agent",
-            "ruling_kind": "source_or_scene_fact",
-            "decision": "The loose straw bale in the burst area catches fire.",
-            "reason": (
-                "The recorded object is flammable, unattended, and within "
-                "ten feet of the dying creature."
-            ),
-            "ignited_objects": [
-                {
-                    "id": "loose-straw-bale",
-                    "description": (
-                        "An unattended loose straw bale beside the combatants."
-                    ),
-                }
-            ],
-        },
-    }
 
 
-def test_agent_death_trigger_rulings_require_explicit_object_list() -> None:
-    with pytest.raises(ValueError, match="explicit ignited_objects"):
-        _agent_death_trigger_rulings(
-            [
-                {
-                    "actor_id": "magmin-1",
-                    "decision": "Nothing else in the recorded area catches fire.",
-                    "ruling_reason": (
-                        "No qualifying unattended flammable object is established."
-                    ),
-                }
-            ],
-            participant_ids=["magmin-1"],
-        )
 
 
-def test_interrupted_standard_death_burst_uses_agent_scene_fact_ruling() -> None:
-    calls: list[tuple[str, dict]] = []
-
-    class Client:
-        async def core(self, tool_id: str, arguments: dict) -> dict:
-            assert tool_id == "campaign_query"
-            return {"revision": 23}
-
-        async def domain(self, tool_id: str, arguments: dict) -> dict:
-            calls.append((tool_id, arguments))
-            return {"result": {"status": "committed"}}
-
-    result = asyncio.run(
-        _resolve_pending(
-            Client(),
-            SimpleNamespace(
-                campaign_id="campaign-1",
-                agent_death_trigger_ruling_json=[
-                    {
-                        "actor_id": "magmin-1",
-                        "decision": (
-                            "No qualifying unattended flammable object is "
-                            "established in the recorded burst area."
-                        ),
-                        "ruling_reason": (
-                            "The combat map records creature positions but no "
-                            "eligible loose object at this location."
-                        ),
-                        "ignited_objects": [],
-                    }
-                ],
-            ),
-            "branch-1",
-            {
-                "combatants": [
-                    {"actor_id": "magmin-1"},
-                    {"actor_id": "hero-1"},
-                ],
-                "pending": [
-                    {
-                        "id": "death-window-1",
-                        "kind": "save",
-                        "actor_id": "magmin-1",
-                        "source_actor_id": "magmin-1",
-                        "trigger": "standard_death_burst",
-                        "status": "pending",
-                    }
-                ],
-            },
-        )
-    )
-
-    assert result == {"status": "committed"}
-    assert calls == [
-        (
-            "combat_choice",
-            {
-                "campaign_id": "campaign-1",
-                "action": "resolve_death_trigger",
-                "actor_id": "magmin-1",
-                "payload": {
-                    "choice_id": "death-window-1",
-                    "environment_ruling": {
-                        "default_resolver": "agent",
-                        "ruling_kind": "source_or_scene_fact",
-                        "decision": (
-                            "No qualifying unattended flammable object is "
-                            "established in the recorded burst area."
-                        ),
-                        "reason": (
-                            "The combat map records creature positions but no "
-                            "eligible loose object at this location."
-                        ),
-                        "ignited_objects": [],
-                    },
-                },
-                "branch_id": "branch-1",
-                "expected_revision": 23,
-                "idempotency_key": calls[0][1]["idempotency_key"],
-            },
-        )
-    ]
 
 
-def test_interrupted_standard_death_burst_requests_agent_when_absent() -> None:
-    class Client:
-        async def core(self, tool_id: str, arguments: dict) -> dict:
-            assert tool_id == "campaign_query"
-            return {"revision": 24}
-
-    with pytest.raises(
-        EncounterRulingRequiredError,
-        match="standard death trigger",
-    ):
-        asyncio.run(
-            _resolve_pending(
-                Client(),
-                SimpleNamespace(campaign_id="campaign-1"),
-                "branch-1",
-                {
-                    "combatants": [{"actor_id": "magmin-1"}],
-                    "pending": [
-                        {
-                            "id": "death-window-2",
-                            "actor_id": "magmin-1",
-                            "source_actor_id": "magmin-1",
-                            "trigger": "standard_death_burst",
-                            "status": "pending",
-                        }
-                    ],
-                },
-            )
-        )
 
 
-def test_interrupted_periodic_damage_resumes_with_explicit_agent_ruling() -> None:
-    calls: list[tuple[str, dict]] = []
-    excerpt = (
-        "If the target is a creature or a flammable object, it ignites. Until "
-        "a creature takes an action to douse the fire, the target takes 5 "
-        "(1d10) fire damage at the start of each of its turns."
-    )
-
-    class Client:
-        async def core(self, tool_id: str, arguments: dict) -> dict:
-            assert tool_id == "campaign_query"
-            return {"revision": 22}
-
-        async def domain(self, tool_id: str, arguments: dict) -> dict:
-            calls.append((tool_id, arguments))
-            return {"status": "committed"}
-
-    result = asyncio.run(
-        _resolve_pending(
-            Client(),
-            SimpleNamespace(
-                campaign_id="campaign-1",
-                source_on_hit_ruling_json=[
-                    {
-                        "actor_id": "fire-elemental",
-                        "weapon_id": "touch",
-                        "id": "ongoing_damage",
-                        "applies": True,
-                        "damage_formula": "1d10",
-                        "damage_type": "fire",
-                        "trigger_timing": "turn_start",
-                        "end_action": "improvise",
-                        "end_action_description": "douse the fire",
-                        "trigger_facts": {
-                            "target_id": "hero",
-                            "target_is_creature": True,
-                        },
-                        "default_resolver": "agent",
-                        "ruling_kind": "agent_dm_adjudication",
-                        "decision": "Apply the printed ongoing fire damage.",
-                        "reason": "The target is a creature ignited by the hit.",
-                        "source_excerpt": excerpt,
-                    }
-                ],
-            ),
-            "branch-1",
-            {
-                "pending": [
-                    {
-                        "id": "choice-fire",
-                        "kind": "ruling",
-                        "actor_id": "hero",
-                        "attacker_id": "fire-elemental",
-                        "target_id": "hero",
-                        "weapon_id": "touch",
-                        "trigger": "attack_on_hit_effect",
-                        "effect": excerpt,
-                        "status": "pending",
-                    }
-                ]
-            },
-        )
-    )
-
-    assert result == {"status": "committed"}
-    selection = calls[0][1]["payload"]["selection"]
-    assert selection["id"] == "ongoing_damage"
-    assert selection["damage_formula"] == "1d10"
-    assert selection["trigger_timing"] == "turn_start"
-    assert selection["end_action_description"] == "douse the fire"
-    assert calls[0][1]["actor_id"] == "hero"
 
 
-def test_interrupted_source_attachment_resumes_with_declared_settlement() -> None:
-    calls: list[tuple[str, dict]] = []
-    excerpt = "the stirge attaches to the target. While attached, the stirge doesn't attack."
-
-    class Client:
-        async def core(self, tool_id: str, arguments: dict) -> dict:
-            assert tool_id == "campaign_query"
-            return {"revision": 18}
-
-        async def domain(self, tool_id: str, arguments: dict) -> dict:
-            calls.append((tool_id, arguments))
-            return {"status": "committed"}
-
-    result = asyncio.run(
-        _resolve_pending(
-            Client(),
-            SimpleNamespace(
-                campaign_id="campaign-1",
-                source_on_hit_ruling_json=[
-                    {
-                        "actor_id": "stirge-1",
-                        "weapon_id": "blood-drain",
-                        "id": "attachment",
-                        "source_excerpt": excerpt,
-                    }
-                ],
-            ),
-            "branch-1",
-            {
-                "pending": [
-                    {
-                        "id": "choice-2",
-                        "kind": "ruling",
-                        "actor_id": "target-1",
-                        "attacker_id": "stirge-1",
-                        "target_id": "target-1",
-                        "weapon_id": "blood-drain",
-                        "trigger": "attack_on_hit_effect",
-                        "effect": excerpt,
-                        "status": "pending",
-                    }
-                ]
-            },
-        )
-    )
-
-    assert result == {"status": "committed"}
-    assert calls == [
-        (
-            "combat_choice",
-            {
-                "campaign_id": "campaign-1",
-                "action": "on_hit_ruling",
-                "actor_id": "target-1",
-                "payload": {
-                    "choice_id": "choice-2",
-                    "selection": {
-                        "id": "attachment",
-                        "source_excerpt": excerpt,
-                    },
-                },
-                "branch_id": "branch-1",
-                "expected_revision": 18,
-                "idempotency_key": (calls[0][1]["idempotency_key"] if calls else ""),
-            },
-        )
-    ]
-
-
-def test_interrupted_source_alternative_damage_resumes_with_agent_false_ruling() -> None:
-    calls: list[tuple[str, dict]] = []
-    excerpt = "or 11 (2d8 + 2) piercing damage while enlarged."
-
-    class Client:
-        async def core(self, tool_id: str, arguments: dict) -> dict:
-            assert tool_id == "campaign_query"
-            return {"revision": 19}
-
-        async def domain(self, tool_id: str, arguments: dict) -> dict:
-            calls.append((tool_id, arguments))
-            return {"status": "committed"}
-
-    result = asyncio.run(
-        _resolve_pending(
-            Client(),
-            SimpleNamespace(
-                campaign_id="campaign-1",
-                source_on_hit_ruling_json=[
-                    {
-                        "actor_id": "duergar-1",
-                        "weapon_id": "war-pick",
-                        "id": "conditional_extra_damage",
-                        "applies": False,
-                        "trigger_facts": {"attacker_enlarged": False},
-                        "default_resolver": "agent",
-                        "ruling_kind": "agent_dm_adjudication",
-                        "decision": "The enlarged alternative does not apply.",
-                        "reason": "The attacker is not enlarged in the current encounter state.",
-                        "source_excerpt": excerpt,
-                    }
-                ],
-            ),
-            "branch-1",
-            {
-                "pending": [
-                    {
-                        "id": "choice-3",
-                        "kind": "ruling",
-                        "actor_id": "target-1",
-                        "attacker_id": "duergar-1",
-                        "target_id": "target-1",
-                        "weapon_id": "war-pick",
-                        "trigger": "attack_on_hit_effect",
-                        "effect": excerpt,
-                        "status": "pending",
-                    }
-                ]
-            },
-        )
-    )
-
-    assert result == {"status": "committed"}
-    assert calls[0][0] == "combat_choice"
-    assert calls[0][1]["action"] == "on_hit_ruling"
-    assert calls[0][1]["payload"]["selection"] == {
-        "id": "conditional_extra_damage",
-        "applies": False,
-        "trigger_facts": {"attacker_enlarged": False},
-        "default_resolver": "agent",
-        "ruling_kind": "agent_dm_adjudication",
-        "decision": "The enlarged alternative does not apply.",
-        "reason": "The attacker is not enlarged in the current encounter state.",
-        "source_excerpt": excerpt,
-    }
 
 
 def test_source_surrender_requires_threshold_life_no_escape_and_resolved_party() -> None:
@@ -7556,20 +4906,12 @@ def test_source_reinforcements_enter_openly_at_configured_round_positions() -> N
             "source_excerpt": "The reinforcement arrives restrained.",
         }
     ]
-    source_traits = [
-        {
-            "kind": "regeneration",
-            "feature_id": "regeneration-passive",
-            "source_excerpt": "The troll regains 10 hit points at the start of its turn.",
-        }
-    ]
     second = _reinforcement_config(
         "rift-2",
         1,
         join_round=7,
         tie_breaker=8,
         source_conditions=source_conditions,
-        source_traits=source_traits,
     )
 
     assert first == {
@@ -7583,12 +4925,9 @@ def test_source_reinforcements_enter_openly_at_configured_round_positions() -> N
     assert second["join_round"] == 7
     assert second["tie_breaker"] == 8
     assert second["source_conditions"] == source_conditions
-    assert second["source_traits"] == source_traits
 
     source_conditions[0]["condition"] = "poisoned"
-    source_traits[0]["feature_id"] = "changed"
     assert second["source_conditions"][0]["condition"] == "restrained"
-    assert second["source_traits"][0]["feature_id"] == "regeneration-passive"
     friendly = _reinforcement_config(
         "scout-1",
         2,

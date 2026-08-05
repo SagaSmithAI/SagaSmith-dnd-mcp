@@ -12,6 +12,14 @@ from sagasmith_dnd_mcp.server import create_server
 
 
 def test_public_attack_pauses_for_parry_before_damage(tmp_path: Path, monkeypatch) -> None:
+    import_root = tmp_path / "rules"
+    import_root.mkdir()
+    effect = (
+        "The defender adds 2 to its AC against one melee attack that would hit it, "
+        "provided the defender can see the attacker and is wielding a melee weapon."
+    )
+    source = import_root / "parry-lore.md"
+    source.write_text(f"# Parry Lore\n\n## Parry\n\n{effect}\n", encoding="utf-8")
     config = McpConfig(
         home=tmp_path / "home",
         database_url=None,
@@ -19,6 +27,7 @@ def test_public_attack_pauses_for_parry_before_damage(tmp_path: Path, monkeypatc
         chroma_path_override=None,
         dnd_skills_dir=tmp_path / "dnd",
         modulegen_skills_dir=tmp_path / "modulegen",
+        rule_import_roots=(import_root,),
         auto_seed_rules=False,
     )
 
@@ -42,6 +51,33 @@ def test_public_attack_pauses_for_parry_before_damage(tmp_path: Path, monkeypatc
             "campaign_create",
             {"name": "Parry", "edition": "2014", "idempotency_key": "parry-campaign"},
         )
+        staged = await call(
+            server,
+            "rule_document_stage",
+            {"campaign_id": campaign["id"], "source_path": str(source)},
+        )
+        await call(
+            server,
+            "rule_document_import",
+            {
+                "campaign_id": campaign["id"],
+                "artifact": staged["artifact"],
+                "source_key": "parry-lore",
+                "title": "Parry Lore",
+                "edition": "2014",
+                "idempotency_key": "parry-rule-import",
+            },
+        )
+        hits = await call(
+            server,
+            "rule_search",
+            {
+                "query": "defender adds 2 to its AC",
+                "edition": "2014",
+                "top_k": 1,
+            },
+        )
+        chunk_id = hits[0]["id"]
         attacker_sheet = default_character_sheet()
         attacker_sheet["abilities"]["strength"]["score"] = 16
         attacker_sheet["inventory"]["items"] = [
@@ -93,17 +129,16 @@ def test_public_attack_pauses_for_parry_before_damage(tmp_path: Path, monkeypatc
         target_sheet["inventory"]["equipment_slots"]["main_hand"] = "scimitar"
         target_sheet["content"]["activities"] = [
             {
-                "id": "bandit-captain-parry",
+                "id": "source-bound-parry",
                 "name": "Parry",
-                "source_key": "Bandit Captain",
+                "source_key": "rule-source:parry-lore",
+                "description": effect,
                 "activation": {"type": "reaction"},
                 "choices": {
-                    "reaction_defense": {
-                        "kind": "armor_class_bonus",
-                        "bonus": 2,
-                        "attack_modes": ["melee"],
-                        "requires_visible_attacker": True,
-                        "requires_wielded_melee_weapon": True,
+                    "manual_ruling": {
+                        "kind": "descriptive_activity",
+                        "default_resolver": "agent",
+                        "source_excerpt": effect,
                     }
                 },
             }
@@ -118,6 +153,56 @@ def test_public_attack_pauses_for_parry_before_damage(tmp_path: Path, monkeypatc
                 "idempotency_key": "parry-target",
             },
         )
+        compiled = await call(
+            server,
+            "content_solution",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": target["id"],
+                "action": "compile",
+                "source_card_id": "source-bound-parry",
+                "source_card_kind": "activity",
+                "payload": {
+                    "resolution_plan": {
+                        "schema_version": 2,
+                        "id": "addon.test.parry-defense",
+                        "source_card_id": "source-bound-parry",
+                        "source_card_kind": "activity",
+                        "trigger": "attack.after_hit",
+                        "trigger_filter": {"hit": True},
+                        "slots": {},
+                        "steps": [
+                            {
+                                "id": "defend",
+                                "op": "attack.ac_bonus",
+                                "args": {
+                                    "bonus": 2,
+                                    "attack_modes": ["melee"],
+                                    "requires_visible_attacker": True,
+                                    "requires_wielded_melee_weapon": True,
+                                },
+                            }
+                        ],
+                        "citations": [
+                            {
+                                "source": "rule-source:parry-lore",
+                                "source_ref": {"chunk_id": chunk_id},
+                                "source_excerpt": effect,
+                            }
+                        ],
+                    },
+                    "agent_ruling": {
+                        "default_resolver": "agent",
+                        "ruling_kind": "agent_dm_adjudication",
+                        "decision": "Store the quoted reaction as a contextual AC bonus.",
+                        "reason": "The cited text states the bonus and all triggering limits.",
+                    },
+                },
+                "expected_revision": target["revision"],
+                "idempotency_key": "compile-parry-defense",
+            },
+        )
+        assert compiled["status"] == "compiled"
         campaign = await call(
             server, "campaign_get", {"campaign_id": campaign["id"]}
         )
@@ -191,7 +276,7 @@ def test_public_attack_pauses_for_parry_before_damage(tmp_path: Path, monkeypatc
                 "action": "resolve_defense",
                 "payload": {
                     "choice_id": choice["id"],
-                    "selection": {"id": "bandit-captain-parry"},
+                    "selection": {"id": "source-bound-parry"},
                 },
                 "expected_revision": rolled["campaign_revision"],
                 "idempotency_key": "parry-resolve",
@@ -200,6 +285,10 @@ def test_public_attack_pauses_for_parry_before_damage(tmp_path: Path, monkeypatc
         assert resolved["result"]["hit"] is False
         assert resolved["result"]["damage"] is None
         assert resolved["result"]["reaction_defense"]["used"] is True
+        semantic = resolved["result"]["reaction_defense"]["semantic_solution"]
+        assert semantic["plan_id"] == "addon.test.parry-defense"
+        assert semantic["plan_fingerprint"] == compiled["solution"]["plan_fingerprint"]
+        assert semantic["compiled_by"]["default_resolver"] == "agent"
         target_state = next(
             item
             for item in resolved["combat"]["combatants"]

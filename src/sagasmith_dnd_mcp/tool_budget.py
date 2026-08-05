@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-TOOL_BUDGET_VERSION = "2026-08-agent-ocr-review-v31"
+TOOL_BUDGET_VERSION = "2026-08-portable-monster-semantics-v32"
 
 # Captured before the conservative facade consolidation.  Keep this historical
 # baseline so a lower tool count cannot conceal a larger aggregate input schema.
@@ -20,14 +20,16 @@ TARGET_CORE_TOOL_COUNT = 13
 # source-bound combat_choice(execute_plan) action without another public tool.
 # Version 8's paid-use solution-authoring action is retired; portable addon
 # resolution is now completed before release.
-# Version 9 added the DM-only content_solution tool. Build-time resolution now
-# limits that authoring/migration facade to Lobby; Play and Combat consume only
-# already-reviewed cards and direct source-bound ruling contracts.
+# Version 9 added the DM-only content_solution tool. Custom cards may now be
+# compiled at first use in Play or Combat, while the persisted source-bound plan
+# remains the only executable path.
 # Version 10 adds the hard-standard sustain_spell action to the existing common
 # action facade; no public or core tool is added.
-# Version 11 adds the hard-standard resolve_death_trigger action to the existing
-# combat choice facade. The 24-byte schema increase preserves the same public
-# and core tool counts while keeping server saves and scene facts auditable.
+# Version 11 formerly added a creature-specific death-trigger selector. That
+# selector is retired; custom death triggers now use source-bound plans. Version
+# 32 also retires the creature-specific detach selector and legacy combat-cleanup
+# manifest action. Their three enum entries remove 61 bytes from version 30's
+# 53,441-byte aggregate without changing any public/core tool count.
 # Version 12 adds related_refs to continuity_context so the Agent can receive
 # exact, non-executable module evidence without another public tool.
 # Version 13 adds the source-exact shake_hypnotic_pattern action to the existing
@@ -66,9 +68,9 @@ TARGET_CORE_TOOL_COUNT = 13
 # Version 30 adds one DM-only, phase-safe addon actor materializer.  Its strict
 # typed inputs derive owner statistics server-side and keep the aggregate below
 # the historical 92-tool/56,611-byte baseline.
-TARGET_INPUT_SCHEMA_BYTES = 53_441
+TARGET_INPUT_SCHEMA_BYTES = 53_380
 PROFILE_TOOL_LIMITS = {
     "lobby": 64,
-    "play": 49,
-    "combat": 48,
+    "play": 50,
+    "combat": 49,
 }

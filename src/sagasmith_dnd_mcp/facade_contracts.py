@@ -874,15 +874,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
     },
     "combat_common_action": {
         **{
-            action: [
-                _guide(
-                    (
-                        "end_action_description",
-                        "end_ongoing_effect_id",
-                        "source_excerpt",
-                    )
-                )
-            ]
+            action: [_guide(())]
             for action in (
                 "dash",
                 "disengage",
@@ -934,9 +926,6 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                 ("agent_ruling", "effect_id", "target_total_cover"),
                 ("effect_id", "target_total_cover", "agent_ruling"),
             )
-        ],
-        "detach_attachment": [
-            _guide(("effect_id",), ("effect_id",))
         ],
     },
     "combat_query": {
@@ -1496,7 +1485,6 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                 ),
             )
         ],
-        "combat_cleanup": [_variant(("outcome",), ("outcome",))],
     },
     "content_solution": {
         "query": [_variant(())],
@@ -1522,12 +1510,6 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
         ],
         "execute_plan": [
             _variant(("commitment",), ("commitment",))
-        ],
-        "resolve_death_trigger": [
-            _variant(
-                ("choice_id", "environment_ruling"),
-                ("choice_id", "environment_ruling"),
-            )
         ],
     },
 }

@@ -98,7 +98,6 @@ from sagasmith_core.visibility import (
     PLAYER_MODULE_VISIBILITY_SCOPES,
     PLAYER_OWNED_ACTOR_DISCLOSURE_SCOPES,
 )
-from sagasmith_dnd.abilities import ABILITY_IDS
 from sagasmith_dnd.ability_generation import (
     apply_ability_generation,
     apply_pending_rolled_ability_generation,
@@ -110,7 +109,6 @@ from sagasmith_dnd.activities import (
     consume_activity,
     recharge_activities_at_turn_start,
 )
-from sagasmith_dnd.activity_identity import MULTIATTACK_MECHANIC_ID
 from sagasmith_dnd.actor_types import (
     NON_PLAYER_CHARACTER_TYPES,
     require_agent_decidable_character_type,
@@ -131,10 +129,10 @@ from sagasmith_dnd.character_schema import (
     adjust_wallet,
     attune_inventory_item,
     consume_weapon_ammunition,
+    consume_weapon_limited_use,
     default_character_notes,
     default_character_sheet,
     derive_character_sheet,
-    effective_size,
     equip_inventory_item,
     receive_inventory_item,
     remove_effect,
@@ -170,7 +168,6 @@ from sagasmith_dnd.combat_engine import (
     apply_damage_parts_to_sheet,
     apply_damage_to_sheet,
     apply_healing_to_sheet,
-    apply_hit_point_loss_to_sheet,
     apply_weapon_mastery_to_encounter,
     arm_readied_spell,
     available_actions,
@@ -179,16 +176,13 @@ from sagasmith_dnd.combat_engine import (
     consume_weapon_mastery_attack_effects,
     current_combatant,
     damage_amount_after_reduction,
-    detach_attachment,
     end_concentration_for_incapacitating_conditions,
     end_hypnotic_pattern_effects,
     end_turn,
     force_move_directly_away,
-    force_move_directly_toward,
     pay_activity_activation,
     pay_attack_action,
     pay_legendary_action,
-    pay_multiattack_activity,
     pay_witch_bolt_sustain_action,
     preflight_attack,
     preflight_spell_attack,
@@ -206,22 +200,17 @@ from sagasmith_dnd.combat_engine import (
     resolve_divine_spark_to_sheet,
     resolve_hypnotic_pattern_target,
     resolve_preserve_life_to_sheets,
-    resolve_random_save_effects,
     resolve_readied_action_window,
     resolve_readied_spell_window,
     resolve_save_damage_to_sheets,
     resolve_second_wind_to_sheet,
-    resolve_source_contest_effect,
-    resolve_source_save_effect,
     resolve_turn_undead_to_sheets,
     roll_attack_action,
     settle_core_activity_effect,
-    settle_start_turn_regeneration,
     source_speed_multiplier,
     spend_movement,
     stabilize_sheet,
     stand_up,
-    standard_death_trigger_for_sheet,
     standard_save_damage_reduction,
     start_encounter,
     start_witch_bolt_tether,
@@ -418,7 +407,13 @@ from sagasmith_dnd.spells import (
     validate_magic_missile_allocations,
     validate_spell_grant,
 )
-from sagasmith_dnd.standard_content import build_standard2014_content
+from sagasmith_dnd.standard_content import (
+    CORE_DRAGONBORN_BREATH_MECHANIC_ID,
+    build_standard2014_content,
+)
+from sagasmith_dnd.standard_feature_ids import (
+    CORE_RELENTLESS_ENDURANCE_MECHANIC_ID,
+)
 from sagasmith_dnd.standard_spell_ids import (
     CORE_BLADE_WARD_MECHANIC_ID,
     CORE_FLY_MECHANIC_ID,
@@ -439,14 +434,11 @@ from sagasmith_dnd.statblocks import (
     apply_dependent_actor_template_variant,
     apply_reviewed_statblock_fill,
     apply_statblock_variant,
-    area_save_damage_spec,
     dependent_actor_template_solution_errors,
     discover_2014_statblock_names_from_layout,
     discover_2014_statblock_slots_from_layout,
     effective_statblock_rating,
     finalize_imported_actor_rulings,
-    frightful_presence_spec,
-    gazer_eye_ray_spec,
     is_2014_statblock_identity_line,
     legendary_action_spec,
     materialize_parameterized_statblock_source,
@@ -455,8 +447,6 @@ from sagasmith_dnd.statblocks import (
     parse_2014_statblock_template_preview,
     parse_2024_statblock,
     recover_2014_statblock_from_ocr,
-    source_contest_effect_spec,
-    source_save_effect_spec,
     split_2014_statblock_action_variants,
 )
 from sagasmith_dnd.system import DND5E
@@ -568,9 +558,6 @@ def _render_immutable_pdf_page(
     )
 
 
-CORE_GRAPPLE_ESCAPE_CHECKS = frozenset({"athletics", "acrobatics"})
-
-
 def _character_spell_card(catalog_card: dict[str, Any]) -> dict[str, Any]:
     """Project a rule-catalog spell into the persistable character-card schema."""
     return {
@@ -598,27 +585,21 @@ ENGINE_OWNED_STANDARD_ACTIVITY_IDS = frozenset(
         "dnd5e.content.srd2024.feature.fighter-second-wind",
         "dnd5e.content.srd2024.feature.life-domain-preserve-life",
         "dnd5e.content.srd2024.feature.rogue-cunning-action",
-        "dnd5e.core.monster.aggressive",
-        "dnd5e.core.monster.battle-cry",
     }
 )
 ENGINE_SETTLED_CARD_MECHANIC_IDS = frozenset(
     {
         "dnd5e.core.action.multiattack_choice",
         "dnd5e.core.activity.action_surge",
-        "dnd5e.core.activity.area_save_damage",
-        "dnd5e.core.activity.battle_cry",
         "dnd5e.core.activity.cunning_action",
         "dnd5e.core.activity.divine_spark",
-        "dnd5e.core.activity.frightful_presence",
+        CORE_DRAGONBORN_BREATH_MECHANIC_ID,
         "dnd5e.core.activity.legendary_action",
         "dnd5e.core.activity.preserve_life",
-        "dnd5e.core.activity.random_save_effects",
         "dnd5e.core.activity.second_wind",
-        "dnd5e.core.activity.source_contest_effect",
-        "dnd5e.core.activity.source_save_effect",
         "dnd5e.core.activity.turn_undead",
         "dnd5e.core.item.healing_potion",
+        CORE_RELENTLESS_ENDURANCE_MECHANIC_ID,
         "dnd5e.core.magic_ammunition.slaying",
         CORE_BLADE_WARD_MECHANIC_ID,
         CORE_FLY_MECHANIC_ID,
@@ -632,87 +613,16 @@ ENGINE_SETTLED_CARD_MECHANIC_IDS = frozenset(
 )
 
 
-def reviewed_on_hit_escape_checks(
-    effect: str,
-    *,
-    condition: str,
-    escape_dc: int,
-    escape_abilities: list[str],
-    escape_checks: list[str],
-) -> tuple[list[str], str]:
-    """Validate source-local escapes or the 2014 Core grapple escape rule."""
-
-    if escape_abilities and escape_checks:
-        raise CombatEngineError(
-            "on-hit escape must use source-stated abilities or Core-defined checks, not both"
-        )
-    if escape_abilities:
-        if any(ability not in ABILITY_IDS for ability in escape_abilities) or any(
-            re.search(rf"(?i)\b{re.escape(ability)}\b", effect) is None
-            for ability in escape_abilities
-        ):
-            raise CombatEngineError("escape DC or ability is not stated by the reviewed attack")
-        return escape_abilities, "source_explicit"
-    if (
-        condition == "grappled"
-        and set(escape_checks) == CORE_GRAPPLE_ESCAPE_CHECKS
-        and len(escape_checks) == len(CORE_GRAPPLE_ESCAPE_CHECKS)
-        and re.search(rf"(?i)\bescape\s+DC\s*{escape_dc}\b", effect) is not None
-    ):
-        return escape_checks, "core_2014_grapple"
-    raise CombatEngineError(
-        "escape checks must be stated by the reviewed attack or be the "
-        "2014 Core Athletics/Acrobatics grapple escape"
-    )
-
-
-def release_unavailable_source_grapples(
-    encounter: dict[str, Any],
-    unavailable_source_ids: set[str],
-) -> dict[str, list[str]]:
-    """End source-owned grapples when their source can no longer maintain them."""
-
-    released_by_target: dict[str, list[str]] = {}
-    for effect in encounter.get("ongoing_effects", []):
-        if (
-            not isinstance(effect, dict)
-            or not effect.get("active", True)
-            or effect.get("kind") != "on_hit_condition"
-            or str(effect.get("condition") or "").casefold() != "grappled"
-        ):
-            continue
-        source_actor_id = str(effect.get("source_actor_id") or "")
-        if source_actor_id not in unavailable_source_ids:
-            continue
-        target_id = str(effect.get("target_id") or "")
-        if not target_id:
-            continue
-        effect["active"] = False
-        effect["resolution"] = {
-            "kind": "source_unavailable",
-            "source_actor_id": source_actor_id,
-        }
-        released_by_target.setdefault(target_id, []).append(str(effect.get("id") or ""))
-    return released_by_target
-
-
 def has_active_owned_condition(
     encounter: dict[str, Any],
     *,
     target_id: str,
     condition: str,
 ) -> bool:
-    """Return whether an active structured or source effect still owns the condition."""
+    """Return whether an active scene-authored effect still owns the condition."""
 
     normalized_condition = condition.casefold()
     return any(
-        isinstance(effect, dict)
-        and effect.get("active", True)
-        and effect.get("kind") == "on_hit_condition"
-        and str(effect.get("target_id") or "") == target_id
-        and str(effect.get("condition") or "").casefold() == normalized_condition
-        for effect in encounter.get("ongoing_effects", [])
-    ) or any(
         isinstance(effect, dict)
         and effect.get("active", True)
         and str(effect.get("actor_id") or "") == target_id
@@ -7319,12 +7229,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             source_excerpt = " ".join(str(manual_ruling.get("source_excerpt") or "").split())
             description = " ".join(str(activity.get("description") or "").split())
             if (
-                manual_ruling.get("default_resolver") != "agent"
-                or not source_excerpt
-                or source_excerpt != description
-                or MULTIATTACK_MECHANIC_ID
-                not in {str(item) for item in activity.get("mechanic_refs") or []}
-            ):
+            manual_ruling.get("default_resolver") != "agent"
+            or not source_excerpt
+            or source_excerpt != description
+            or bool(activity.get("mechanic_refs"))
+        ):
                 invalid_unresolved.append(activity)
         if invalid_unresolved:
             names = sorted(
@@ -7332,7 +7241,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             raise ValueError(
                 "standard rule Multiattack lacks a complete engine option or "
-                "direct source-bound ruling: " + ", ".join(names)
+                "non-executable direct source-bound ruling: " + ", ".join(names)
             )
         # A creature-specific activity or passive is content, not a new copy of
         # the standard action economy.  The parser deliberately records such a
@@ -8238,15 +8147,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> dict[str, Any]:
         """Route standard gaps to engine work and prepared custom text to Agent ruling."""
 
-        if source_card_has_direct_agent_ruling(source_card):
-            return {
-                "status": "ruling_ready",
-                "source_card_id": source_card_id,
-                "source_card_kind": source_card_kind,
-                "required_action": "agent_dm_adjudication",
-                "first_use_compilation_required": False,
-                "character_revision": character_revision,
-            }
         if str(source_card.get("pack_id") or "") in {
             CORE_CONTENT_PACK_ID,
             CORE_2024_CONTENT_PACK_ID,
@@ -8263,33 +8163,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "status": "content_authoring_required",
             "source_card_id": source_card_id,
             "source_card_kind": source_card_kind,
-            "required_action": "import_or_author_build_time_resolution",
-            "first_use_compilation_required": False,
+            "required_action": "compile_and_persist_source_bound_resolution",
+            "first_use_compilation_required": True,
             "character_revision": character_revision,
         }
-
-    def source_card_has_direct_agent_ruling(
-        source_card: dict[str, Any],
-    ) -> bool:
-        """Recognize a build-time, source-bound ruling without inventing mechanics."""
-
-        for requirement in source_card.get("ruling_requirements") or []:
-            if not isinstance(requirement, dict):
-                continue
-            if (
-                requirement.get("default_resolver") == "agent"
-                and str(requirement.get("ruling_kind") or "").strip()
-                and str(requirement.get("source_excerpt") or "").strip()
-                and str(requirement.get("policy_ref") or "")
-                in {"actor_card.import.v1", "rule_clause.v1"}
-            ):
-                return True
-        manual_ruling = dict(dict(source_card.get("choices") or {}).get("manual_ruling") or {})
-        return bool(
-            manual_ruling.get("default_resolver") == "agent"
-            and str(manual_ruling.get("kind") or "").strip()
-            and str(manual_ruling.get("source_excerpt") or "").strip()
-        )
 
     def validate_authored_content_plan(
         campaign_id: str,
@@ -8593,10 +8470,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             if (
                 not isinstance(window, dict)
-                or window.get("trigger") != "attack_semantic_plan"
+                or window.get("trigger")
+                not in {"attack_semantic_plan", "attack_on_hit_effect"}
                 or str(window.get("attacker_id") or "") != source_actor_id
                 or str(window.get("weapon_id") or "") != source_card_id
-                or str(window.get("plan_fingerprint") or "") != bound_plan.compiled.fingerprint
+                or (
+                    window.get("trigger") == "attack_semantic_plan"
+                    and str(window.get("plan_fingerprint") or "")
+                    != bound_plan.compiled.fingerprint
+                )
             ):
                 raise CombatEngineError(
                     "item semantic plan requires its exact pending on-hit event"
@@ -8826,7 +8708,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             normalized != raw_commitment
             or not normalized["application_id"]
             or not normalized["source_card_id"]
-            or normalized["source_card_kind"] not in {"activity", "spell", "scene_procedure"}
+            or normalized["source_card_kind"] != "scene_procedure"
             or normalized["application_id"] != normalized_ruling["application_id"]
             or normalized["source_card_id"] != source_card_id
             or normalized["source_card_kind"] != source_card_kind
@@ -8899,22 +8781,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 continue
             paid_commitment: Any = None
             if (
-                source_card_kind == "activity"
-                and entry.get("type") == "activity"
-                and str(entry.get("activity_id") or "") == source_card_id
-                and entry.get("requires_ruling") is True
-            ):
-                paid_commitment = dict(entry.get("declaration") or {}).get(
-                    "agent_ruling_commitment"
-                )
-            elif (
-                source_card_kind == "spell"
-                and entry.get("type") == "common_action"
-                and entry.get("action") == "cast"
-                and str(dict(entry.get("payload") or {}).get("spell_id") or "") == source_card_id
-            ):
-                paid_commitment = dict(entry.get("payload") or {}).get("agent_ruling_commitment")
-            elif (
                 source_card_kind == "scene_procedure"
                 and entry.get("type") == "common_action"
                 and entry.get("action") == "improvise"
@@ -8926,7 +8792,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 return deepcopy(entry)
         raise CombatEngineError(
             "save damage requires the exact current-turn Agent ruling commitment "
-            "to be paid by its activity, spell, or scene procedure"
+            "to be paid by its scene procedure"
         )
 
     def validate_agent_attack_context(
@@ -8969,696 +8835,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             },
         )
 
-    def apply_agent_attack_rulings(
-        attacker: dict[str, Any],
-        plan: dict[str, Any],
-        action: dict[str, Any],
-        *,
-        encounter: dict[str, Any],
-        authorized: bool,
-    ) -> dict[str, Any]:
-        """Bind Agent-adjudicated source riders to one atomic attack plan."""
 
-        supported_kind = "source_conditional_extra_damage"
-        requested = [
-            item
-            for item in action.get("rulings") or []
-            if isinstance(item, dict) and item.get("kind") == supported_kind
-        ]
-        if requested and not authorized:
-            raise CombatEngineError(
-                "source conditional extra-damage rulings require Owner/DM authority"
-            )
-        allowed = {
-            "source",
-            "kind",
-            "application_id",
-            "feature_id",
-            "target_actor_ids",
-            "solution_plan_fingerprint",
-            "source_excerpt",
-            "damage_expression",
-            "damage_type",
-            "condition_satisfied",
-            "trigger_facts",
-            "default_resolver",
-            "ruling_kind",
-            "decision",
-            "reason",
-        }
-        result = deepcopy(plan)
-        additional_damage = deepcopy(list(result.get("additional_damage") or []))
-        normalized_rulings = [
-            deepcopy(item)
-            for item in result.get("rulings") or []
-            if not (isinstance(item, dict) and item.get("kind") == supported_kind)
-        ]
-        application_ids: set[str] = set()
-        feature_ids: set[str] = set()
-        features = [
-            dict(item)
-            for item in dict(attacker.get("sheet") or {}).get("content", {}).get("features", [])
-            if isinstance(item, dict)
-        ]
 
-        for index, raw in enumerate(action.get("rulings") or []):
-            if not isinstance(raw, dict) or raw.get("kind") != supported_kind:
-                continue
-            unknown = set(raw) - allowed
-            if unknown:
-                raise CombatEngineError(
-                    "source conditional extra-damage ruling has unsupported fields: "
-                    + ", ".join(sorted(unknown))
-                )
-            application_id = str(raw.get("application_id") or "").strip()
-            feature_id = str(raw.get("feature_id") or "").strip()
-            target_actor_ids = raw.get("target_actor_ids")
-            solution_plan_fingerprint = str(raw.get("solution_plan_fingerprint") or "").strip()
-            source_excerpt = str(raw.get("source_excerpt") or "").strip()
-            expression = str(raw.get("damage_expression") or "").strip()
-            damage_type = str(raw.get("damage_type") or "").strip().casefold()
-            trigger_facts = raw.get("trigger_facts")
-            decision = str(raw.get("decision") or "").strip()
-            reason = str(raw.get("reason") or "").strip()
-            if (
-                raw.get("source") != "dm_ruling"
-                or raw.get("default_resolver") != "agent"
-                or raw.get("ruling_kind") != "agent_dm_adjudication"
-                or raw.get("condition_satisfied") is not True
-                or not application_id
-                or application_id in application_ids
-                or not feature_id
-                or feature_id in feature_ids
-                or not isinstance(target_actor_ids, list)
-                or not target_actor_ids
-                or any(not isinstance(item, str) or not item.strip() for item in target_actor_ids)
-                or len(target_actor_ids) != len({str(item).strip() for item in target_actor_ids})
-                or not source_excerpt
-                or not expression
-                or not isinstance(trigger_facts, dict)
-                or not trigger_facts
-                or not decision
-                or not reason
-            ):
-                raise CombatEngineError(
-                    f"source conditional extra-damage ruling {index} is incomplete"
-                )
-            normalized_target_actor_ids = [str(item).strip() for item in target_actor_ids]
-            target_id = str(result.get("target_id") or "").strip()
-            if target_id not in normalized_target_actor_ids:
-                raise CombatEngineError(
-                    "source conditional extra damage does not apply to this target"
-                )
-            for target_actor_id in normalized_target_actor_ids:
-                require_encounter_combatant(
-                    encounter,
-                    target_actor_id,
-                    role="source conditional extra-damage target",
-                )
-            requires_advantage = trigger_facts.get("requires_attack_advantage")
-            if requires_advantage is not None and not isinstance(requires_advantage, bool):
-                raise CombatEngineError("requires_attack_advantage trigger fact must be a boolean")
-            if requires_advantage and (
-                not bool(result.get("advantage")) or bool(result.get("disadvantage"))
-            ):
-                raise CombatEngineError(
-                    "source conditional extra damage requires this attack to have advantage"
-                )
-            applicability_mode = str(trigger_facts.get("applicability_mode") or "").strip()
-            if applicability_mode:
-                if applicability_mode != (
-                    "attack_advantage_or_target_adjacent_to_ally_without_disadvantage"
-                ):
-                    raise CombatEngineError(
-                        "source conditional extra damage has an unsupported applicability mode"
-                    )
-                applicability_branch = str(trigger_facts.get("applicability_branch") or "")
-                if applicability_branch == "attack_advantage":
-                    if (
-                        requires_advantage is not True
-                        or not bool(result.get("advantage"))
-                        or bool(result.get("disadvantage"))
-                    ):
-                        raise CombatEngineError(
-                            "source conditional extra damage advantage branch "
-                            "conflicts with this attack"
-                        )
-                elif applicability_branch == "adjacent_ally":
-                    qualifying_ally_actor_ids = trigger_facts.get("qualifying_ally_actor_ids")
-                    if (
-                        trigger_facts.get("requires_no_attack_disadvantage") is not True
-                        or trigger_facts.get("target_adjacent_to_nonincapacitated_ally") is not True
-                        or bool(result.get("disadvantage"))
-                        or not isinstance(qualifying_ally_actor_ids, list)
-                        or not qualifying_ally_actor_ids
-                        or any(
-                            not isinstance(item, str) or not item.strip()
-                            for item in qualifying_ally_actor_ids
-                        )
-                        or len(qualifying_ally_actor_ids)
-                        != len({str(item).strip() for item in qualifying_ally_actor_ids})
-                    ):
-                        raise CombatEngineError(
-                            "source conditional extra damage adjacent-ally branch is incomplete"
-                        )
-                    attacker_combatant = require_encounter_combatant(
-                        encounter,
-                        str(result.get("attacker_id") or ""),
-                        role="source conditional extra-damage attacker",
-                    )
-                    target_combatant = require_encounter_combatant(
-                        encounter,
-                        str(result.get("target_id") or ""),
-                        role="source conditional extra-damage target",
-                    )
-                    for ally_actor_id in qualifying_ally_actor_ids:
-                        ally = require_encounter_combatant(
-                            encounter,
-                            str(ally_actor_id).strip(),
-                            role="source conditional extra-damage qualifying ally",
-                        )
-                        if (
-                            str(ally.get("actor_id") or "")
-                            in {
-                                str(result.get("attacker_id") or ""),
-                                str(result.get("target_id") or ""),
-                            }
-                            or ally.get("disposition") != attacker_combatant.get("disposition")
-                            or ally.get("departed") is not None
-                            or INCAPACITATING_STATE_IDS
-                            & {
-                                str(condition).strip().casefold()
-                                for condition in ally.get("conditions", [])
-                            }
-                            or combat_distance(
-                                ally.get("position"),
-                                target_combatant.get("position"),
-                            )
-                            not in {0, 5}
-                        ):
-                            raise CombatEngineError(
-                                "source conditional extra damage qualifying "
-                                "ally conflicts with current combat state"
-                            )
-                else:
-                    raise CombatEngineError(
-                        "source conditional extra damage requires one settled applicability branch"
-                    )
-            max_per_turn = trigger_facts.get("max_applications_per_turn")
-            if max_per_turn is not None and (
-                isinstance(max_per_turn, bool)
-                or not isinstance(max_per_turn, int)
-                or max_per_turn < 1
-            ):
-                raise CombatEngineError(
-                    "max_applications_per_turn trigger fact must be a positive integer"
-                )
-            if max_per_turn is not None:
-                current = current_combatant(encounter)
-                if current is None:
-                    raise CombatEngineError(
-                        "per-turn source conditional extra damage requires an active turn"
-                    )
-                turn_token = (
-                    f"{int(encounter.get('round', 1) or 1)}:"
-                    f"{int(encounter.get('turn_index', 0) or 0)}:"
-                    f"{str(current.get('actor_id') or '')}"
-                )
-                attacker_combatant = next(
-                    (
-                        item
-                        for item in encounter.get("combatants", [])
-                        if str(item.get("actor_id") or "") == str(plan.get("attacker_id") or "")
-                    ),
-                    None,
-                )
-                if attacker_combatant is None:
-                    raise CombatEngineError(
-                        "source conditional extra-damage attacker is absent from combat"
-                    )
-                usage = dict(
-                    dict(attacker_combatant.get("turn_flags") or {}).get(
-                        "agent_extra_damage_applications"
-                    )
-                    or {}
-                )
-                feature_usage = dict(usage.get(feature_id) or {})
-                used = (
-                    int(feature_usage.get("count", 0) or 0)
-                    if feature_usage.get("turn_token") == turn_token
-                    else 0
-                )
-                if used >= max_per_turn:
-                    raise CombatEngineError(
-                        "source conditional extra damage has reached its per-turn limit"
-                    )
-            feature = next(
-                (item for item in features if str(item.get("id") or "") == feature_id),
-                None,
-            )
-            if feature is None:
-                raise CombatEngineError(
-                    "source conditional extra-damage feature is absent from the attacker card"
-                )
-            resolution_plan = dict(feature.get("resolution_plan") or {})
-            direct_agent_ruling = source_card_has_direct_agent_ruling(feature)
-            if resolution_plan and (
-                resolution_plan.get("schema_version") != 2
-                or resolution_plan.get("source_card_id") != feature_id
-                or resolution_plan.get("source_card_kind") not in {"feature", "trait"}
-                or resolution_plan.get("trigger") != "attack.after_hit"
-                or not solution_plan_fingerprint
-                or resolution_plan.get("fingerprint") != solution_plan_fingerprint
-            ):
-                raise CombatEngineError(
-                    "source conditional extra damage does not match its build-time attack plan"
-                )
-            if not resolution_plan and not direct_agent_ruling:
-                raise CombatEngineError(
-                    "source conditional extra damage requires a build-time "
-                    "source-bound plan or Agent ruling"
-                )
-            if resolution_plan and not any(
-                isinstance(step, dict)
-                and step.get("op") == "damage.apply"
-                and "".join(
-                    str(dict(step.get("args") or {}).get("expression") or "").split()
-                ).casefold()
-                == "".join(expression.split()).casefold()
-                for step in resolution_plan.get("steps") or []
-            ):
-                raise CombatEngineError(
-                    "source conditional extra damage is absent from its build-time attack plan"
-                )
-            manual_ruling = dict(dict(feature.get("choices") or {}).get("manual_ruling") or {})
-            direct_requirement = next(
-                (
-                    requirement
-                    for requirement in feature.get("ruling_requirements") or []
-                    if isinstance(requirement, dict)
-                    and requirement.get("default_resolver") == "agent"
-                    and str(requirement.get("source_excerpt") or "").strip()
-                ),
-                {},
-            )
-            recorded_excerpt = str(
-                manual_ruling.get("source_excerpt")
-                or direct_requirement.get("source_excerpt")
-                or ""
-            ).strip()
 
-            def compact(value: Any) -> str:
-                return " ".join(str(value).split()).casefold()
-
-            if (
-                not direct_agent_ruling
-                or compact(source_excerpt) != compact(recorded_excerpt)
-                or compact(source_excerpt) != compact(feature.get("description") or "")
-            ):
-                raise CombatEngineError(
-                    "source conditional extra-damage excerpt is not the exact "
-                    "Agent-owned passive on the attacker card"
-                )
-            compact_expression = "".join(expression.split()).casefold()
-            compact_excerpt = "".join(source_excerpt.split()).casefold()
-            if (
-                not compact_expression
-                or re.search(
-                    rf"(?<![a-z0-9_]){re.escape(compact_expression)}(?![a-z0-9_])",
-                    compact_excerpt,
-                )
-                is None
-            ):
-                raise CombatEngineError(
-                    "source conditional extra-damage expression is absent from the recorded passive"
-                )
-            resolved_damage_type = (
-                str(result.get("damage_type") or "").strip().casefold()
-                if damage_type == "weapon"
-                else damage_type
-            )
-            if not resolved_damage_type:
-                raise CombatEngineError(
-                    "source conditional extra damage requires a recorded damage type"
-                )
-            if (
-                damage_type != "weapon"
-                and re.search(
-                    rf"\b{re.escape(damage_type)}\b",
-                    compact(source_excerpt),
-                )
-                is None
-            ):
-                raise CombatEngineError(
-                    "source conditional extra-damage type is absent from the "
-                    "recorded passive; use damage_type='weapon' for the attack's type"
-                )
-            application_ids.add(application_id)
-            feature_ids.add(feature_id)
-            additional_damage.append(
-                {
-                    "damage_expression": expression,
-                    "damage_type": resolved_damage_type,
-                    "source": f"agent-ruling:{application_id}",
-                }
-            )
-            normalized_rulings.append(
-                {
-                    **deepcopy(raw),
-                    "target_actor_ids": normalized_target_actor_ids,
-                    "damage_type": resolved_damage_type,
-                }
-            )
-
-        result["additional_damage"] = additional_damage
-        result["rulings"] = normalized_rulings
-        return result
-
-    def record_agent_attack_ruling_uses(
-        encounter: dict[str, Any],
-        *,
-        attacker_id: str,
-        plan: dict[str, Any],
-        result: dict[str, Any],
-    ) -> None:
-        """Record successful generic Agent rider use in the attacker's turn budget."""
-
-        if result.get("hit") is not True:
-            return
-        rulings = [
-            dict(item)
-            for item in plan.get("rulings") or []
-            if isinstance(item, dict) and item.get("kind") == "source_conditional_extra_damage"
-        ]
-        limited = [
-            item
-            for item in rulings
-            if dict(item.get("trigger_facts") or {}).get("max_applications_per_turn") is not None
-        ]
-        if not limited:
-            return
-        combatant = next(
-            (
-                item
-                for item in encounter.get("combatants", [])
-                if str(item.get("actor_id") or "") == attacker_id
-            ),
-            None,
-        )
-        if combatant is None:
-            raise CombatEngineError(
-                "source conditional extra-damage attacker is absent from combat"
-            )
-        flags = dict(combatant.get("turn_flags") or {})
-        usage = dict(flags.get("agent_extra_damage_applications") or {})
-        current = current_combatant(encounter)
-        if current is None:
-            raise CombatEngineError("source conditional extra-damage use has no active turn")
-        turn_token = (
-            f"{int(encounter.get('round', 1) or 1)}:"
-            f"{int(encounter.get('turn_index', 0) or 0)}:"
-            f"{str(current.get('actor_id') or '')}"
-        )
-        for ruling in limited:
-            feature_id = str(ruling.get("feature_id") or "")
-            previous = dict(usage.get(feature_id) or {})
-            count = (
-                int(previous.get("count", 0) or 0)
-                if previous.get("turn_token") == turn_token
-                else 0
-            )
-            usage[feature_id] = {
-                "turn_token": turn_token,
-                "count": count + 1,
-            }
-        flags["agent_extra_damage_applications"] = usage
-        combatant["turn_flags"] = flags
-
-    def add_standard_death_trigger_window(
-        encounter: dict[str, Any],
-        *,
-        source_actor_id: str,
-        sheet: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        """Open one engine-owned area-save window for a standard death trigger."""
-
-        trigger = standard_death_trigger_for_sheet(sheet)
-        if trigger is None:
-            return None
-        if any(
-            isinstance(item, dict)
-            and item.get("status", "pending") == "pending"
-            and item.get("trigger") == "standard_death_burst"
-            and str(item.get("source_actor_id") or "") == source_actor_id
-            for item in encounter.get("pending", [])
-        ):
-            raise CombatEngineError("this standard Death Burst already has a pending resolution")
-        source = require_encounter_combatant(
-            encounter,
-            source_actor_id,
-            role="standard death-trigger source",
-        )
-        source_position = source.get("position")
-        if combat_coordinates(source_position) is None:
-            raise NeedsRulingError(
-                "standard Death Burst requires the source's combat position",
-                missing=("death_burst_source_position",),
-                ruling_kind="source_or_scene_fact",
-            )
-        battle_map = dict(encounter.get("battle_map") or {})
-        cell_ft = int(dict(battle_map.get("grid") or {}).get("cell_ft", 5) or 5)
-        targets: list[str] = []
-        for combatant in encounter.get("combatants", []):
-            target_id = str(combatant.get("actor_id") or "")
-            if target_id == source_actor_id or "dead" in {
-                str(item).strip().casefold() for item in combatant.get("conditions", [])
-            }:
-                continue
-            target_position = combatant.get("position")
-            if combat_coordinates(target_position) is None:
-                raise NeedsRulingError(
-                    "standard Death Burst requires every living combatant's position",
-                    missing=(f"death_burst_target_position:{target_id}",),
-                    ruling_kind="source_or_scene_fact",
-                )
-            distance = combat_distance(
-                source_position,
-                target_position,
-                cell_ft=cell_ft,
-            )
-            if distance is not None and distance <= int(trigger["range_ft"]):
-                targets.append(target_id)
-        next_encounter = add_choice_window(
-            encounter,
-            kind="save",
-            actor_id_value=source_actor_id,
-            event="creature.death.standard_trigger",
-            candidates=[
-                {
-                    "id": "resolve",
-                    "name": "Resolve the standard Death Burst",
-                }
-            ],
-        )
-        window = next_encounter["pending"][-1]
-        window.update(
-            trigger="standard_death_burst",
-            source_actor_id=source_actor_id,
-            target_ids=targets,
-            standard_trigger=deepcopy(trigger),
-            environment_ruling_required={
-                "default_resolver": "agent",
-                "ruling_kind": "source_or_scene_fact",
-                "question": (
-                    "Which flammable objects in the recorded area are neither worn nor carried?"
-                ),
-                "rule_outcome": "qualifying objects are ignited",
-                "source_excerpt": str(trigger["source_excerpt"]),
-            },
-        )
-        encounter["pending"] = next_encounter["pending"]
-        encounter["log"] = [
-            *list(encounter.get("log") or []),
-            {
-                "type": "standard_death_trigger",
-                "source_actor_id": source_actor_id,
-                "choice_id": str(window["id"]),
-                "target_ids": targets,
-                "mechanic_id": str(trigger["mechanic_id"]),
-            },
-        ][-100:]
-        return window
-
-    def record_standard_weapon_ongoing_effect(
-        encounter: dict[str, Any],
-        *,
-        attacker_id: str,
-        target_id: str,
-        weapon_id: str,
-        attack_result: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        """Persist one non-stacking standard on-hit ongoing effect."""
-
-        structured = dict(attack_result.get("structured_on_hit") or {})
-        effect_contract = dict(structured.get("ongoing_effect") or {})
-        if (
-            attack_result.get("hit") is not True
-            or structured.get("kind") != "ignition_ongoing_damage"
-            or effect_contract.get("kind") != "source_ongoing_damage"
-            or effect_contract.get("mechanic_id") != "dnd5e.core.monster.ignition_ongoing_damage"
-        ):
-            return None
-        existing = next(
-            (
-                item
-                for item in encounter.get("ongoing_effects", [])
-                if isinstance(item, dict)
-                and item.get("active", True)
-                and item.get("mechanic_id") == "dnd5e.core.monster.ignition_ongoing_damage"
-                and str(item.get("target_id") or "") == target_id
-            ),
-            None,
-        )
-        if existing is None:
-            existing = {
-                **deepcopy(effect_contract),
-                "id": f"standard-ignition-{uuid4().hex}",
-                "source_actor_id": attacker_id,
-                "target_id": target_id,
-                "weapon_id": weapon_id,
-                "started_round": int(encounter.get("round", 1) or 1),
-            }
-            encounter["ongoing_effects"] = [
-                *list(encounter.get("ongoing_effects") or []),
-                existing,
-            ]
-            event_type = "standard_ignition_started"
-        else:
-            existing.update(
-                source_actor_id=attacker_id,
-                weapon_id=weapon_id,
-                source_excerpt=str(effect_contract["source_excerpt"]),
-            )
-            existing.pop("last_resolution_turn_token", None)
-            event_type = "standard_ignition_refreshed"
-        encounter["log"] = [
-            *list(encounter.get("log") or []),
-            {
-                "type": event_type,
-                "effect_id": str(existing["id"]),
-                "source_actor_id": attacker_id,
-                "target_id": target_id,
-                "weapon_id": weapon_id,
-            },
-        ][-100:]
-        return deepcopy(existing)
 
     def sync_combatant_conditions(
         encounter: dict[str, Any], actor_id: str, sheet: dict[str, Any]
     ) -> None:
         for combatant in encounter.get("combatants", []):
             if combatant.get("actor_id") == actor_id:
-                before_conditions = {
-                    str(item).strip().casefold() for item in combatant.get("conditions", [])
-                }
-                body_thief = dict(combatant.get("body_thief_host") or {})
-                hp = int(dict(dict(sheet.get("combat") or {}).get("hp") or {}).get("value", 0) or 0)
-                if body_thief and hp <= 0:
-                    source_actor_id = str(body_thief.get("source_actor_id") or "")
-                    source_combatant = next(
-                        (
-                            item
-                            for item in encounter.get("combatants", [])
-                            if str(item.get("actor_id") or "") == source_actor_id
-                        ),
-                        None,
-                    )
-                    if source_combatant is None:
-                        raise CombatEngineError("Body Thief source combatant is missing")
-                    origin = dict(combatant.get("position") or {})
-                    battle_map = dict(encounter.get("battle_map") or {})
-                    width = int(battle_map.get("width", 0) or 0)
-                    height = int(battle_map.get("height", 0) or 0)
-                    blocked = {
-                        (int(item["x"]), int(item["y"]))
-                        for item in battle_map.get("blocked_cells", [])
-                        if isinstance(item, dict) and set(item) >= {"x", "y"}
-                    }
-                    occupied = {
-                        (
-                            int(dict(item.get("position") or {})["x"]),
-                            int(dict(item.get("position") or {})["y"]),
-                        )
-                        for item in encounter.get("combatants", [])
-                        if str(item.get("actor_id") or "") not in {source_actor_id, actor_id}
-                        and set(dict(item.get("position") or {})) == {"x", "y"}
-                        and "dead"
-                        not in {str(value).casefold() for value in item.get("conditions", [])}
-                    }
-                    candidates = sorted(
-                        (
-                            {"x": int(origin["x"]) + dx, "y": int(origin["y"]) + dy}
-                            for dx, dy in (
-                                (-1, -1),
-                                (-1, 0),
-                                (-1, 1),
-                                (0, -1),
-                                (0, 1),
-                                (1, -1),
-                                (1, 0),
-                                (1, 1),
-                            )
-                            if set(origin) == {"x", "y"}
-                        ),
-                        key=lambda item: (item["y"], item["x"]),
-                    )
-                    destination = next(
-                        (
-                            item
-                            for item in candidates
-                            if (not width or 0 <= item["x"] < width)
-                            and (not height or 0 <= item["y"] < height)
-                            and (item["x"], item["y"]) not in blocked
-                            and (item["x"], item["y"]) not in occupied
-                        ),
-                        None,
-                    )
-                    if destination is None:
-                        raise NeedsRulingError(
-                            "Body Thief must leave a zero-HP host but has no "
-                            "recorded unoccupied adjacent space",
-                            missing=("body_thief_ejection_space",),
-                        )
-                    source_combatant["position"] = destination
-                    source_combatant.pop("inside_host", None)
-                    source_combatant["hidden"] = False
-                    source_combatant.pop("visible_to_actor_ids", None)
-                    combatant["disposition"] = body_thief["original_disposition"]
-                    combatant["death_saves"] = bool(body_thief.get("original_death_saves", False))
-                    combatant["zero_hp_recovery"] = bool(
-                        body_thief.get("original_zero_hp_recovery", False)
-                    )
-                    combatant.pop("controlled_by_actor_id", None)
-                    combatant.pop("body_thief_host", None)
-                    for effect in sheet.get("effects", []):
-                        if effect.get("active") and str(effect.get("id") or "") == str(
-                            body_thief.get("effect_instance_id") or ""
-                        ):
-                            effect["active"] = False
-                            effect["ended_reason"] = "host_zero_hit_points"
-                    for condition in ("unconscious", "stable", "stunned", "incapacitated"):
-                        apply_condition_change(sheet, condition_id=condition, add=False)
-                    apply_condition_change(sheet, condition_id="dead", add=True)
-                    encounter["log"] = [
-                        *list(encounter.get("log") or []),
-                        {
-                            "type": "body_thief_ejected",
-                            "source_actor_id": source_actor_id,
-                            "host_actor_id": actor_id,
-                            "reason": "host_zero_hit_points",
-                            "destination": destination,
-                        },
-                    ][-100:]
                 combatant["conditions"] = list(sheet.get("conditions") or [])
                 combatant["condition_sources"] = timed_condition_sources(sheet)
                 combatant["speed_multiplier"] = source_speed_multiplier(sheet)
@@ -9669,124 +8854,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     actor_id,
                     sheet,
                 )
-                after_conditions = {
-                    str(item).strip().casefold() for item in combatant.get("conditions", [])
-                }
-                if "dead" not in before_conditions and "dead" in after_conditions:
-                    add_standard_death_trigger_window(
-                        encounter,
-                        source_actor_id=actor_id,
-                        sheet=sheet,
-                    )
                 return
 
     def combatant_zero_hp_buffered(combatant: dict[str, Any]) -> bool:
         return bool(combatant.get("death_saves", False) or combatant.get("zero_hp_recovery", False))
 
-    def source_regeneration_trait(character: Any, raw: dict[str, Any]) -> dict[str, Any]:
-        allowed = {"kind", "feature_id", "source_excerpt"}
-        unknown = set(raw) - allowed
-        if unknown:
-            raise ValueError(f"unsupported source trait fields: {sorted(unknown)}")
-        if str(raw.get("kind") or "").strip().casefold() != "regeneration":
-            raise ValueError("only a source-recorded regeneration trait is supported")
-        feature_id = str(raw.get("feature_id") or "").strip()
-        excerpt = str(raw.get("source_excerpt") or "").strip()
-        feature = next(
-            (
-                item
-                for item in dict(character.sheet.get("content") or {}).get("features", [])
-                if str(item.get("id") or "") == feature_id
-                and str(item.get("name") or "").strip().casefold() == "regeneration"
-            ),
-            None,
-        )
-        if feature is None:
-            raise ValueError("source regeneration feature_id is not recorded on the actor card")
-        description = str(feature.get("description") or "").strip()
-        if not excerpt or " ".join(excerpt.split()) not in " ".join(description.split()):
-            raise ValueError("source regeneration excerpt is not contained in the recorded feature")
-        structured = dict(dict(feature.get("choices") or {}).get("source_trait") or {})
-        if structured:
-            amount = structured.get("amount")
-            damage_types = structured.get("suppressed_by_damage_types")
-            valid_structured = (
-                structured.get("kind") == "regeneration"
-                and structured.get("trigger") == "turn_start"
-                and isinstance(amount, int)
-                and not isinstance(amount, bool)
-                and amount > 0
-                and isinstance(damage_types, list)
-                and damage_types
-                and all(str(item).strip() for item in damage_types)
-                and structured.get("dies_at_zero_when_suppressed") is True
-            )
-            if not valid_structured:
-                raise ValueError("recorded regeneration source trait is malformed")
-            suppressed_by = [str(item).strip().casefold() for item in damage_types]
-        else:
-            amount_match = re.search(
-                r"(?i)\bregains\s+(\d+)\s+hit points at the start of "
-                r"(?:its|his|her|their)\s+turn\b",
-                description,
-            )
-            suppression_match = re.search(
-                r"(?i)\btakes\s+([a-z]+(?:\s+or\s+[a-z]+)+)\s+damage,\s+"
-                r"this trait doesn't function at the start of "
-                r"(?:(?:its|his|her|their)|the\s+[a-z][a-z '\-]*'s)\s+"
-                r"next turn\b",
-                description,
-            )
-            death_match = re.search(
-                r"(?i)\bdies only if (?:it|he|she|they) starts? "
-                r"(?:its|his|her|their)\s+turn with 0 hit points and "
-                r"doesn't regenerate\b",
-                description,
-            )
-            if not amount_match or not suppression_match or not death_match:
-                raise ValueError("recorded regeneration text is not mechanically complete")
-            amount = int(amount_match.group(1))
-            suppressed_by = [
-                item.strip().casefold()
-                for item in re.split(r"\s+or\s+", suppression_match.group(1))
-                if item.strip()
-            ]
-        if len(suppressed_by) != len(set(suppressed_by)):
-            raise ValueError("regeneration suppression damage types must be unique")
-        return {
-            "kind": "regeneration",
-            "actor_id": str(character.id),
-            "feature_id": feature_id,
-            "amount": int(amount),
-            "suppressed_by_damage_types": suppressed_by,
-            "suppressed_at_next_turn": False,
-            "source_excerpt": excerpt,
-            "active": True,
-        }
 
     def source_participant_rules(
         campaign_id: str,
         scene_id: str | None,
         character: Any,
         config_entry: dict[str, Any],
-        *,
-        existing_traits: list[dict[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
-        """Normalize source rules identically for initial and joining combatants."""
+        """Normalize scene-authored conditions for initial and joining combatants."""
 
         actor_id_value = str(character.id)
-        trait_records: list[dict[str, Any]] = []
-        prior_traits = list(existing_traits or [])
-        for raw_trait in config_entry.get("source_traits") or []:
-            trait = source_regeneration_trait(character, raw_trait)
-            if any(
-                str(item.get("actor_id") or "") == actor_id_value
-                and str(item.get("feature_id") or "") == trait["feature_id"]
-                for item in [*prior_traits, *trait_records]
-            ):
-                raise ValueError("source traits must identify unique actor feature records")
-            trait_records.append(trait)
-
         condition_records: list[dict[str, Any]] = []
         sheet = deepcopy(character.sheet)
         for raw_condition in config_entry.get("source_conditions") or []:
@@ -9847,88 +8929,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 }
             )
         return (
-            trait_records,
+            [],
             condition_records,
             sheet if sheet != character.sheet else None,
         )
 
-    def source_attachment_effect(effect: str) -> dict[str, Any]:
-        attach_match = re.search(r"(?i)\battaches to the target\b", effect)
-        drain_match = re.search(
-            r"(?i)\bat the start of each of the [^.!?]+ turns,\s+"
-            r"the target loses\s+\d+\s+\(([^)]+)\)\s+hit points\b",
-            effect,
-        )
-        movement_match = re.search(
-            r"(?i)\bdetach itself by spending\s+(\d+)\s+feet of its movement\b",
-            effect,
-        )
-        threshold_match = re.search(
-            r"(?i)\bafter it drains\s+(\d+)\s+hit points of blood from the target "
-            r"or the target dies\b",
-            effect,
-        )
-        action_match = re.search(
-            r"(?i)\ba creature,\s+including the target,\s+can use its action "
-            r"to detach the [^.!?]+\b",
-            effect,
-        )
-        if not all(
-            (
-                attach_match,
-                drain_match,
-                movement_match,
-                threshold_match,
-                action_match,
-            )
-        ):
-            raise CombatEngineError("the reviewed attachment effect is not mechanically complete")
-        formula = str(drain_match.group(1)).replace(" ", "")
-        if re.fullmatch(r"\d+d\d+(?:[+\-]\d+)?", formula, re.IGNORECASE) is None:
-            raise CombatEngineError("attachment drain formula is unsupported")
-        return {
-            "drain_formula": formula,
-            "self_detach_movement_ft": int(movement_match.group(1)),
-            "detach_after_hit_point_loss": int(threshold_match.group(1)),
-            "other_creature_detach_action": True,
-        }
 
-    def add_critical_followup_window(
-        encounter: dict[str, Any],
-        *,
-        result: dict[str, Any],
-        attacker_id: str,
-        target_id: str,
-        weapon_id: str,
-    ) -> dict[str, Any] | None:
-        followup = dict(result.get("critical_followup") or {})
-        if not followup.get("requires_dm_ruling"):
-            return None
-        next_value = add_choice_window(
-            encounter,
-            kind="ruling",
-            actor_id_value=target_id,
-            event="attack.critical.anatomical_loss",
-            candidates=[
-                {
-                    "id": "critical_followup",
-                    "name": "Record the source-authored anatomical loss",
-                }
-            ],
-        )
-        encounter.clear()
-        encounter.update(next_value)
-        window = encounter["pending"][-1]
-        window.update(
-            trigger="critical_body_part_loss",
-            attacker_id=attacker_id,
-            target_id=target_id,
-            weapon_id=weapon_id,
-            effect=str(followup.get("source_excerpt") or ""),
-            critical_followup=followup,
-        )
-        result["pending_on_hit_ruling_id"] = window["id"]
-        return window
 
     def add_attack_on_hit_window(
         encounter: dict[str, Any],
@@ -9942,64 +8948,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         effect = str(on_hit_ruling.get("effect") or "").strip()
         if not result.get("hit") or not effect:
             return None
-        next_attack_advantage = (
-            re.search(
-                r"(?i)\bthe next attack against the target before the end of "
-                r"the caster's next turn has advantage\b",
-                effect,
-            )
-            is not None
-        )
-        attachment = re.search(r"(?i)\battaches to the target\b", effect) is not None
         next_value = add_choice_window(
             encounter,
             kind="ruling",
             actor_id_value=target_id,
             event="attack.on_hit.effect",
             candidates=[
-                *(
-                    [
-                        {
-                            "id": "next_attack_advantage",
-                            "name": "Grant advantage to the next attack",
-                        }
-                    ]
-                    if next_attack_advantage
-                    else []
-                ),
-                *(
-                    [
-                        {
-                            "id": "attachment",
-                            "name": "Apply a structured attachment",
-                        }
-                    ]
-                    if attachment
-                    else []
-                ),
                 {
-                    "id": "apply_condition",
-                    "name": "Apply a structured condition",
-                },
-                {
-                    "id": "saving_throw_condition",
-                    "name": "Resolve a saving throw and condition",
-                },
-                {
-                    "id": "saving_throw_damage",
-                    "name": "Resolve a saving throw and damage",
-                },
-                {
-                    "id": "direct_damage",
-                    "name": "Apply reviewed direct damage",
-                },
-                {
-                    "id": "conditional_extra_damage",
-                    "name": "Adjudicate source-conditional extra damage",
+                    "id": "execute_plan",
+                    "name": "Compile, persist, and execute a source-bound plan",
                 },
                 {
                     "id": "dismiss",
-                    "name": "No structured condition applies",
+                    "name": "Agent confirms that no structured effect applies",
                 },
             ],
         )
@@ -10016,78 +8977,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         result["pending_on_hit_ruling_id"] = window["id"]
         return window
 
-    def record_source_trait_damage(
-        encounter: dict[str, Any],
-        *,
-        target_id: str,
-        damage: dict[str, Any] | None,
-    ) -> list[str]:
-        if not isinstance(damage, dict) or int(damage.get("applied_amount", 0) or 0) <= 0:
-            return []
-        parts = [
-            item
-            for item in damage.get("parts") or damage.get("roll_parts") or []
-            if isinstance(item, dict)
-            and int(item.get("applied_amount", item.get("amount", 0)) or 0) > 0
-        ]
-        damage_types = {
-            str(item.get("damage_type") or "").strip().casefold()
-            for item in parts
-            if str(item.get("damage_type") or "").strip()
-        }
-        if not damage_types:
-            damage_type = str(damage.get("damage_type") or "").strip().casefold()
-            if damage_type and damage_type != "mixed":
-                damage_types.add(damage_type)
-        suppressed: list[str] = []
-        for trait in encounter.get("source_traits", []):
-            if (
-                isinstance(trait, dict)
-                and trait.get("active", True)
-                and trait.get("kind") == "regeneration"
-                and str(trait.get("actor_id") or "") == target_id
-                and damage_types
-                & {str(item).casefold() for item in trait.get("suppressed_by_damage_types") or []}
-            ):
-                trait["suppressed_at_next_turn"] = True
-                trait["last_suppressing_damage_types"] = sorted(
-                    damage_types
-                    & {
-                        str(item).casefold()
-                        for item in trait.get("suppressed_by_damage_types") or []
-                    }
-                )
-                suppressed.append(str(trait.get("feature_id") or ""))
-        return suppressed
 
-    def reconcile_source_attachments(
-        encounter: dict[str, Any],
-        *,
-        actor_id: str,
-        sheet: dict[str, Any],
-    ) -> list[str]:
-        hp = int(dict(dict(sheet.get("combat") or {}).get("hp") or {}).get("value", 0) or 0)
-        conditions = {str(item).strip().casefold() for item in sheet.get("conditions", [])}
-        ended: list[str] = []
-        for effect in encounter.get("ongoing_effects", []):
-            if (
-                not isinstance(effect, dict)
-                or not effect.get("active", True)
-                or effect.get("kind") != "attachment"
-            ):
-                continue
-            reason = ""
-            if str(effect.get("source_actor_id") or "") == actor_id and (
-                hp <= 0 or "dead" in conditions
-            ):
-                reason = "source_incapacitated"
-            elif str(effect.get("target_id") or "") == actor_id and "dead" in conditions:
-                reason = "target_dead"
-            if reason:
-                effect["active"] = False
-                effect["ended_reason"] = reason
-                ended.append(str(effect.get("id") or ""))
-        return ended
 
     def encounter_turn_token(encounter: dict[str, Any]) -> str:
         current = current_combatant(encounter)
@@ -10097,225 +8987,135 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             f"{str((current or {}).get('actor_id') or '')}"
         )
 
-    def settle_source_ongoing_damage(
+
+    def apply_standard_spell_on_hit_mechanics(
         encounter: dict[str, Any],
         *,
-        actor_id: str,
-        sheets: dict[str, dict[str, Any]],
-        trigger_timing: str,
-        next_revision: int,
+        result: dict[str, Any],
+        attacker_id: str,
+        target_id: str,
     ) -> list[dict[str, Any]]:
-        """Settle each recorded standard/source ongoing damage effect once per turn."""
+        """Commit locked standard-spell effects without interpreting source prose."""
 
-        if trigger_timing not in {"turn_start", "turn_end"}:
-            raise CombatEngineError("source ongoing-damage timing is unsupported")
-        turn_token = encounter_turn_token(encounter)
-        settlements: list[dict[str, Any]] = []
-        for effect in encounter.get("ongoing_effects", []):
+        mechanics = list(result.pop("standard_on_hit_mechanics", []) or [])
+        if not result.get("hit") or not mechanics:
+            return []
+        allowed = {
+            "next_attack_advantage_until_source_turn_end",
+            "healing_prevention_until_source_turn_start",
+            "healing_prevention_until_source_turn_end",
+            "undead_attack_disadvantage_against_source_until_source_turn_start",
+        }
+        unknown = set(mechanics) - allowed
+        if unknown:
+            raise CombatEngineError(
+                f"unsupported locked standard spell on-hit mechanics: {sorted(unknown)}"
+            )
+        target_sheet = combat_actor_snapshot(target_id)["sheet"]
+        creature_type = str(
+            dict(target_sheet.get("progression") or {}).get("species") or ""
+        ).casefold()
+        activated_turn_token = encounter_turn_token(encounter)
+        committed: list[dict[str, Any]] = []
+        for mechanic in mechanics:
             if (
-                not isinstance(effect, dict)
-                or not effect.get("active", True)
-                or effect.get("kind") != "source_ongoing_damage"
-                or str(effect.get("target_id") or "") != actor_id
-                or effect.get("trigger_timing") != trigger_timing
-                or effect.get("last_resolution_turn_token") == turn_token
+                mechanic
+                == "undead_attack_disadvantage_against_source_until_source_turn_start"
+                and "undead" not in creature_type
             ):
                 continue
-            combatant = require_encounter_combatant(
-                encounter,
-                actor_id,
-                role="source ongoing-damage target",
-            )
-            if "dead" in {str(item).strip().casefold() for item in combatant.get("conditions", [])}:
-                effect["active"] = False
-                effect["ended_reason"] = "target_dead"
-                continue
-            damage_roll = asdict(roll(str(effect["damage_formula"])))
-            damaged = apply_damage_to_sheet(
-                sheets[actor_id],
-                amount=int(damage_roll["total"]),
-                damage_type=str(effect["damage_type"]),
-                source=str(effect.get("weapon_id") or "source-ongoing-damage"),
-                ruleset=str(encounter.get("ruleset") or "2014"),
-                death_saves=combatant_zero_hp_buffered(combatant),
-            )
-            sheets[actor_id] = damaged["sheet"]
-            effect["last_resolution_turn_token"] = turn_token
-            record_source_trait_damage(
-                encounter,
-                target_id=actor_id,
-                damage=damaged,
-            )
-            add_concentration_window(
-                encounter,
-                actor_id,
-                damaged.get("concentration"),
-                next_revision=next_revision,
-            )
-            sync_combatant_conditions(encounter, actor_id, sheets[actor_id])
-            reconcile_readied_spells(encounter, actor_id, sheets[actor_id])
-            reconcile_source_attachments(
-                encounter,
-                actor_id=actor_id,
-                sheet=sheets[actor_id],
-            )
-            settlement = {
-                "kind": "source_ongoing_damage",
-                "effect_id": str(effect.get("id") or ""),
-                "source_actor_id": str(effect.get("source_actor_id") or ""),
-                "target_id": actor_id,
-                "trigger_timing": trigger_timing,
-                "source_excerpt": str(effect.get("source_excerpt") or ""),
-                "roll": damage_roll,
-                "result": {key: value for key, value in damaged.items() if key != "sheet"},
-            }
-            settlements.append(settlement)
-            encounter["log"] = [
-                *list(encounter.get("log") or []),
-                settlement,
-            ][-100:]
-        return settlements
-
-    def settle_source_start_turn(
-        encounter: dict[str, Any],
-        *,
-        actor_id: str,
-        sheets: dict[str, dict[str, Any]],
-        next_revision: int,
-    ) -> list[dict[str, Any]]:
-        settlements: list[dict[str, Any]] = []
-        for trait in encounter.get("source_traits", []):
-            if (
-                not isinstance(trait, dict)
-                or not trait.get("active", True)
-                or trait.get("kind") != "regeneration"
-                or str(trait.get("actor_id") or "") != actor_id
-            ):
-                continue
-            suppressed = bool(trait.get("suppressed_at_next_turn", False))
-            result = settle_start_turn_regeneration(
-                sheets[actor_id],
-                amount=int(trait["amount"]),
-                suppressed=suppressed,
-            )
-            sheets[actor_id] = result["sheet"]
-            trait["suppressed_at_next_turn"] = False
-            trait["last_resolution"] = {
-                "round": int(encounter.get("round", 1) or 1),
-                "suppressed": suppressed,
-                "amount": int(result["amount"]),
-                "died": bool(result["died"]),
-            }
-            trait.pop("last_suppressing_damage_types", None)
-            settlement = {
-                "kind": "source_regeneration",
-                "actor_id": actor_id,
-                "feature_id": str(trait.get("feature_id") or ""),
-                "source_excerpt": str(trait.get("source_excerpt") or ""),
-                "result": {key: value for key, value in result.items() if key != "sheet"},
-            }
-            settlements.append(settlement)
-            encounter["log"] = [
-                *list(encounter.get("log") or []),
-                settlement,
-            ][-100:]
-            reconcile_source_attachments(
-                encounter,
-                actor_id=actor_id,
-                sheet=sheets[actor_id],
-            )
-
-        settlements.extend(
-            settle_source_ongoing_damage(
-                encounter,
-                actor_id=actor_id,
-                sheets=sheets,
-                trigger_timing="turn_start",
-                next_revision=next_revision,
-            )
-        )
-
-        for effect in encounter.get("ongoing_effects", []):
-            if (
-                not isinstance(effect, dict)
-                or not effect.get("active", True)
-                or effect.get("kind") != "attachment"
-                or str(effect.get("source_actor_id") or "") != actor_id
-            ):
-                continue
-            target_id = str(effect.get("target_id") or "")
-            if target_id not in sheets:
-                raise CombatEngineError("attachment target is not an encounter combatant")
-            target_conditions = {
-                str(item).strip().casefold() for item in sheets[target_id].get("conditions", [])
-            }
-            if "dead" in target_conditions:
-                effect["active"] = False
-                effect["ended_reason"] = "target_dead"
-                continue
-            drain_roll = asdict(roll(str(effect["drain_formula"])))
-            target_combatant = require_encounter_combatant(
-                encounter,
-                target_id,
-                role="attachment target",
-            )
-            drained = apply_hit_point_loss_to_sheet(
-                sheets[target_id],
-                amount=int(drain_roll["total"]),
-                death_saves=bool(target_combatant.get("death_saves", False)),
-                zero_hp_recovery=bool(target_combatant.get("zero_hp_recovery", False)),
-            )
-            sheets[target_id] = drained["sheet"]
-            sync_combatant_conditions(
-                encounter,
-                target_id,
-                sheets[target_id],
-            )
-            effect["drained_hit_points"] = int(effect.get("drained_hit_points", 0) or 0) + int(
-                drained["hit_point_loss"]
-            )
-            target_conditions = {
-                str(item).strip().casefold() for item in sheets[target_id].get("conditions", [])
-            }
-            detach_reason = ""
-            if "dead" in target_conditions:
-                detach_reason = "target_dead"
-            elif int(effect["drained_hit_points"]) >= int(effect["detach_after_hit_point_loss"]):
-                detach_reason = "drain_threshold"
-            if detach_reason:
-                effect["active"] = False
-                effect["ended_reason"] = detach_reason
-                source_combatant = require_encounter_combatant(
-                    encounter,
-                    actor_id,
-                    role="attaching creature",
-                )
-                budget = dict(source_combatant.get("turn_budget") or {})
-                movement_cost = int(effect["self_detach_movement_ft"])
-                budget["movement"] = max(
-                    0,
-                    int(budget.get("movement", 0) or 0) - movement_cost,
-                )
-                source_combatant["turn_budget"] = budget
-            settlement = {
-                "kind": "attachment_drain",
-                "effect_id": str(effect.get("id") or ""),
-                "source_actor_id": actor_id,
+            effect: dict[str, Any] = {
+                "id": f"standard-spell-on-hit-{uuid4().hex}",
+                "mechanic_id": SPELL_RESOLUTION_MECHANIC_ID,
+                "standard_on_hit_mechanic": mechanic,
+                "source_actor_id": attacker_id,
                 "target_id": target_id,
-                "source_excerpt": str(effect.get("source_excerpt") or ""),
-                "roll": drain_roll,
-                "result": {key: value for key, value in drained.items() if key != "sheet"},
-                "drained_hit_points": int(effect["drained_hit_points"]),
-                "detached": bool(detach_reason),
-                "detach_reason": detach_reason,
+                "active": True,
+                "activated_turn_token": activated_turn_token,
             }
-            settlements.append(settlement)
-            encounter["log"] = [
-                *list(encounter.get("log") or []),
-                settlement,
-            ][-100:]
-            reconcile_readied_spells(encounter, target_id, sheets[target_id])
-        return settlements
+            if mechanic == "next_attack_advantage_until_source_turn_end":
+                effect.update(
+                    kind="next_attack_advantage",
+                    expires_on_actor_id=attacker_id,
+                    expires_at="source_turn_end",
+                )
+            elif mechanic.startswith("healing_prevention_until_source_turn_"):
+                effect.update(
+                    kind="healing_prevention",
+                    expires_on_actor_id=attacker_id,
+                    expires_at=(
+                        "source_turn_start"
+                        if mechanic.endswith("_start")
+                        else "source_turn_end"
+                    ),
+                )
+            else:
+                effect.update(
+                    kind="attack_disadvantage_against_source",
+                    protected_actor_id=attacker_id,
+                    expires_on_actor_id=attacker_id,
+                    expires_at="source_turn_start",
+                )
+            encounter.setdefault("ongoing_effects", []).append(effect)
+            committed.append(deepcopy(effect))
+        if committed:
+            result["standard_on_hit_effects"] = committed
+        return committed
+
+
+    def expire_standard_source_turn_effects(
+        encounter: dict[str, Any],
+        *,
+        actor_id: str,
+        phase: Literal["source_turn_start", "source_turn_end"],
+        turn_token: str,
+    ) -> list[str]:
+        expired: list[str] = []
+        for effect in encounter.get("ongoing_effects", []):
+            if (
+                isinstance(effect, dict)
+                and effect.get("active", True)
+                and effect.get("mechanic_id") == SPELL_RESOLUTION_MECHANIC_ID
+                and bool(effect.get("standard_on_hit_mechanic"))
+                and str(effect.get("expires_on_actor_id") or "") == actor_id
+                and effect.get("expires_at") == phase
+                and str(effect.get("activated_turn_token") or "") != turn_token
+            ):
+                effect["active"] = False
+                effect["resolution"] = {
+                    "kind": "duration_expired",
+                    "actor_id": actor_id,
+                    "phase": phase,
+                    "turn_token": turn_token,
+                }
+                expired.append(str(effect.get("id") or ""))
+        return expired
+
+
+    def require_healing_not_prevented(
+        encounter: dict[str, Any] | None,
+        *,
+        target_id: str,
+    ) -> None:
+        if not isinstance(encounter, dict) or not encounter.get("active", False):
+            return
+        blocked = next(
+            (
+                effect
+                for effect in encounter.get("ongoing_effects", [])
+                if isinstance(effect, dict)
+                and effect.get("active", True)
+                and effect.get("kind") == "healing_prevention"
+                and str(effect.get("target_id") or "") == target_id
+            ),
+            None,
+        )
+        if blocked is not None:
+            raise CombatEngineError(
+                "target cannot regain hit points while a locked standard spell effect is active"
+            )
+
+
 
     def consume_next_attack_advantage(
         encounter: dict[str, Any],
@@ -10363,6 +9163,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 isinstance(effect, dict)
                 and effect.get("active", True)
                 and effect.get("kind") == "next_attack_advantage"
+                and not (
+                    effect.get("mechanic_id") == SPELL_RESOLUTION_MECHANIC_ID
+                    and bool(effect.get("standard_on_hit_mechanic"))
+                )
                 and str(effect.get("expires_on_actor_id") or "") == actor_id
                 and ended_round >= int(effect.get("expires_on_round", 0) or 0)
             ):
@@ -10815,76 +9619,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ended_reason=reason,
         )
 
-    def settle_standard_attack_forced_movement(
-        campaign_id: str,
-        encounter: dict[str, Any],
-        attack_result: dict[str, Any],
-        *,
-        attacker_id: str,
-        target_id: str,
-        sheets: dict[str, dict[str, Any]],
-    ) -> set[str]:
-        """Apply an engine-settled weapon movement rider in the same transaction."""
-
-        structured = dict(attack_result.get("structured_on_hit") or {})
-        movement = structured.get("forced_movement")
-        if (
-            attack_result.get("hit") is not True
-            or structured.get("kind") != "contest_pull"
-            or movement is None
-        ):
-            return set()
-        if (
-            not isinstance(movement, dict)
-            or set(movement)
-            != {
-                "source_actor_id",
-                "target_actor_id",
-                "distance_ft",
-                "direction",
-            }
-            or str(movement.get("source_actor_id") or "") != attacker_id
-            or str(movement.get("target_actor_id") or "") != target_id
-            or movement.get("direction") != "toward_source"
-        ):
-            raise CombatEngineError("standard attack forced-movement settlement is invalid")
-        before_movement = deepcopy(encounter)
-        moved = force_move_directly_toward(
-            encounter,
-            source_actor_id=attacker_id,
-            target_actor_id=target_id,
-            distance_ft=int(movement["distance_ft"]),
-        )
-        encounter.clear()
-        encounter.update(moved["encounter"])
-        movement["settlement"] = {
-            key: deepcopy(value) for key, value in moved.items() if key != "encounter"
-        }
-        structured["forced_movement"] = movement
-        attack_result["structured_on_hit"] = structured
-
-        ended_tethers = newly_ended_witch_bolt_tethers(
-            before_movement,
-            encounter,
-        )
-        changed_sheet_ids: set[str] = set()
-        by_caster: dict[str, list[dict[str, Any]]] = {}
-        for tether in ended_tethers:
-            caster_id = str(tether.get("source_actor_id") or "")
-            if not caster_id:
-                raise CombatEngineError("ended Witch Bolt tether has no source actor")
-            by_caster.setdefault(caster_id, []).append(tether)
-        for caster_id, tethers in by_caster.items():
-            if caster_id not in sheets:
-                sheets[caster_id] = deepcopy(require_campaign_actor(campaign_id, caster_id).sheet)
-            ended = end_tether_concentrations(sheets[caster_id], tethers)
-            sheets[caster_id] = ended["sheet"]
-            changed_sheet_ids.add(caster_id)
-        if ended_tethers:
-            movement["settlement"]["ended_witch_bolt_tether_ids"] = [
-                str(item.get("id") or "") for item in ended_tethers
-            ]
-        return changed_sheet_ids
 
     def reconcile_actor_witch_bolt_concentration(
         encounter: dict[str, Any],
@@ -10991,13 +9725,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             target["cover"] = cover
         return target
 
-    def normalize_area_spell_declaration(
+    def normalize_area_declaration(
         encounter: dict[str, Any],
         *,
-        caster_id: str,
-        spell: dict[str, Any],
-        resolution: dict[str, Any],
+        source_id: str,
+        area: dict[str, Any],
         declaration: dict[str, Any] | None,
+        origin_range_ft: int = 0,
     ) -> dict[str, Any]:
         value = dict(declaration or {})
         if set(value) != {"origin", "target_contexts"}:
@@ -11010,34 +9744,33 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         combatants = {
             str(item.get("actor_id") or ""): item for item in encounter.get("combatants", [])
         }
-        caster = combatants.get(caster_id)
-        if caster is None:
-            raise CombatEngineError("spell caster is not in this encounter")
-        caster_position = caster.get("position")
-        if not isinstance(caster_position, dict):
-            raise CombatEngineError("area spell requires a caster position")
-        distance_to_origin = combat_distance(caster_position, origin)
+        source = combatants.get(source_id)
+        if source is None:
+            raise CombatEngineError("area source is not in this encounter")
+        source_position = source.get("position")
+        if not isinstance(source_position, dict):
+            raise CombatEngineError("area resolution requires a source position")
+        distance_to_origin = combat_distance(source_position, origin)
         if distance_to_origin is None:
-            raise CombatEngineError("area spell requires an executable origin")
-        area = dict(dict(resolution.get("targeting") or {}).get("area") or {})
+            raise CombatEngineError("area resolution requires an executable origin")
+        area = dict(area or {})
         shape = str(area.get("shape") or "")
         radius = int(area.get("radius_ft", 0) or 0)
         length = int(area.get("length_ft", 0) or 0)
         width = int(area.get("width_ft", 0) or 0)
         if shape == "sphere":
-            range_ft = int(
-                dict(dict(spell.get("definition") or {}).get("range") or {}).get("normal_ft", 0)
-                or 0
-            )
-            if range_ft <= 0:
+            if origin_range_ft <= 0:
                 raise CombatEngineError("sphere spell requires an executable casting range")
-            if distance_to_origin > range_ft:
+            if distance_to_origin > origin_range_ft:
                 raise CombatEngineError("area spell origin is outside range")
         elif shape == "line":
             if distance_to_origin <= 0 or length <= 0 or width <= 0:
                 raise CombatEngineError("line spell requires a direction, length, and width")
+        elif shape == "cone":
+            if distance_to_origin <= 0 or length <= 0:
+                raise CombatEngineError("cone area requires a direction and length")
         else:
-            raise CombatEngineError("unsupported structured spell area shape")
+            raise CombatEngineError("unsupported structured area shape")
         cell_ft = int(
             dict(dict(encounter.get("battle_map") or {}).get("grid") or {}).get("cell_ft", 5) or 5
         )
@@ -11046,8 +9779,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if shape == "sphere":
                 distance = combat_distance(origin, position)
                 return distance is not None and distance <= radius, float(distance or 0)
-            start_x = float(caster_position["x"])
-            start_y = float(caster_position["y"])
+            start_x = float(source_position["x"])
+            start_y = float(source_position["y"])
             direction_x = float(origin["x"]) - start_x
             direction_y = float(origin["y"]) - start_y
             direction_length = math.hypot(direction_x, direction_y)
@@ -11059,10 +9792,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             projection_ft = projection_cells * cell_ft
             perpendicular_ft = perpendicular_cells * cell_ft
-            return (
-                0 < projection_ft <= length and perpendicular_ft <= width / 2,
-                projection_ft,
+            maximum_half_width = (
+                perpendicular_ft <= width / 2
+                if shape == "line"
+                else perpendicular_ft <= projection_ft / 2
             )
+            return 0 < projection_ft <= length and maximum_half_width, projection_ft
 
         affected: dict[str, dict[str, Any]] = {}
         for target_id, combatant in combatants.items():
@@ -11072,7 +9807,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             position = combatant.get("position")
             if not isinstance(position, dict):
                 raise CombatEngineError(
-                    "area spell cannot enumerate all living combatants without positions"
+                    "area resolution cannot enumerate all living combatants without positions"
                 )
             included, distance = inside_area(position)
             if included:
@@ -11082,7 +9817,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 }
         contexts = value.get("target_contexts")
         if not isinstance(contexts, list):
-            raise CombatEngineError("area spell target_contexts must be a list")
+                raise CombatEngineError("area target_contexts must be a list")
         normalized_contexts: dict[str, str] = {}
         for item in contexts:
             if not isinstance(item, dict) or set(item) != {"target_id", "cover"}:
@@ -11102,7 +9837,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             normalized_contexts[target_id] = cover
         if set(normalized_contexts) != set(affected):
             raise CombatEngineError(
-                "area spell target_contexts must cover every living combatant in the area"
+                "area target_contexts must cover every living combatant in the area"
             )
         for target_id, cover in normalized_contexts.items():
             affected[target_id]["cover"] = cover
@@ -11111,7 +9846,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "origin": {"x": float(origin["x"]), "y": float(origin["y"])},
             "distance_ft": distance_to_origin,
             **({"radius_ft": radius} if shape == "sphere" else {}),
-            **({"length_ft": length, "width_ft": width} if shape == "line" else {}),
+            **(
+                {"length_ft": length, **({"width_ft": width} if shape == "line" else {})}
+                if shape in {"line", "cone"}
+                else {}
+            ),
             "targets": list(affected.values()),
         }
 
@@ -11376,16 +10115,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     death_saves=combatant_zero_hp_buffered(combatant),
                 )
                 sheet = applied["sheet"]
-                record_source_trait_damage(
-                    value,
-                    target_id=target_id,
-                    damage=applied,
-                )
-                reconcile_source_attachments(
-                    value,
-                    actor_id=target_id,
-                    sheet=sheet,
-                )
                 concentration = applied.get("concentration")
                 if concentration:
                     concentration_windows.append(
@@ -14618,6 +13347,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         edition = campaign_rules_edition(campaign.id)
         expression = healing_potion_formula(item, edition=edition)
         healing_roll = asdict(roll(expression))
+        require_healing_not_prevented(
+            dict(campaign.state or {}).get("combat"),
+            target_id=normalized_target_id,
+        )
         healed = apply_healing_to_sheet(target.sheet, amount=int(healing_roll["total"]))
         shared, removed = remove_inventory_item(shared, normalized_item_id, 1)
         healing_result = {key: value for key, value in healed.items() if key != "sheet"}
@@ -15351,7 +14084,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "initiative",
                 "tie_breaker",
                 "source_conditions",
-                "source_traits",
             }
             unknown = set(entry) - allowed
             if unknown:
@@ -15368,12 +14100,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 or any(not isinstance(item, dict) for item in source_conditions)
             ):
                 raise ValueError("source_conditions must be a list of objects")
-            source_traits = entry.get("source_traits")
-            if source_traits is not None and (
-                not isinstance(source_traits, list)
-                or any(not isinstance(item, dict) for item in source_traits)
-            ):
-                raise ValueError("source_traits must be a list of objects")
             config_by_actor[actor_id_value] = dict(entry)
         current_scene_context = modules.current_scene(campaign_id, scope_id=scope_id)
         scene_context = None
@@ -15516,17 +14242,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         source_condition_records: list[dict[str, Any]] = []
         source_condition_sheets: dict[str, dict[str, Any]] = {}
         source_condition_characters = {character.id: character for character in participants}
-        source_trait_records: list[dict[str, Any]] = []
         for actor_id_value, config_entry in config_by_actor.items():
             actor = source_condition_characters[actor_id_value]
-            traits, conditions, sheet = source_participant_rules(
+            _, conditions, sheet = source_participant_rules(
                 campaign_id,
                 resolved_scene_id,
                 actor,
                 config_entry,
-                existing_traits=source_trait_records,
             )
-            source_trait_records.extend(traits)
             source_condition_records.extend(conditions)
             if sheet is not None:
                 source_condition_sheets[actor_id_value] = sheet
@@ -15535,13 +14258,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor = combat_actor_snapshot(character_id)
             actor_config = dict(config_by_actor.get(character_id, {}))
             actor_config.pop("source_conditions", None)
-            actor_config.pop("source_traits", None)
-            if any(
-                str(item.get("actor_id") or "") == character_id
-                and item.get("kind") == "regeneration"
-                for item in source_trait_records
-            ):
-                actor_config["zero_hp_recovery"] = True
             actor.update(actor_config)
             if character_id in source_condition_sheets:
                 actor["sheet"] = validate_character_sheet(
@@ -15560,25 +14276,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             encounter["participant_manifest"] = readiness
         if source_condition_records:
             encounter["source_conditions"] = source_condition_records
-        if source_trait_records:
-            encounter["source_traits"] = source_trait_records
         initial_sheets = {
             str(character.id): deepcopy(
                 source_condition_sheets.get(str(character.id), character.sheet)
             )
             for character in participants
         }
-        first_combatant = current_combatant(encounter)
-        initial_source_turn = (
-            settle_source_start_turn(
-                encounter,
-                actor_id=str(first_combatant.get("actor_id") or ""),
-                sheets=initial_sheets,
-                next_revision=campaign.revision + 1,
-            )
-            if first_combatant is not None
-            else []
-        )
         for actor_id_value, sheet in initial_sheets.items():
             sync_combatant_conditions(encounter, actor_id_value, sheet)
         initiatives = [
@@ -15616,7 +14319,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         def start_response(revisions: list[Any]) -> dict[str, Any]:
             return {
                 "combat": encounter,
-                "source_turn_start": initial_source_turn,
                 "tool_profile": PROFILE_COMBAT,
                 "campaign_revision": campaign.revision + 1,
                 "revisions": [asdict(item) for item in revisions],
@@ -15680,7 +14382,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "tie_breaker",
             "join_round",
             "source_conditions",
-            "source_traits",
         }
         unknown = set(config_value) - allowed
         if unknown:
@@ -15691,12 +14392,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             or any(not isinstance(item, dict) for item in source_conditions)
         ):
             raise ValueError("source_conditions must be a list of objects")
-        source_traits = config_value.get("source_traits")
-        if source_traits is not None and (
-            not isinstance(source_traits, list)
-            or any(not isinstance(item, dict) for item in source_traits)
-        ):
-            raise ValueError("source_traits must be a list of objects")
         payload = {
             "actor_id": actor_id,
             "participant_config": deepcopy(config_value),
@@ -15742,20 +14437,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             or join_round <= int(encounter.get("round", 1) or 1)
         ):
             raise ValueError("join_round must be an integer after the current combat round")
-        joining_traits, joining_conditions, joining_sheet = source_participant_rules(
+        _, joining_conditions, joining_sheet = source_participant_rules(
             campaign_id,
             str(encounter.get("scene_id") or "") or None,
             joining_actor,
             config_value,
-            existing_traits=[
-                item for item in encounter.get("source_traits", []) if isinstance(item, dict)
-            ],
         )
         config_value.pop("source_conditions", None)
-        config_value.pop("source_traits", None)
         actor = combat_actor_snapshot(actor_id)
-        if any(item.get("kind") == "regeneration" for item in joining_traits):
-            config_value["zero_hp_recovery"] = True
         actor.update(config_value)
         if joining_sheet is not None:
             actor["sheet"] = validate_character_sheet(
@@ -15767,11 +14456,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor,
             joins_round=join_round,
         )
-        if joining_traits:
-            next_encounter["source_traits"] = [
-                *list(next_encounter.get("source_traits") or []),
-                *joining_traits,
-            ]
         if joining_conditions:
             next_encounter["source_conditions"] = [
                 *list(next_encounter.get("source_conditions") or []),
@@ -15923,14 +14607,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     campaign_id,
                     facts={"actor_id": actor_id, "target_id": target_id, "kind": "attack"},
                 ),
-            )
-            plan = apply_agent_attack_rulings(
-                attacker,
-                plan,
-                action,
-                encounter=encounter,
-                authorized=access.require_campaign(campaign_id, principal_id).role
-                in CAMPAIGN_DM_ROLES,
             )
             pay_attack_action(
                 encounter,
@@ -16092,14 +14768,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     encounter=encounter,
                     rules=rule_context,
                 )
-                plan = apply_agent_attack_rulings(
-                    attacker,
-                    plan,
-                    action_payload,
-                    encounter=encounter,
-                    authorized=access.require_campaign(campaign_id, principal_id).role
-                    in CAMPAIGN_DM_ROLES,
-                )
                 weapon_id = str(plan.get("weapon_id") or "")
                 item_card = next(
                     (
@@ -16129,27 +14797,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         raise CombatEngineError(
                             "recorded weapon plan must be an item attack.after_hit contract"
                         )
-                if (
-                    isinstance(item_card, dict)
-                    and str(plan.get("on_hit_effect") or "").strip()
-                    and str(item_card.get("pack_id") or "")
-                    not in {
-                        CORE_CONTENT_PACK_ID,
-                        CORE_2024_CONTENT_PACK_ID,
-                        STANDARD_2014_CONTENT_PACK_ID,
-                    }
-                    and compiled_item_plan is None
-                    and plan.get("ammunition_slaying") is None
-                    and not source_card_has_executable_mechanic(
-                        campaign_id,
-                        item_card,
-                    )
-                    and not source_card_has_direct_agent_ruling(item_card)
-                ):
-                    raise CombatEngineError(
-                        "custom item on-hit text requires a build-time source-bound "
-                        "plan or Agent ruling before combat"
-                    )
         except NeedsRulingError:
             if access.require_campaign(campaign_id, principal_id).role not in CAMPAIGN_DM_ROLES:
                 raise CombatEngineError("attack requires Agent-as-DM adjudication") from None
@@ -16215,8 +14862,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         updated_attacker = deepcopy(attacker)
         ammunition = None
+        limited_use = None
         weapon_id = plan.get("weapon_id")
         if spell_resolution is None and weapon_id and weapon_id != "unarmed-strike":
+            if plan.get("weapon_recharge"):
+                updated_sheet, limited_use = consume_weapon_limited_use(
+                    updated_attacker["sheet"],
+                    weapon_id,
+                )
+                updated_attacker["sheet"] = updated_sheet
             if plan.get("ammunition_item_id"):
                 updated_sheet, ammunition = consume_weapon_ammunition(
                     updated_attacker["sheet"],
@@ -16232,6 +14886,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             }
             if ammunition is not None:
                 result["ammunition"] = ammunition
+            if limited_use is not None:
+                result["limited_use"] = limited_use
             current = next(
                 item for item in next_encounter["combatants"] if item.get("actor_id") == actor_id
             )
@@ -16267,6 +14923,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 attack=deepcopy(attack_roll),
                 attack_payment=deepcopy(attack_payment),
                 ammunition=deepcopy(ammunition),
+                limited_use=deepcopy(limited_use),
                 spell_resolution_id=spell_resolution_id or None,
             )
             next_encounter["log"] = [
@@ -16279,7 +14936,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ][-100:]
             next_state = {**dict(campaign.state or {}), "combat": next_encounter}
             updates = []
-            if ammunition is not None:
+            if updated_attacker["sheet"] != attacker["sheet"]:
                 updates.append(
                     CharacterStateUpdate(
                         character_id=actor_id,
@@ -16345,22 +15002,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         next_encounter = mastery_commit["encounter"]
         if mastery_commit["effect"] is not None:
             result.setdefault("weapon_mastery", {})["committed_effect"] = mastery_commit["effect"]
-        attack_sheets = {
-            actor_id: updated_attacker["sheet"],
-            target_id: updated_target["sheet"],
-        }
-        forced_movement_sheet_ids = settle_standard_attack_forced_movement(
-            campaign_id,
-            next_encounter,
-            result,
-            attacker_id=actor_id,
-            target_id=target_id,
-            sheets=attack_sheets,
-        )
-        updated_attacker["sheet"] = attack_sheets[actor_id]
-        updated_target["sheet"] = attack_sheets[target_id]
         if ammunition is not None:
             result["ammunition"] = ammunition
+        if limited_use is not None:
+            result["limited_use"] = limited_use
         result["attack_payment"] = attack_payment
         result["rule_receipts"] = [
             *list(result.get("rule_receipts") or []),
@@ -16455,12 +15100,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             flags = dict(current.get("turn_flags") or {})
             flags["sneak_attack_turn_token"] = sneak_attack["turn_token"]
             current["turn_flags"] = flags
-        record_agent_attack_ruling_uses(
-            next_encounter,
-            attacker_id=actor_id,
-            plan=plan,
-            result=result,
-        )
         if result.get("reveals_attacker"):
             reveal_attacker_to_target(next_encounter, actor_id, target_id)
         if plan.get("helped_by"):
@@ -16476,76 +15115,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 helper_flags = dict(helper.get("turn_flags") or {})
                 helper_flags.pop("helping", None)
                 helper["turn_flags"] = helper_flags
-        reactive_damage = next(
-            (
-                damage
-                for damage in (
-                    dict(dict(result.get("heated_body") or {}).get("fire_damage") or {}),
-                    dict(dict(result.get("corrosive_form") or {}).get("acid_damage") or {}),
-                )
-                if damage
-            ),
-            None,
-        )
-        if reactive_damage is not None:
-            record_source_trait_damage(
-                next_encounter,
-                target_id=actor_id,
-                damage=reactive_damage,
-            )
-            reconcile_source_attachments(
-                next_encounter,
-                actor_id=actor_id,
-                sheet=updated_attacker["sheet"],
-            )
-            add_concentration_window(
-                next_encounter,
-                actor_id,
-                reactive_damage.get("concentration"),
-                next_revision=campaign.revision + 1,
-            )
         sync_combatant_conditions(next_encounter, actor_id, updated_attacker["sheet"])
         sync_combatant_conditions(next_encounter, target_id, updated_target["sheet"])
-        target_combatant = require_encounter_combatant(
-            next_encounter,
-            target_id,
-            role="attack target",
-        )
-        if "dead" not in {
-            str(item).strip().casefold() for item in target_combatant.get("conditions", [])
-        }:
-            standard_ongoing_effect = record_standard_weapon_ongoing_effect(
-                next_encounter,
-                attacker_id=actor_id,
-                target_id=target_id,
-                weapon_id=str(plan.get("weapon_id") or ""),
-                attack_result=result,
-            )
-            if standard_ongoing_effect is not None:
-                result.setdefault("structured_on_hit", {})["ongoing_effect_instance"] = (
-                    standard_ongoing_effect
-                )
-                result["rule_receipts"] = [
-                    *list(result.get("rule_receipts") or []),
-                    *core_receipts(
-                        rule_context,
-                        ["dnd5e.core.monster.ignition_ongoing_damage"],
-                        "attack.hit.standard_ignition",
-                    ),
-                ]
         reconcile_readied_spells(next_encounter, target_id, updated_target["sheet"])
         damage_result = result.get("damage")
         if isinstance(damage_result, dict):
-            record_source_trait_damage(
-                next_encounter,
-                target_id=target_id,
-                damage=damage_result,
-            )
-            reconcile_source_attachments(
-                next_encounter,
-                actor_id=target_id,
-                sheet=updated_target["sheet"],
-            )
             add_concentration_window(
                 next_encounter,
                 target_id,
@@ -16562,6 +15136,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 resolution_id=spell_resolution_id,
                 result=result,
             )
+        apply_standard_spell_on_hit_mechanics(
+            next_encounter,
+            result=result,
+            attacker_id=actor_id,
+            target_id=target_id,
+        )
         on_hit_ruling = dict(result.get("on_hit_ruling") or {})
         pending_on_hit_ruling: dict[str, Any] | None = None
         if attack_roll.get("hit") and compiled_item_plan is not None:
@@ -16612,86 +15192,25 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     item_card,
                 )
             )
-            next_attack_advantage = (
-                re.search(
-                    r"(?i)\bthe next attack against the target before the end of "
-                    r"the caster's next turn has advantage\b",
-                    str(on_hit_ruling["effect"]),
-                )
-                is not None
-            )
-            attachment = (
-                re.search(
-                    r"(?i)\battaches to the target\b",
-                    str(on_hit_ruling["effect"]),
-                )
-                is not None
-            )
-            next_encounter = add_choice_window(
+            pending_on_hit_ruling = add_attack_on_hit_window(
                 next_encounter,
-                kind="ruling",
-                actor_id_value=target_id,
-                event="attack.on_hit.effect",
-                candidates=[
-                    *(
-                        [
-                            {
-                                "id": "next_attack_advantage",
-                                "name": "Grant advantage to the next attack",
-                            }
-                        ]
-                        if next_attack_advantage
-                        else []
-                    ),
-                    *(
-                        [
-                            {
-                                "id": "attachment",
-                                "name": "Apply a structured attachment",
-                            }
-                        ]
-                        if attachment
-                        else []
-                    ),
-                    {
-                        "id": "apply_condition",
-                        "name": "Apply a structured condition",
-                    },
-                    {
-                        "id": "saving_throw_condition",
-                        "name": "Resolve a saving throw and condition",
-                    },
-                    {
-                        "id": "saving_throw_damage",
-                        "name": "Resolve a saving throw and damage",
-                    },
-                    {
-                        "id": "direct_damage",
-                        "name": "Apply reviewed direct damage",
-                    },
-                    {
-                        "id": "conditional_extra_damage",
-                        "name": "Adjudicate source-conditional extra damage",
-                    },
-                    {
-                        "id": "dismiss",
-                        "name": "No structured condition applies",
-                    },
-                ],
-            )
-            pending_on_hit_ruling = next_encounter["pending"][-1]
-            pending_on_hit_ruling.update(
-                trigger="attack_on_hit_effect",
-                attack_ref=str(plan.get("attack_id") or plan.get("weapon_id") or ""),
+                result=result,
                 attacker_id=actor_id,
+                target_id=target_id,
+                weapon_id=str(plan.get("weapon_id") or ""),
+            )
+            assert pending_on_hit_ruling is not None
+            pending_on_hit_ruling.update(
+                attack_ref=str(plan.get("attack_id") or plan.get("weapon_id") or ""),
                 branch_id=resolved_branch_id,
                 campaign_id=campaign_id,
                 critical=bool(attack_roll.get("critical", False)),
-                target_id=target_id,
-                weapon_id=str(plan.get("weapon_id") or ""),
-                effect=str(on_hit_ruling["effect"]).strip(),
             )
             if custom_item_ruling:
+                pending_on_hit_ruling.update(
+                    source_card_id=str(plan.get("weapon_id") or ""),
+                    source_card_kind="item",
+                )
                 result["semantic_solution"] = {
                     **unresolved_content_solution(
                         item_card,
@@ -16702,15 +15221,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "application_id": pending_on_hit_ruling["id"],
                 }
             result["pending_on_hit_ruling_id"] = pending_on_hit_ruling["id"]
-        critical_followup_window = add_critical_followup_window(
-            next_encounter,
-            result=result,
-            attacker_id=actor_id,
-            target_id=target_id,
-            weapon_id=str(plan.get("weapon_id") or ""),
-        )
-        if critical_followup_window is not None:
-            pending_on_hit_ruling = critical_followup_window
         next_encounter["log"] = [
             *list(next_encounter.get("log") or []),
             {
@@ -16742,21 +15252,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     expected_revision=record.revision,
                 )
             )
-        for changed_actor_id in sorted(forced_movement_sheet_ids - {actor_id, target_id}):
-            record = require_campaign_actor(campaign_id, changed_actor_id)
-            normalized_sheet = validate_character_sheet(attack_sheets[changed_actor_id])
-            normalized_notes = validate_character_notes(record.notes)
-            if normalized_sheet == record.sheet and normalized_notes == record.notes:
-                continue
-            updates.append(
-                CharacterStateUpdate(
-                    character_id=record.id,
-                    sheet=normalized_sheet,
-                    notes=normalized_notes,
-                    expected_revision=record.revision,
-                )
-            )
-
         def attack_response(revisions: list[Any]) -> dict[str, Any]:
             response = {
                 **_ruling_status(
@@ -16811,1542 +15306,49 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Settle a reviewed attack's structured condition or save-and-damage effect."""
+        """Dismiss a reviewed no-op; executable on-hit effects use a persisted plan."""
+
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
-        require_write_contract(expected_revision, idempotency_key)
-        resolved_branch_id = require_current_branch(campaign_id, branch_id)
-        target_record = require_campaign_actor(campaign_id, target_id)
-        normalized_selection = deepcopy(dict(selection or {}))
-        payload = {
-            "target_id": target_id,
-            "choice_id": choice_id,
-            "selection": normalized_selection,
-            "branch_id": resolved_branch_id,
-        }
-        scope = f"combat-on-hit-ruling:{campaign_id}:{resolved_branch_id}:{principal_id}"
-        replay = replay_idempotent(scope, idempotency_key, payload)
-        if replay is not None:
-            return combat_response(campaign_id, principal_id, replay)
-        campaign, encounter = active_encounter(campaign_id)
-        if campaign.revision != expected_revision:
-            raise ValueError(
-                "campaign revision conflict: "
-                f"expected {expected_revision}, found {campaign.revision}"
+        normalized = deepcopy(dict(selection or {}))
+        if set(normalized) != {"id", "source_excerpt"} or normalized.get("id") != "dismiss":
+            raise CombatEngineError(
+                "custom on-hit mechanics must be compiled with content_solution and "
+                "settled with combat_choice(action='execute_plan'); on_hit_ruling only "
+                "dismisses an Agent-reviewed no-op"
             )
+        _campaign, encounter = active_encounter(campaign_id)
         window = next(
-            (item for item in encounter.get("pending", []) if item.get("id") == choice_id),
+            (
+                item
+                for item in encounter.get("pending", [])
+                if str(item.get("id") or "") == choice_id
+            ),
             None,
         )
         if (
             not isinstance(window, dict)
             or window.get("kind") != "ruling"
-            or window.get("trigger") not in {"attack_on_hit_effect", "critical_body_part_loss"}
+            or window.get("trigger") != "attack_on_hit_effect"
             or str(window.get("target_id") or "") != target_id
-            or str(window.get("actor_id") or "") != target_id
         ):
-            raise CombatEngineError("choice_id is not this target's pending attack on-hit ruling")
-        selection_id = str(normalized_selection.get("id") or "").strip().casefold()
-        if selection_id not in {
-            "apply_condition",
-            "saving_throw_condition",
-            "saving_throw_damage",
-            "direct_damage",
-            "conditional_extra_damage",
-            "ongoing_damage",
-            "next_attack_advantage",
-            "attachment",
-            "critical_followup",
-            "dismiss",
-        }:
-            raise CombatEngineError(
-                "attack on-hit ruling must apply a condition, resolve a save-gated "
-                "condition or save damage, apply reviewed direct damage, "
-                "adjudicate conditional or ongoing damage, "
-                "grant reviewed next-attack advantage, apply an attachment, settle "
-                "a critical follow-up, or dismiss it"
-            )
-        effect = str(window.get("effect") or "").strip()
-        is_critical_body_part_loss = window.get("trigger") == "critical_body_part_loss"
-        if is_critical_body_part_loss:
-            allowed_fields = {"id", "source_excerpt", "target_has_limbs"}
-            source_excerpt = str(normalized_selection.get("source_excerpt") or "").strip()
-            target_has_limbs = normalized_selection.get("target_has_limbs")
-            followup = dict(window.get("critical_followup") or {})
-            if (
-                selection_id != "critical_followup"
-                or set(normalized_selection) - allowed_fields
-                or not isinstance(target_has_limbs, bool)
-                or not source_excerpt
-                or source_excerpt.casefold() != effect.casefold()
-                or not followup.get("anatomical_loss_triggered")
-                or int(dict(followup.get("followup_roll") or {}).get("total", 0) or 0)
-                != int(followup.get("anatomical_loss_natural", 20) or 20)
-            ):
-                raise CombatEngineError(
-                    "critical anatomical loss requires the exact attack excerpt "
-                    "and Agent-as-DM adjudication of whether the target has limbs"
-                )
-        elif selection_id == "critical_followup":
-            raise CombatEngineError(
-                "critical follow-up settlement requires its triggered d20 window"
-            )
-        has_explicit_saving_throw = re.search(r"(?i)\bsaving throw\b", effect) is not None
-        has_explicit_save_damage = (
-            has_explicit_saving_throw and re.search(r"(?i)\bdamage\b", effect) is not None
-        )
-        has_explicit_ongoing_damage = (
-            re.search(
-                r"(?i)\bdamage\s+at\s+the\s+start\s+of\s+each\s+of\s+"
-                r"(?:its|his|her|their)\s+turns?\b",
-                effect,
-            )
-            is not None
-            and re.search(r"(?i)(?<![A-Za-z0-9_])\d+d\d+", effect) is not None
-        )
-        has_explicit_conditional_damage = (
-            not has_explicit_ongoing_damage
-            and re.search(r"(?i)\bdamage\b", effect) is not None
-            and re.search(r"(?i)\b(?:if|when|while|unless)\b", effect) is not None
-            and re.search(r"(?i)(?<![A-Za-z0-9_])\d+d\d+", effect) is not None
-        )
-        has_explicit_direct_damage = (
-            not has_explicit_saving_throw
-            and not has_explicit_conditional_damage
-            and not has_explicit_ongoing_damage
-            and re.search(r"(?i)\bdamage\b", effect) is not None
-            and re.search(r"(?i)(?<![A-Za-z0-9_])\d+d\d+", effect) is not None
-        )
-        if selection_id == "dismiss":
-            allowed_fields = {"id", "source_excerpt"}
-            unknown_fields = set(normalized_selection) - allowed_fields
-            source_excerpt = str(normalized_selection.get("source_excerpt") or "").strip()
-            explicit_conditions = {
-                "blinded",
-                "charmed",
-                "deafened",
-                "frightened",
-                "grappled",
-                "incapacitated",
-                "paralyzed",
-                "poisoned",
-                "prone",
-                "restrained",
-                "stunned",
-                "unconscious",
-            }
-            states_structured_condition = any(
-                re.search(rf"(?i)\b{re.escape(condition)}\b", effect) is not None
-                for condition in explicit_conditions
-            )
-            candidate_ids = {
-                str(item.get("id") or "")
-                for item in window.get("candidates", [])
-                if isinstance(item, dict)
-            }
-            if (
-                unknown_fields
-                or not source_excerpt
-                or source_excerpt.casefold() != effect.casefold()
-            ):
-                raise CombatEngineError("dismissal requires the exact reviewed attack excerpt")
-            if (
-                has_explicit_save_damage
-                or has_explicit_conditional_damage
-                or has_explicit_direct_damage
-                or has_explicit_ongoing_damage
-                or states_structured_condition
-                or candidate_ids & {"attachment", "next_attack_advantage"}
-            ):
-                raise CombatEngineError("an explicit structured on-hit effect cannot be dismissed")
-        if selection_id == "apply_condition" and has_explicit_saving_throw:
-            raise CombatEngineError(
-                "an explicit saving-throw condition requires saving-throw settlement"
-            )
-        if selection_id == "saving_throw_condition" and has_explicit_save_damage:
-            raise CombatEngineError(
-                "an explicit saving-throw damage effect cannot be reduced to a condition"
-            )
-        states_next_attack_advantage = (
-            re.search(
-                r"(?i)\bthe next attack against the target before the end of "
-                r"the caster's next turn has advantage\b",
-                effect,
-            )
-            is not None
-        )
-        if selection_id == "next_attack_advantage":
-            allowed_fields = {"id", "source_excerpt"}
-            unknown_fields = set(normalized_selection) - allowed_fields
-            source_excerpt = str(normalized_selection.get("source_excerpt") or "").strip()
-            if (
-                unknown_fields
-                or not states_next_attack_advantage
-                or not source_excerpt
-                or source_excerpt.casefold() not in effect.casefold()
-            ):
-                raise CombatEngineError(
-                    "next-attack advantage requires the exact reviewed spell excerpt"
-                )
-            candidates = list(window.get("candidates") or [])
-            if not any(
-                str(item.get("id") or "") == "next_attack_advantage"
-                for item in candidates
-                if isinstance(item, dict)
-            ):
-                window["candidates"] = [
-                    *candidates,
-                    {
-                        "id": "next_attack_advantage",
-                        "name": "Grant advantage to the next attack",
-                    },
-                ]
-        elif selection_id == "attachment":
-            allowed_fields = {"id", "source_excerpt"}
-            unknown_fields = set(normalized_selection) - allowed_fields
-            source_excerpt = str(normalized_selection.get("source_excerpt") or "").strip()
-            candidate_ids = {
-                str(item.get("id") or "")
-                for item in window.get("candidates", [])
-                if isinstance(item, dict)
-            }
-            if (
-                unknown_fields
-                or "attachment" not in candidate_ids
-                or not source_excerpt
-                or source_excerpt.casefold() not in effect.casefold()
-            ):
-                raise CombatEngineError("attachment requires the exact reviewed attack excerpt")
-            source_attachment_effect(effect)
-        elif selection_id == "conditional_extra_damage":
-            if not has_explicit_conditional_damage:
-                raise CombatEngineError("the reviewed attack does not state conditional damage")
-            candidates = list(window.get("candidates") or [])
-            if not any(
-                str(item.get("id") or "") == "conditional_extra_damage"
-                for item in candidates
-                if isinstance(item, dict)
-            ):
-                window["candidates"] = [
-                    *candidates,
-                    {
-                        "id": "conditional_extra_damage",
-                        "name": "Adjudicate source-conditional extra damage",
-                    },
-                ]
-        elif selection_id == "ongoing_damage":
-            if not has_explicit_ongoing_damage:
-                raise CombatEngineError(
-                    "the reviewed attack does not state start-of-turn ongoing damage"
-                )
-            candidates = list(window.get("candidates") or [])
-            if not any(
-                str(item.get("id") or "") == "ongoing_damage"
-                for item in candidates
-                if isinstance(item, dict)
-            ):
-                window["candidates"] = [
-                    *candidates,
-                    {
-                        "id": "ongoing_damage",
-                        "name": "Apply reviewed ongoing damage",
-                    },
-                ]
-        elif selection_id == "direct_damage":
-            if not has_explicit_direct_damage:
-                raise CombatEngineError("the reviewed attack does not state direct damage")
-            candidates = list(window.get("candidates") or [])
-            if not any(
-                str(item.get("id") or "") == "direct_damage"
-                for item in candidates
-                if isinstance(item, dict)
-            ):
-                window["candidates"] = [
-                    *candidates,
-                    {
-                        "id": "direct_damage",
-                        "name": "Apply reviewed direct damage",
-                    },
-                ]
-        next_encounter = resolve_choice_window(
-            encounter,
-            choice_id=choice_id,
-            actor_id_value=target_id,
-            selection={"id": selection_id},
-        )
-        updated_sheet = deepcopy(target_record.sheet)
-        ongoing_effect: dict[str, Any] | None = None
-        settlement_result: dict[str, Any] | None = None
-        rule_receipts: list[dict[str, Any]] = []
-        if selection_id == "critical_followup":
-            source_excerpt = str(normalized_selection["source_excerpt"]).strip()
-            part_category = "limb" if normalized_selection["target_has_limbs"] else "body_portion"
-            effect_id = f"{choice_id}:anatomical-loss"
-            updated_sheet, _ = add_effect(
-                updated_sheet,
-                {
-                    "id": effect_id,
-                    "name": "Source-authored anatomical loss",
-                    "kind": "anatomical_loss",
-                    "source": str(window.get("weapon_id") or ""),
-                    "active": True,
-                    "changes": [],
-                    "description": source_excerpt,
-                },
-            )
-            ongoing_effect = {
-                "id": effect_id,
-                "kind": "anatomical_loss",
-                "source_actor_id": str(window.get("attacker_id") or ""),
-                "target_id": target_id,
-                "weapon_id": str(window.get("weapon_id") or ""),
-                "part_category": part_category,
-                "mechanical_effect": "dm_unspecified",
-                "source_excerpt": source_excerpt,
-                "active": True,
-            }
-            next_encounter["ongoing_effects"] = [
-                *list(next_encounter.get("ongoing_effects") or []),
-                ongoing_effect,
-            ]
-            settlement_result = {
-                "anatomical_loss": True,
-                "part_category": part_category,
-                "mechanical_effect": "dm_unspecified",
-                "effect_id": effect_id,
-            }
-        elif selection_id == "next_attack_advantage":
-            source_excerpt = str(normalized_selection["source_excerpt"]).strip()
-            ongoing_effect = {
-                "id": str(choice_id),
-                "kind": "next_attack_advantage",
-                "source_actor_id": str(window.get("attacker_id") or ""),
-                "target_id": target_id,
-                "weapon_id": str(window.get("weapon_id") or ""),
-                "source_excerpt": source_excerpt,
-                "effect": effect,
-                "expires_on_actor_id": str(window.get("attacker_id") or ""),
-                "expires_on_round": int(next_encounter.get("round", 1) or 1) + 1,
-                "active": True,
-            }
-            next_encounter["ongoing_effects"] = [
-                *list(next_encounter.get("ongoing_effects") or []),
-                ongoing_effect,
-            ]
-        elif selection_id == "attachment":
-            source_excerpt = str(normalized_selection["source_excerpt"]).strip()
-            attachment = source_attachment_effect(effect)
-            source_actor_id = str(window.get("attacker_id") or "")
-            if any(
-                isinstance(item, dict)
-                and item.get("active", True)
-                and item.get("kind") == "attachment"
-                and str(item.get("source_actor_id") or "") == source_actor_id
-                for item in next_encounter.get("ongoing_effects", [])
-            ):
-                raise CombatEngineError(
-                    "an attaching creature cannot maintain multiple attachments"
-                )
-            ongoing_effect = {
-                "id": str(choice_id),
-                "kind": "attachment",
-                "source_actor_id": source_actor_id,
-                "target_id": target_id,
-                "weapon_id": str(window.get("weapon_id") or ""),
-                "source_excerpt": source_excerpt,
-                "effect": effect,
-                "drained_hit_points": 0,
-                "active": True,
-                **attachment,
-            }
-            next_encounter["ongoing_effects"] = [
-                *list(next_encounter.get("ongoing_effects") or []),
-                ongoing_effect,
-            ]
-            settlement_result = {
-                "attached": True,
-                "source_actor_id": source_actor_id,
-                "target_id": target_id,
-            }
-        elif selection_id == "apply_condition":
-            allowed_fields = {
-                "id",
-                "condition",
-                "escape_dc",
-                "escape_abilities",
-                "escape_checks",
-                "source_excerpt",
-            }
-            unknown_fields = set(normalized_selection) - allowed_fields
-            if unknown_fields:
-                raise CombatEngineError(
-                    "unsupported on-hit ruling fields: " + ", ".join(sorted(unknown_fields))
-                )
-            condition = str(normalized_selection.get("condition") or "").strip().casefold()
-            escape_dc = normalized_selection.get("escape_dc")
-            escape_abilities = [
-                str(item).strip().casefold()
-                for item in normalized_selection.get("escape_abilities") or []
-                if str(item).strip()
-            ]
-            escape_checks = [
-                str(item).strip().casefold().replace(" ", "_")
-                for item in normalized_selection.get("escape_checks") or []
-                if str(item).strip()
-            ]
-            source_excerpt = str(normalized_selection.get("source_excerpt") or "").strip()
-            if condition not in STANDARD_BINARY_CONDITION_IDS:
-                raise CombatEngineError("on-hit ruling condition is unsupported")
-            if re.search(rf"(?i)\b{re.escape(condition)}\b", effect) is None:
-                raise CombatEngineError(
-                    "on-hit ruling condition is not stated by the reviewed attack"
-                )
-            if (
-                isinstance(escape_dc, bool)
-                or not isinstance(escape_dc, int)
-                or escape_dc < 1
-                or escape_dc > 40
-                or not (escape_abilities or escape_checks)
-                or len(escape_abilities) != len(set(escape_abilities))
-                or len(escape_checks) != len(set(escape_checks))
-                or not source_excerpt
-                or source_excerpt.casefold() not in effect.casefold()
-            ):
-                raise CombatEngineError(
-                    "on-hit condition requires exact reviewed escape terms and excerpt"
-                )
-            if re.search(rf"(?i)\bDC\s*{escape_dc}\b", effect) is None:
-                raise CombatEngineError("escape DC is not stated by the reviewed attack")
-            normalized_escape_checks, escape_rule = reviewed_on_hit_escape_checks(
-                effect,
-                condition=condition,
-                escape_dc=escape_dc,
-                escape_abilities=escape_abilities,
-                escape_checks=escape_checks,
-            )
-            apply_condition_change(updated_sheet, condition_id=condition, add=True)
-            condition_applied = condition in condition_ids(updated_sheet.get("conditions"))
-            if condition_applied:
-                end_concentration_for_incapacitating_conditions(updated_sheet)
-                sync_combatant_conditions(next_encounter, target_id, updated_sheet)
-                reconcile_readied_spells(next_encounter, target_id, updated_sheet)
-                ongoing_effect = {
-                    "id": str(choice_id),
-                    "kind": "on_hit_condition",
-                    "source_actor_id": str(window.get("attacker_id") or ""),
-                    "target_id": target_id,
-                    "weapon_id": str(window.get("weapon_id") or ""),
-                    "condition": condition,
-                    "escape_dc": escape_dc,
-                    "escape_abilities": escape_abilities,
-                    "escape_checks": normalized_escape_checks,
-                    "escape_rule": escape_rule,
-                    "source_excerpt": source_excerpt,
-                    "effect": effect,
-                    "active": True,
-                }
-                next_encounter["ongoing_effects"] = [
-                    *list(next_encounter.get("ongoing_effects") or []),
-                    ongoing_effect,
-                ]
-            settlement_result = {
-                "condition": condition,
-                "condition_applied": condition_applied,
-                "resisted_by_immunity": not condition_applied,
-                "escape_rule": escape_rule,
-            }
-        elif selection_id == "saving_throw_condition":
-            allowed_fields = {
-                "id",
-                "condition",
-                "save_ability",
-                "save_dc",
-                "repeat_save_timing",
-                "duration",
-                "source_excerpt",
-            }
-            unknown_fields = set(normalized_selection) - allowed_fields
-            if unknown_fields:
-                raise CombatEngineError(
-                    "unsupported on-hit save-condition fields: " + ", ".join(sorted(unknown_fields))
-                )
-            condition = str(normalized_selection.get("condition") or "").strip().casefold()
-            save_ability = str(normalized_selection.get("save_ability") or "").strip().casefold()
-            save_dc = normalized_selection.get("save_dc")
-            repeat_save_timing = (
-                str(normalized_selection.get("repeat_save_timing") or "").strip().casefold()
-            )
-            raw_duration = normalized_selection.get("duration")
-            source_excerpt = str(normalized_selection.get("source_excerpt") or "").strip()
-            instant_condition = not repeat_save_timing and raw_duration is None
-            if not instant_condition and not isinstance(raw_duration, dict):
-                raise CombatEngineError(
-                    "on-hit save condition requires both reviewed repeat timing "
-                    "and a structured source duration, or neither for an immediate "
-                    "condition"
-                )
-            duration = dict(raw_duration or {})
-            duration_period = str(duration.get("period") or "").strip().casefold()
-            duration_remaining = duration.get("remaining")
-            if (
-                set(duration) - {"period", "remaining"}
-                or condition not in STANDARD_BINARY_CONDITION_IDS
-                or save_ability not in ABILITY_IDS
-                or isinstance(save_dc, bool)
-                or not isinstance(save_dc, int)
-                or not 1 <= save_dc <= 40
-                or (
-                    not instant_condition
-                    and (
-                        repeat_save_timing != "turn_end"
-                        or duration_period not in {"round", "minute", "hour", "day"}
-                        or isinstance(duration_remaining, bool)
-                        or not isinstance(duration_remaining, int)
-                        or duration_remaining < 1
-                    )
-                )
-                or not source_excerpt
-                or source_excerpt.casefold() != effect.casefold()
-            ):
-                raise CombatEngineError(
-                    "on-hit save condition requires exact reviewed condition, save, "
-                    "optional repeat timing and duration, and excerpt terms"
-                )
-            if (
-                re.search(rf"(?i)\b{re.escape(condition)}\b", effect) is None
-                or re.search(
-                    rf"(?i)\bDC\s*{save_dc}\s+{re.escape(save_ability)}\s+saving throw\b",
-                    effect,
-                )
-                is None
-            ):
-                raise CombatEngineError(
-                    "condition, save DC, or ability is not stated by the reviewed attack"
-                )
-            if not instant_condition and not (
-                re.search(r"(?i)\brepeat\b", effect)
-                and re.search(r"(?i)\bsaving throw\b", effect)
-                and re.search(r"(?i)\bend\b[^.]{0,120}\bturns?\b", effect)
-            ):
-                raise CombatEngineError(
-                    "turn-end repeat saving throw is not stated by the reviewed attack"
-                )
-            if not instant_condition and (
-                re.search(
-                    rf"(?i)\b{duration_remaining}\s+"
-                    rf"{re.escape(duration_period)}s?\b",
-                    effect,
-                )
-                is None
-            ):
-                raise CombatEngineError("condition duration is not stated by the reviewed attack")
-            normalized_duration = {
-                "period": duration_period,
-                "remaining": duration_remaining,
-            }
-            target_actor = combat_actor_snapshot(target_id)
-            target_actor["sheet"] = deepcopy(updated_sheet)
-            target_actor["derived"] = derive_character_sheet(updated_sheet)
-            saved = resolve_actor_check(
-                target_actor,
-                kind="save",
-                ability=save_ability,
-                dc=save_dc,
-                ruleset=str(next_encounter.get("ruleset") or "2014"),
-                rules=effective_rule_context(
-                    campaign_id,
-                    facts={
-                        "actor_id": target_id,
-                        "attacker_id": str(window.get("attacker_id") or ""),
-                        "weapon_id": str(window.get("weapon_id") or ""),
-                        "kind": "attack_on_hit_save_condition",
-                    },
-                ),
-            )
-            rule_receipts.extend(saved.get("rule_receipts") or [])
-            effect_id: str | None = None
-            condition_applied = False
-            if not saved["success"]:
-                if instant_condition:
-                    apply_condition_change(
-                        updated_sheet,
-                        condition_id=condition,
-                        add=True,
-                    )
-                else:
-                    effect_id = f"{choice_id}:save-condition"
-                    updated_sheet, _ = add_effect(
-                        updated_sheet,
-                        {
-                            "id": effect_id,
-                            "name": "Attack save-gated condition",
-                            "kind": "timed_conditions",
-                            "source": str(window.get("weapon_id") or ""),
-                            "active": True,
-                            "duration": normalized_duration,
-                            "changes": [
-                                {
-                                    "path": "conditions",
-                                    "mode": "add",
-                                    "value": [condition],
-                                }
-                            ],
-                            "description": source_excerpt,
-                        },
-                    )
-                condition_applied = condition in condition_ids(updated_sheet.get("conditions"))
-                if condition_applied:
-                    end_concentration_for_incapacitating_conditions(updated_sheet)
-                    if not instant_condition:
-                        ongoing_effect = {
-                            "id": effect_id,
-                            "kind": "on_hit_save_condition",
-                            "source_actor_id": str(window.get("attacker_id") or ""),
-                            "target_id": target_id,
-                            "weapon_id": str(window.get("weapon_id") or ""),
-                            "condition": condition,
-                            "save_ability": save_ability,
-                            "save_dc": save_dc,
-                            "repeat_save_timing": repeat_save_timing,
-                            "duration": normalized_duration,
-                            "source_excerpt": source_excerpt,
-                            "effect": effect,
-                            "active": True,
-                        }
-                        next_encounter["ongoing_effects"] = [
-                            *list(next_encounter.get("ongoing_effects") or []),
-                            ongoing_effect,
-                        ]
-                    sync_combatant_conditions(next_encounter, target_id, updated_sheet)
-                    reconcile_readied_spells(next_encounter, target_id, updated_sheet)
-                elif not instant_condition:
-                    updated_sheet = remove_effect(updated_sheet, effect_id)
-                    effect_id = None
-            settlement_result = {
-                "save": saved,
-                "condition": condition,
-                "condition_applied": condition_applied,
-                "resisted_by_immunity": not saved["success"] and not condition_applied,
-                "effect_id": effect_id,
-                "resolution": "instant" if instant_condition else "timed_repeat",
-            }
-        elif selection_id == "ongoing_damage":
-            allowed_fields = {
-                "id",
-                "applies",
-                "damage_formula",
-                "damage_type",
-                "trigger_timing",
-                "end_action",
-                "end_action_description",
-                "trigger_facts",
-                "default_resolver",
-                "ruling_kind",
-                "decision",
-                "reason",
-                "source_excerpt",
-            }
-            unknown_fields = set(normalized_selection) - allowed_fields
-            if unknown_fields:
-                raise CombatEngineError(
-                    "unsupported ongoing-damage fields: " + ", ".join(sorted(unknown_fields))
-                )
-            applies = normalized_selection.get("applies")
-            damage_formula = (
-                str(normalized_selection.get("damage_formula") or "")
-                .strip()
-                .casefold()
-                .replace(" ", "")
-            )
-            damage_type = str(normalized_selection.get("damage_type") or "").strip().casefold()
-            trigger_timing = (
-                str(normalized_selection.get("trigger_timing") or "").strip().casefold()
-            )
-            end_action = (
-                str(normalized_selection.get("end_action") or "")
-                .strip()
-                .casefold()
-                .replace("-", "_")
-            )
-            end_action_description = str(
-                normalized_selection.get("end_action_description") or ""
-            ).strip()
-            trigger_facts = normalized_selection.get("trigger_facts")
-            decision = str(normalized_selection.get("decision") or "").strip()
-            reason = str(normalized_selection.get("reason") or "").strip()
-            source_excerpt = str(normalized_selection.get("source_excerpt") or "").strip()
-            if (
-                applies is not True
-                or re.fullmatch(r"\d+d\d+(?:[+\-]\d+)?", damage_formula) is None
-                or damage_type not in DAMAGE_TYPES
-                or trigger_timing != "turn_start"
-                or end_action not in {"improvise", "use_object"}
-                or not end_action_description
-                or len(end_action_description) > 300
-                or not isinstance(trigger_facts, dict)
-                or trigger_facts.get("target_is_creature") is not True
-                or len(trigger_facts) > 32
-                or normalized_selection.get("default_resolver") != "agent"
-                or normalized_selection.get("ruling_kind") != "agent_dm_adjudication"
-                or not decision
-                or len(decision) > 1000
-                or not reason
-                or len(reason) > 2000
-                or not source_excerpt
-                or source_excerpt.casefold() != effect.casefold()
-            ):
-                raise CombatEngineError(
-                    "ongoing damage requires an exact reviewed excerpt, a "
-                    "start-of-turn formula, a source-authored ending action, "
-                    "and an explicit Agent-as-DM applicability decision"
-                )
-            try:
-                encoded_trigger_facts = canonical_json(trigger_facts)
-            except (TypeError, ValueError) as exc:
-                raise CombatEngineError("ongoing-damage trigger facts must be JSON values") from exc
-            if len(encoded_trigger_facts) > 10000:
-                raise CombatEngineError("ongoing-damage trigger facts are too large")
-            compact_effect = " ".join(effect.split())
-            compact_end_description = " ".join(end_action_description.split())
-            if (
-                re.search(
-                    rf"(?i)(?<![A-Za-z0-9]){re.escape(damage_formula)}"
-                    rf"(?![A-Za-z0-9])",
-                    effect.replace(" ", ""),
-                )
-                is None
-                or re.search(
-                    rf"(?i)\b{re.escape(damage_type)}\s+damage\b",
-                    effect,
-                )
-                is None
-                or re.search(
-                    r"(?i)\bdamage\s+at\s+the\s+start\s+of\s+each\s+of\s+"
-                    r"(?:its|his|her|their)\s+turns?\b",
-                    effect,
-                )
-                is None
-                or compact_end_description.casefold() not in compact_effect.casefold()
-                or re.search(
-                    rf"(?i)\b(?:takes?|use)\s+an?\s+action\s+to\s+"
-                    rf"{re.escape(compact_end_description)}\b",
-                    compact_effect,
-                )
-                is None
-            ):
-                raise CombatEngineError(
-                    "ongoing-damage formula, type, timing, or ending action "
-                    "is not stated by the reviewed attack"
-                )
-            existing_ongoing = next(
-                (
-                    item
-                    for item in next_encounter.get("ongoing_effects", [])
-                    if isinstance(item, dict)
-                    and item.get("active", True)
-                    and item.get("kind") == "source_ongoing_damage"
-                    and str(item.get("target_id") or "") == target_id
-                    and str(item.get("weapon_id") or "") == str(window.get("weapon_id") or "")
-                    and str(item.get("source_excerpt") or "").casefold()
-                    == source_excerpt.casefold()
-                ),
-                None,
-            )
-            ongoing_effect = existing_ongoing or {
-                "id": str(choice_id),
-                "kind": "source_ongoing_damage",
-                "source_actor_id": str(window.get("attacker_id") or ""),
-                "target_id": target_id,
-                "weapon_id": str(window.get("weapon_id") or ""),
-                "damage_formula": damage_formula,
-                "damage_type": damage_type,
-                "trigger_timing": trigger_timing,
-                "end_action": end_action,
-                "end_action_description": compact_end_description,
-                "source_excerpt": source_excerpt,
-                "agent_ruling": {
-                    "trigger_facts": deepcopy(trigger_facts),
-                    "default_resolver": "agent",
-                    "ruling_kind": "agent_dm_adjudication",
-                    "decision": decision,
-                    "reason": reason,
-                },
-                "active": True,
-            }
-            if existing_ongoing is None:
-                next_encounter["ongoing_effects"] = [
-                    *list(next_encounter.get("ongoing_effects") or []),
-                    ongoing_effect,
-                ]
-            settlement_result = {
-                "ongoing_damage": True,
-                "effect_id": str(ongoing_effect["id"]),
-                "trigger_timing": trigger_timing,
-                "end_action": end_action,
-                "reapplied_without_stacking": existing_ongoing is not None,
-            }
-        elif selection_id == "direct_damage":
-            allowed_fields = {
-                "id",
-                "damage_formula",
-                "damage_type",
-                "trigger_facts",
-                "default_resolver",
-                "ruling_kind",
-                "decision",
-                "reason",
-                "source_excerpt",
-            }
-            unknown_fields = set(normalized_selection) - allowed_fields
-            if unknown_fields:
-                raise CombatEngineError(
-                    "unsupported direct-damage fields: " + ", ".join(sorted(unknown_fields))
-                )
-            damage_formula = (
-                str(normalized_selection.get("damage_formula") or "")
-                .strip()
-                .casefold()
-                .replace(" ", "")
-            )
-            damage_type = str(normalized_selection.get("damage_type") or "").strip().casefold()
-            trigger_facts = normalized_selection.get("trigger_facts")
-            decision = str(normalized_selection.get("decision") or "").strip()
-            reason = str(normalized_selection.get("reason") or "").strip()
-            source_excerpt = str(normalized_selection.get("source_excerpt") or "").strip()
-            if (
-                not has_explicit_direct_damage
-                or not damage_formula
-                or damage_type not in DAMAGE_TYPES
-                or not isinstance(trigger_facts, dict)
-                or not trigger_facts
-                or len(trigger_facts) > 32
-                or any(
-                    not isinstance(key, str) or not key.strip() or len(key) > 100
-                    for key in trigger_facts
-                )
-                or normalized_selection.get("default_resolver") != "agent"
-                or normalized_selection.get("ruling_kind") != "agent_dm_adjudication"
-                or not decision
-                or len(decision) > 1000
-                or not reason
-                or len(reason) > 2000
-                or not source_excerpt
-                or source_excerpt.casefold() != effect.casefold()
-            ):
-                raise CombatEngineError(
-                    "direct damage requires an exact reviewed excerpt, printed "
-                    "damage formula, structured type-selection facts, and an "
-                    "explicit Agent-as-DM decision"
-                )
-            try:
-                encoded_trigger_facts = canonical_json(trigger_facts)
-            except (TypeError, ValueError) as exc:
-                raise CombatEngineError("direct-damage trigger facts must be JSON values") from exc
-            if len(encoded_trigger_facts) > 10000:
-                raise CombatEngineError("direct-damage trigger facts are too large")
-            if (
-                re.search(
-                    rf"(?i)(?<![A-Za-z0-9]){re.escape(damage_formula)}"
-                    rf"(?![A-Za-z0-9])",
-                    effect.replace(" ", ""),
-                )
-                is None
-            ):
-                raise CombatEngineError(
-                    "direct-damage formula is not stated by the reviewed attack"
-                )
-            variable_resistance_type = (
-                re.search(
-                    r"(?i)\btype\s+to\s+which\s+the\s+\w+\s+has\s+"
-                    r"damage\s+resistance\b",
-                    effect,
-                )
-                is not None
-            )
-            if variable_resistance_type:
-                selected_resistance = (
-                    str(trigger_facts.get("selected_damage_resistance") or "").strip().casefold()
-                )
-                attacker_record = require_campaign_actor(
-                    campaign_id,
-                    str(window.get("attacker_id") or ""),
-                )
-                attacker_resistances = {
-                    str(item).strip().casefold()
-                    for item in dict(attacker_record.sheet.get("traits") or {}).get(
-                        "resistances", []
-                    )
-                    if str(item).strip()
-                }
-                if selected_resistance != damage_type or damage_type not in attacker_resistances:
-                    raise CombatEngineError(
-                        "direct-damage selected type does not match the attacker's "
-                        "recorded damage resistance"
-                    )
-            elif (
-                re.search(
-                    rf"(?i)\b{re.escape(damage_type)}\s+damage\b",
-                    effect,
-                )
-                is None
-            ):
-                raise CombatEngineError("direct-damage type is not stated by the reviewed attack")
-            damage_roll = asdict(roll(damage_formula))
-            damage_amount = int(damage_roll["total"])
-            combatant = require_encounter_combatant(
-                next_encounter,
-                target_id,
-                role="attack on-hit target",
-            )
-            damaged = apply_damage_to_sheet(
-                updated_sheet,
-                amount=damage_amount,
-                damage_type=damage_type,
-                source=str(window.get("weapon_id") or "attack-on-hit"),
-                ruleset=str(next_encounter.get("ruleset") or "2014"),
-                death_saves=combatant_zero_hp_buffered(combatant),
-            )
-            updated_sheet = damaged["sheet"]
-            record_source_trait_damage(
-                next_encounter,
-                target_id=target_id,
-                damage=damaged,
-            )
-            reconcile_source_attachments(
-                next_encounter,
-                actor_id=target_id,
-                sheet=updated_sheet,
-            )
-            add_concentration_window(
-                next_encounter,
-                target_id,
-                damaged.get("concentration"),
-                next_revision=campaign.revision + 1,
-            )
-            sync_combatant_conditions(next_encounter, target_id, updated_sheet)
-            reconcile_readied_spells(next_encounter, target_id, updated_sheet)
-            settlement_result = {
-                "damage_roll": damage_roll,
-                "damage_amount": damage_amount,
-                "damage": {key: value for key, value in damaged.items() if key != "sheet"},
-                "agent_ruling": {
-                    "trigger_facts": deepcopy(trigger_facts),
-                    "default_resolver": "agent",
-                    "ruling_kind": "agent_dm_adjudication",
-                    "decision": decision,
-                    "reason": reason,
-                    "source_excerpt": source_excerpt,
-                },
-            }
-        elif selection_id == "saving_throw_damage":
-            allowed_fields = {
-                "id",
-                "save_ability",
-                "save_dc",
-                "damage_formula",
-                "damage_type",
-                "half_on_success",
-                "save_source_kind",
-                "source_excerpt",
-                "zero_hp_effect",
-            }
-            unknown_fields = set(normalized_selection) - allowed_fields
-            if unknown_fields:
-                raise CombatEngineError(
-                    "unsupported on-hit save-damage fields: " + ", ".join(sorted(unknown_fields))
-                )
-            save_ability = str(normalized_selection.get("save_ability") or "").strip().casefold()
-            save_dc = normalized_selection.get("save_dc")
-            damage_formula = (
-                str(normalized_selection.get("damage_formula") or "")
-                .strip()
-                .casefold()
-                .replace(" ", "")
-            )
-            damage_type = str(normalized_selection.get("damage_type") or "").strip().casefold()
-            half_on_success = normalized_selection.get("half_on_success")
-            save_source_kind = (
-                str(normalized_selection.get("save_source_kind") or "").strip().casefold()
-            )
-            source_excerpt = str(normalized_selection.get("source_excerpt") or "").strip()
-            zero_hp_effect = normalized_selection.get("zero_hp_effect")
-            if (
-                save_ability not in ABILITY_IDS
-                or isinstance(save_dc, bool)
-                or not isinstance(save_dc, int)
-                or not 1 <= save_dc <= 40
-                or not damage_formula
-                or not damage_type
-                or not isinstance(half_on_success, bool)
-                or save_source_kind
-                not in {
-                    "",
-                    "spell",
-                    "magical_effect",
-                    "nonmagical_effect",
-                }
-                or not source_excerpt
-                or source_excerpt.casefold() not in effect.casefold()
-            ):
-                raise CombatEngineError(
-                    "on-hit save damage requires exact reviewed save, damage, "
-                    "success, and excerpt terms"
-                )
-            if (
-                re.search(
-                    rf"(?i)\bDC\s*{save_dc}\s+{re.escape(save_ability)}\s+saving throw\b",
-                    effect,
-                )
-                is None
-            ):
-                raise CombatEngineError("save DC or ability is not stated by the reviewed attack")
-            if (
-                re.search(
-                    rf"(?i)(?<![A-Za-z0-9]){re.escape(damage_formula)}(?![A-Za-z0-9])",
-                    effect.replace(" ", ""),
-                )
-                is None
-                or re.search(
-                    rf"(?i)\b{re.escape(damage_type)}\s+damage\b",
-                    effect,
-                )
-                is None
-            ):
-                raise CombatEngineError(
-                    "damage formula or type is not stated by the reviewed attack"
-                )
-            states_half_damage = (
-                re.search(
-                    r"(?i)\bhalf as much damage on a successful one\b",
-                    effect,
-                )
-                is not None
-            )
-            if half_on_success != states_half_damage:
-                raise CombatEngineError("success damage does not match the reviewed attack")
-            states_zero_hp_effect = (
-                re.search(
-                    (
-                        rf"(?i)\b(?:the\s+{re.escape(damage_type)}(?:\s+damage)?|"
-                        rf"{re.escape(damage_type)}\s+damage|this\s+damage|"
-                        r"the\s+damage|it)\s+reduces\s+the\s+target\s+to\s+"
-                        r"0\s+hit\s+points\b"
-                    ),
-                    effect,
-                )
-                is not None
-            )
-            normalized_zero_hp_effect: dict[str, Any] | None = None
-            if states_zero_hp_effect:
-                if not isinstance(zero_hp_effect, dict):
-                    raise CombatEngineError(
-                        "the reviewed zero-hit-point effect requires structured settlement"
-                    )
-                unknown_zero_fields = set(zero_hp_effect) - {
-                    "stable",
-                    "conditions",
-                    "duration",
-                }
-                raw_duration = zero_hp_effect.get("duration")
-                raw_zero_conditions = zero_hp_effect.get("conditions")
-                if not isinstance(raw_duration, dict) or not isinstance(raw_zero_conditions, list):
-                    raise CombatEngineError(
-                        "zero-hit-point conditions and duration must be structured"
-                    )
-                duration = dict(raw_duration)
-                unknown_duration_fields = set(duration) - {"period", "remaining"}
-                zero_conditions = [
-                    str(item).strip().casefold()
-                    for item in raw_zero_conditions
-                    if str(item).strip()
-                ]
-                duration_period = str(duration.get("period") or "").strip().casefold()
-                duration_remaining = duration.get("remaining")
-                normalized_effect = _normalize_source_evidence_text(effect)
-                conditions_match_source = all(
-                    re.search(
-                        rf"(?<!\w){re.escape(condition)}(?!\w)",
-                        normalized_effect,
-                    )
-                    is not None
-                    for condition in zero_conditions
-                )
-                duration_matches_source = (
-                    isinstance(duration_remaining, int)
-                    and not isinstance(duration_remaining, bool)
-                    and re.search(
-                        (
-                            rf"(?<!\w)for\s+{duration_remaining}\s+"
-                            rf"{re.escape(duration_period)}s?(?!\w)"
-                        ),
-                        normalized_effect,
-                    )
-                    is not None
-                )
-                if (
-                    unknown_zero_fields
-                    or unknown_duration_fields
-                    or zero_hp_effect.get("stable") is not True
-                    or not zero_conditions
-                    or len(zero_conditions) != len(raw_zero_conditions)
-                    or len(zero_conditions) != len(set(zero_conditions))
-                    or any(len(condition) > 64 for condition in zero_conditions)
-                    or duration_period not in {"round", "minute", "hour", "day"}
-                    or isinstance(duration_remaining, bool)
-                    or not isinstance(duration_remaining, int)
-                    or duration_remaining < 1
-                    or duration_remaining > 100000
-                    or re.search(r"(?i)\bthe\s+target\s+is\s+stable\b", effect) is None
-                    or not conditions_match_source
-                    or not duration_matches_source
-                ):
-                    raise CombatEngineError(
-                        "zero-hit-point settlement does not match the reviewed attack"
-                    )
-                normalized_zero_hp_effect = {
-                    "stable": True,
-                    "conditions": zero_conditions,
-                    "duration": {
-                        "period": duration_period,
-                        "remaining": duration_remaining,
-                    },
-                }
-            elif zero_hp_effect is not None:
-                raise CombatEngineError(
-                    "the reviewed attack does not state a zero-hit-point effect"
-                )
-            target_actor = combat_actor_snapshot(target_id)
-            target_actor["sheet"] = deepcopy(updated_sheet)
-            target_actor["derived"] = derive_character_sheet(updated_sheet)
-            saved = resolve_actor_check(
-                target_actor,
-                kind="save",
-                ability=save_ability,
-                dc=save_dc,
-                ruleset=str(next_encounter.get("ruleset") or "2014"),
-                rules=effective_rule_context(
-                    campaign_id,
-                    facts={
-                        "actor_id": target_id,
-                        "attacker_id": str(window.get("attacker_id") or ""),
-                        "weapon_id": str(window.get("weapon_id") or ""),
-                        "kind": "attack_on_hit_save",
-                        **({"save_source_kind": save_source_kind} if save_source_kind else {}),
-                    },
-                ),
-            )
-            rule_receipts.extend(saved.get("rule_receipts") or [])
-            damage_roll = asdict(roll(damage_formula))
-            reduction_settlement = standard_save_damage_reduction(
-                target_actor,
-                ability=save_ability,
-                success=bool(saved["success"]),
-                ordinary_successful_save=("half" if half_on_success else "none"),
-                rules=effective_rule_context(
-                    campaign_id,
-                    facts={
-                        "actor_id": target_id,
-                        "attacker_id": str(window.get("attacker_id") or ""),
-                        "weapon_id": str(window.get("weapon_id") or ""),
-                        "kind": "attack_on_hit_save",
-                        **({"save_source_kind": save_source_kind} if save_source_kind else {}),
-                    },
-                ),
-            )
-            rule_receipts.extend(reduction_settlement.get("rule_receipts") or [])
-            damage_amount = damage_amount_after_reduction(
-                int(damage_roll["total"]),
-                str(reduction_settlement["damage_reduction"]),
-            )
-            damaged_result: dict[str, Any] | None = None
-            applied_zero_hp_effect: dict[str, Any] | None = None
-            if damage_amount > 0:
-                combatant = require_encounter_combatant(
-                    next_encounter,
-                    target_id,
-                    role="attack on-hit target",
-                )
-                damaged = apply_damage_to_sheet(
-                    updated_sheet,
-                    amount=damage_amount,
-                    damage_type=damage_type,
-                    source=str(window.get("weapon_id") or "attack-on-hit"),
-                    ruleset=str(next_encounter.get("ruleset") or "2014"),
-                    death_saves=combatant_zero_hp_buffered(combatant),
-                )
-                updated_sheet = damaged["sheet"]
-                record_source_trait_damage(
-                    next_encounter,
-                    target_id=target_id,
-                    damage=damaged,
-                )
-                reconcile_source_attachments(
-                    next_encounter,
-                    actor_id=target_id,
-                    sheet=updated_sheet,
-                )
-                damaged_result = {key: value for key, value in damaged.items() if key != "sheet"}
-                add_concentration_window(
-                    next_encounter,
-                    target_id,
-                    damaged.get("concentration"),
-                    next_revision=campaign.revision + 1,
-                )
-                if (
-                    normalized_zero_hp_effect is not None
-                    and int(damaged.get("before_hp", 0) or 0) > 0
-                    and int(damaged.get("after_hp", 0) or 0) == 0
-                    and int(damaged.get("applied_amount", 0) or 0) > 0
-                ):
-                    apply_condition_change(updated_sheet, condition_id="dead", add=False)
-                    apply_condition_change(updated_sheet, condition_id="stable", add=False)
-                    apply_condition_change(updated_sheet, condition_id="unconscious", add=True)
-                    stabilized = stabilize_sheet(updated_sheet)
-                    updated_sheet = stabilized["sheet"]
-                    before_special_conditions = condition_ids(updated_sheet.get("conditions"))
-                    effect_id = f"{choice_id}:zero-hp"
-                    updated_sheet, _ = add_effect(
-                        updated_sheet,
-                        {
-                            "id": effect_id,
-                            "name": "Attack effect at 0 hit points",
-                            "kind": "timed_conditions",
-                            "source": str(window.get("weapon_id") or ""),
-                            "active": True,
-                            "duration": normalized_zero_hp_effect["duration"],
-                            "changes": [
-                                {
-                                    "path": "conditions",
-                                    "mode": "add",
-                                    "value": normalized_zero_hp_effect["conditions"],
-                                }
-                            ],
-                            "description": source_excerpt,
-                        },
-                    )
-                    added_conditions = sorted(
-                        condition_ids(updated_sheet.get("conditions")) - before_special_conditions
-                    )
-                    applied_zero_hp_effect = {
-                        **normalized_zero_hp_effect,
-                        "effect_id": effect_id,
-                        "added_conditions": added_conditions,
-                        "stabilization": {
-                            key: value for key, value in stabilized.items() if key != "sheet"
-                        },
-                    }
-                    ongoing_effect = {
-                        "id": effect_id,
-                        "kind": "timed_conditions",
-                        "source_actor_id": str(window.get("attacker_id") or ""),
-                        "target_id": target_id,
-                        "weapon_id": str(window.get("weapon_id") or ""),
-                        "conditions": list(normalized_zero_hp_effect["conditions"]),
-                        "duration": dict(normalized_zero_hp_effect["duration"]),
-                        "source_excerpt": source_excerpt,
-                        "effect": effect,
-                        "active": True,
-                    }
-                    next_encounter["ongoing_effects"] = [
-                        *list(next_encounter.get("ongoing_effects") or []),
-                        ongoing_effect,
-                    ]
-            sync_combatant_conditions(next_encounter, target_id, updated_sheet)
-            reconcile_readied_spells(next_encounter, target_id, updated_sheet)
-            settlement_result = {
-                "save": saved,
-                "damage_reduction": str(reduction_settlement["damage_reduction"]),
-                "damage_roll": damage_roll,
-                "damage_amount": damage_amount,
-                "damage": damaged_result,
-                "zero_hp_effect": applied_zero_hp_effect,
-            }
-        elif selection_id == "conditional_extra_damage":
-            allowed_fields = {
-                "id",
-                "applies",
-                "damage_formula",
-                "damage_type",
-                "trigger_facts",
-                "default_resolver",
-                "ruling_kind",
-                "decision",
-                "reason",
-                "source_excerpt",
-            }
-            unknown_fields = set(normalized_selection) - allowed_fields
-            if unknown_fields:
-                raise CombatEngineError(
-                    "unsupported conditional extra-damage fields: "
-                    + ", ".join(sorted(unknown_fields))
-                )
-            applies = normalized_selection.get("applies")
-            damage_formula = (
-                str(normalized_selection.get("damage_formula") or "")
-                .strip()
-                .casefold()
-                .replace(" ", "")
-            )
-            damage_type = str(normalized_selection.get("damage_type") or "").strip().casefold()
-            trigger_facts = normalized_selection.get("trigger_facts")
-            decision = str(normalized_selection.get("decision") or "").strip()
-            reason = str(normalized_selection.get("reason") or "").strip()
-            source_excerpt = str(normalized_selection.get("source_excerpt") or "").strip()
-            if (
-                not has_explicit_conditional_damage
-                or not isinstance(applies, bool)
-                or not isinstance(trigger_facts, dict)
-                or not trigger_facts
-                or len(trigger_facts) > 32
-                or any(
-                    not isinstance(key, str) or not key.strip() or len(key) > 100
-                    for key in trigger_facts
-                )
-                or normalized_selection.get("default_resolver") != "agent"
-                or normalized_selection.get("ruling_kind") != "agent_dm_adjudication"
-                or not decision
-                or len(decision) > 1000
-                or not reason
-                or len(reason) > 2000
-                or not source_excerpt
-                or source_excerpt.casefold() != effect.casefold()
-            ):
-                raise CombatEngineError(
-                    "conditional extra damage requires an exact reviewed excerpt, "
-                    "structured trigger facts, and an explicit Agent-as-DM decision"
-                )
-            try:
-                encoded_trigger_facts = canonical_json(trigger_facts)
-            except (TypeError, ValueError) as exc:
-                raise CombatEngineError(
-                    "conditional extra-damage trigger facts must be JSON values"
-                ) from exc
-            if len(encoded_trigger_facts) > 10000:
-                raise CombatEngineError("conditional extra-damage trigger facts are too large")
-
-            target_size = effective_size(target_record.sheet)
-            if "target_size" in trigger_facts:
-                recorded_target_size = (
-                    str(trigger_facts.get("target_size") or "").strip().casefold()
-                )
-                if recorded_target_size != target_size:
-                    raise CombatEngineError(
-                        "conditional extra-damage target_size does not match the target actor card"
-                    )
-            bound_fact_values = {
-                "target_id": target_id,
-                "attacker_id": str(window.get("attacker_id") or ""),
-                "weapon_id": str(window.get("weapon_id") or ""),
-            }
-            for fact_key, expected_value in bound_fact_values.items():
-                if fact_key in trigger_facts and str(trigger_facts[fact_key]) != expected_value:
-                    raise CombatEngineError(
-                        f"conditional extra-damage {fact_key} does not match the pending attack"
-                    )
-
-            size_condition = re.search(
-                r"(?i)\bif\s+the\s+target\s+is\s+"
-                r"(Tiny|Small|Medium|Large|Huge|Gargantuan)\s+or\s+"
-                r"(larger|smaller)\b",
-                effect,
-            )
-            if size_condition is not None:
-                size_ranks = {
-                    "tiny": 0,
-                    "small": 1,
-                    "medium": 2,
-                    "large": 3,
-                    "huge": 4,
-                    "gargantuan": 5,
-                }
-                threshold = size_condition.group(1).casefold()
-                comparison = size_condition.group(2).casefold()
-                if target_size not in size_ranks or "target_size" not in trigger_facts:
-                    raise CombatEngineError(
-                        "a source size threshold requires the target_size actor fact"
-                    )
-                source_applies = (
-                    size_ranks[target_size] >= size_ranks[threshold]
-                    if comparison == "larger"
-                    else size_ranks[target_size] <= size_ranks[threshold]
-                )
-                if applies is not source_applies:
-                    raise CombatEngineError(
-                        "Agent applicability conflicts with the source size threshold "
-                        "and target actor card"
-                    )
-
-            if applies:
-                if (
-                    re.fullmatch(r"\d+d\d+(?:[+\-]\d+)?", damage_formula) is None
-                    or not damage_type
-                    or re.search(
-                        rf"(?i)(?<![A-Za-z0-9_])"
-                        rf"{re.escape(damage_formula)}"
-                        rf"(?![A-Za-z0-9_])",
-                        effect.replace(" ", ""),
-                    )
-                    is None
-                    or re.search(
-                        rf"(?i)\b{re.escape(damage_type)}\s+damage\b",
-                        effect,
-                    )
-                    is None
-                ):
-                    raise CombatEngineError(
-                        "applied conditional extra damage requires a printed dice "
-                        "formula and damage type from the reviewed attack"
-                    )
-            elif damage_formula or damage_type:
-                raise CombatEngineError(
-                    "non-applicable conditional extra damage must not roll or declare damage terms"
-                )
-
-            damage_roll: dict[str, Any] | None = None
-            damaged_result: dict[str, Any] | None = None
-            if applies:
-                damage_roll = asdict(roll(damage_formula))
-                combatant = require_encounter_combatant(
-                    next_encounter,
-                    target_id,
-                    role="conditional extra-damage target",
-                )
-                damaged = apply_damage_to_sheet(
-                    updated_sheet,
-                    amount=int(damage_roll["total"]),
-                    damage_type=damage_type,
-                    source=str(window.get("weapon_id") or "conditional-extra-damage"),
-                    ruleset=str(next_encounter.get("ruleset") or "2014"),
-                    death_saves=combatant_zero_hp_buffered(combatant),
-                )
-                updated_sheet = damaged["sheet"]
-                record_source_trait_damage(
-                    next_encounter,
-                    target_id=target_id,
-                    damage=damaged,
-                )
-                reconcile_source_attachments(
-                    next_encounter,
-                    actor_id=target_id,
-                    sheet=updated_sheet,
-                )
-                damaged_result = {key: value for key, value in damaged.items() if key != "sheet"}
-                add_concentration_window(
-                    next_encounter,
-                    target_id,
-                    damaged.get("concentration"),
-                    next_revision=campaign.revision + 1,
-                )
-            sync_combatant_conditions(next_encounter, target_id, updated_sheet)
-            reconcile_readied_spells(next_encounter, target_id, updated_sheet)
-            settlement_result = {
-                "applies": applies,
-                "trigger_facts": deepcopy(trigger_facts),
-                "agent_ruling": {
-                    "default_resolver": "agent",
-                    "ruling_kind": "agent_dm_adjudication",
-                    "decision": decision,
-                    "reason": reason,
-                },
-                "damage_roll": damage_roll,
-                "damage_amount": (int(damage_roll["total"]) if damage_roll is not None else 0),
-                "damage": damaged_result,
-            }
-        next_encounter["log"] = [
-            *list(next_encounter.get("log") or []),
-            {
-                "type": "attack_on_hit_ruling",
-                "target_id": target_id,
-                "choice_id": choice_id,
-                "selection": normalized_selection,
-                "ongoing_effect": ongoing_effect,
-                "result": settlement_result,
-            },
-        ][-100:]
-        next_state = {**dict(campaign.state or {}), "combat": next_encounter}
-        updates = []
-        if updated_sheet != target_record.sheet:
-            updates.append(
-                CharacterStateUpdate(
-                    character_id=target_id,
-                    sheet=validate_character_sheet(updated_sheet),
-                    notes=validate_character_notes(target_record.notes),
-                    expected_revision=target_record.revision,
-                )
-            )
-
-        def on_hit_ruling_response(revisions: list[Any]) -> dict[str, Any]:
-            response = {
-                "status": "committed",
-                "selection": normalized_selection,
-                "ongoing_effect": ongoing_effect,
-                "result": settlement_result,
-                "combat": next_encounter,
-                "campaign_revision": campaign.revision + 1,
-                "revisions": [asdict(item) for item in revisions],
-            }
-            stream = active_random_stream()
-            if stream is not None and stream.draw_count > 0:
-                response["random_stream_receipt"] = stream.receipt()
-            return response
-
-        revisions_result = StateMutationService(storage.database).replace(
+            raise CombatEngineError("choice_id is not this target's pending on-hit review")
+        source_excerpt = str(normalized.get("source_excerpt") or "").strip()
+        if not source_excerpt or source_excerpt.casefold() != str(
+            window.get("effect") or ""
+        ).strip().casefold():
+            raise CombatEngineError("dismissal requires the exact reviewed source excerpt")
+        return combat_choice_resolve(
             campaign_id,
-            campaign_state=validate_party_state(next_state),
-            character_updates=updates,
-            expected_campaign_revision=campaign.revision,
-            operation="combat.attack.on_hit.ruling",
-            actor=principal_id,
-            branch_id=resolved_branch_id,
+            target_id,
+            choice_id,
+            {"id": "dismiss", "source_excerpt": source_excerpt},
+            principal_id=principal_id,
+            expected_revision=expected_revision,
+            branch_id=branch_id,
             idempotency_key=idempotency_key,
-            idempotency_write=IdempotencyWrite(
-                scope=scope,
-                payload=payload,
-                response=on_hit_ruling_response,
-            ),
-            rule_receipts=rule_receipts,
-        )
-        response = on_hit_ruling_response(list(revisions_result or []))
-        return combat_response(
-            campaign_id,
-            principal_id,
-            response,
         )
 
-    def grant_frightful_presence_immunity(
-        sheet: dict[str, Any],
-        *,
-        source_actor_id: str,
-        immunity_duration: dict[str, Any],
-        source_excerpt: str,
-        revision: int,
-    ) -> dict[str, Any]:
-        """Apply the source-scoped immunity whenever the printed fear effect ends."""
 
-        if any(
-            isinstance(effect, dict)
-            and effect.get("active", True)
-            and effect.get("kind") == "frightful_presence_immunity"
-            and str(effect.get("source") or "") == source_actor_id
-            for effect in sheet.get("effects", [])
-        ):
-            return deepcopy(sheet)
-        updated, _ = add_effect(
-            sheet,
-            {
-                "id": (f"frightful-presence-immunity:{source_actor_id}:{revision}"),
-                "name": "Frightful Presence immunity",
-                "kind": "frightful_presence_immunity",
-                "source": source_actor_id,
-                "active": True,
-                "duration": {
-                    "period": str(immunity_duration.get("period") or "hour"),
-                    "remaining": int(immunity_duration.get("remaining", 24) or 24),
-                },
-                "changes": [],
-                "description": str(source_excerpt or ""),
-            },
-        )
-        return updated
 
     @mcp.tool()
     @_agent_ruling_boundary
@@ -18379,200 +15381,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         current_sheet = deepcopy(current.sheet)
         next_encounter = deepcopy(encounter)
         require_no_blocking_pending(next_encounter)
-        turn_end_sheets = {actor_id: current_sheet}
-        source_turn_end = settle_source_ongoing_damage(
+        duration = advance_effect_durations(current_sheet, period="turn_end")
+        ended_turn_token = encounter_turn_token(next_encounter)
+        expired_standard_turn_end = expire_standard_source_turn_effects(
             next_encounter,
             actor_id=actor_id,
-            sheets=turn_end_sheets,
-            trigger_timing="turn_end",
-            next_revision=campaign.revision + 1,
+            phase="source_turn_end",
+            turn_token=ended_turn_token,
         )
-        current_sheet = turn_end_sheets[actor_id]
-        if any(
-            item.get("status", "pending") == "pending" for item in next_encounter.get("pending", [])
-        ):
-            next_state = {
-                **dict(campaign.state or {}),
-                "combat": next_encounter,
-            }
-            interrupt_context = effective_rule_context(campaign_id)
-            interrupt_receipts = core_receipts(
-                interrupt_context,
-                [
-                    "dnd5e.core.monster.ignition_ongoing_damage",
-                    *(
-                        ["dnd5e.core.monster.death_burst"]
-                        if any(
-                            item.get("trigger") == "standard_death_burst"
-                            for item in next_encounter.get("pending", [])
-                        )
-                        else []
-                    ),
-                ],
-                "combat.turn_end.standard_trigger",
-            )
-
-            def turn_end_interrupt_response(
-                revisions: list[Any],
-            ) -> dict[str, Any]:
-                response = {
-                    "status": "pending_trigger",
-                    "combat": next_encounter,
-                    "source_turn_end": source_turn_end,
-                    "campaign_revision": campaign.revision + 1,
-                    "revisions": [asdict(item) for item in revisions],
-                    "rule_receipts": interrupt_receipts,
-                }
-                stream = active_random_stream()
-                if stream is not None and stream.draw_count > 0:
-                    response["random_stream_receipt"] = stream.receipt()
-                return response
-
-            revisions_result = StateMutationService(storage.database).replace(
-                campaign_id,
-                campaign_state=validate_party_state(next_state),
-                character_updates=[
-                    CharacterStateUpdate(
-                        character_id=actor_id,
-                        sheet=validate_character_sheet(current_sheet),
-                        notes=validate_character_notes(current.notes),
-                        expected_revision=current.revision,
-                    )
-                ],
-                expected_campaign_revision=campaign.revision,
-                operation="combat.turn.end.standard_trigger",
-                actor=principal_id,
-                branch_id=resolved_branch_id,
-                idempotency_key=idempotency_key,
-                idempotency_write=IdempotencyWrite(
-                    scope=scope,
-                    payload=payload,
-                    response=turn_end_interrupt_response,
-                ),
-                rule_receipts=interrupt_receipts,
-            )
-            return combat_response(
-                campaign_id,
-                principal_id,
-                turn_end_interrupt_response(list(revisions_result or [])),
-            )
-        repeat_saves: list[dict[str, Any]] = []
-        repeat_save_receipts: list[dict[str, Any]] = []
-        for ongoing in next_encounter.get("ongoing_effects", []):
-            if (
-                not isinstance(ongoing, dict)
-                or not ongoing.get("active", True)
-                or ongoing.get("kind")
-                not in {
-                    "on_hit_save_condition",
-                    "frightful_presence",
-                }
-                or str(ongoing.get("target_id") or "") != actor_id
-                or ongoing.get("repeat_save_timing") != "turn_end"
-            ):
-                continue
-            condition = str(ongoing.get("condition") or "").strip().casefold()
-            effect_id = str(ongoing.get("id") or "")
-            sheet_effect = next(
-                (
-                    effect
-                    for effect in current_sheet.get("effects", [])
-                    if str(effect.get("id") or "") == effect_id and effect.get("active", True)
-                ),
-                None,
-            )
-            condition_present = condition in {
-                str(item).strip().casefold() for item in current_sheet.get("conditions", [])
-            }
-            if sheet_effect is None or not condition_present:
-                if ongoing.get("kind") == "frightful_presence":
-                    current_sheet = grant_frightful_presence_immunity(
-                        current_sheet,
-                        source_actor_id=str(ongoing.get("source_actor_id") or ""),
-                        immunity_duration=dict(ongoing.get("immunity_duration") or {}),
-                        source_excerpt=str(ongoing.get("source_excerpt") or ""),
-                        revision=campaign.revision + 1,
-                    )
-                    ongoing["active"] = False
-                    ongoing["resolution"] = {
-                        "kind": "effect_ended",
-                        "actor_id": actor_id,
-                        "round": int(next_encounter.get("round", 1) or 1),
-                    }
-                    repeat_saves.append(
-                        {
-                            "ongoing_effect_id": effect_id,
-                            "condition": condition,
-                            "save": None,
-                            "condition_ended": True,
-                            "source_immunity_applied": True,
-                        }
-                    )
-                continue
-            save_ability = str(ongoing.get("save_ability") or "").strip().casefold()
-            save_dc = int(ongoing.get("save_dc", 0) or 0)
-            target_actor = combat_actor_snapshot(actor_id)
-            target_actor["sheet"] = deepcopy(current_sheet)
-            target_actor["derived"] = derive_character_sheet(current_sheet)
-            saved = resolve_actor_check(
-                target_actor,
-                kind="save",
-                ability=save_ability,
-                dc=save_dc,
-                save_source_kind=(
-                    "nonmagical_effect" if ongoing.get("kind") == "frightful_presence" else None
-                ),
-                save_effect_conditions=[condition],
-                ruleset=str(next_encounter.get("ruleset") or "2014"),
-                rules=effective_rule_context(
-                    campaign_id,
-                    facts={
-                        "actor_id": actor_id,
-                        "source_actor_id": str(ongoing.get("source_actor_id") or ""),
-                        "weapon_id": str(ongoing.get("weapon_id") or ""),
-                        "ongoing_effect_id": effect_id,
-                        "kind": "attack_on_hit_repeat_save_condition",
-                    },
-                ),
-            )
-            repeat_save_receipts.extend(saved.get("rule_receipts") or [])
-            ended = bool(saved["success"])
-            if ended:
-                current_sheet = remove_effect(current_sheet, effect_id)
-                if ongoing.get("kind") == "frightful_presence":
-                    current_sheet = grant_frightful_presence_immunity(
-                        current_sheet,
-                        source_actor_id=str(ongoing.get("source_actor_id") or ""),
-                        immunity_duration=dict(ongoing.get("immunity_duration") or {}),
-                        source_excerpt=str(ongoing.get("source_excerpt") or ""),
-                        revision=campaign.revision + 1,
-                    )
-                ongoing["active"] = False
-                ongoing["resolution"] = {
-                    "kind": "repeat_save_success",
-                    "actor_id": actor_id,
-                    "round": int(next_encounter.get("round", 1) or 1),
-                }
-            repeat_saves.append(
-                {
-                    "ongoing_effect_id": effect_id,
-                    "condition": condition,
-                    "save_ability": save_ability,
-                    "save_dc": save_dc,
-                    "save": saved,
-                    "condition_ended": ended,
-                }
-            )
-        if repeat_saves:
-            next_encounter["log"] = [
-                *list(next_encounter.get("log") or []),
-                {
-                    "type": "on_hit_condition_repeat_saves",
-                    "actor_id": actor_id,
-                    "results": repeat_saves,
-                },
-            ][-100:]
-        duration = advance_effect_durations(current_sheet, period="turn_end")
         next_state = dict(campaign.state or {})
         next_state["combat"] = end_turn(next_encounter, actor_id_value=actor_id)
         expired_attack_advantage = expire_next_attack_advantage(
@@ -18589,6 +15405,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if item.get("kind") == "spell" and str(item.get("id")) not in remaining_readied_ids
         ]
         next_combatant = current_combatant(next_state["combat"])
+        expired_standard_turn_start: list[str] = []
+        if next_combatant is not None:
+            next_actor_id = str(next_combatant.get("actor_id") or "")
+            expired_standard_turn_start = expire_standard_source_turn_effects(
+                next_state["combat"],
+                actor_id=next_actor_id,
+                phase="source_turn_start",
+                turn_token=encounter_turn_token(next_state["combat"]),
+            )
         round_changed = int(next_state["combat"].get("round", 1)) > int(encounter.get("round", 1))
         time_transition: dict[str, Any] | None = None
         if round_changed:
@@ -18670,18 +15495,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 period="turn_start",
             )
             source_sheets[next_actor_id] = started_effects_by_actor[next_actor_id]["sheet"]
-            source_turn_start = settle_source_start_turn(
-                next_state["combat"],
-                actor_id=next_actor_id,
-                sheets=source_sheets,
-                next_revision=campaign.revision + 1,
-            )
-        else:
-            source_turn_start = []
         combat_updates: list[CharacterStateUpdate] = []
         expired_effects = {
             *duration["expired"],
             *expired_attack_advantage,
+            *expired_standard_turn_end,
+            *expired_standard_turn_start,
             *source_duration_expired,
         }
         rule_receipts: list[dict[str, Any]] = core_receipts(
@@ -18689,16 +15508,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ["dnd5e.core.mcp.duration_clock"],
             "turn.end.duration_clock",
         )
-        rule_receipts.extend(repeat_save_receipts)
         rule_receipts.extend(activity_recharge_receipts)
-        if source_turn_end:
-            rule_receipts.extend(
-                core_receipts(
-                    rule_context,
-                    ["dnd5e.core.monster.ignition_ongoing_damage"],
-                    "combat.turn_end.ongoing_damage",
-                )
-            )
         for combatant in next_state["combat"].get("combatants", []):
             target_id = str(combatant.get("actor_id"))
             target = characters.get(target_id)
@@ -18723,28 +15533,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
                 sheet = minutes["sheet"]
                 expired.extend(minutes["expired"])
-            for ongoing in next_state["combat"].get("ongoing_effects", []):
-                if (
-                    not isinstance(ongoing, dict)
-                    or not ongoing.get("active", True)
-                    or ongoing.get("kind") != "frightful_presence"
-                    or str(ongoing.get("target_id") or "") != target_id
-                    or str(ongoing.get("id") or "") not in expired
-                ):
-                    continue
-                sheet = grant_frightful_presence_immunity(
-                    sheet,
-                    source_actor_id=str(ongoing.get("source_actor_id") or ""),
-                    immunity_duration=dict(ongoing.get("immunity_duration") or {}),
-                    source_excerpt=str(ongoing.get("source_excerpt") or ""),
-                    revision=campaign.revision + 1,
-                )
-                ongoing["active"] = False
-                ongoing["resolution"] = {
-                    "kind": "duration_expired",
-                    "actor_id": target_id,
-                    "round": int(next_state["combat"].get("round", 1) or 1),
-                }
             extension = apply_rule_event(
                 sheet,
                 "duration.advance",
@@ -18836,9 +15624,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "world_advanced": list(dict.fromkeys(world_advanced)),
                 "world_expired": list(dict.fromkeys(world_expired)),
                 "readied_spells_expired": sorted(str(item.get("id")) for item in expired_readied),
-                "source_turn_start": source_turn_start,
-                "source_turn_end": source_turn_end,
-                "repeat_saves": repeat_saves,
                 "activity_recharges": activity_recharges,
                 "rule_receipts": rule_receipts,
                 "ruleset_fingerprint": rule_context.fingerprint,
@@ -19386,8 +16171,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         updated_attacker = deepcopy(attacker)
         ammunition = None
+        limited_use = None
         weapon_id = plan.get("weapon_id")
         if weapon_id and weapon_id != "unarmed-strike":
+            if plan.get("weapon_recharge"):
+                updated_sheet, limited_use = consume_weapon_limited_use(
+                    updated_attacker["sheet"],
+                    weapon_id,
+                )
+                updated_attacker["sheet"] = updated_sheet
             if plan.get("ammunition_item_id"):
                 updated_sheet, ammunition = consume_weapon_ammunition(
                     updated_attacker["sheet"],
@@ -19445,6 +16237,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             }
             if ammunition is not None:
                 result["ammunition"] = ammunition
+            if limited_use is not None:
+                result["limited_use"] = limited_use
             if plan.get("attacker_was_hidden"):
                 result["reveals_attacker"] = True
             next_encounter = add_choice_window(
@@ -19463,6 +16257,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 attack=deepcopy(attack_roll),
                 attack_payment=attack_payment,
                 ammunition=deepcopy(ammunition),
+                limited_use=deepcopy(limited_use),
                 source_choice_id=choice_id,
             )
             next_encounter["log"] = [
@@ -19476,7 +16271,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ][-100:]
             next_state = {**dict(campaign.state or {}), "combat": next_encounter}
             updates = []
-            if ammunition is not None:
+            if updated_attacker["sheet"] != attacker["sheet"]:
                 updates.append(
                     CharacterStateUpdate(
                         character_id=actor_id,
@@ -19518,64 +16313,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             attack=attack_roll,
             rules=rule_context,
         )
-        attack_sheets = {
-            actor_id: updated_attacker["sheet"],
-            target_id: updated_target["sheet"],
-        }
-        forced_movement_sheet_ids = settle_standard_attack_forced_movement(
-            campaign_id,
-            next_encounter,
-            result,
-            attacker_id=actor_id,
-            target_id=target_id,
-            sheets=attack_sheets,
-        )
-        updated_attacker["sheet"] = attack_sheets[actor_id]
-        updated_target["sheet"] = attack_sheets[target_id]
         if ammunition is not None:
             result["ammunition"] = ammunition
+        if limited_use is not None:
+            result["limited_use"] = limited_use
         sync_combatant_conditions(next_encounter, actor_id, updated_attacker["sheet"])
         sync_combatant_conditions(next_encounter, target_id, updated_target["sheet"])
-        if "dead" not in {
-            str(item).strip().casefold()
-            for item in require_encounter_combatant(
-                next_encounter,
-                target_id,
-                role="opportunity-attack target",
-            ).get("conditions", [])
-        }:
-            standard_ongoing_effect = record_standard_weapon_ongoing_effect(
-                next_encounter,
-                attacker_id=actor_id,
-                target_id=target_id,
-                weapon_id=str(plan.get("weapon_id") or ""),
-                attack_result=result,
-            )
-            if standard_ongoing_effect is not None:
-                result.setdefault("structured_on_hit", {})["ongoing_effect_instance"] = (
-                    standard_ongoing_effect
-                )
-                result["rule_receipts"] = [
-                    *list(result.get("rule_receipts") or []),
-                    *core_receipts(
-                        rule_context,
-                        ["dnd5e.core.monster.ignition_ongoing_damage"],
-                        "attack.hit.standard_ignition",
-                    ),
-                ]
         reconcile_readied_spells(next_encounter, target_id, updated_target["sheet"])
         damage_result = result.get("damage")
         if isinstance(damage_result, dict):
-            record_source_trait_damage(
-                next_encounter,
-                target_id=target_id,
-                damage=damage_result,
-            )
-            reconcile_source_attachments(
-                next_encounter,
-                actor_id=target_id,
-                sheet=updated_target["sheet"],
-            )
             add_concentration_window(
                 next_encounter,
                 target_id,
@@ -19586,14 +16332,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             result["damage"] = {
                 key: value for key, value in result["damage"].items() if key != "sheet"
             }
-        on_hit_window = add_attack_on_hit_window(
+        apply_standard_spell_on_hit_mechanics(
             next_encounter,
             result=result,
             attacker_id=actor_id,
             target_id=target_id,
-            weapon_id=str(plan.get("weapon_id") or ""),
         )
-        critical_followup_window = add_critical_followup_window(
+        on_hit_window = add_attack_on_hit_window(
             next_encounter,
             result=result,
             attacker_id=actor_id,
@@ -19618,7 +16363,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 **_ruling_status(
                     (
                         "pending_ruling"
-                        if on_hit_window is not None or critical_followup_window is not None
+                        if on_hit_window is not None
                         else "committed"
                     ),
                     "source_or_scene_fact",
@@ -19639,17 +16384,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     notes=validate_character_notes(characters.get(target_id).notes),
                     expected_revision=characters.get(target_id).revision,
                 ),
-                *[
-                    CharacterStateUpdate(
-                        character_id=changed_actor_id,
-                        sheet=validate_character_sheet(attack_sheets[changed_actor_id]),
-                        notes=validate_character_notes(characters.get(changed_actor_id).notes),
-                        expected_revision=characters.get(changed_actor_id).revision,
-                    )
-                    for changed_actor_id in sorted(
-                        forced_movement_sheet_ids - {actor_id, target_id}
-                    )
-                ],
             ],
             rule_receipts=[
                 *list(result.get("rule_receipts") or []),
@@ -19726,6 +16460,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         used = selection_id not in {"decline", "skip", "pass"}
         defense_kind = str(candidate.get("kind") or "")
         spell_result: dict[str, Any] | None = None
+        activity_result: dict[str, Any] | None = None
         if used:
             next_encounter = pay_activity_activation(
                 next_encounter,
@@ -19782,7 +16517,25 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     spent_slot=cast_payment.get("economy") in SLOT_PAYMENT_ECONOMIES,
                     cast_level=cast_level,
                 )
-            elif defense_kind != "armor_class_bonus":
+            elif defense_kind == "armor_class_bonus":
+                activity_result = consume_activity(
+                    target["sheet"],
+                    activity_id=selection_id,
+                    rules=effective_rule_context(
+                        campaign_id,
+                        facts={
+                            "actor_id": actor_id,
+                            "activity_id": selection_id,
+                        },
+                    ),
+                )
+                if activity_result.get("status") != "committed":
+                    raise CombatEngineError(
+                        "reviewed defensive activity could not be consumed"
+                    )
+                target["sheet"] = activity_result["sheet"]
+                target["derived"] = derive_character_sheet(target["sheet"])
+            else:
                 raise CombatEngineError("defensive reaction kind is not executable")
             attack = apply_attack_ac_bonus(
                 attack,
@@ -19815,20 +16568,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         next_encounter = mastery_commit["encounter"]
         if mastery_commit["effect"] is not None:
             result.setdefault("weapon_mastery", {})["committed_effect"] = mastery_commit["effect"]
-        attack_sheets = {
-            attacker_id: updated_attacker["sheet"],
-            actor_id: updated_target["sheet"],
-        }
-        forced_movement_sheet_ids = settle_standard_attack_forced_movement(
-            campaign_id,
-            next_encounter,
-            result,
-            attacker_id=attacker_id,
-            target_id=actor_id,
-            sheets=attack_sheets,
-        )
-        updated_attacker["sheet"] = attack_sheets[attacker_id]
-        updated_target["sheet"] = attack_sheets[actor_id]
         result["attack_payment"] = deepcopy(window.get("attack_payment") or {})
         if window.get("ammunition") is not None:
             result["ammunition"] = deepcopy(window["ammunition"])
@@ -19846,14 +16585,36 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 else None
             ),
             "cast_level": spell_result.get("cast_level") if spell_result else None,
-            "payment": deepcopy(spell_result.get("payment") or {}) if spell_result else None,
+            "payment": (
+                deepcopy(spell_result.get("payment") or {})
+                if spell_result
+                else deepcopy(activity_result.get("payment"))
+                if activity_result
+                else None
+            ),
             "effect_id": spell_result.get("effect_id") if spell_result else None,
             "bonus": int(candidate.get("bonus", 0) or 0) if used else 0,
+            "semantic_solution": (
+                {
+                    "plan_id": candidate.get("plan_id"),
+                    "plan_fingerprint": candidate.get("plan_fingerprint"),
+                    "solution_version": candidate.get("solution_version"),
+                    "compiled_by": deepcopy(candidate.get("compiled_by")),
+                    "citations": deepcopy(candidate.get("citations") or []),
+                }
+                if used and defense_kind == "armor_class_bonus"
+                else None
+            ),
         }
-        if spell_result is not None:
+        if spell_result is not None or activity_result is not None:
             result["rule_receipts"] = [
                 *list(result.get("rule_receipts") or []),
-                *list(spell_result.get("rule_receipts") or []),
+                *(list(spell_result.get("rule_receipts") or []) if spell_result else []),
+                *(
+                    list(activity_result.get("rule_receipts") or [])
+                    if activity_result
+                    else []
+                ),
             ]
         attacker_combatant = next(
             item for item in next_encounter["combatants"] if item.get("actor_id") == attacker_id
@@ -19863,56 +16624,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             flags = dict(attacker_combatant.get("turn_flags") or {})
             flags["sneak_attack_turn_token"] = sneak_attack["turn_token"]
             attacker_combatant["turn_flags"] = flags
-        record_agent_attack_ruling_uses(
-            next_encounter,
-            attacker_id=attacker_id,
-            plan=plan,
-            result=result,
-        )
         if result.get("reveals_attacker"):
             reveal_attacker_to_target(next_encounter, attacker_id, actor_id)
         sync_combatant_conditions(next_encounter, attacker_id, updated_attacker["sheet"])
         sync_combatant_conditions(next_encounter, actor_id, updated_target["sheet"])
-        if "dead" not in {
-            str(item).strip().casefold()
-            for item in require_encounter_combatant(
-                next_encounter,
-                actor_id,
-                role="defended attack target",
-            ).get("conditions", [])
-        }:
-            standard_ongoing_effect = record_standard_weapon_ongoing_effect(
-                next_encounter,
-                attacker_id=attacker_id,
-                target_id=actor_id,
-                weapon_id=str(plan.get("weapon_id") or ""),
-                attack_result=result,
-            )
-            if standard_ongoing_effect is not None:
-                result.setdefault("structured_on_hit", {})["ongoing_effect_instance"] = (
-                    standard_ongoing_effect
-                )
-                result["rule_receipts"] = [
-                    *list(result.get("rule_receipts") or []),
-                    *core_receipts(
-                        rule_context,
-                        ["dnd5e.core.monster.ignition_ongoing_damage"],
-                        "attack.hit.standard_ignition",
-                    ),
-                ]
         reconcile_readied_spells(next_encounter, actor_id, updated_target["sheet"])
         damage_result = result.get("damage")
         if isinstance(damage_result, dict):
-            record_source_trait_damage(
-                next_encounter,
-                target_id=actor_id,
-                damage=damage_result,
-            )
-            reconcile_source_attachments(
-                next_encounter,
-                actor_id=actor_id,
-                sheet=updated_target["sheet"],
-            )
             add_concentration_window(
                 next_encounter,
                 actor_id,
@@ -19922,14 +16640,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             result["damage"] = {
                 key: value for key, value in damage_result.items() if key != "sheet"
             }
-        on_hit_window = add_attack_on_hit_window(
+        apply_standard_spell_on_hit_mechanics(
             next_encounter,
             result=result,
             attacker_id=attacker_id,
             target_id=actor_id,
-            weapon_id=str(plan.get("weapon_id") or ""),
         )
-        critical_followup_window = add_critical_followup_window(
+        on_hit_window = add_attack_on_hit_window(
             next_encounter,
             result=result,
             attacker_id=attacker_id,
@@ -19966,7 +16683,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 **_ruling_status(
                     (
                         "pending_ruling"
-                        if on_hit_window is not None or critical_followup_window is not None
+                        if on_hit_window is not None
                         else "committed"
                     ),
                     "source_or_scene_fact",
@@ -19987,17 +16704,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     notes=validate_character_notes(characters.get(actor_id).notes),
                     expected_revision=characters.get(actor_id).revision,
                 ),
-                *[
-                    CharacterStateUpdate(
-                        character_id=changed_actor_id,
-                        sheet=validate_character_sheet(attack_sheets[changed_actor_id]),
-                        notes=validate_character_notes(characters.get(changed_actor_id).notes),
-                        expected_revision=characters.get(changed_actor_id).revision,
-                    )
-                    for changed_actor_id in sorted(
-                        forced_movement_sheet_ids - {attacker_id, actor_id}
-                    )
-                ],
             ],
             rule_receipts=[
                 *list(result.get("rule_receipts") or []),
@@ -20119,8 +16825,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             movement_boundary_ids.append("dnd5e.core.movement.grapple_source")
         if "turned" in moving_conditions:
             movement_boundary_ids.append("dnd5e.core.activity.turn_undead")
-        if str(movement_mode).strip().casefold().replace("-", "_") == "aggressive":
-            movement_boundary_ids.append("dnd5e.core.monster.aggressive")
         if destination is not None:
             movement_boundary_ids.append("dnd5e.core.movement.occupied_destination")
         difficult_cells = set(dict(encounter.get("battle_map") or {}).get("difficult_cells") or [])
@@ -20249,7 +16953,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "sustain_spell",
             "use_object",
             "utilize",
-            "detach_attachment",
         ],
         target_id: str | None = None,
         trigger: str | None = None,
@@ -20415,16 +17118,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     next_encounter,
                     target_actor_id,
                     damaged["sheet"],
-                )
-                record_source_trait_damage(
-                    next_encounter,
-                    target_id=target_actor_id,
-                    damage=damaged,
-                )
-                reconcile_source_attachments(
-                    next_encounter,
-                    actor_id=target_actor_id,
-                    sheet=damaged["sheet"],
                 )
                 reconcile_readied_spells(
                     next_encounter,
@@ -20659,24 +17352,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "object_description": object_description,
                 "interaction": interaction,
             }
-        if normalized_action == "detach_attachment":
-            effect_id = str(dict(payload or {}).get("effect_id") or "").strip()
-            if not effect_id:
-                raise CombatEngineError("detach_attachment requires payload.effect_id")
-            next_encounter = detach_attachment(
-                encounter,
-                actor_id_value=actor_id,
-                effect_id=effect_id,
-            )
-        else:
-            next_encounter = resolve_common_action(
-                encounter,
-                actor_id_value=actor_id,
-                action=action,
-                target_id=target_id,
-                trigger=trigger,
-                payload=engine_payload,
-            )
+        next_encounter = resolve_common_action(
+            encounter,
+            actor_id_value=actor_id,
+            action=action,
+            target_id=target_id,
+            trigger=trigger,
+            payload=engine_payload,
+        )
         if hypnotic_target_record is not None:
             ended_hypnotic = end_hypnotic_pattern_effects(
                 hypnotic_target_record.sheet,
@@ -20754,55 +17437,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "source_excerpt": str(next_source_condition["source_excerpt"]),
                 "agent_ruling": deepcopy(source_condition_ruling),
             }
-        end_effect_id = str(dict(payload or {}).get("end_ongoing_effect_id") or "").strip()
-        if end_effect_id:
-            end_payload = dict(payload or {})
-            allowed_end_fields = {
-                "end_ongoing_effect_id",
-                "end_action_description",
-                "source_excerpt",
-            }
-            effect = next(
-                (
-                    item
-                    for item in next_encounter.get("ongoing_effects", [])
-                    if isinstance(item, dict)
-                    and str(item.get("id") or "") == end_effect_id
-                    and item.get("active", True)
-                    and item.get("kind") == "source_ongoing_damage"
-                ),
-                None,
-            )
-            if (
-                set(end_payload) - allowed_end_fields
-                or effect is None
-                or normalized_action != str(effect.get("end_action") or "")
-                or str(target_id or "") != str(effect.get("target_id") or "")
-                or str(end_payload.get("end_action_description") or "").strip().casefold()
-                != str(effect.get("end_action_description") or "").strip().casefold()
-                or str(end_payload.get("source_excerpt") or "").strip().casefold()
-                != str(effect.get("source_excerpt") or "").strip().casefold()
-            ):
-                raise CombatEngineError(
-                    "ending source ongoing damage requires its active effect, "
-                    "recorded common action, target, description, and exact excerpt"
-                )
-            effect["active"] = False
-            effect["ended_reason"] = "source_end_action"
-            effect["ended_by_actor_id"] = actor_id
-            effect["ended_round"] = int(next_encounter.get("round", 1) or 1)
-            next_encounter["log"] = [
-                *list(next_encounter.get("log") or []),
-                {
-                    "type": "source_ongoing_damage_ended",
-                    "effect_id": end_effect_id,
-                    "actor_id": actor_id,
-                    "target_id": str(target_id or ""),
-                    "action": normalized_action,
-                    "end_action_description": str(effect["end_action_description"]),
-                    "source_excerpt": str(effect["source_excerpt"]),
-                },
-            ][-100:]
         action_ended_tethers = newly_ended_witch_bolt_tethers(
             encounter,
             next_encounter,
@@ -21293,42 +17927,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 compiled_plan=compiled_spell_plan,
             )
             declaration = {"agent_resolution_commitment": semantic_plan_commitment}
-        agent_ruling_commitment: dict[str, Any] | None = None
-        if (
-            structured_resolution is None
-            and compiled_spell_plan is None
-            and not fly
-            and not invisibility
-            and not hypnotic_pattern
-            and declaration
-        ):
-            if not source_card_has_direct_agent_ruling(spell_entry):
-                raise CombatEngineError(
-                    "an unstructured spell needs a build-time source-bound "
-                    "agent_ruling clause before it can use a runtime commitment"
-                )
-            declared = dict(declaration)
-            if set(declared) != {"agent_ruling_commitment"} or not isinstance(
-                declared.get("agent_ruling_commitment"),
-                dict,
-            ):
-                raise CombatEngineError(
-                    "an unstructured spell accepts only one "
-                    "agent_ruling_commitment for its pending Agent settlement"
-                )
-            access.require_campaign(
-                campaign_id,
-                principal_id,
-                roles=CAMPAIGN_DM_ROLES,
-            )
-            agent_ruling_commitment = validate_agent_save_damage_commitment(
-                campaign_id,
-                declared["agent_ruling_commitment"],
-                encounter=encounter,
-                source_actor_id=actor_id,
-                source_card_id=spell_id,
-                source_card_kind="spell",
-            )
         if (
             source_item_id is None
             and structured_resolution is None
@@ -21345,7 +17943,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 campaign_id,
                 spell_entry,
             )
-            and agent_ruling_commitment is None
         ):
             return {
                 **_ruling_status(
@@ -21525,12 +18122,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             elif kind == "saving_throw":
                 save = dict(structured_resolution.get("save") or {})
                 if dict(structured_resolution.get("targeting") or {}).get("mode") == "area":
-                    structured_target = normalize_area_spell_declaration(
+                    spell_area = dict(
+                        dict(structured_resolution.get("targeting") or {}).get("area")
+                        or {}
+                    )
+                    spell_range = dict(
+                        dict(spell_entry.get("definition") or {}).get("range") or {}
+                    )
+                    structured_target = normalize_area_declaration(
                         encounter,
-                        caster_id=actor_id,
-                        spell=spell_entry,
-                        resolution=structured_resolution,
+                        source_id=actor_id,
+                        area=spell_area,
                         declaration=declaration,
+                        origin_range_ft=int(spell_range.get("normal_ft", 0) or 0),
                     )
                 else:
                     structured_target = normalize_single_target_declaration(
@@ -21598,10 +18202,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "result": {key: value for key, value in applied.items() if key != "sheet"},
                 "campaign_revision": campaign.revision,
             }
-        if agent_ruling_commitment is not None and applied.get("automatic_effect") is not None:
-            raise CombatEngineError(
-                "an automatically settled spell cannot open an Agent ruling commitment"
-            )
         casting_time = str(spell_entry.get("definition", {}).get("casting_time") or "1 action")
         normalized_casting_time = casting_time.casefold().strip()
         if ritual:
@@ -21670,11 +18270,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "cast_level": cast_level,
                 "ritual": ritual,
                 "source_item_id": source_item_id,
-                **(
-                    {"agent_ruling_commitment": agent_ruling_commitment}
-                    if agent_ruling_commitment is not None
-                    else {}
-                ),
                 **(
                     {"agent_resolution_commitment": (semantic_plan_commitment)}
                     if semantic_plan_commitment is not None
@@ -22211,6 +18806,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
                 dice = asdict(roll(expression))
                 rolled_amount = max(0, int(dice["total"]))
+                require_healing_not_prevented(next_encounter, target_id=target_id)
                 healed = apply_healing_to_sheet(
                     target_sheet,
                     amount=rolled_amount,
@@ -22350,16 +18946,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         death_saves=combatant_zero_hp_buffered(combatant),
                     )
                     final_sheets[target_id] = damaged["sheet"]
-                    record_source_trait_damage(
-                        next_encounter,
-                        target_id=target_id,
-                        damage=damaged,
-                    )
-                    reconcile_source_attachments(
-                        next_encounter,
-                        actor_id=target_id,
-                        sheet=damaged["sheet"],
-                    )
                     sync_combatant_conditions(next_encounter, target_id, damaged["sheet"])
                     reconcile_readied_spells(next_encounter, target_id, damaged["sheet"])
                     add_concentration_window(
@@ -23174,10 +19760,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 campaign_id,
                 activity_card,
             )
-            and not (
-                source_card_has_direct_agent_ruling(activity_card)
-                and "agent_ruling_commitment" in dict(declaration or {})
-            )
         ):
             return {
                 **_ruling_status(
@@ -23196,860 +19778,117 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 },
                 "campaign_revision": campaign.revision,
             }
-        elif "agent_ruling_commitment" in dict(declaration or {}):
-            if set(dict(declaration or {})) != {"agent_ruling_commitment"}:
-                raise CombatEngineError(
-                    "a descriptive activity save-damage settlement accepts "
-                    "only agent_ruling_commitment"
-                )
-            access.require_campaign(
-                campaign_id,
-                principal_id,
-                roles=CAMPAIGN_DM_ROLES,
-            )
-            declaration = {
-                "agent_ruling_commitment": (
-                    validate_agent_save_damage_commitment(
-                        campaign_id,
-                        dict(declaration or {}).get("agent_ruling_commitment"),
-                        encounter=encounter,
-                        source_actor_id=actor_id,
-                        source_card_id=activity_id,
-                        source_card_kind="activity",
-                    )
-                )
-            }
         rule_context = effective_rule_context(
             campaign_id,
             facts={"actor_id": actor_id, "activity_id": activity_id},
             branch_id=resolved_branch_id,
-        )
-        random_save_spec = (
-            None
-            if compiled_activity_plan is not None
-            else gazer_eye_ray_spec(current.sheet, activity_id)
-        )
-        area_save_spec = (
-            None
-            if compiled_activity_plan is not None
-            else area_save_damage_spec(current.sheet, activity_id)
-        )
-        frightful_spec = (
-            None
-            if compiled_activity_plan is not None
-            else frightful_presence_spec(current.sheet, activity_id)
         )
         legendary_spec = (
             None
             if compiled_activity_plan is not None
             else legendary_action_spec(current.sheet, activity_id)
         )
-        source_contest_spec = (
-            None
-            if compiled_activity_plan is not None
-            else source_contest_effect_spec(current.sheet, activity_id)
-        )
-        source_save_spec = (
-            None
-            if compiled_activity_plan is not None
-            else source_save_effect_spec(current.sheet, activity_id)
-        )
-        random_target_records: dict[str, Any] = {}
-        random_targets: list[dict[str, Any]] = []
-        area_target_records: dict[str, Any] = {}
-        area_targets: list[dict[str, Any]] = []
-        area_save_bonuses: dict[str, int] = {}
-        area_origin: dict[str, int] | None = None
-        area_endpoint: dict[str, int] | None = None
-        frightful_target_records: dict[str, Any] = {}
-        frightful_targets: list[dict[str, Any]] = []
-        legendary_wing_target_records: dict[str, Any] = {}
-        legendary_wing_targets: list[dict[str, Any]] = []
-        legendary_wing_save_bonuses: dict[str, int] = {}
-        legendary_wing_destination: dict[str, int] | None = None
-        source_save_target_record = None
-        source_save_target: dict[str, Any] | None = None
-        source_contest_target_record = None
-        source_contest_target: dict[str, Any] | None = None
-        source_contest_knowledge_count = 0
-        if area_save_spec is not None:
-            if not is_dm(campaign_id, principal_id):
-                raise PermissionError(
-                    "source area saving-throw settlement requires the Agent in the DM role"
-                )
-            declared = dict(declaration or {})
-            battle_map = dict(encounter.get("battle_map") or {})
-            cell_ft = int(dict(battle_map.get("grid") or {}).get("cell_ft", 5) or 5)
-            if cell_ft <= 0:
-                raise CombatEngineError("battle-map cell_ft must be positive")
-            source_combatant = next(
-                (
-                    item
-                    for item in encounter.get("combatants", [])
-                    if str(item.get("actor_id") or "") == actor_id
-                ),
-                None,
-            )
-            if source_combatant is None:
-                raise CombatEngineError("area saving-throw source is not a combatant")
-            source_position = dict(source_combatant.get("position") or {})
-            if set(source_position) != {"x", "y"}:
-                raise NeedsRulingError(
-                    "area saving-throw activity requires the source position",
-                    missing=("area_save_source_position",),
-                )
-            source_conditions = {
-                str(item).strip().casefold() for item in source_combatant.get("conditions", [])
-            }
-            if "blinded" in source_conditions:
-                raise CombatEngineError("a blinded source cannot choose a point it can see")
-            origin_contract = dict(area_save_spec.get("origin") or {})
-            area_contract = dict(area_save_spec.get("area") or {})
-            origin_kind = str(origin_contract.get("kind") or "")
-            shape = str(area_contract.get("shape") or "")
-            if (
-                origin_kind == "visible_point"
-                and shape == "radius"
-                and area_save_spec.get("targets") == "each_creature"
-            ):
-                if set(declared) != {"origin", "target_contexts"}:
-                    raise CombatEngineError(
-                        "point-radius saving-throw activity requires origin and target_contexts"
-                    )
-                raw_origin = declared.get("origin")
-                if (
-                    not isinstance(raw_origin, dict)
-                    or set(raw_origin) != {"x", "y"}
-                    or any(
-                        isinstance(raw_origin[coordinate], bool)
-                        or not isinstance(raw_origin[coordinate], int)
-                        for coordinate in ("x", "y")
-                    )
-                ):
-                    raise CombatEngineError("area saving-throw origin requires integer x and y")
-                area_origin = {
-                    "x": int(raw_origin["x"]),
-                    "y": int(raw_origin["y"]),
-                }
-                if battle_map:
-                    validate_position(battle_map, area_origin)
-                origin_distance = combat_distance(
-                    source_position,
-                    area_origin,
-                    cell_ft=cell_ft,
-                )
-                if origin_distance is None or origin_distance > int(
-                    origin_contract.get("range_ft", 0) or 0
-                ):
-                    raise CombatEngineError(
-                        "area saving-throw origin is outside the recorded range"
-                    )
-                radius_ft = int(area_contract.get("radius_ft", 0) or 0)
-                if radius_ft <= 0:
-                    raise CombatEngineError("area saving-throw radius must be positive")
-            elif (
-                origin_kind == "self"
-                and shape in {"line", "cone"}
-                and area_save_spec.get("targets") == "each_creature"
-            ):
-                if set(declared) != {"endpoint", "target_contexts"}:
-                    raise CombatEngineError(
-                        "self-origin saving-throw activity requires endpoint and target_contexts"
-                    )
-                raw_endpoint = declared.get("endpoint")
-                if (
-                    not isinstance(raw_endpoint, dict)
-                    or set(raw_endpoint) != {"x", "y"}
-                    or any(
-                        isinstance(raw_endpoint[coordinate], bool)
-                        or not isinstance(raw_endpoint[coordinate], int)
-                        for coordinate in ("x", "y")
-                    )
-                ):
-                    raise CombatEngineError("area saving-throw endpoint requires integer x and y")
-                area_origin = {
-                    "x": int(source_position["x"]),
-                    "y": int(source_position["y"]),
-                }
-                area_endpoint = {
-                    "x": int(raw_endpoint["x"]),
-                    "y": int(raw_endpoint["y"]),
-                }
-                if battle_map:
-                    validate_position(battle_map, area_endpoint)
-                length_ft = int(area_contract.get("length_ft", 0) or 0)
-                width_ft = int(area_contract.get("width_ft", 0) or 0)
-                endpoint_distance = (
-                    math.hypot(
-                        int(area_endpoint["x"]) - int(area_origin["x"]),
-                        int(area_endpoint["y"]) - int(area_origin["y"]),
-                    )
-                    * cell_ft
-                )
-                if (
-                    length_ft <= 0
-                    or (shape == "line" and width_ft <= 0)
-                    or endpoint_distance <= 0
-                    or endpoint_distance > length_ft
-                ):
-                    raise CombatEngineError(
-                        "area saving-throw endpoint is outside its recorded length"
-                    )
-            else:
-                raise CombatEngineError("unsupported area saving-throw target contract")
-            for target_combatant in encounter.get("combatants", []):
-                target_id = str(target_combatant.get("actor_id") or "")
-                target_conditions = {
-                    str(item).strip().casefold() for item in target_combatant.get("conditions", [])
-                }
-                if "dead" in target_conditions:
-                    continue
-                target_position = dict(target_combatant.get("position") or {})
-                if set(target_position) != {"x", "y"}:
-                    raise NeedsRulingError(
-                        "area saving-throw activity requires every living combatant position",
-                        missing=(f"area_save_target_position:{target_id}",),
-                    )
-                if shape == "radius":
-                    distance = combat_distance(
-                        area_origin,
-                        target_position,
-                        cell_ft=cell_ft,
-                    )
-                    if distance is None or distance > radius_ft:
-                        continue
-                elif shape == "line":
-                    assert area_endpoint is not None
-                    origin_x = float(area_origin["x"])
-                    origin_y = float(area_origin["y"])
-                    delta_x = float(area_endpoint["x"]) - origin_x
-                    delta_y = float(area_endpoint["y"]) - origin_y
-                    squared_length = delta_x**2 + delta_y**2
-                    target_x = float(target_position["x"]) - origin_x
-                    target_y = float(target_position["y"]) - origin_y
-                    projection = (target_x * delta_x + target_y * delta_y) / squared_length
-                    perpendicular_ft = (
-                        abs(target_x * delta_y - target_y * delta_x)
-                        / math.sqrt(squared_length)
-                        * cell_ft
-                    )
-                    if (
-                        target_id == actor_id
-                        or projection <= 0
-                        or projection > 1
-                        or perpendicular_ft > float(area_contract["width_ft"]) / 2
-                    ):
-                        continue
-                else:
-                    assert area_endpoint is not None
-                    origin_x = float(area_origin["x"])
-                    origin_y = float(area_origin["y"])
-                    delta_x = float(area_endpoint["x"]) - origin_x
-                    delta_y = float(area_endpoint["y"]) - origin_y
-                    squared_length = delta_x**2 + delta_y**2
-                    endpoint_length = math.sqrt(squared_length)
-                    target_x = float(target_position["x"]) - origin_x
-                    target_y = float(target_position["y"]) - origin_y
-                    projection = (target_x * delta_x + target_y * delta_y) / squared_length
-                    axial_ft = projection * endpoint_length * cell_ft
-                    perpendicular_ft = (
-                        abs(target_x * delta_y - target_y * delta_x) / endpoint_length * cell_ft
-                    )
-                    radial_ft = math.hypot(target_x, target_y) * cell_ft
-                    if (
-                        target_id == actor_id
-                        or projection <= 0
-                        or projection > 1
-                        or radial_ft > float(area_contract["length_ft"])
-                        or perpendicular_ft > axial_ft / 2
-                    ):
-                        continue
-                target = require_campaign_actor(campaign_id, target_id)
-                access.require_actor(
-                    campaign_id,
-                    target_id,
-                    principal_id,
-                    control=True,
-                )
-                area_target_records[target_id] = target
-                area_targets.append(combat_actor_snapshot(target_id))
-            target_contexts = declared.get("target_contexts")
-            if not isinstance(target_contexts, list):
-                raise CombatEngineError("area saving-throw target_contexts must be a list")
-            normalized_contexts: dict[str, str] = {}
-            for context in target_contexts:
-                if not isinstance(context, dict) or set(context) != {"target_id", "cover"}:
-                    raise CombatEngineError("each area target context requires target_id and cover")
-                target_id = str(context.get("target_id") or "").strip()
-                cover = str(context.get("cover") or "").strip().casefold().replace("-", "_")
-                if (
-                    not target_id
-                    or target_id in normalized_contexts
-                    or cover
-                    not in {
-                        "none",
-                        "half",
-                        "three_quarters",
-                        "total",
-                    }
-                ):
-                    raise CombatEngineError(
-                        "area target contexts require unique targets and a "
-                        "rules-defined cover degree"
-                    )
-                normalized_contexts[target_id] = cover
-            geometric_target_ids = set(area_target_records)
-            if set(normalized_contexts) != geometric_target_ids:
-                raise CombatEngineError(
-                    "area target_contexts must cover every living creature "
-                    "inside the geometric area"
-                )
-            totally_covered = {
-                target_id for target_id, cover in normalized_contexts.items() if cover == "total"
-            }
-            for target_id in totally_covered:
-                area_target_records.pop(target_id, None)
-            area_targets = [
-                target
-                for target in area_targets
-                if str(target.get("id") or "") not in totally_covered
-            ]
-            area_save_bonuses = {
-                target_id: {
-                    "none": 0,
-                    "half": 2,
-                    "three_quarters": 5,
-                }[cover]
-                for target_id, cover in normalized_contexts.items()
-                if cover != "total"
-            }
-        if frightful_spec is not None:
-            if not is_dm(campaign_id, principal_id):
-                raise PermissionError(
-                    "Frightful Presence settlement requires the Agent in the DM role"
-                )
-            declared = dict(declaration or {})
-            if set(declared) != {"targets"} or not isinstance(declared.get("targets"), list):
-                raise CombatEngineError(
-                    "Frightful Presence declaration requires only a targets list"
-                )
-            source_combatant = next(
-                (
-                    item
-                    for item in encounter.get("combatants", [])
-                    if str(item.get("actor_id") or "") == actor_id
-                ),
-                None,
-            )
-            source_position = dict((source_combatant or {}).get("position") or {})
-            if set(source_position) != {"x", "y"}:
-                raise NeedsRulingError(
-                    "Frightful Presence requires the source position",
-                    missing=("frightful_presence_source_position",),
-                )
-            selected_ids: set[str] = set()
-            for selected in declared["targets"]:
-                if (
-                    not isinstance(selected, dict)
-                    or set(selected) != {"target_id", "aware"}
-                    or selected.get("aware") is not True
-                ):
-                    raise CombatEngineError(
-                        "each Frightful Presence target requires target_id and aware=true"
-                    )
-                target_id = str(selected.get("target_id") or "").strip()
-                if not target_id or target_id == actor_id or target_id in selected_ids:
-                    raise CombatEngineError(
-                        "Frightful Presence targets must be unique other actors"
-                    )
-                selected_ids.add(target_id)
-                target_combatant = next(
-                    (
-                        item
-                        for item in encounter.get("combatants", [])
-                        if str(item.get("actor_id") or "") == target_id
-                    ),
-                    None,
-                )
-                target_position = dict((target_combatant or {}).get("position") or {})
-                target_conditions = {
-                    str(item).strip().casefold()
-                    for item in (target_combatant or {}).get("conditions", [])
-                }
-                source_immunities = dict((target_combatant or {}).get("source_immunities") or {})
-                target_record = (
-                    require_campaign_actor(campaign_id, target_id)
-                    if target_combatant is not None
-                    else None
-                )
-                source_immunity_effect = any(
-                    isinstance(effect, dict)
-                    and effect.get("active", True)
-                    and effect.get("kind") == "frightful_presence_immunity"
-                    and str(effect.get("source") or "") == actor_id
-                    for effect in (
-                        (target_record.sheet if target_record else {}).get("effects", [])
-                    )
-                )
-                if (
-                    target_combatant is None
-                    or "dead" in target_conditions
-                    or set(target_position) != {"x", "y"}
-                    or actor_id in source_immunities.get("frightful_presence", [])
-                    or source_immunity_effect
-                ):
-                    raise CombatEngineError(
-                        "Frightful Presence target is absent, dead, unpositioned, "
-                        "or immune to this source"
-                    )
-                distance = combat_distance(
-                    source_position,
-                    target_position,
-                    cell_ft=int(
-                        dict(dict(encounter.get("battle_map") or {}).get("grid") or {}).get(
-                            "cell_ft", 5
-                        )
-                        or 5
-                    ),
-                )
-                if distance is None or distance > int(frightful_spec["range_ft"]):
-                    raise CombatEngineError(
-                        "Frightful Presence target is outside the recorded range"
-                    )
-                assert target_record is not None
-                target = target_record
-                access.require_actor(
-                    campaign_id,
-                    target_id,
-                    principal_id,
-                    control=True,
-                )
-                frightful_target_records[target_id] = target
-                frightful_targets.append(combat_actor_snapshot(target_id))
-            if not frightful_targets:
-                raise CombatEngineError(
-                    "Frightful Presence requires at least one chosen aware target"
-                )
         if legendary_spec is not None:
             if not is_dm(campaign_id, principal_id):
                 raise PermissionError("legendary actions require the Agent in the DM role")
             legendary_effect = dict(legendary_spec.get("effect") or {})
             legendary_kind = str(legendary_effect.get("kind") or "")
-            declared = dict(declaration or {})
-            if legendary_kind in {"skill_check", "weapon_attack"}:
-                if declared:
-                    raise CombatEngineError("this legendary action accepts no declaration")
-            elif legendary_kind == "wing_attack_2014":
-                if set(declared) not in (
-                    {"target_contexts"},
-                    {"destination", "target_contexts"},
-                ):
-                    raise CombatEngineError(
-                        "Wing Attack requires target_contexts and accepts "
-                        "only an optional destination"
-                    )
-                source_combatant = next(
-                    (
-                        item
-                        for item in encounter.get("combatants", [])
-                        if str(item.get("actor_id") or "") == actor_id
-                    ),
-                    None,
+            if legendary_kind not in {"skill_check", "weapon_attack"}:
+                raise CombatEngineError(
+                    "nonstandard legendary actions require a source-bound resolution plan"
                 )
-                source_position = dict((source_combatant or {}).get("position") or {})
-                if set(source_position) != {"x", "y"}:
-                    raise NeedsRulingError(
-                        "Wing Attack requires the source position",
-                        missing=("wing_attack_source_position",),
-                    )
-                raw_destination = declared.get("destination")
-                if raw_destination is not None:
-                    if (
-                        not isinstance(raw_destination, dict)
-                        or set(raw_destination) != {"x", "y"}
-                        or any(
-                            isinstance(raw_destination[coordinate], bool)
-                            or not isinstance(raw_destination[coordinate], int)
-                            for coordinate in ("x", "y")
-                        )
-                    ):
-                        raise CombatEngineError("Wing Attack destination requires integer x and y")
-                    legendary_wing_destination = {
-                        "x": int(raw_destination["x"]),
-                        "y": int(raw_destination["y"]),
-                    }
-                    battle_map = dict(encounter.get("battle_map") or {})
-                    if battle_map:
-                        validate_position(
-                            battle_map,
-                            legendary_wing_destination,
-                        )
-                    fly_speed = int(
-                        dict(derive_character_sheet(current.sheet).get("speed") or {}).get("fly", 0)
-                        or 0
-                    )
-                    distance = combat_distance(
-                        source_position,
-                        legendary_wing_destination,
-                        cell_ft=int(dict(battle_map.get("grid") or {}).get("cell_ft", 5) or 5),
-                    )
-                    if fly_speed <= 0 or distance is None or distance > fly_speed // 2:
-                        raise CombatEngineError(
-                            "Wing Attack destination exceeds half the flying speed"
-                        )
-                radius = int(dict(legendary_effect.get("area") or {}).get("radius_ft", 0) or 0)
-                for target_combatant in encounter.get("combatants", []):
-                    target_id = str(target_combatant.get("actor_id") or "")
-                    if target_id == actor_id or "dead" in {
-                        str(item).strip().casefold()
-                        for item in target_combatant.get("conditions", [])
-                    }:
-                        continue
-                    target_position = dict(target_combatant.get("position") or {})
-                    if set(target_position) != {"x", "y"}:
-                        raise NeedsRulingError(
-                            "Wing Attack requires every living combatant position",
-                            missing=(f"wing_attack_target_position:{target_id}",),
-                        )
-                    if (combat_distance(source_position, target_position) or 0) > radius:
-                        continue
-                    target = require_campaign_actor(campaign_id, target_id)
-                    access.require_actor(
-                        campaign_id,
-                        target_id,
-                        principal_id,
-                        control=True,
-                    )
-                    legendary_wing_target_records[target_id] = target
-                    legendary_wing_targets.append(combat_actor_snapshot(target_id))
-                target_contexts = declared.get("target_contexts")
-                if not isinstance(target_contexts, list):
-                    raise CombatEngineError("Wing Attack target_contexts must be a list")
-                normalized_contexts: dict[str, str] = {}
-                for context in target_contexts:
-                    if not isinstance(context, dict) or set(context) != {"target_id", "cover"}:
-                        raise CombatEngineError(
-                            "each Wing Attack target context requires target_id and cover"
-                        )
-                    target_id = str(context.get("target_id") or "").strip()
-                    cover = str(context.get("cover") or "").strip().casefold().replace("-", "_")
-                    if (
-                        not target_id
-                        or target_id in normalized_contexts
-                        or cover
-                        not in {
-                            "none",
-                            "half",
-                            "three_quarters",
-                            "total",
-                        }
-                    ):
-                        raise CombatEngineError(
-                            "Wing Attack target contexts require unique "
-                            "targets and a rules-defined cover degree"
-                        )
-                    normalized_contexts[target_id] = cover
-                geometric_target_ids = set(legendary_wing_target_records)
-                if set(normalized_contexts) != geometric_target_ids:
-                    raise CombatEngineError(
-                        "Wing Attack target_contexts must cover every living "
-                        "creature inside its radius"
-                    )
-                totally_covered = {
-                    target_id
-                    for target_id, cover in normalized_contexts.items()
-                    if cover == "total"
-                }
-                for target_id in totally_covered:
-                    legendary_wing_target_records.pop(target_id, None)
-                legendary_wing_targets = [
-                    target
-                    for target in legendary_wing_targets
-                    if str(target.get("id") or "") not in totally_covered
-                ]
-                legendary_wing_save_bonuses = {
-                    target_id: {
-                        "none": 0,
-                        "half": 2,
-                        "three_quarters": 5,
-                    }[cover]
-                    for target_id, cover in normalized_contexts.items()
-                    if cover != "total"
-                }
-            else:
-                raise CombatEngineError("unsupported legendary-action effect contract")
-        if random_save_spec is not None:
+            if dict(declaration or {}):
+                raise CombatEngineError("this legendary action accepts no declaration")
+        dragonborn_breath = (
+            CORE_DRAGONBORN_BREATH_MECHANIC_ID
+            in {str(item) for item in activity_card.get("mechanic_refs") or []}
+        )
+        breath_target_records: dict[str, Any] = {}
+        breath_targets: list[dict[str, Any]] = []
+        breath_target_contexts: list[dict[str, Any]] = []
+        breath_spec: dict[str, Any] = {}
+        breath_save_dc = 0
+        breath_damage_expression = ""
+        if dragonborn_breath:
+            if (
+                str(activity_card.get("pack_id") or "")
+                != STANDARD_2014_CONTENT_PACK_ID
+                or not activity_id.startswith(
+                    f"{STANDARD_2014_CONTENT_PACK_ID}.species.dragonborn.activity."
+                )
+            ):
+                raise CombatEngineError(
+                    "Dragonborn Breath Weapon requires its exact locked standard card"
+                )
             if not is_dm(campaign_id, principal_id):
                 raise PermissionError(
-                    "source-random multi-actor settlement requires the Agent in the DM role"
+                    "area activity settlement requires the Agent in the DM role"
                 )
-            declared = dict(declaration or {})
-            if set(declared) != {"target_ids"}:
-                raise CombatEngineError(
-                    "random saving-throw activity declaration requires only target_ids"
-                )
-            target_ids = declared.get("target_ids")
-            if not isinstance(target_ids, list):
-                raise CombatEngineError("random saving-throw activity target_ids must be a list")
-            normalized_target_ids = [str(item).strip() for item in target_ids]
-            target_bounds = dict(random_save_spec.get("target_count") or {})
-            minimum_targets = int(target_bounds.get("minimum", 1) or 1)
-            maximum_targets = int(target_bounds.get("maximum", 1) or 1)
-            if not minimum_targets <= len(normalized_target_ids) <= maximum_targets:
-                raise CombatEngineError("random saving-throw activity has an invalid target count")
+            breath_spec = dict(
+                dict(activity_card.get("choices") or {}).get("standard_resolution")
+                or {}
+            )
             if (
-                any(not item for item in normalized_target_ids)
-                or len(normalized_target_ids) != len(set(normalized_target_ids))
-                or actor_id in normalized_target_ids
+                breath_spec.get("kind") != "area_save_damage"
+                or dict(breath_spec.get("origin") or {}) != {"kind": "self"}
+                or breath_spec.get("targets") != "each_creature"
+                or breath_spec.get("half_on_success") is not True
+                or breath_spec.get("save_source_kind") != "nonmagical_effect"
             ):
                 raise CombatEngineError(
-                    "random saving-throw activity targets must be unique other actors"
+                    "Dragonborn Breath Weapon has an invalid standard resolution contract"
                 )
-            source_combatant = next(
-                (
-                    item
-                    for item in encounter.get("combatants", [])
-                    if str(item.get("actor_id") or "") == actor_id
-                ),
-                None,
+            normalized_area = normalize_area_declaration(
+                encounter,
+                source_id=actor_id,
+                area=dict(breath_spec.get("area") or {}),
+                declaration=declaration,
             )
-            source_position = dict((source_combatant or {}).get("position") or {})
-            if set(source_position) != {"x", "y"}:
-                raise NeedsRulingError(
-                    "random saving-throw activity requires the source position",
-                    missing=("random_effect_source_position",),
-                )
-            source_conditions = {
-                str(item).casefold() for item in (source_combatant or {}).get("conditions", [])
-            }
-            if "blinded" in source_conditions:
-                raise CombatEngineError(
-                    "the source cannot choose targets it cannot see while blinded"
-                )
-            maximum_range = int(random_save_spec.get("range_ft", 0) or 0)
-            for target_id in normalized_target_ids:
-                target_combatant = next(
-                    (
-                        item
-                        for item in encounter.get("combatants", [])
-                        if str(item.get("actor_id") or "") == target_id
-                    ),
-                    None,
-                )
-                if target_combatant is None:
-                    raise CombatEngineError("random saving-throw target is not a combatant")
-                target_conditions = {
-                    str(item).casefold() for item in target_combatant.get("conditions", [])
-                }
-                visible_to = target_combatant.get("visible_to_actor_ids")
-                if (
-                    "dead" in target_conditions
-                    or target_combatant.get("hidden", False)
-                    or "invisible" in target_conditions
-                    or (
-                        isinstance(visible_to, list)
-                        and actor_id not in {str(item) for item in visible_to}
-                    )
-                ):
-                    raise CombatEngineError("random saving-throw target must be living and visible")
-                target_position = dict(target_combatant.get("position") or {})
-                if set(target_position) != {"x", "y"}:
-                    raise NeedsRulingError(
-                        "random saving-throw activity requires target positions",
-                        missing=(f"random_effect_target_position:{target_id}",),
-                    )
-                distance = (
-                    max(
-                        abs(int(source_position["x"]) - int(target_position["x"])),
-                        abs(int(source_position["y"]) - int(target_position["y"])),
-                    )
-                    * 5
-                )
-                if distance > maximum_range:
+            breath_target_contexts = list(normalized_area["targets"])
+            for target_context in breath_target_contexts:
+                target_id = str(target_context["target_id"])
+                target = characters.get(target_id)
+                if target.campaign_id != campaign_id:
                     raise CombatEngineError(
-                        "random saving-throw target is outside the recorded range"
+                        "Breath Weapon targets must share the campaign"
                     )
-                target = require_campaign_actor(campaign_id, target_id)
-                access.require_actor(campaign_id, target_id, principal_id, control=True)
-                random_target_records[target_id] = target
-                random_targets.append(combat_actor_snapshot(target_id))
-        if source_save_spec is not None:
-            if not is_dm(campaign_id, principal_id):
-                raise PermissionError(
-                    "source saving-throw activity settlement requires the Agent in the DM role"
-                )
-            declared = dict(declaration or {})
-            if set(declared) != {"target_id", "target_has_brain"}:
-                raise CombatEngineError(
-                    "source saving-throw activity declaration requires target_id "
-                    "and target_has_brain"
-                )
-            target_id = str(declared.get("target_id") or "").strip()
-            if (
-                not target_id
-                or target_id == actor_id
-                or declared.get("target_has_brain") is not True
-            ):
-                raise CombatEngineError(
-                    "source saving-throw activity requires one other target "
-                    "confirmed to have a brain"
-                )
-            source_combatant = next(
-                (
-                    item
-                    for item in encounter.get("combatants", [])
-                    if str(item.get("actor_id") or "") == actor_id
-                ),
-                None,
-            )
-            target_combatant = next(
-                (
-                    item
-                    for item in encounter.get("combatants", [])
-                    if str(item.get("actor_id") or "") == target_id
-                ),
-                None,
-            )
-            source_position = dict((source_combatant or {}).get("position") or {})
-            target_position = dict((target_combatant or {}).get("position") or {})
-            if set(source_position) != {"x", "y"} or set(target_position) != {
-                "x",
-                "y",
-            }:
-                raise NeedsRulingError(
-                    "source saving-throw activity requires battle-map positions",
-                    missing=("source_save_effect_positions",),
-                )
-            target_conditions = {
-                str(item).casefold() for item in (target_combatant or {}).get("conditions", [])
-            }
-            visible_to = (target_combatant or {}).get("visible_to_actor_ids")
-            if (
-                target_combatant is None
-                or target_conditions & {"dead", "unconscious"}
-                or bool(target_combatant.get("hidden", False))
-                or "invisible" in target_conditions
-                or (
-                    isinstance(visible_to, list)
-                    and actor_id not in {str(item) for item in visible_to}
-                )
-            ):
-                raise CombatEngineError(
-                    "source saving-throw target must be living, conscious, and visible"
-                )
-            distance = (
-                max(
-                    abs(int(source_position["x"]) - int(target_position["x"])),
-                    abs(int(source_position["y"]) - int(target_position["y"])),
-                )
-                * 5
-            )
-            if distance > int(source_save_spec.get("range_ft", 0) or 0):
-                raise CombatEngineError("source saving-throw target is outside the recorded range")
-            source_save_target_record = require_campaign_actor(campaign_id, target_id)
-            access.require_actor(
-                campaign_id,
-                target_id,
-                principal_id,
-                control=True,
-            )
-            source_save_target = combat_actor_snapshot(target_id)
-        if source_contest_spec is not None:
-            if not is_dm(campaign_id, principal_id):
-                raise PermissionError(
-                    "source ability-contest activity settlement requires the Agent in the DM role"
-                )
-            declared = dict(declaration or {})
-            if set(declared) != {"target_id", "target_is_humanoid"}:
-                raise CombatEngineError(
-                    "source ability-contest activity declaration requires "
-                    "target_id and target_is_humanoid"
-                )
-            target_id = str(declared.get("target_id") or "").strip()
-            if (
-                not target_id
-                or target_id == actor_id
-                or declared.get("target_is_humanoid") is not True
-            ):
-                raise CombatEngineError(
-                    "Body Thief requires one other target confirmed to be humanoid"
-                )
-            source_combatant = next(
-                (
-                    item
-                    for item in encounter.get("combatants", [])
-                    if str(item.get("actor_id") or "") == actor_id
-                ),
-                None,
-            )
-            target_combatant = next(
-                (
-                    item
-                    for item in encounter.get("combatants", [])
-                    if str(item.get("actor_id") or "") == target_id
-                ),
-                None,
-            )
-            if source_combatant is None or target_combatant is None:
-                raise CombatEngineError("Body Thief source and target must be combatants")
-            if source_combatant.get("inside_host"):
-                raise CombatEngineError("intellect devourer is already inside a host")
-            source_position = dict(source_combatant.get("position") or {})
-            target_position = dict(target_combatant.get("position") or {})
-            if set(source_position) != {"x", "y"} or set(target_position) != {
-                "x",
-                "y",
-            }:
-                raise NeedsRulingError(
-                    "Body Thief requires battle-map positions",
-                    missing=("source_contest_effect_positions",),
-                )
-            target_conditions = {
-                str(item).casefold() for item in target_combatant.get("conditions", [])
-            }
-            incapacitated = bool(
-                target_conditions
-                & {
-                    "incapacitated",
-                    "paralyzed",
-                    "petrified",
-                    "stunned",
-                    "unconscious",
-                }
-            )
-            if (
-                not incapacitated
-                or "dead" in target_conditions
-                or target_combatant.get("body_thief_host")
-            ):
-                raise CombatEngineError(
-                    "Body Thief target must be a living incapacitated humanoid "
-                    "that is not already a host"
-                )
-            distance = (
-                max(
-                    abs(int(source_position["x"]) - int(target_position["x"])),
-                    abs(int(source_position["y"]) - int(target_position["y"])),
-                )
-                * 5
-            )
-            if distance > int(source_contest_spec.get("range_ft", 0) or 0):
-                raise CombatEngineError("Body Thief target is outside the recorded range")
-            source_contest_target_record = require_campaign_actor(campaign_id, target_id)
-            access.require_actor(
-                campaign_id,
-                target_id,
-                principal_id,
-                control=True,
-            )
-            source_contest_target = combat_actor_snapshot(target_id)
-            source_contest_knowledge_count = len(
-                knowledge.list(
+                access.require_actor(
                     campaign_id,
-                    actor_id=target_id,
-                    branch_id=resolved_branch_id,
+                    target_id,
+                    principal_id,
+                    control=True,
                 )
+                breath_target_records[target_id] = target
+                breath_targets.append(combat_actor_snapshot(target_id))
+            save_dc_formula = dict(breath_spec.get("save_dc_formula") or {})
+            if save_dc_formula != {
+                "base": 8,
+                "ability": "constitution",
+                "include_proficiency": True,
+            }:
+                raise CombatEngineError(
+                    "Dragonborn Breath Weapon has an invalid save DC formula"
+                )
+            source_derived = derive_character_sheet(current.sheet)
+            breath_save_dc = (
+                8
+                + int(source_derived["ability_modifiers"]["constitution"])
+                + int(source_derived["proficiency_bonus"])
             )
+            source_level = int(current.sheet.get("progression", {}).get("level", 0) or 0)
+            damage_by_level = {
+                int(level): str(expression)
+                for level, expression in dict(
+                    breath_spec.get("damage_formula_by_level") or {}
+                ).items()
+                if str(level).isdigit()
+            }
+            eligible_levels = [level for level in damage_by_level if level <= source_level]
+            if source_level < 1 or not eligible_levels:
+                raise CombatEngineError(
+                    "Dragonborn Breath Weapon has no damage formula for this level"
+                )
+            breath_damage_expression = damage_by_level[max(eligible_levels)]
         turn_undead = (
             activity_id
             in {
@@ -24366,36 +20205,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             and not is_dm(campaign_id, principal_id)
         ):
             raise CombatEngineError("special activity triggers require a DM resolution")
-        actor_combatant = next(
-            item
-            for item in encounter.get("combatants", [])
-            if str(item.get("actor_id") or "") == actor_id
-        )
-        active_multiattack = dict(
-            dict(actor_combatant.get("turn_flags") or {}).get("multiattack") or {}
-        )
-        remaining_multiattack = list(active_multiattack.get("remaining") or [])
-        source_save_is_followup = bool(
-            source_save_spec is not None
-            and any(
-                str(item.get("activity_id") or "") == activity_id
-                and int(item.get("count", 0) or 0) > 0
-                for item in remaining_multiattack
-                if isinstance(item, dict)
-            )
-        )
         if legendary_spec is not None:
             next_encounter, activity_activation_payment = pay_legendary_action(
                 encounter,
                 actor_id_value=actor_id,
                 activity_id=activity_id,
                 spec=legendary_spec,
-            )
-        elif source_save_is_followup:
-            next_encounter, activity_activation_payment = pay_multiattack_activity(
-                encounter,
-                actor_id,
-                activity_id=activity_id,
             )
         else:
             next_encounter = pay_activity_activation(
@@ -24426,193 +20241,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             declaration=declaration,
         )
         additional_updates: list[CharacterStateUpdate] = []
-        if area_save_spec is not None:
-            assert area_origin is not None
-            for target_actor in area_targets:
-                if str(target_actor.get("id") or "") != actor_id:
-                    continue
-                target_actor["sheet"] = deepcopy(applied["sheet"])
-                target_actor["derived"] = derive_character_sheet(target_actor["sheet"])
-            if area_targets:
-                settled_area = resolve_save_damage_to_sheets(
-                    area_targets,
-                    save_ability=str(area_save_spec["save_ability"]),
-                    save_dc=int(area_save_spec["save_dc"]),
-                    damage_expression=str(area_save_spec["damage_formula"]),
-                    damage_type=str(area_save_spec["damage_type"]),
-                    half_on_success=bool(area_save_spec["half_on_success"]),
-                    source=str(activity_card.get("name") or activity_id),
-                    save_bonuses_by_actor_id=area_save_bonuses,
-                    death_saves_by_actor_id={
-                        str(item.get("actor_id") or ""): bool(
-                            item.get("death_saves", False) or item.get("zero_hp_recovery", False)
-                        )
-                        for item in next_encounter.get("combatants", [])
-                    },
-                    ruleset=str(next_encounter.get("ruleset") or "2014"),
-                    rules=context_with_facts(
-                        rule_context,
-                        save_source_kind=str(area_save_spec["save_source_kind"]),
-                    ),
-                )
-                area_result = settled_area["result"]
-            else:
-                settled_area = {"sheets": {}}
-                area_result = {
-                    "kind": "save_damage",
-                    "damage_roll": None,
-                    "targets": [],
-                }
-            for target_result in area_result["targets"]:
-                target_id = str(target_result["target_id"])
-                target_sheet = validate_character_sheet(settled_area["sheets"][target_id])
-                sync_combatant_conditions(
-                    next_encounter,
-                    target_id,
-                    target_sheet,
-                )
-                concentration = dict(
-                    dict(target_result.get("damage") or {}).get("concentration") or {}
-                )
-                add_concentration_window(
-                    next_encounter,
-                    target_id,
-                    concentration or None,
-                    next_revision=campaign.revision + 1,
-                )
-                if target_id == actor_id:
-                    applied["sheet"] = target_sheet
-                    continue
-                target_record = area_target_records[target_id]
-                additional_updates.append(
-                    CharacterStateUpdate(
-                        character_id=target_id,
-                        sheet=target_sheet,
-                        notes=validate_character_notes(target_record.notes),
-                        expected_revision=target_record.revision,
-                    )
-                )
-            core_effect = {
-                "kind": "area_save_damage",
-                "contract": str(area_save_spec.get("kind") or ""),
-                "origin": area_origin,
-                **({"endpoint": area_endpoint} if area_endpoint is not None else {}),
-                "damage_roll": area_result["damage_roll"],
-                "targets": area_result["targets"],
-                "target_contexts": deepcopy(dict(declaration or {}).get("target_contexts") or []),
-                "activation_payment": activity_activation_payment,
-                "requires_ruling": False,
-            }
-        if frightful_spec is not None:
-            frightful_results: list[dict[str, Any]] = []
-            immunity_duration = dict(frightful_spec.get("immunity_on_success_or_end") or {})
-            for target_actor in frightful_targets:
-                target_id = str(target_actor["id"])
-                saved = resolve_actor_check(
-                    target_actor,
-                    kind="save",
-                    ability=str(frightful_spec["save_ability"]),
-                    dc=int(frightful_spec["save_dc"]),
-                    save_source_kind="nonmagical_effect",
-                    save_effect_conditions=["frightened"],
-                    ruleset=str(next_encounter.get("ruleset") or "2014"),
-                    rules=effective_rule_context(
-                        campaign_id,
-                        facts={
-                            "actor_id": target_id,
-                            "source_actor_id": actor_id,
-                            "kind": "frightful_presence",
-                        },
-                    ),
-                )
-                target_sheet = deepcopy(target_actor["sheet"])
-                effect_id: str | None = None
-                condition_applied = False
-                if saved["success"]:
-                    target_sheet = grant_frightful_presence_immunity(
-                        target_sheet,
-                        source_actor_id=actor_id,
-                        immunity_duration=immunity_duration,
-                        source_excerpt=str(frightful_spec.get("source_excerpt") or ""),
-                        revision=campaign.revision + 1,
-                    )
-                else:
-                    effect_id = f"frightful-presence:{actor_id}:{target_id}"
-                    target_sheet, _ = add_effect(
-                        target_sheet,
-                        {
-                            "id": effect_id,
-                            "name": "Frightful Presence",
-                            "kind": "timed_conditions",
-                            "source": actor_id,
-                            "active": True,
-                            "duration": deepcopy(frightful_spec["duration"]),
-                            "changes": [
-                                {
-                                    "path": "conditions",
-                                    "mode": "add",
-                                    "value": ["frightened"],
-                                }
-                            ],
-                            "description": str(frightful_spec.get("source_excerpt") or ""),
-                        },
-                    )
-                    condition_applied = "frightened" in {
-                        str(item).strip().casefold() for item in target_sheet.get("conditions", [])
-                    }
-                    if condition_applied:
-                        next_encounter["ongoing_effects"] = [
-                            *list(next_encounter.get("ongoing_effects") or []),
-                            {
-                                "id": effect_id,
-                                "kind": "frightful_presence",
-                                "source_actor_id": actor_id,
-                                "target_id": target_id,
-                                "condition": "frightened",
-                                "save_ability": str(frightful_spec["save_ability"]),
-                                "save_dc": int(frightful_spec["save_dc"]),
-                                "repeat_save_timing": "turn_end",
-                                "immunity_duration": immunity_duration,
-                                "source_excerpt": str(frightful_spec.get("source_excerpt") or ""),
-                                "active": True,
-                            },
-                        ]
-                    else:
-                        target_sheet = remove_effect(
-                            target_sheet,
-                            effect_id,
-                        )
-                        effect_id = None
-                target_sheet = validate_character_sheet(target_sheet)
-                sync_combatant_conditions(
-                    next_encounter,
-                    target_id,
-                    target_sheet,
-                )
-                target_record = frightful_target_records[target_id]
-                additional_updates.append(
-                    CharacterStateUpdate(
-                        character_id=target_id,
-                        sheet=target_sheet,
-                        notes=validate_character_notes(target_record.notes),
-                        expected_revision=target_record.revision,
-                    )
-                )
-                frightful_results.append(
-                    {
-                        "target_id": target_id,
-                        "save": saved,
-                        "condition_applied": condition_applied,
-                        "effect_id": effect_id,
-                        "source_immunity_applied": bool(saved["success"]),
-                    }
-                )
-            core_effect = {
-                "kind": "frightful_presence",
-                "targets": frightful_results,
-                "activation_payment": activity_activation_payment,
-                "requires_ruling": False,
-            }
         if legendary_spec is not None:
             legendary_effect = dict(legendary_spec.get("effect") or {})
             legendary_kind = str(legendary_effect.get("kind") or "")
@@ -24620,14 +20248,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 source_actor = combat_actor_snapshot(actor_id)
                 source_actor["sheet"] = applied["sheet"]
                 source_actor["derived"] = derive_character_sheet(applied["sheet"])
-                skill_name = str(legendary_effect["skill"])
                 core_effect = {
                     "kind": "legendary_action",
                     "effect_kind": "skill_check",
                     "check": resolve_actor_check(
                         source_actor,
                         kind="ability",
-                        ability=skill_name,
+                        ability=str(legendary_effect["skill"]),
                         dc=0,
                         ruleset=str(next_encounter.get("ruleset") or "2014"),
                         rules=rule_context,
@@ -24635,7 +20262,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "activation_payment": activity_activation_payment,
                     "requires_ruling": False,
                 }
-            elif legendary_kind == "weapon_attack":
+            else:
                 core_effect = {
                     "kind": "legendary_action",
                     "effect_kind": "weapon_attack",
@@ -24645,348 +20272,87 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "activation_payment": activity_activation_payment,
                     "requires_ruling": False,
                 }
-            elif legendary_kind == "wing_attack_2014":
-                if legendary_wing_targets:
-                    settled_wing = resolve_save_damage_to_sheets(
-                        legendary_wing_targets,
-                        save_ability=str(legendary_effect["save_ability"]),
-                        save_dc=int(legendary_effect["save_dc"]),
-                        damage_expression=str(legendary_effect["damage_formula"]),
-                        damage_type=str(legendary_effect["damage_type"]),
-                        half_on_success=False,
-                        source=str(activity_card.get("name") or activity_id),
-                        save_bonuses_by_actor_id=(legendary_wing_save_bonuses),
-                        death_saves_by_actor_id={
-                            str(item.get("actor_id") or ""): bool(
-                                item.get("death_saves", False)
-                                or item.get("zero_hp_recovery", False)
-                            )
-                            for item in next_encounter.get("combatants", [])
-                        },
-                        ruleset=str(next_encounter.get("ruleset") or "2014"),
-                        rules=context_with_facts(
-                            rule_context,
-                            save_source_kind=str(legendary_effect["save_source_kind"]),
-                        ),
+        actor_knowledge_transfers: list[ActorKnowledgeTransfer] = []
+        if dragonborn_breath:
+            breath_results: list[dict[str, Any]] = []
+            damage_roll = None
+            if breath_targets:
+                save_ability = str(breath_spec.get("save_ability") or "").casefold()
+                save_bonuses = {
+                    str(context["target_id"]): (
+                        {"none": 0, "half": 2, "three_quarters": 5}[
+                            str(context["cover"])
+                        ]
+                        if save_ability == "dexterity"
+                        else 0
                     )
-                    wing_result = settled_wing["result"]
-                else:
-                    settled_wing = {"sheets": {}}
-                    wing_result = {
-                        "kind": "save_damage",
-                        "damage_roll": None,
-                        "targets": [],
-                    }
-                for target_result in wing_result["targets"]:
-                    target_id = str(target_result["target_id"])
-                    target_sheet = deepcopy(settled_wing["sheets"][target_id])
-                    if not bool(dict(target_result.get("save") or {}).get("success")):
-                        apply_condition_change(
-                            target_sheet,
-                            condition_id="prone",
-                            add=True,
+                    for context in breath_target_contexts
+                }
+                combatants_by_id = {
+                    str(item.get("actor_id") or ""): item
+                    for item in next_encounter.get("combatants", [])
+                }
+                settled_breath = resolve_save_damage_to_sheets(
+                    breath_targets,
+                    save_ability=save_ability,
+                    save_dc=breath_save_dc,
+                    damage_expression=breath_damage_expression,
+                    damage_type=str(breath_spec.get("damage_type") or ""),
+                    half_on_success=True,
+                    source=f"standard-activity:{activity_id}",
+                    death_saves_by_actor_id={
+                        target_id: combatant_zero_hp_buffered(
+                            combatants_by_id[target_id]
                         )
-                    target_sheet = validate_character_sheet(target_sheet)
+                        for target_id in breath_target_records
+                    },
+                    save_bonuses_by_actor_id=save_bonuses,
+                    ruleset=encounter_rules_edition(campaign_id, next_encounter),
+                    rules=rule_context,
+                )
+                breath_results = list(settled_breath["result"]["targets"])
+                damage_roll = deepcopy(settled_breath["result"]["damage_roll"])
+                for target_result in breath_results:
+                    target_id = str(target_result["target_id"])
+                    target_sheet = validate_character_sheet(
+                        settled_breath["sheets"][target_id]
+                    )
                     sync_combatant_conditions(
                         next_encounter,
                         target_id,
                         target_sheet,
                     )
-                    concentration = dict(
-                        dict(target_result.get("damage") or {}).get("concentration") or {}
+                    reconcile_readied_spells(
+                        next_encounter,
+                        target_id,
+                        target_sheet,
                     )
+                    damage = dict(target_result.get("damage") or {})
                     add_concentration_window(
                         next_encounter,
                         target_id,
-                        concentration or None,
+                        dict(damage.get("concentration") or {}) or None,
                         next_revision=campaign.revision + 1,
                     )
-                    target_record = legendary_wing_target_records[target_id]
+                    target = breath_target_records[target_id]
                     additional_updates.append(
                         CharacterStateUpdate(
                             character_id=target_id,
                             sheet=target_sheet,
-                            notes=validate_character_notes(target_record.notes),
-                            expected_revision=target_record.revision,
+                            notes=validate_character_notes(target.notes),
+                            expected_revision=target.revision,
                         )
                     )
-                if legendary_wing_destination is not None:
-                    source_combatant = next(
-                        item
-                        for item in next_encounter.get("combatants", [])
-                        if str(item.get("actor_id") or "") == actor_id
-                    )
-                    fly_speed = int(
-                        dict(derive_character_sheet(applied["sheet"]).get("speed") or {}).get(
-                            "fly", 0
-                        )
-                        or 0
-                    )
-                    flags = dict(source_combatant.get("turn_flags") or {})
-                    flags["legendary_wing_movement"] = {
-                        "remaining_ft": fly_speed // 2,
-                        "turn_token": str(activity_activation_payment["turn_token"]),
-                        "activity_id": activity_id,
-                    }
-                    source_combatant["turn_flags"] = flags
-                    origin = dict(source_combatant.get("position") or {})
-                    movement_distance = int(
-                        combat_distance(
-                            origin,
-                            legendary_wing_destination,
-                            cell_ft=int(
-                                dict(
-                                    dict(next_encounter.get("battle_map") or {}).get("grid") or {}
-                                ).get("cell_ft", 5)
-                                or 5
-                            ),
-                        )
-                        or 0
-                    )
-                    next_encounter = spend_movement(
-                        next_encounter,
-                        actor_id,
-                        movement_distance,
-                        destination=legendary_wing_destination,
-                        movement_mode="legendary_wing",
-                    )
-                core_effect = {
-                    "kind": "legendary_action",
-                    "effect_kind": "wing_attack_2014",
-                    "damage_roll": wing_result["damage_roll"],
-                    "targets": wing_result["targets"],
-                    "target_contexts": deepcopy(
-                        dict(declaration or {}).get("target_contexts") or []
-                    ),
-                    "destination": legendary_wing_destination,
-                    "activation_payment": activity_activation_payment,
-                    "requires_ruling": False,
-                }
-        if random_save_spec is not None:
-            source_actor = combat_actor_snapshot(actor_id)
-            source_actor["sheet"] = applied["sheet"]
-            source_actor["derived"] = derive_character_sheet(applied["sheet"])
-            settled_random = resolve_random_save_effects(
-                source_actor,
-                random_targets,
-                spec=random_save_spec,
-                death_saves_by_target={
-                    str(item.get("actor_id") or ""): bool(
-                        item.get("death_saves", False) or item.get("zero_hp_recovery", False)
-                    )
-                    for item in next_encounter.get("combatants", [])
-                },
-                rules=rule_context,
-            )
-            before_forced_movement = deepcopy(next_encounter)
-            for target_result in settled_random["targets"]:
-                movement = target_result.get("forced_movement")
-                if not isinstance(movement, dict):
-                    continue
-                moved = force_move_directly_away(
-                    next_encounter,
-                    source_actor_id=str(movement["source_actor_id"]),
-                    target_actor_id=str(movement["target_actor_id"]),
-                    distance_ft=int(movement["distance_ft"]),
-                )
-                next_encounter = moved["encounter"]
-                target_result["outcome"] = "forced_movement"
-                target_result["movement"] = {
-                    key: value for key, value in moved.items() if key != "encounter"
-                }
-            movement_ended_by_caster: dict[str, list[dict[str, Any]]] = {}
-            for tether in newly_ended_witch_bolt_tethers(
-                before_forced_movement,
-                next_encounter,
-            ):
-                movement_ended_by_caster.setdefault(
-                    str(tether.get("source_actor_id") or ""),
-                    [],
-                ).append(tether)
-            forced_movement_updates: list[CharacterStateUpdate] = []
-            for caster_id, tethers in movement_ended_by_caster.items():
-                if caster_id == actor_id:
-                    applied["sheet"] = end_tether_concentrations(
-                        applied["sheet"],
-                        tethers,
-                    )["sheet"]
-                    continue
-                if caster_id in settled_random["sheets"]:
-                    settled_random["sheets"][caster_id] = end_tether_concentrations(
-                        settled_random["sheets"][caster_id],
-                        tethers,
-                    )["sheet"]
-                    continue
-                caster_record = characters.get(caster_id)
-                ended = end_tether_concentrations(
-                    caster_record.sheet,
-                    tethers,
-                )
-                if ended["sheet"] != caster_record.sheet:
-                    forced_movement_updates.append(
-                        CharacterStateUpdate(
-                            character_id=caster_id,
-                            sheet=validate_character_sheet(ended["sheet"]),
-                            notes=validate_character_notes(caster_record.notes),
-                            expected_revision=caster_record.revision,
-                        )
-                    )
-            for target_id, target_record in random_target_records.items():
-                target_sheet = validate_character_sheet(settled_random["sheets"][target_id])
-                sync_combatant_conditions(next_encounter, target_id, target_sheet)
-                concentration = next(
-                    (
-                        dict(item.get("damage") or {}).get("concentration")
-                        for item in settled_random["targets"]
-                        if str(item.get("target_id") or "") == target_id
-                        and item.get("outcome") == "damage"
-                    ),
-                    None,
-                )
-                add_concentration_window(
-                    next_encounter,
-                    target_id,
-                    concentration,
-                    next_revision=campaign.revision + 1,
-                )
-                additional_updates.append(
-                    CharacterStateUpdate(
-                        character_id=target_id,
-                        sheet=target_sheet,
-                        notes=validate_character_notes(target_record.notes),
-                        expected_revision=target_record.revision,
-                    )
-                )
-            additional_updates.extend(forced_movement_updates)
             core_effect = {
-                "kind": "random_save_effects",
-                "contract": str(random_save_spec.get("kind") or ""),
-                "source_actor_id": settled_random["source_actor_id"],
-                "selection_rolls": settled_random["selection_rolls"],
-                "selected_effect_ids": settled_random["selected_effect_ids"],
-                "targets": settled_random["targets"],
-                "requires_ruling": False,
-            }
-        if source_save_spec is not None:
-            assert source_save_target_record is not None
-            assert source_save_target is not None
-            source_actor = combat_actor_snapshot(actor_id)
-            source_actor["sheet"] = applied["sheet"]
-            source_actor["derived"] = derive_character_sheet(applied["sheet"])
-            target_id = str(source_save_target["id"])
-            target_combatant = next(
-                item
-                for item in next_encounter.get("combatants", [])
-                if str(item.get("actor_id") or "") == target_id
-            )
-            settled_source = resolve_source_save_effect(
-                source_actor,
-                source_save_target,
-                spec=source_save_spec,
-                death_saves=bool(
-                    target_combatant.get("death_saves", False)
-                    or target_combatant.get("zero_hp_recovery", False)
-                ),
-                rules=rule_context,
-            )
-            target_sheet = validate_character_sheet(settled_source["sheet"])
-            sync_combatant_conditions(next_encounter, target_id, target_sheet)
-            concentration = dict(
-                dict(settled_source["result"].get("damage") or {}).get("concentration") or {}
-            )
-            add_concentration_window(
-                next_encounter,
-                target_id,
-                concentration or None,
-                next_revision=campaign.revision + 1,
-            )
-            additional_updates.append(
-                CharacterStateUpdate(
-                    character_id=target_id,
-                    sheet=target_sheet,
-                    notes=validate_character_notes(source_save_target_record.notes),
-                    expected_revision=source_save_target_record.revision,
-                )
-            )
-            core_effect = {
-                **settled_source["result"],
-                "kind": "source_save_effect",
+                "kind": "dragonborn_breath_weapon",
+                "save_ability": str(breath_spec.get("save_ability") or ""),
+                "save_dc": breath_save_dc,
+                "damage_expression": breath_damage_expression,
+                "damage_type": str(breath_spec.get("damage_type") or ""),
+                "damage_roll": damage_roll,
+                "target_contexts": breath_target_contexts,
+                "targets": breath_results,
                 "activation_payment": activity_activation_payment,
-                "requires_ruling": False,
-            }
-        actor_knowledge_transfers: list[ActorKnowledgeTransfer] = []
-        if source_contest_spec is not None:
-            assert source_contest_target_record is not None
-            assert source_contest_target is not None
-            source_actor = combat_actor_snapshot(actor_id)
-            source_actor["sheet"] = applied["sheet"]
-            source_actor["derived"] = derive_character_sheet(applied["sheet"])
-            target_id = str(source_contest_target["id"])
-            settled_contest = resolve_source_contest_effect(
-                source_actor,
-                source_contest_target,
-                spec=source_contest_spec,
-                rules=rule_context,
-            )
-            target_sheet = validate_character_sheet(settled_contest["sheet"])
-            if settled_contest["result"]["success"]:
-                source_combatant = next(
-                    item
-                    for item in next_encounter.get("combatants", [])
-                    if str(item.get("actor_id") or "") == actor_id
-                )
-                target_combatant = next(
-                    item
-                    for item in next_encounter.get("combatants", [])
-                    if str(item.get("actor_id") or "") == target_id
-                )
-                effect_instance_id = str(settled_contest["result"]["effect_instance_id"])
-                target_combatant["body_thief_host"] = {
-                    "source_actor_id": actor_id,
-                    "effect_instance_id": effect_instance_id,
-                    "original_disposition": str(target_combatant.get("disposition") or "neutral"),
-                    "original_death_saves": bool(target_combatant.get("death_saves", False)),
-                    "original_zero_hp_recovery": bool(
-                        target_combatant.get("zero_hp_recovery", False)
-                    ),
-                }
-                target_combatant["controlled_by_actor_id"] = actor_id
-                target_combatant["disposition"] = str(
-                    source_combatant.get("disposition") or "hostile"
-                )
-                target_combatant["death_saves"] = False
-                target_combatant["zero_hp_recovery"] = False
-                source_combatant["position"] = deepcopy(target_combatant["position"])
-                source_combatant["inside_host"] = {
-                    "host_actor_id": target_id,
-                    "effect_instance_id": effect_instance_id,
-                    "total_cover": True,
-                }
-                source_combatant["hidden"] = True
-                source_combatant["visible_to_actor_ids"] = []
-                sync_combatant_conditions(next_encounter, target_id, target_sheet)
-                actor_knowledge_transfers.append(
-                    ActorKnowledgeTransfer(
-                        source_actor_id=target_id,
-                        destination_actor_id=actor_id,
-                        knowledge_key_prefix=(f"body-thief.{target_id}"),
-                    )
-                )
-                additional_updates.append(
-                    CharacterStateUpdate(
-                        character_id=target_id,
-                        sheet=target_sheet,
-                        notes=validate_character_notes(source_contest_target_record.notes),
-                        expected_revision=(source_contest_target_record.revision),
-                    )
-                )
-            core_effect = {
-                **settled_contest["result"],
-                "kind": "source_contest_effect",
-                "activation_payment": activity_activation_payment,
-                "knowledge_transfer_count": (
-                    source_contest_knowledge_count if settled_contest["result"]["success"] else 0
-                ),
                 "requires_ruling": False,
             }
         if turn_undead:
@@ -25073,11 +20439,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             sync_combatant_conditions(next_encounter, target_id, target_sheet)
             reconcile_readied_spells(next_encounter, target_id, target_sheet)
             if settled_spark.get("damage") is not None:
-                reconcile_source_attachments(
-                    next_encounter,
-                    actor_id=target_id,
-                    sheet=target_sheet,
-                )
                 concentration = dict(
                     dict(settled_spark.get("damage") or {}).get("concentration") or {}
                 )
@@ -25144,19 +20505,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             applied["core_effect"] = core_effect
             mechanic_id = {
                 "action_surge": "dnd5e.core.activity.action_surge",
-                "area_save_damage": "dnd5e.core.activity.area_save_damage",
-                "aggressive": "dnd5e.core.monster.aggressive",
-                "battle_cry": "dnd5e.core.activity.battle_cry",
                 "cunning_action": "dnd5e.core.activity.cunning_action",
                 "divine_spark": "dnd5e.core.activity.divine_spark",
-                "frightful_presence": ("dnd5e.core.activity.frightful_presence"),
+                "dragonborn_breath_weapon": CORE_DRAGONBORN_BREATH_MECHANIC_ID,
                 "legendary_action": ("dnd5e.core.activity.legendary_action"),
                 "second_wind": "dnd5e.core.activity.second_wind",
                 "preserve_life": "dnd5e.core.activity.preserve_life",
                 "turn_undead": "dnd5e.core.activity.turn_undead",
-                "random_save_effects": "dnd5e.core.activity.random_save_effects",
-                "source_save_effect": "dnd5e.core.activity.source_save_effect",
-                "source_contest_effect": ("dnd5e.core.activity.source_contest_effect"),
             }[str(core_effect["kind"])]
             applied["rule_receipts"] = [
                 *list(applied.get("rule_receipts") or []),
@@ -26031,7 +21386,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             or int(weapon_mechanics.get("magic_bonus", 0) or 0) != 0
             or bool(weapon_mechanics.get("additional_damage"))
             or bool(weapon_mechanics.get("on_hit_effect"))
-            or bool(weapon_mechanics.get("on_hit_resolution"))
         ):
             weapon_traits.add("magical")
         if "adamantine" in {
@@ -26088,6 +21442,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         next_attacker_sheet = deepcopy(updated_attacker["sheet"])
         ammunition = None
+        limited_use = None
+        if plan.get("weapon_recharge"):
+            next_attacker_sheet, limited_use = consume_weapon_limited_use(
+                next_attacker_sheet,
+                str(weapon_id),
+            )
         if plan.get("ammunition_item_id"):
             next_attacker_sheet, ammunition = consume_weapon_ammunition(
                 next_attacker_sheet,
@@ -26156,6 +21516,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "attack": attack_roll,
                 "damage": settled.get("damage"),
                 "ammunition": ammunition,
+                "limited_use": limited_use,
                 "campaign_revision": campaign.revision + 1,
                 "revisions": [asdict(item) for item in revisions],
             }
@@ -26480,45 +21841,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     raise CombatEngineError(
                         "an action-bound check can be made only on this actor's turn"
                     )
-                escape_effect: dict[str, Any] | None = None
-                if normalized_check_action == "escape":
-                    requested_effect_id = str(
-                        settlement_facts.get("ongoing_effect_id") or ""
-                    ).strip()
-                    matching_effects = [
-                        item
-                        for item in encounter.get("ongoing_effects", [])
-                        if isinstance(item, dict)
-                        and item.get("active", True)
-                        and str(item.get("target_id") or "") == actor_id
-                        and (
-                            not requested_effect_id
-                            or str(item.get("id") or "") == requested_effect_id
-                        )
-                    ]
-                    if len(matching_effects) != 1:
-                        raise CombatEngineError(
-                            "escape check requires exactly one matching ongoing effect"
-                        )
-                    escape_effect = matching_effects[0]
-                    condition = str(escape_effect.get("condition") or "").strip().casefold()
-                    acting_conditions = {
-                        str(item).strip().casefold() for item in acting.get("conditions", [])
-                    }
-                    if (
-                        condition not in acting_conditions
-                        or normalized_ability
-                        not in set(
-                            escape_effect.get("escape_checks")
-                            or escape_effect.get("escape_abilities")
-                            or []
-                        )
-                        or dc != int(escape_effect.get("escape_dc", 0) or 0)
-                    ):
-                        raise CombatEngineError(
-                            "escape check does not match the active effect's condition, "
-                            "ability, and DC"
-                        )
                 encounter = resolve_common_action(
                     encounter,
                     actor_id_value=actor_id,
@@ -26530,35 +21852,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     },
                 )
                 result = {**result, "action": normalized_check_action}
-                if escape_effect is not None:
-                    condition = str(escape_effect["condition"]).casefold()
-                    result["ongoing_effect_id"] = str(escape_effect.get("id") or "")
-                    result["condition"] = condition
-                    result["escaped"] = bool(result["success"])
-                    if result["success"]:
-                        escaped_sheet = deepcopy(actor["sheet"])
-                        apply_condition_change(
-                            escaped_sheet,
-                            condition_id=condition,
-                            add=False,
-                        )
-                        current_actor = characters.get(actor_id)
-                        updates.append(
-                            CharacterStateUpdate(
-                                character_id=actor_id,
-                                sheet=validate_character_sheet(escaped_sheet),
-                                notes=validate_character_notes(current_actor.notes),
-                                expected_revision=current_actor.revision,
-                            )
-                        )
-                        for ongoing in encounter.get("ongoing_effects", []):
-                            if str(ongoing.get("id") or "") == str(escape_effect.get("id") or ""):
-                                ongoing["active"] = False
-                                ongoing["resolution"] = {
-                                    "kind": "escape_check",
-                                    "actor_id": actor_id,
-                                    "success": True,
-                                }
         if encounter:
             for update in updates:
                 sync_combatant_conditions(encounter, update.character_id, update.sheet)
@@ -27231,20 +22524,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             branch_id=resolved_branch_id,
                         ),
                     )
-                    attack_sheets = {
-                        attacker_id: dict(updated_attacker["sheet"]),
-                        target_id: dict(updated_target["sheet"]),
-                    }
-                    settle_standard_attack_forced_movement(
-                        campaign_id,
-                        self.encounter,
-                        result,
-                        attacker_id=attacker_id,
-                        target_id=target_id,
-                        sheets=attack_sheets,
-                    )
-                    for sheet_actor_id, sheet in attack_sheets.items():
-                        self.set_sheet(sheet_actor_id, sheet)
+                    self.set_sheet(attacker_id, dict(updated_attacker["sheet"]))
+                    self.set_sheet(target_id, dict(updated_target["sheet"]))
                     return result
                 if opcode == "damage.apply":
                     rolled = (
@@ -27318,6 +22599,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     results: list[dict[str, Any]] = []
                     for target_id_value in arguments["target_ids"]:
                         target_id = str(target_id_value)
+                        require_healing_not_prevented(self.encounter, target_id=target_id)
                         applied = apply_healing_to_sheet(
                             self.sheet(target_id),
                             amount=amount,
@@ -27812,59 +23094,32 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         normalized_mechanic_excerpt = " ".join(str(mechanic_source_excerpt or "").split())
         if (
             source_actor_id in normalized_target_ids
-            or normalized_card_kind not in {"activity", "spell", "scene_procedure"}
+            or normalized_card_kind != "scene_procedure"
             or not normalized_card_id
             or not normalized_mechanic_excerpt
         ):
             raise CombatEngineError(
                 "save damage requires distinct source/target actors and one "
-                "reviewed activity, spell, or scene procedure"
+                "reviewed scene procedure; actor-card mechanics use content_solution"
             )
-        source_actor = combat_actor_snapshot(source_actor_id)
-        source_content = dict(source_actor.get("sheet") or {}).get("content", {})
-        card_excerpt = ""
-        if normalized_card_kind in {"activity", "spell"}:
-            collection = "activities" if normalized_card_kind == "activity" else "spells"
-            card = next(
-                (
-                    dict(item)
-                    for item in dict(source_content).get(collection, [])
-                    if isinstance(item, dict) and str(item.get("id") or "") == normalized_card_id
-                ),
-                None,
+        try:
+            _normalized, _source, expanded = managed_module_source_ref(
+                campaign_id,
+                normalized_ruling["source_ref"],
+                require_exact=True,
+                expected_scene_id=str(encounter.get("scene_id") or ""),
+                require_active_module=True,
             )
-            if card is None:
-                raise CombatEngineError(
-                    f"save-damage source {normalized_card_kind} is absent from the actor card"
-                )
-            card_excerpt = str(
-                dict(card.get("definition") or {}).get("effect") or card.get("description") or ""
+            assert expanded is not None
+            managed_module_source_excerpt(
+                expanded,
+                normalized_mechanic_excerpt,
+                field="save damage mechanic_source_excerpt",
+                minimum_length=10,
             )
-            if _normalize_source_evidence_text(card_excerpt) != (
-                _normalize_source_evidence_text(normalized_mechanic_excerpt)
-            ):
-                raise CombatEngineError(
-                    "save-damage mechanics must equal the reviewed actor-card excerpt"
-                )
-        else:
-            try:
-                _normalized, _source, expanded = managed_module_source_ref(
-                    campaign_id,
-                    normalized_ruling["source_ref"],
-                    require_exact=True,
-                    expected_scene_id=str(encounter.get("scene_id") or ""),
-                    require_active_module=True,
-                )
-                assert expanded is not None
-                managed_module_source_excerpt(
-                    expanded,
-                    normalized_mechanic_excerpt,
-                    field="save damage mechanic_source_excerpt",
-                    minimum_length=10,
-                )
-            except (LookupError, ValueError) as error:
-                raise CombatEngineError(str(error)) from error
-            card_excerpt = normalized_mechanic_excerpt
+        except (LookupError, ValueError) as error:
+            raise CombatEngineError(str(error)) from error
+        card_excerpt = normalized_mechanic_excerpt
         normalized_expression = "".join(str(damage_expression or "").split()).casefold()
         normalized_damage_type = str(damage_type or "").strip().casefold()
         normalized_save_ability = str(save_ability or "").strip().casefold()
@@ -27983,22 +23238,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             updated_sheet = updated_sheets[target_id]
             damage = dict(target_result.get("damage") or {})
             if damage:
-                record_source_trait_damage(
-                    next_encounter,
-                    target_id=target_id,
-                    damage={**damage, "sheet": updated_sheet},
-                )
                 add_concentration_window(
                     next_encounter,
                     target_id,
                     damage.get("concentration"),
                     next_revision=campaign.revision + 1,
                 )
-            reconcile_source_attachments(
-                next_encounter,
-                actor_id=target_id,
-                sheet=updated_sheet,
-            )
             sync_combatant_conditions(
                 next_encounter,
                 target_id,
@@ -28132,16 +23377,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         encounter = existing_encounter
         next_state = dict(campaign.state or {})
         if encounter:
-            record_source_trait_damage(
-                encounter,
-                target_id=target_id,
-                damage=applied,
-            )
-            reconcile_source_attachments(
-                encounter,
-                actor_id=target_id,
-                sheet=applied["sheet"],
-            )
             sync_combatant_conditions(encounter, target_id, applied["sheet"])
             reconcile_readied_spells(encounter, target_id, applied["sheet"])
             add_concentration_window(
@@ -28230,6 +23465,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             require_encounter_combatant(active, target_id, role="healing target")
             if source_actor_id is not None:
                 require_encounter_combatant(active, source_actor_id, role="healing source")
+        require_healing_not_prevented(active, target_id=target_id)
         source = combat_actor_snapshot(source_actor_id) if source_actor_id else None
         applied = apply_healing_to_sheet(
             target["sheet"],
@@ -28271,281 +23507,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return combat_response(campaign_id, principal_id, response)
 
-    def combat_standard_death_trigger_resolve(
-        campaign_id: str,
-        actor_id: str,
-        choice_id: str,
-        environment_ruling: dict[str, Any],
-        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
-        expected_revision: int | None = None,
-        branch_id: str | None = None,
-        idempotency_key: str | None = None,
-    ) -> dict[str, Any]:
-        """Resolve one hard standard Death Burst and record only its scene facts."""
-
-        access.require_campaign(
-            campaign_id,
-            principal_id,
-            roles=CAMPAIGN_DM_ROLES,
-        )
-        require_write_contract(expected_revision, idempotency_key)
-        resolved_branch_id = require_current_branch(campaign_id, branch_id)
-        ruling = deepcopy(dict(environment_ruling or {}))
-        allowed_ruling_fields = {
-            "default_resolver",
-            "ruling_kind",
-            "decision",
-            "reason",
-            "ignited_objects",
-        }
-        if set(ruling) != allowed_ruling_fields:
-            raise CombatEngineError(
-                "Death Burst environment_ruling requires exactly "
-                "default_resolver, ruling_kind, decision, reason, and "
-                "ignited_objects"
-            )
-        ignited_objects = ruling.get("ignited_objects")
-        if not isinstance(ignited_objects, list) or len(ignited_objects) > 50:
-            raise CombatEngineError("Death Burst ignited_objects must be a bounded list")
-        normalized_objects: list[dict[str, str]] = []
-        seen_object_ids: set[str] = set()
-        for item in ignited_objects:
-            if not isinstance(item, dict) or set(item) != {"id", "description"}:
-                raise CombatEngineError("each ignited object requires exactly id and description")
-            object_id = str(item.get("id") or "").strip()
-            description = " ".join(str(item.get("description") or "").split())
-            if (
-                not object_id
-                or object_id in seen_object_ids
-                or not description
-                or len(description) > 300
-            ):
-                raise CombatEngineError(
-                    "ignited object ids must be unique and descriptions bounded"
-                )
-            seen_object_ids.add(object_id)
-            normalized_objects.append({"id": object_id, "description": description})
-        decision = " ".join(str(ruling.get("decision") or "").split())
-        reason = " ".join(str(ruling.get("reason") or "").split())
-        if (
-            ruling.get("default_resolver") != "agent"
-            or ruling.get("ruling_kind") != "source_or_scene_fact"
-            or not decision
-            or len(decision) > 1_000
-            or not reason
-            or len(reason) > 500
-        ):
-            raise CombatEngineError(
-                "Death Burst environment_ruling must be a bounded Agent "
-                "source_or_scene_fact decision"
-            )
-        normalized_ruling = {
-            "default_resolver": "agent",
-            "ruling_kind": "source_or_scene_fact",
-            "decision": decision,
-            "reason": reason,
-            "ignited_objects": normalized_objects,
-            "committed": True,
-        }
-        request_payload = {
-            "actor_id": actor_id,
-            "choice_id": choice_id,
-            "environment_ruling": normalized_ruling,
-            "branch_id": resolved_branch_id,
-        }
-        scope = f"combat-standard-death-trigger:{campaign_id}:{resolved_branch_id}:{principal_id}"
-        replay = replay_idempotent(scope, idempotency_key, request_payload)
-        if replay is not None:
-            return combat_response(campaign_id, principal_id, replay)
-        campaign, encounter = active_encounter(campaign_id)
-        if campaign.revision != expected_revision:
-            raise ValueError(
-                "campaign revision conflict: "
-                f"expected {expected_revision}, found {campaign.revision}"
-            )
-        window = next(
-            (
-                item
-                for item in encounter.get("pending", [])
-                if str(item.get("id") or "") == choice_id
-            ),
-            None,
-        )
-        if (
-            not isinstance(window, dict)
-            or window.get("status", "pending") != "pending"
-            or window.get("kind") != "save"
-            or window.get("trigger") != "standard_death_burst"
-            or str(window.get("source_actor_id") or "") != actor_id
-            or str(window.get("actor_id") or "") != actor_id
-        ):
-            raise CombatEngineError("choice_id is not this actor's standard Death Burst window")
-        source_record = characters.get(actor_id)
-        recorded_trigger = standard_death_trigger_for_sheet(source_record.sheet)
-        if recorded_trigger is None or recorded_trigger != dict(
-            window.get("standard_trigger") or {}
-        ):
-            raise CombatEngineError("pending Death Burst no longer matches the standard actor card")
-        target_ids = [str(item) for item in window.get("target_ids", [])]
-        if any(not item for item in target_ids) or len(target_ids) != len(set(target_ids)):
-            raise CombatEngineError("pending Death Burst targets are malformed")
-        target_combatants = {
-            target_id: require_encounter_combatant(
-                encounter,
-                target_id,
-                role="standard Death Burst target",
-            )
-            for target_id in target_ids
-        }
-        rule_context = effective_rule_context(
-            campaign_id,
-            branch_id=resolved_branch_id,
-            facts={
-                "source_actor_id": actor_id,
-                "actor_ids": target_ids,
-                "kind": "standard_death_burst",
-                "ability": str(recorded_trigger["save_ability"]),
-                "dc": int(recorded_trigger["save_dc"]),
-                "save_source_kind": "nonmagical_effect",
-            },
-        )
-        if target_ids:
-            settled = resolve_save_damage_to_sheets(
-                [combat_actor_snapshot(target_id) for target_id in target_ids],
-                save_ability=str(recorded_trigger["save_ability"]),
-                save_dc=int(recorded_trigger["save_dc"]),
-                damage_expression=str(recorded_trigger["damage_formula"]),
-                damage_type=str(recorded_trigger["damage_type"]),
-                half_on_success=True,
-                source=f"standard-death-burst:{actor_id}",
-                death_saves_by_actor_id={
-                    target_id: combatant_zero_hp_buffered(combatant)
-                    for target_id, combatant in target_combatants.items()
-                },
-                ruleset=encounter_rules_edition(campaign_id, encounter),
-                rules=rule_context,
-            )
-            updated_sheets = {
-                target_id: validate_character_sheet(sheet)
-                for target_id, sheet in dict(settled["sheets"]).items()
-            }
-            result = {
-                **dict(settled["result"]),
-                "source_actor_id": actor_id,
-                "mechanic_id": str(recorded_trigger["mechanic_id"]),
-                "environment_ruling": normalized_ruling,
-            }
-        else:
-            updated_sheets = {}
-            result = {
-                "kind": "save_damage",
-                "damage_roll": None,
-                "targets": [],
-                "source_actor_id": actor_id,
-                "mechanic_id": str(recorded_trigger["mechanic_id"]),
-                "environment_ruling": normalized_ruling,
-            }
-        next_encounter = resolve_choice_window(
-            encounter,
-            choice_id=choice_id,
-            actor_id_value=actor_id,
-            selection={"id": "resolve"},
-        )
-        for target_result in result["targets"]:
-            target_id = str(target_result["target_id"])
-            updated_sheet = updated_sheets[target_id]
-            damage = dict(target_result.get("damage") or {})
-            if damage:
-                record_source_trait_damage(
-                    next_encounter,
-                    target_id=target_id,
-                    damage={**damage, "sheet": updated_sheet},
-                )
-                add_concentration_window(
-                    next_encounter,
-                    target_id,
-                    damage.get("concentration"),
-                    next_revision=campaign.revision + 1,
-                )
-            reconcile_source_attachments(
-                next_encounter,
-                actor_id=target_id,
-                sheet=updated_sheet,
-            )
-            sync_combatant_conditions(
-                next_encounter,
-                target_id,
-                updated_sheet,
-            )
-            reconcile_readied_spells(
-                next_encounter,
-                target_id,
-                updated_sheet,
-            )
-        next_encounter["log"] = [
-            *list(next_encounter.get("log") or []),
-            {
-                "type": "standard_death_burst_resolved",
-                "choice_id": choice_id,
-                "source_actor_id": actor_id,
-                "target_ids": target_ids,
-                "result": result,
-            },
-        ][-100:]
-        current_records = {target_id: characters.get(target_id) for target_id in target_ids}
-        response = commit_campaign_state(
-            campaign,
-            {**dict(campaign.state or {}), "combat": next_encounter},
-            operation="combat.standard_death_burst.resolve",
-            principal_id=principal_id,
-            branch_id=resolved_branch_id,
-            idempotency_key=idempotency_key,
-            scope=scope,
-            payload=request_payload,
-            response_fields={
-                "status": (
-                    "pending_chain"
-                    if any(
-                        item.get("trigger") == "standard_death_burst"
-                        for item in next_encounter.get("pending", [])
-                    )
-                    else "committed"
-                ),
-                "result": result,
-                "combat": next_encounter,
-            },
-            character_updates=[
-                CharacterStateUpdate(
-                    character_id=target_id,
-                    sheet=updated_sheets[target_id],
-                    notes=validate_character_notes(current_records[target_id].notes),
-                    expected_revision=current_records[target_id].revision,
-                )
-                for target_id in target_ids
-                if updated_sheets[target_id] != current_records[target_id].sheet
-            ],
-            rule_receipts=[
-                *core_receipts(
-                    rule_context,
-                    [
-                        "dnd5e.core.monster.death_burst",
-                        "dnd5e.core.mcp.save_damage_atomicity",
-                    ],
-                    "combat.standard_death_burst",
-                ),
-                *[
-                    receipt
-                    for target_result in result["targets"]
-                    for receipt in dict(target_result.get("save") or {}).get("rule_receipts", [])
-                ],
-                *[
-                    receipt
-                    for target_result in result["targets"]
-                    for receipt in target_result.get("rule_receipts", [])
-                ],
-            ],
-        )
-        return combat_response(campaign_id, principal_id, response)
 
     @mcp.tool()
     def combat_choice_open(
@@ -28648,10 +23609,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if pending_choice and pending_choice.get("trigger") == "attack_hit_defense":
             raise CombatEngineError(
                 "attack-defense windows must use combat_choice(action=resolve_defense)"
-            )
-        if pending_choice and pending_choice.get("trigger") == "standard_death_burst":
-            raise CombatEngineError(
-                "standard Death Burst windows must use combat_choice(action=resolve_death_trigger)"
             )
         next_encounter = resolve_choice_window(
             encounter,
@@ -33687,10 +28644,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise CombatEngineError("campaign has no retained combat")
         combat = deepcopy(retained_combat)
         encounter_rules_edition(campaign_id, combat)
-        recovering_postcombat = not combat.get("active", False)
-        retained_outcome = dict(combat.get("outcome") or {})
-        if recovering_postcombat and (not retained_outcome or outcome_value != retained_outcome):
-            raise CombatEngineError("postcombat cleanup requires the exact retained combat outcome")
+        if not combat.get("active", False):
+            raise CombatEngineError("combat is already closed")
         require_no_blocking_pending(combat)
         ending_actor_ids = list(
             dict.fromkeys(
@@ -33705,40 +28660,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         ending_actors = {
             actor_id_value: characters.get(actor_id_value) for actor_id_value in ending_actor_ids
         }
-        if not recovering_postcombat:
-            for combatant in combat.get("combatants", []):
-                if not combatant.get("death_saves", False):
-                    continue
-                actor = ending_actors[str(combatant["actor_id"])]
-                hp = int(actor.sheet.get("combat", {}).get("hp", {}).get("value", 0) or 0)
-                conditions = condition_ids(actor.sheet.get("conditions", []))
-                if hp == 0 and not conditions & DEATH_SAVE_SETTLED_CONDITIONS:
-                    raise CombatEngineError(
-                        f"cannot end combat while {actor.id} is still making death saves"
-                    )
-            combat["active"] = False
-            if outcome_value:
-                combat["outcome"] = outcome_value
-        unavailable_source_ids = {
-            str(combatant.get("actor_id") or "")
-            for combatant in combat.get("combatants", [])
-            if isinstance(combatant, dict)
-            and (
-                combatant.get("departed") is not None
-                or condition_ids(
-                    ending_actors[str(combatant.get("actor_id") or "")].sheet.get("conditions", [])
+        for combatant in combat.get("combatants", []):
+            if not combatant.get("death_saves", False):
+                continue
+            actor = ending_actors[str(combatant["actor_id"])]
+            hp = int(actor.sheet.get("combat", {}).get("hp", {}).get("value", 0) or 0)
+            conditions = condition_ids(actor.sheet.get("conditions", []))
+            if hp == 0 and not conditions & DEATH_SAVE_SETTLED_CONDITIONS:
+                raise CombatEngineError(
+                    f"cannot end combat while {actor.id} is still making death saves"
                 )
-                & INCAPACITATING_STATE_IDS
-            )
-        }
-        released_grapples = release_unavailable_source_grapples(
-            combat,
-            unavailable_source_ids,
-        )
-        if recovering_postcombat and not released_grapples:
-            raise CombatEngineError(
-                "retained combat has no unavailable-source grapple cleanup to recover"
-            )
+        combat["active"] = False
+        if outcome_value:
+            combat["outcome"] = outcome_value
         ending_readied = list(combat.get("readied", []))
         combat["readied"] = []
         updated_state = dict(campaign.state or {})
@@ -33747,36 +28681,27 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         character_updates: list[CharacterStateUpdate] = []
         expired_effects: set[str] = set()
         for actor_id_value in ending_actor_ids:
-            if recovering_postcombat and actor_id_value not in released_grapples:
-                continue
             actor = ending_actors[actor_id_value]
             sheet = deepcopy(actor.sheet)
-            if not recovering_postcombat:
-                for source_condition in combat.get("source_conditions", []):
-                    if str(source_condition.get("actor_id") or "") != actor.id or not (
-                        source_condition.get("active", True)
-                        and source_condition.get("added_by_encounter", False)
-                    ):
-                        continue
-                    condition = str(source_condition.get("condition") or "").casefold()
-                    apply_condition_change(sheet, condition_id=condition, add=False)
-                holding_ids = {
-                    str(item.get("holding_effect_id"))
-                    for item in ending_readied
-                    if item.get("kind") == "spell" and item.get("actor_id") == actor.id
-                }
-                for effect in sheet.get("effects", []):
-                    if str(effect.get("id")) in holding_ids:
-                        effect["active"] = False
-                advanced = expire_combat_bound_effects(sheet)
-                expired_effects.update(advanced["expired"])
-                sheet = advanced["sheet"]
-            if actor_id_value in released_grapples and not has_active_owned_condition(
-                combat,
-                target_id=actor_id_value,
-                condition="grappled",
-            ):
-                apply_condition_change(sheet, condition_id="grappled", add=False)
+            for source_condition in combat.get("source_conditions", []):
+                if str(source_condition.get("actor_id") or "") != actor.id or not (
+                    source_condition.get("active", True)
+                    and source_condition.get("added_by_encounter", False)
+                ):
+                    continue
+                condition = str(source_condition.get("condition") or "").casefold()
+                apply_condition_change(sheet, condition_id=condition, add=False)
+            holding_ids = {
+                str(item.get("holding_effect_id"))
+                for item in ending_readied
+                if item.get("kind") == "spell" and item.get("actor_id") == actor.id
+            }
+            for effect in sheet.get("effects", []):
+                if str(effect.get("id")) in holding_ids:
+                    effect["active"] = False
+            advanced = expire_combat_bound_effects(sheet)
+            expired_effects.update(advanced["expired"])
+            sheet = advanced["sheet"]
             normalized_sheet = validate_character_sheet(sheet)
             sync_combatant_conditions(combat, actor_id_value, normalized_sheet)
             character_updates.append(
@@ -33791,7 +28716,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         response = commit_campaign_state(
             campaign,
             updated_state,
-            operation=("combat.end.cleanup" if recovering_postcombat else "combat.end"),
+            operation="combat.end",
             principal_id=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
@@ -33800,13 +28725,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             response_fields={
                 "ended": True,
                 "combat": combat,
-                "outcome": outcome_value or retained_outcome or None,
+                "outcome": outcome_value or None,
                 "tool_profile": PROFILE_PLAY,
-                "recovered_postcombat_cleanup": recovering_postcombat,
-                "released_grapples": {
-                    target_id: sorted(effect_ids)
-                    for target_id, effect_ids in released_grapples.items()
-                },
                 "effects_expired": sorted(expired_effects),
                 "readied_spells_expired": sorted(
                     str(item.get("id")) for item in ending_readied if item.get("kind") == "spell"
@@ -39930,12 +34850,26 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 source_key=str(feature_card.get("source_key") or species_name),
                 pack_id=pack_id,
                 pack_version=pack_version,
-                rule_refs=list(rule_refs),
-                mechanic_refs=list(mechanic_refs),
+                rule_refs=list(
+                    dict.fromkeys(
+                        [
+                            *list(feature_card.get("rule_refs") or []),
+                            *list(rule_refs),
+                        ]
+                    )
+                ),
+                mechanic_refs=list(
+                    feature_card.get("mechanic_refs")
+                    if "mechanic_refs" in feature_card
+                    else mechanic_refs
+                ),
             )
             feature_card.setdefault("activation", {"type": "passive"})
             if choices and any(choices.values()):
-                feature_card["choices"] = deepcopy(choices)
+                feature_card["choices"] = {
+                    **deepcopy(choices),
+                    **dict(feature_card.get("choices") or {}),
+                }
             sheet["content"]["features"].append(feature_card)
             present_ids.add(feature_id)
             unlocked.append(
@@ -42827,8 +37761,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "resource_scaling": {},
                     "attack_scaling": {},
                     "choices": {
-                        "area_save_damage": {
-                            "kind": f"self_{shape}_save_damage",
+                        "standard_resolution": {
+                            "kind": "area_save_damage",
                             "origin": {"kind": "self"},
                             "area": area,
                             "targets": "each_creature",
@@ -42851,7 +37785,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "pack_id": pack_id,
                     "pack_version": version,
                     "rule_refs": list(artifact.get("rule_refs") or []),
-                    "mechanic_refs": ["dnd5e.core.activity.area_save_damage"],
+                    "mechanic_refs": [CORE_DRAGONBORN_BREATH_MECHANIC_ID],
                     "ruling_requirements": [],
                 }
                 sheet["content"]["activities"].append(activity)
@@ -49784,7 +44718,6 @@ Useful bounded guidance:
             "currency_spend",
             "item_spend",
             "consumable_use",
-            "combat_cleanup",
         ] = "update",
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
@@ -49861,7 +44794,6 @@ Useful bounded guidance:
                     "reason",
                 ),
             ),
-            "combat_cleanup": ({"outcome"}, ("outcome",)),
         }
         if action not in action_contracts:
             raise ValueError(f"unsupported campaign_change action: {action}")
@@ -49999,20 +44931,6 @@ Useful bounded guidance:
                 required(data, "target_character_id"),
                 required(data, "expected_character_revision"),
                 required(data, "reason"),
-                principal_id,
-                expected_revision,
-                branch_id,
-                idempotency_key,
-            )
-        elif action == "combat_cleanup":
-            require_facade_phase(
-                campaign_id,
-                "campaign_change(combat_cleanup)",
-                PROFILE_PLAY,
-            )
-            result = combat_end(
-                campaign_id,
-                required(data, "outcome"),
                 principal_id,
                 expected_revision,
                 branch_id,
@@ -51124,7 +46042,7 @@ Useful bounded guidance:
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Inspect or author one source-bound custom-content solution before play."""
+        """Inspect or author one source-bound custom-content solution at first use."""
 
         access.require_campaign(
             campaign_id,
@@ -51155,11 +46073,6 @@ Useful bounded guidance:
                 "resolution_plan": deepcopy(source_card.get("resolution_plan")),
                 "resolution_solution": deepcopy(source_card.get("resolution_solution")),
             }
-        require_facade_phase(
-            campaign_id,
-            "content_solution(compile)",
-            PROFILE_LOBBY,
-        )
         data = strict_facade_payload(
             payload,
             action="content_solution(compile)",
@@ -51206,23 +46119,6 @@ Useful bounded guidance:
             source_card.get("resolution_solution"), dict
         ):
             raise CombatEngineError("source card already has a compiled solution")
-        encounter = dict(campaigns.get(campaign_id).state or {}).get("combat")
-        if (
-            source_card_kind == "item"
-            and isinstance(encounter, dict)
-            and encounter.get("active")
-            and any(
-                isinstance(item, dict)
-                and item.get("trigger") == "attack_on_hit_effect"
-                and str(item.get("attacker_id") or "") == actor_id
-                and str(item.get("weapon_id") or "") == source_card_id
-                for item in encounter.get("pending", [])
-            )
-        ):
-            raise CombatEngineError(
-                "item resolution must be authored before combat; a paid hit "
-                "cannot change the source card's execution contract"
-            )
         compiled_plan = validate_authored_content_plan(
             campaign_id,
             required(data, "resolution_plan"),
@@ -51284,7 +46180,6 @@ Useful bounded guidance:
             "resolve_defense",
             "on_hit_ruling",
             "execute_plan",
-            "resolve_death_trigger",
         ],
         payload: dict[str, Any],
         actor_id: str | None = None,
@@ -51297,7 +46192,6 @@ Useful bounded guidance:
         if action in {
             "on_hit_ruling",
             "execute_plan",
-            "resolve_death_trigger",
         }:
             access.require_campaign(
                 campaign_id,
@@ -51310,24 +46204,7 @@ Useful bounded guidance:
             PROFILE_COMBAT,
         )
         resolved_actor_id = str(required({"actor_id": actor_id}, "actor_id"))
-        if action == "resolve_death_trigger":
-            data = strict_facade_payload(
-                payload,
-                action="combat_choice(resolve_death_trigger)",
-                allowed={"choice_id", "environment_ruling"},
-                required_names=("choice_id", "environment_ruling"),
-            )
-            result = combat_standard_death_trigger_resolve(
-                campaign_id,
-                resolved_actor_id,
-                str(required(data, "choice_id")),
-                required(data, "environment_ruling"),
-                principal_id,
-                expected_revision,
-                branch_id,
-                idempotency_key,
-            )
-        elif action == "execute_plan":
+        if action == "execute_plan":
             data = strict_facade_payload(
                 payload,
                 action="combat_choice(execute_plan)",

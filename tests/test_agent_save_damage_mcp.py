@@ -319,6 +319,22 @@ def test_agent_save_damage_requires_one_paid_immutable_action_and_replays(
                     "idempotency_key": "player",
                 },
             )
+        with pytest.raises(Exception, match="scene procedure.*content_solution"):
+            await _call(
+                server,
+                "combat_hp_change",
+                {
+                    "campaign_id": campaign["id"],
+                    "target_id": agile["id"],
+                    "action": "save_damage",
+                    "payload": {
+                        **payload,
+                        "source_card_kind": "activity",
+                    },
+                    "expected_revision": started["campaign_revision"],
+                    "idempotency_key": "actor-card-bypass",
+                },
+            )
         with pytest.raises(Exception, match="exact current-turn.*commitment"):
             await _call(
                 server,

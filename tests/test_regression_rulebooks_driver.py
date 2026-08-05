@@ -580,7 +580,7 @@ def test_publication_metadata_marks_only_core_dependencies_as_standard() -> None
     )
     assert driver._core_content_dependency("2014") == {
         "id": "dnd5e.content.srd2014",
-        "version": "1.20.0",
+        "version": "1.21.0",
     }
     assert driver._core_content_dependency("2024") == {
         "id": "dnd5e.content.srd2024",
@@ -1350,7 +1350,7 @@ def test_portable_receiver_enables_exact_core_dependency() -> None:
                     "result": {
                         "activation": {
                             "pack_id": "dnd5e.content.srd2014",
-                            "version": "1.20.0",
+                            "version": "1.21.0",
                             "enabled": True,
                         }
                     }
@@ -1371,7 +1371,7 @@ def test_portable_receiver_enables_exact_core_dependency() -> None:
     assert activation["enabled"] is True
     assert server.calls[1][1]["payload"] == {
         "pack_id": "dnd5e.content.srd2014",
-        "version": "1.20.0",
+        "version": "1.21.0",
     }
     assert server.calls[1][1]["expected_revision"] == 4
     assert server.calls[1][1]["idempotency_key"].endswith(f"{driver._run_token('reviewed-v2')}-r4")
@@ -1865,7 +1865,7 @@ def test_portable_roundtrip_uses_public_facades_and_preserves_package() -> None:
     assert fallback_compile["provenance"]["empty_source_chunk_count"] == 1
     assert "descriptive_fallback" not in fallback_compile["provenance"]
     assert fallback_compile["manifest"]["dependencies"] == [
-        {"id": "dnd5e.content.srd2014", "version": "1.20.0"}
+        {"id": "dnd5e.content.srd2014", "version": "1.21.0"}
     ]
     assert [name for name, _arguments in target.calls] == [
         "rule_import",

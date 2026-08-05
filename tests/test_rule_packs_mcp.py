@@ -629,6 +629,53 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
             item["name"] == "Dwarven Toughness" for item in dwarf["sheet"]["content"]["features"]
         )
 
+        half_orc_catalog = await call(
+            server,
+            "content_catalog_list",
+            {"campaign_id": campaign["id"], "kind": "species", "query": "Half-Orc"},
+        )
+        half_orc_species = next(
+            item for item in half_orc_catalog if item["name"] == "Half-Orc"
+        )
+        half_orc = await call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Half-Orc",
+                "sheet": default_character_sheet(),
+                "idempotency_key": "catalog-half-orc-character",
+            },
+        )
+        half_orc = await call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": half_orc["id"],
+                "artifact_id": half_orc_species["id"],
+                "expected_revision": half_orc["revision"],
+                "idempotency_key": "catalog-half-orc-species",
+            },
+        )
+        relentless = next(
+            feature
+            for feature in half_orc["sheet"]["content"]["features"]
+            if feature["name"] == "Relentless Endurance"
+        )
+        assert relentless["mechanic_refs"] == [
+            "dnd5e.core.damage.relentless_endurance"
+        ]
+        assert relentless["choices"]["source_trait"]["kind"] == (
+            "relentless_endurance"
+        )
+        assert relentless["uses"]["recovers_on"] == "long_rest"
+        assert all(
+            "dnd5e.core.damage.relentless_endurance"
+            not in feature["mechanic_refs"]
+            for feature in half_orc["sheet"]["content"]["features"]
+            if feature["name"] != "Relentless Endurance"
+        )
+
         fire_bolt = next(
             item
             for item in await call(

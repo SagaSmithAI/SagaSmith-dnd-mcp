@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import random
-from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -163,385 +162,6 @@ def test_end_turn_does_not_revision_unchanged_character_documents(tmp_path: Path
     asyncio.run(exercise())
 
 
-def test_agent_source_damage_is_authorized_and_settled_in_one_attack(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source_excerpt = (
-        "If the peryton is flying and dives at least 30 feet straight toward a "
-        "target and then hits it with a melee weapon attack, the attack deals an "
-        "extra 9 (2d8) damage to the target."
-    )
-    original_attack_roll = server_module.roll_attack_action
-
-    def forced_critical(*, plan, rng=None):
-        result = original_attack_roll(plan=plan, rng=rng)
-        result.update(
-            natural=20,
-            total=max(int(plan["target_ac"]), int(result.get("total", 0) or 0)),
-            armor_class=int(plan["target_ac"]),
-            hit=True,
-            critical=True,
-            fumble=False,
-        )
-        return result
-
-    monkeypatch.setattr(server_module, "roll_attack_action", forced_critical)
-
-    async def exercise() -> None:
-        server = create_server(_config(tmp_path))
-        campaign = await _call(
-            server,
-            "campaign_create",
-            {
-                "name": "Atomic Agent source damage",
-                "edition": "2014",
-                "idempotency_key": "campaign",
-            },
-        )
-        attacker_sheet = default_character_sheet()
-        source_feature = {
-            "id": "dive-attack-passive",
-            "name": "Dive Attack",
-            "description": source_excerpt,
-            "choices": {
-                "manual_ruling": {
-                    "kind": "descriptive_passive",
-                    "default_resolver": "agent",
-                    "source_excerpt": source_excerpt,
-                }
-            },
-        }
-        attacker_sheet["content"]["features"] = [source_feature]
-        attacker_sheet["content"]["activities"] = [
-            {
-                "id": "peryton-multiattack",
-                "name": "Multiattack",
-                "source_key": "Peryton",
-                "activation": {"type": "action"},
-                "choices": {
-                    "multiattack_options": [
-                        {
-                            "id": "two-strikes",
-                            "attacks": [
-                                {
-                                    "weapon_id": "gore",
-                                    "attack_mode": "melee",
-                                    "count": 2,
-                                }
-                            ],
-                        }
-                    ]
-                },
-            }
-        ]
-        attacker_sheet["inventory"]["items"] = [
-            {
-                "id": "gore",
-                "name": "Gore",
-                "kind": "weapon",
-                "equipped": True,
-                "equipped_slot": "main_hand",
-                "mechanics": {
-                    "attack_type": "melee",
-                    "attack_ability": "strength",
-                    "damage_formula": "1d6",
-                    "damage_type": "piercing",
-                },
-            }
-        ]
-        attacker_sheet["inventory"]["equipment_slots"]["main_hand"] = "gore"
-        target_sheet = default_character_sheet()
-        target_sheet["combat"]["hp"] = {"value": 100, "max": 100, "temp": 0}
-        attacker = await _call(
-            server,
-            "character_create",
-            {
-                "campaign_id": campaign["id"],
-                "name": "Peryton",
-                "character_type": "monster",
-                "sheet": attacker_sheet,
-                "idempotency_key": "attacker",
-            },
-        )
-        target = await _call(
-            server,
-            "character_create",
-            {
-                "campaign_id": campaign["id"],
-                "name": "Target",
-                "sheet": target_sheet,
-                "idempotency_key": "target",
-            },
-        )
-        campaign = await _call(
-            server, "campaign_get", {"campaign_id": campaign["id"]}
-        )
-        await _call_raw(
-            server,
-            "combat_start",
-            {
-                "campaign_id": campaign["id"],
-                "participant_ids": [attacker["id"], target["id"]],
-                "participant_config": [
-                    {
-                        "actor_id": attacker["id"],
-                        "initiative": 20,
-                        "position": {"x": 0, "y": 0},
-                    },
-                    {
-                        "actor_id": target["id"],
-                        "initiative": 10,
-                        "position": {"x": 1, "y": 0},
-                    },
-                ],
-                "expected_revision": campaign["revision"],
-                "idempotency_key": "start",
-            },
-        )
-        ruling = {
-            "source": "dm_ruling",
-            "kind": "source_conditional_extra_damage",
-            "application_id": "peryton:dive:round-1",
-            "feature_id": "dive-attack-passive",
-            "target_actor_ids": [target["id"]],
-            "solution_plan_fingerprint": "",
-            "source_excerpt": source_excerpt,
-            "damage_expression": "2d8",
-            "damage_type": "weapon",
-            "condition_satisfied": True,
-            "trigger_facts": {
-                "flying": True,
-                "straight_dive_ft": 30,
-                "requires_attack_advantage": True,
-                "max_applications_per_turn": 1,
-            },
-            "default_resolver": "agent",
-            "ruling_kind": "agent_dm_adjudication",
-            "decision": "Apply Dive Attack to this qualifying hit.",
-            "reason": "The peryton completed the printed 30-foot straight dive.",
-        }
-        action = {
-            "weapon_id": "gore",
-            "attack_mode": "melee",
-            "multiattack_option_id": "two-strikes",
-            "context": {"advantage": True},
-            "rulings": [ruling],
-        }
-        with pytest.raises(Exception, match="requires this attack to have advantage"):
-            await _call(
-                server,
-                "combat_preflight_attack",
-                {
-                    "campaign_id": campaign["id"],
-                    "actor_id": attacker["id"],
-                    "target_id": target["id"],
-                    "action": {
-                        **action,
-                        "context": {},
-                    },
-                },
-            )
-        with pytest.raises(Exception, match="does not apply to this target"):
-            await _call(
-                server,
-                "combat_preflight_attack",
-                {
-                    "campaign_id": campaign["id"],
-                    "actor_id": attacker["id"],
-                    "target_id": target["id"],
-                    "action": {
-                        **action,
-                        "rulings": [
-                            {
-                                **ruling,
-                                "target_actor_ids": [attacker["id"]],
-                            }
-                        ],
-                    },
-                },
-            )
-        with pytest.raises(Exception, match="qualifying ally conflicts"):
-            await _call(
-                server,
-                "combat_preflight_attack",
-                {
-                    "campaign_id": campaign["id"],
-                    "actor_id": attacker["id"],
-                    "target_id": target["id"],
-                    "action": {
-                        **action,
-                        "rulings": [
-                            {
-                                **ruling,
-                                "trigger_facts": {
-                                    "applicability_mode": (
-                                        "attack_advantage_or_target_adjacent_to_ally_"
-                                        "without_disadvantage"
-                                    ),
-                                    "applicability_branch": "adjacent_ally",
-                                    "requires_no_attack_disadvantage": True,
-                                    "target_adjacent_to_nonincapacitated_ally": True,
-                                    "qualifying_ally_actor_ids": [attacker["id"]],
-                                },
-                            }
-                        ],
-                    },
-                },
-            )
-        plan = await _call(
-            server,
-            "combat_preflight_attack",
-            {
-                "campaign_id": campaign["id"],
-                "actor_id": attacker["id"],
-                "target_id": target["id"],
-                "action": action,
-            },
-        )
-        assert plan["additional_damage"] == [
-            {
-                "damage_expression": "2d8",
-                "damage_type": "piercing",
-                "source": "agent-ruling:peryton:dive:round-1",
-            }
-        ]
-        assert [item["kind"] for item in plan["rulings"]].count(
-            "source_conditional_extra_damage"
-        ) == 1
-
-        with pytest.raises(Exception, match="exact Agent-owned passive"):
-            await _call(
-                server,
-                "combat_preflight_attack",
-                {
-                    "campaign_id": campaign["id"],
-                    "actor_id": attacker["id"],
-                    "target_id": target["id"],
-                    "action": {
-                        **action,
-                        "rulings": [
-                            {
-                                **ruling,
-                                "source_excerpt": "The peryton deals 2d8.",
-                            }
-                        ],
-                    },
-                },
-            )
-        with pytest.raises(Exception, match="is incomplete"):
-            await _call(
-                server,
-                "combat_preflight_attack",
-                {
-                    "campaign_id": campaign["id"],
-                    "actor_id": attacker["id"],
-                    "target_id": target["id"],
-                    "action": {
-                        **action,
-                        "rulings": [
-                            ruling,
-                            {
-                                **ruling,
-                                "application_id": "peryton:dive:duplicate",
-                            },
-                        ],
-                    },
-                },
-            )
-
-        await _call(
-            server,
-            "campaign_member_grant",
-            {
-                "campaign_id": campaign["id"],
-                "principal_id": "player:test",
-                "role": "player",
-            },
-        )
-        await _call(
-            server,
-            "actor_grant",
-            {
-                "campaign_id": campaign["id"],
-                "principal_id": "player:test",
-                "actor_id": attacker["id"],
-                "can_control": True,
-                "can_view_private": True,
-            },
-        )
-        with pytest.raises(Exception, match="Owner/DM authority"):
-            await _call(
-                server,
-                "combat_preflight_attack",
-                {
-                    "campaign_id": campaign["id"],
-                    "actor_id": attacker["id"],
-                    "target_id": target["id"],
-                    "action": action,
-                    "principal_id": "player:test",
-                },
-            )
-
-        current = await _call(
-            server, "campaign_get", {"campaign_id": campaign["id"]}
-        )
-        resolved = await _call_raw(
-            server,
-            "combat_resolve_attack",
-            {
-                "campaign_id": campaign["id"],
-                "actor_id": attacker["id"],
-                "target_id": target["id"],
-                "action": action,
-                "expected_revision": current["revision"],
-                "idempotency_key": "attack",
-            },
-        )
-        parts = resolved["result"]["damage"]["roll_parts"]
-        assert len(parts) == 2
-        assert parts[1]["expression"] == "2d8"
-        assert parts[1]["rolled_expression"] == "4d8"
-        assert parts[1]["source"] == "agent-ruling:peryton:dive:round-1"
-        assert [item["entity_type"] for item in resolved["revisions"]] == [
-            "campaign",
-            "character",
-        ]
-        assert resolved["revisions"][1]["entity_id"] == target["id"]
-
-        followup_action = {
-            key: value for key, value in action.items() if key != "multiattack_option_id"
-        }
-        with pytest.raises(Exception, match="reached its per-turn limit"):
-            await _call(
-                server,
-                "combat_preflight_attack",
-                {
-                    "campaign_id": campaign["id"],
-                    "actor_id": attacker["id"],
-                    "target_id": target["id"],
-                    "action": followup_action,
-                },
-            )
-        followup = await _call_raw(
-            server,
-            "combat_resolve_attack",
-            {
-                "campaign_id": campaign["id"],
-                "actor_id": attacker["id"],
-                "target_id": target["id"],
-                "action": {
-                    key: value
-                    for key, value in followup_action.items()
-                    if key != "rulings"
-                },
-                "expected_revision": resolved["campaign_revision"],
-                "idempotency_key": "attack-followup",
-            },
-        )
-        assert len(followup["result"]["damage"]["roll_parts"]) == 1
-
-    asyncio.run(exercise())
 
 
 def test_available_actions_explicitly_discovers_required_death_save(
@@ -864,7 +484,7 @@ def test_action_surge_is_settled_without_a_manual_ruling(tmp_path: Path) -> None
     asyncio.run(exercise())
 
 
-def test_battle_cry_uses_engine_settlement_and_persists_daily_use(
+def test_recharge_weapon_use_is_committed_on_attack_declaration(
     tmp_path: Path,
 ) -> None:
     async def exercise() -> None:
@@ -872,389 +492,62 @@ def test_battle_cry_uses_engine_settlement_and_persists_daily_use(
         campaign = await _call(
             server,
             "campaign_create",
-            {"name": "Battle Cry", "edition": "2014", "idempotency_key": "campaign"},
+            {
+                "name": "Recharge weapon transaction",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
         )
         sheet = default_character_sheet()
-        sheet["content"]["activities"] = [
+        sheet["inventory"]["items"] = [
             {
-                "id": "dnd5e.core.monster.battle-cry",
-                "name": "Battle Cry (1/Day)",
-                "source_key": "monster-manual-2014:p246",
-                "description": (
-                    "Each creature of the war chief's choice that is within 30 feet "
-                    "of it, can hear it, and is not already affected by Battle Cry "
-                    "gains advantage on attack rolls until the start of the war "
-                    "chief's next turn. The war chief can then make one attack as "
-                    "a bonus action."
-                ),
+                "id": "breath-recharge-5-6",
+                "name": "Breath (Recharge 5-6)",
+                "kind": "weapon",
+                "mechanics": {
+                    "attack_type": "ranged",
+                    "attack_ability": "dexterity",
+                    "damage_formula": "1d6",
+                    "damage_type": "fire",
+                    "attack_bonus_override": 20,
+                    "always_available": True,
+                    "normal_range_ft": 30,
+                    "long_range_ft": 30,
+                    "recharge": {
+                        "kind": "d6_turn_start",
+                        "minimum": 5,
+                        "maximum": 6,
+                        "source_marker": "(Recharge 5-6)",
+                    },
+                },
                 "uses": {
-                    "label": "Battle Cry (1/Day)",
+                    "label": "Breath (Recharge 5-6)",
                     "value": 1,
                     "max": 1,
-                    "recovers_on": "long_rest",
+                    "recovers_on": "manual",
+                    "source_key": "test:recharge",
                 },
-                "activation": {"type": "action", "cost": 1},
-                "choices": {
-                    "source_trait": {
-                        "kind": "battle_cry",
-                        "range_ft": 30,
-                        "requires_hearing": True,
-                    }
-                },
-            },
-        ]
-        war_chief = await _call(
-            server,
-            "character_create",
-            {
-                "campaign_id": campaign["id"],
-                "name": "War Chief",
-                "sheet": sheet,
-                "idempotency_key": "war-chief",
-            },
-        )
-        ally = await _call(
-            server,
-            "character_create",
-            {
-                "campaign_id": campaign["id"],
-                "name": "Orc Ally",
-                "idempotency_key": "ally",
-            },
-        )
-        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
-        started = await _call_raw(
-            server,
-            "combat_start",
-            {
-                "campaign_id": campaign["id"],
-                "participant_ids": [war_chief["id"], ally["id"]],
-                "participant_config": [
-                    {
-                        "actor_id": war_chief["id"],
-                        "initiative": 20,
-                        "position": {"x": 0, "y": 0},
-                        "disposition": "hostile",
-                    },
-                    {
-                        "actor_id": ally["id"],
-                        "initiative": 10,
-                        "position": {"x": 1, "y": 0},
-                        "disposition": "hostile",
-                    },
-                ],
-                "expected_revision": campaign["revision"],
-                "idempotency_key": "start",
-            },
-        )
-        cried = await _call_raw(
-            server,
-            "combat_use_activity",
-            {
-                "campaign_id": campaign["id"],
-                "actor_id": war_chief["id"],
-                "activity_id": "dnd5e.core.monster.battle-cry",
-                "declaration": {
-                    "targets": [
-                        {
-                            "actor_id": ally["id"],
-                            "can_hear": True,
-                            "reason": "Adjacent in the same open combat area.",
-                        }
-                    ]
-                },
-                "expected_revision": started["campaign_revision"],
-                "idempotency_key": "battle-cry",
-            },
-        )
-
-        assert cried["status"] == "committed"
-        assert cried["result"]["requires_ruling"] is False
-        assert cried["result"]["core_effect"]["target_ids"] == [ally["id"]]
-        assert any(
-            item["mechanic_id"] == "dnd5e.core.activity.battle_cry"
-            for item in cried["result"]["rule_receipts"]
-        )
-        actor_after = await _call(
-            server,
-            "character_get",
-            {"character_id": war_chief["id"]},
-        )
-        assert actor_after["sheet"]["content"]["activities"][0]["uses"]["value"] == 0
-
-    asyncio.run(exercise())
-
-
-def test_custom_activity_is_prefilled_with_agent_ruling_before_payment(
-    tmp_path: Path,
-) -> None:
-    async def exercise() -> None:
-        server = create_server(_config(tmp_path))
-        campaign = await _call(
-            server,
-            "campaign_create",
-            {
-                "name": "Agent ruling boundary",
-                "edition": "2014",
-                "idempotency_key": "campaign",
-            },
-        )
-        source_excerpt = (
-            "The dragon exhales lightning at the defenders; use the authored "
-            "mission procedure to determine casualties."
-        )
-        sheet = default_character_sheet()
-        sheet["content"]["features"] = [
-            {
-                "id": "lightning-breath-action",
-                "name": "Lightning Breath",
-                "source_key": "module-review:dragon",
-                "description": source_excerpt,
-                "activation": {"type": "action", "cost": 1},
-                "choices": {
-                    "manual_ruling": {
-                        "kind": "descriptive_activity",
-                        "source_excerpt": source_excerpt,
-                    }
-                },
-            },
-            {
-                "id": "resolved-lightning-breath-action",
-                "name": "Resolved Lightning Breath",
-                "source_key": "addon-review:dragon",
-                "description": source_excerpt,
-                "activation": {"type": "action", "cost": 1},
-                "choices": {
-                    "manual_ruling": {
-                        "kind": "descriptive_activity",
-                        "default_resolver": "agent",
-                        "source_excerpt": source_excerpt,
-                    }
-                },
-            },
-        ]
-        actor = await _call(
-            server,
-            "character_create",
-            {
-                "campaign_id": campaign["id"],
-                "name": "Dragon",
-                "sheet": sheet,
-                "idempotency_key": "actor",
-            },
-        )
-        stored_activity = next(
-            item
-            for item in actor["sheet"]["content"]["features"]
-            if item["id"] == "lightning-breath-action"
-        )
-        assert stored_activity["ruling_requirements"][0]["policy_ref"] == (
-            "actor_card.import.v1"
-        )
-        outside = await _call_raw(
-            server,
-            "character_use_activity",
-            {
-                "character_id": actor["id"],
-                "activity_id": "lightning-breath-action",
-                "expected_revision": actor["revision"],
-                "idempotency_key": "outside-breath",
-            },
-        )
-        assert outside["result"]["payment_required"] is False
-        assert outside["result"]["semantic_solution"][
-            "source_card_kind"
-        ] == "feature"
-        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
-        started = await _call_raw(
-            server,
-            "combat_start",
-            {
-                "campaign_id": campaign["id"],
-                "participant_ids": [actor["id"]],
-                "participant_config": [{"actor_id": actor["id"], "initiative": 10}],
-                "expected_revision": campaign["revision"],
-                "idempotency_key": "start",
-            },
-        )
-
-        ruled = await _call_raw(
-            server,
-            "combat_use_activity",
-            {
-                "campaign_id": campaign["id"],
-                "actor_id": actor["id"],
-                "activity_id": "lightning-breath-action",
-                "expected_revision": started["campaign_revision"],
-                "idempotency_key": "breath",
-            },
-        )
-
-        assert ruled["status"] == "pending_ruling"
-        assert ruled["result"]["payment_required"] is False
-        assert ruled["result"]["semantic_solution"] == {
-            "status": "ruling_ready",
-            "source_card_id": "lightning-breath-action",
-            "source_card_kind": "feature",
-            "required_action": "agent_dm_adjudication",
-            "first_use_compilation_required": False,
-            "character_revision": actor["revision"],
-        }
-        current = started["combat"]["combatants"][
-            started["combat"]["turn_index"]
-        ]
-        assert current["turn_budget"]["main_action"] == 1
-        actor_after = await _call(server, "character_get", {"character_id": actor["id"]})
-        assert actor_after["revision"] == actor["revision"]
-
-        resolved = await _call_raw(
-            server,
-            "combat_use_activity",
-            {
-                "campaign_id": campaign["id"],
-                "actor_id": actor["id"],
-                "activity_id": "resolved-lightning-breath-action",
-                "expected_revision": started["campaign_revision"],
-                "idempotency_key": "resolved-breath",
-            },
-        )
-        assert resolved["status"] == "pending_ruling"
-        assert resolved["result"]["semantic_solution"] == {
-            "status": "ruling_ready",
-            "source_card_id": "resolved-lightning-breath-action",
-            "source_card_kind": "feature",
-            "required_action": "agent_dm_adjudication",
-            "first_use_compilation_required": False,
-            "character_revision": actor["revision"],
-        }
-
-    asyncio.run(exercise())
-
-
-def test_custom_spell_is_prefilled_with_agent_ruling_before_payment(
-    tmp_path: Path,
-) -> None:
-    async def exercise() -> None:
-        server = create_server(_config(tmp_path))
-        campaign = await _call(
-            server,
-            "campaign_create",
-            {
-                "name": "Custom spell compilation",
-                "edition": "2014",
-                "idempotency_key": "campaign",
-            },
-        )
-        effect = (
-            "A ribbon of moonlight circles one creature and leaves a silver "
-            "brand until the caster's next turn."
-        )
-        sheet = default_character_sheet()
-        sheet["spellcasting"]["spell_slots"] = {
-            "1": {
-                "label": "Level 1",
-                "value": 1,
-                "max": 1,
-                "recovers_on": "long_rest",
-                "source_key": "custom",
-            }
-        }
-        sheet["content"]["spells"] = [
-            {
-                "id": "moon-ribbon",
-                "name": "Moon Ribbon",
-                "level": 1,
-                "grant": {
-                    "source_type": "module",
-                    "source_key": "moon-vault",
-                    "method": "known",
-                },
-                "access": {
-                    "known": True,
-                    "prepared": True,
-                    "always_prepared": False,
-                    "ritual_available": False,
-                    "at_will": False,
-                    "at_will_sources": [],
-                },
-                "definition": {
-                    "casting_time": "1 action",
-                    "duration": {
-                        "kind": "timed",
-                        "value": 1,
-                        "unit": "round",
-                        "concentration": False,
-                    },
-                    "effect": effect,
-                },
-                # A registered accounting mechanic is not an implementation
-                # of this card's authored outcome.
-                "mechanic_refs": [
-                    "dnd5e.core.activity.resource_accounting"
-                ],
             }
         ]
-        standard_gap = deepcopy(sheet["content"]["spells"][0])
-        standard_gap.update(
-            {
-                "id": "locked-standard-gap",
-                "name": "Locked Standard Gap",
-                "pack_id": "dnd5e.content.srd2014",
-                "pack_version": "1.44.0",
-            }
-        )
-        sheet["content"]["spells"].append(standard_gap)
-        caster = await _call(
+        attacker = await _call(
             server,
             "character_create",
             {
                 "campaign_id": campaign["id"],
-                "name": "Moon Mage",
+                "name": "Recharge attacker",
                 "sheet": sheet,
-                "idempotency_key": "caster",
+                "idempotency_key": "attacker",
             },
         )
-        stored_spell = next(
-            item
-            for item in caster["sheet"]["content"]["spells"]
-            if item["id"] == "moon-ribbon"
-        )
-        assert stored_spell["ruling_requirements"][0]["policy_ref"] == (
-            "actor_card.import.v1"
-        )
-        standard_pending = await _call_raw(
+        target = await _call(
             server,
-            "character_cast_spell",
+            "character_create",
             {
-                "character_id": caster["id"],
-                "spell_id": "locked-standard-gap",
-                "cast_level": 1,
-                "expected_revision": caster["revision"],
-                "idempotency_key": "standard-gap",
+                "campaign_id": campaign["id"],
+                "name": "Target",
+                "idempotency_key": "target",
             },
         )
-        assert standard_pending["result"]["semantic_solution"] == {
-            "status": "engine_implementation_required",
-            "source_card_id": "locked-standard-gap",
-            "source_card_kind": "spell",
-            "required_action": "implement_standard_mechanic",
-            "character_revision": caster["revision"],
-        }
-        outside = await _call_raw(
-            server,
-            "character_cast_spell",
-            {
-                "character_id": caster["id"],
-                "spell_id": "moon-ribbon",
-                "cast_level": 1,
-                "expected_revision": caster["revision"],
-                "idempotency_key": "outside-cast",
-            },
-        )
-        assert outside["result"]["payment_required"] is False
-        assert outside["result"]["semantic_solution"][
-            "source_card_kind"
-        ] == "spell"
         campaign = await _call(
             server,
             "campaign_get",
@@ -1265,54 +558,211 @@ def test_custom_spell_is_prefilled_with_agent_ruling_before_payment(
             "combat_start",
             {
                 "campaign_id": campaign["id"],
-                "participant_ids": [caster["id"]],
+                "participant_ids": [attacker["id"], target["id"]],
                 "participant_config": [
-                    {"actor_id": caster["id"], "initiative": 10}
+                    {
+                        "actor_id": attacker["id"],
+                        "initiative": 20,
+                        "position": {"x": 0, "y": 0},
+                    },
+                    {
+                        "actor_id": target["id"],
+                        "initiative": 10,
+                        "position": {"x": 1, "y": 0},
+                    },
                 ],
                 "expected_revision": campaign["revision"],
                 "idempotency_key": "start",
             },
         )
 
-        pending = await _call_raw(
+        attacked = await _call_raw(
             server,
-            "combat_cast_spell",
+            "combat_resolve_attack",
             {
                 "campaign_id": campaign["id"],
-                "actor_id": caster["id"],
-                "spell_id": "moon-ribbon",
-                "cast_level": 1,
+                "actor_id": attacker["id"],
+                "target_id": target["id"],
+                "action": {
+                    "weapon_id": "breath-recharge-5-6",
+                    "attack_mode": "ranged",
+                },
                 "expected_revision": started["campaign_revision"],
-                "idempotency_key": "cast",
+                "idempotency_key": "attack",
+            },
+        )
+        after = await _call(
+            server,
+            "character_get",
+            {"character_id": attacker["id"]},
+        )
+
+        assert attacked["result"]["limited_use"]["remaining"] == 0
+        assert after["sheet"]["inventory"]["items"][0]["uses"]["value"] == 0
+
+    asyncio.run(exercise())
+
+
+def test_locked_dragonborn_breath_uses_generic_area_and_save_primitives(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Dragonborn Breath Weapon",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        activity_id = (
+            "dnd5e.content.standard2014.species.dragonborn.activity.breath-weapon"
+        )
+        source_sheet = default_character_sheet()
+        source_sheet["progression"]["level"] = 1
+        source_sheet["content"]["activities"] = [
+            {
+                "id": activity_id,
+                "name": "Breath Weapon",
+                "source_key": "Dragonborn",
+                "description": "Reviewed standard Breath Weapon settlement.",
+                "uses": {
+                    "label": "Breath Weapon",
+                    "value": 1,
+                    "max": 1,
+                    "recovers_on": "short_rest",
+                    "source_key": "Dragonborn",
+                },
+                "activation": {"type": "action", "cost": 1},
+                "choices": {
+                    "standard_resolution": {
+                        "kind": "area_save_damage",
+                        "origin": {"kind": "self"},
+                        "area": {"shape": "cone", "length_ft": 15},
+                        "targets": "each_creature",
+                        "save_ability": "dexterity",
+                        "save_dc_formula": {
+                            "base": 8,
+                            "ability": "constitution",
+                            "include_proficiency": True,
+                        },
+                        "damage_formula_by_level": {
+                            "1": "2d6",
+                            "6": "3d6",
+                            "11": "4d6",
+                            "16": "5d6",
+                        },
+                        "damage_type": "fire",
+                        "half_on_success": True,
+                        "save_source_kind": "nonmagical_effect",
+                        "source_excerpt": "Reviewed standard Breath Weapon settlement.",
+                    }
+                },
+                "pack_id": "dnd5e.content.standard2014",
+                "pack_version": "1.4.0",
+                "rule_refs": ["book:players-handbook-2014:p34"],
+                "mechanic_refs": [
+                    "dnd5e.core.activity.dragonborn_breath_weapon"
+                ],
+            }
+        ]
+        target_sheet = default_character_sheet()
+        target_sheet["combat"]["hp"] = {"value": 30, "max": 30, "temp": 0}
+        source = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Dragonborn",
+                "sheet": source_sheet,
+                "idempotency_key": "source",
+            },
+        )
+        target = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Target",
+                "sheet": target_sheet,
+                "idempotency_key": "target",
+            },
+        )
+        campaign = await _call(
+            server,
+            "campaign_get",
+            {"campaign_id": campaign["id"]},
+        )
+        started = await _call_raw(
+            server,
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "participant_ids": [source["id"], target["id"]],
+                "participant_config": [
+                    {
+                        "actor_id": source["id"],
+                        "initiative": 20,
+                        "position": {"x": 0, "y": 0},
+                    },
+                    {
+                        "actor_id": target["id"],
+                        "initiative": 10,
+                        "position": {"x": 2, "y": 0},
+                    },
+                ],
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "start",
             },
         )
 
-        assert pending["status"] == "pending_ruling"
-        assert pending["result"]["payment_required"] is False
-        assert pending["result"]["semantic_solution"] == {
-            "status": "ruling_ready",
-            "source_card_id": "moon-ribbon",
-            "source_card_kind": "spell",
-            "required_action": "agent_dm_adjudication",
-            "first_use_compilation_required": False,
-            "character_revision": caster["revision"],
-        }
-        current = started["combat"]["combatants"][
-            started["combat"]["turn_index"]
-        ]
-        assert current["turn_budget"]["main_action"] == 1
-        caster_after = await _call(
+        used = await _call_raw(
+            server,
+            "combat_use_activity",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": source["id"],
+                "activity_id": activity_id,
+                "declaration": {
+                    "origin": {"x": 1, "y": 0},
+                    "target_contexts": [
+                        {"target_id": target["id"], "cover": "none"}
+                    ],
+                },
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "breath",
+            },
+        )
+        source_after = await _call(
             server,
             "character_get",
-            {"character_id": caster["id"]},
+            {"character_id": source["id"]},
         )
-        assert caster_after["revision"] == caster["revision"]
-        assert (
-            caster_after["sheet"]["spellcasting"]["spell_slots"]["1"]["value"]
-            == 1
+        target_after = await _call(
+            server,
+            "character_get",
+            {"character_id": target["id"]},
         )
 
+        effect = used["result"]["core_effect"]
+        assert used["status"] == "committed"
+        assert effect["kind"] == "dragonborn_breath_weapon"
+        assert effect["damage_expression"] == "2d6"
+        assert effect["target_contexts"] == [
+            {"target_id": target["id"], "distance_ft": 10.0, "cover": "none"}
+        ]
+        assert source_after["sheet"]["content"]["activities"][0]["uses"]["value"] == 0
+        assert target_after["sheet"]["combat"]["hp"]["value"] < 30
+
     asyncio.run(exercise())
+
+
+
+
+
+
 
 
 @pytest.mark.parametrize("edition", ["2014", "2024"])

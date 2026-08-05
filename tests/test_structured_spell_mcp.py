@@ -463,6 +463,67 @@ def test_scorching_ray_cast_locks_then_settles_each_source_bound_attack(
     asyncio.run(exercise())
 
 
+def test_guiding_bolt_commits_locked_on_hit_effect_without_agent_ruling(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _deterministic_rolls(monkeypatch)
+
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        caster = default_character_sheet()
+        caster["abilities"]["wisdom"]["score"] = 18
+        caster["spellcasting"].update(ability="wisdom", spell_slots=_slot(1))
+        spell = _spell("Guiding Bolt", 1, casting_time="1 action", range_ft=120)
+        caster["content"]["spells"] = [spell]
+        target = default_character_sheet()
+        target["combat"]["hp"] = {"value": 50, "max": 50, "temp": 0}
+        target["combat"]["ac"] = {"base": 1, "override": 1}
+        campaign_id, revision, actors = await _campaign_with_combat(
+            server,
+            [("Cleric", caster), ("Target", target)],
+            positions=[(0, 0), (5, 0)],
+        )
+
+        cast = await _raw(
+            server,
+            "combat_cast_spell",
+            {
+                "campaign_id": campaign_id,
+                "actor_id": actors[0]["id"],
+                "spell_id": spell["id"],
+                "cast_level": 1,
+                "expected_revision": revision,
+                "idempotency_key": "guiding-bolt",
+            },
+        )
+        settled = await _raw(
+            server,
+            "combat_resolve_attack",
+            {
+                "campaign_id": campaign_id,
+                "actor_id": actors[0]["id"],
+                "target_id": actors[1]["id"],
+                "action": {"spell_resolution_id": cast["result"]["resolution_id"]},
+                "expected_revision": cast["campaign_revision"],
+                "idempotency_key": "guiding-bolt-hit",
+            },
+        )
+
+        assert settled["status"] == "committed"
+        assert "pending_on_hit_ruling_id" not in settled["result"]
+        effects = settled["result"]["standard_on_hit_effects"]
+        assert len(effects) == 1
+        assert effects[0]["kind"] == "next_attack_advantage"
+        assert effects[0]["target_id"] == actors[1]["id"]
+        assert not any(
+            item.get("trigger") == "attack_on_hit_effect"
+            for item in settled["combat"].get("pending", [])
+            if isinstance(item, dict)
+        )
+
+    asyncio.run(exercise())
+
+
 def test_witch_bolt_hard_runtime_tethers_sustains_and_breaks_on_range(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1236,6 +1297,7 @@ def test_fireball_settles_saves_and_area_enumeration(
             {
                 "id": "evasion-passive",
                 "name": "Evasion",
+                "mechanic_refs": ["dnd5e.core.save.evasion"],
                 "choices": {
                     "source_trait": {
                         "kind": "evasion",
@@ -1335,10 +1397,7 @@ def test_fireball_settles_saves_and_area_enumeration(
             if item["target_id"] == actors[1]["id"]
         )
         assert trait_target["damage_reduction"] in {"none", "half"}
-        assert any(
-            receipt["mechanic_id"] == "dnd5e.core.save.magic_resistance"
-            for receipt in trait_target["save"]["rule_receipts"]
-        )
+        assert trait_target["save"]["rule_receipts"] == []
         assert [
             receipt["mechanic_id"] for receipt in trait_target["rule_receipts"]
         ] == ["dnd5e.core.save.evasion"]
