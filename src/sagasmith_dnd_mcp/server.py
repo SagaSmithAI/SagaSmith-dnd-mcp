@@ -46146,7 +46146,9 @@ Useful bounded guidance:
                 agent_ruling=required(data, "agent_ruling"),
             )
         except ContentSolutionError as error:
-            raise CombatEngineError(f"build-time Agent compilation is invalid: {error}") from error
+            raise CombatEngineError(
+                f"source-bound Agent compilation is invalid: {error}"
+            ) from error
         next_sheet = sheet_with_content_solution(
             actor.sheet,
             source_card_id=source_card_id,
