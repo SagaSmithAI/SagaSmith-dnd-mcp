@@ -34,6 +34,7 @@ from sagasmith_dnd_mcp.server import (
     _merge_statblock_discoveries,
     _noisy_ocr_heading_equivalent,
     _ocr_fact_key,
+    _portable_statblock_review_audit,
     _project_recovered_statblock_candidates,
     _select_catalog_ocr_identity_evidence,
     _select_preferred_statblock_reviews,
@@ -687,6 +688,66 @@ def test_preset_export_selects_one_strongest_review_per_source_card() -> None:
     }
     assert _valid_statblock_heading("Ox") is True
     assert _valid_statblock_heading("i\u00b7") is False
+
+
+def test_agent_named_slot_wins_local_id_ties_and_reviews_keep_stable_source_order() -> None:
+    raw = {
+        "id": "z-local-id",
+        "page_number": 12,
+        "review_mode": "layout_ocr",
+        "observation": "Text-only layout OCR v20 recovered WEREWOLF.",
+        "normalized_content": "# WEREWOLF\n\ncomplete mechanics",
+    }
+    corrected = {
+        "id": "a-local-id",
+        "page_number": 12,
+        "review_mode": "layout_ocr",
+        "observation": (
+            "Text-only layout OCR v20 recovered Werewolf. "
+            "Agent named structural statblock slot; the engine retained mechanics."
+        ),
+        "normalized_content": "# Werewolf\n\ncomplete mechanics",
+    }
+    later = {
+        "id": "different-local-id",
+        "page_number": 40,
+        "review_mode": "layout_ocr",
+        "observation": "Text-only layout OCR v20 recovered Aboleth.",
+        "normalized_content": "# Aboleth\n\ncomplete mechanics",
+    }
+
+    selected = _select_preferred_statblock_reviews([later, raw, corrected])
+
+    assert [item["normalized_content"].splitlines()[0] for item in selected] == [
+        "# Werewolf",
+        "# Aboleth",
+    ]
+
+
+def test_portable_excluded_review_audit_uses_content_identity_not_local_id() -> None:
+    source_text = "# Trostani\n\nreviewed mechanics"
+    first = _portable_statblock_review_audit(
+        {
+            "id": "rule-statblock-review:first-local-id",
+            "page_number": 230,
+            "normalized_content": source_text,
+        },
+        reviewed_name="Trostani",
+        basis="duplicate_review_for_catalog_artifact",
+    )
+    second = _portable_statblock_review_audit(
+        {
+            "id": "rule-statblock-review:second-local-id",
+            "page_number": 230,
+            "normalized_content": source_text,
+        },
+        reviewed_name="Trostani",
+        basis="duplicate_review_for_catalog_artifact",
+    )
+
+    assert first == second
+    assert "review_id" not in first
+    assert first["source_review_sha256"] == hashlib.sha256(source_text.encode("utf-8")).hexdigest()
 
 
 def test_statblock_mechanical_identity_matches_corrected_ocr_heading() -> None:

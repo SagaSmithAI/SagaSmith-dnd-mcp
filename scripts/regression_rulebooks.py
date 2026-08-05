@@ -563,7 +563,7 @@ async def _apply_statblock_slot_reviews(
                         ),
                     },
                     "idempotency_key": (
-                        "regression-agent-statblock-slot-wrapper-v1-"
+                        "regression-agent-statblock-slot-wrapper-v2-"
                         f"r{OCR_STATBLOCK_RECOVERY_VERSION}-{id_key}-"
                         f"{correction_token}"
                     ),
@@ -1080,6 +1080,11 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     review_spec=document_review,
                     available_dependency_addons=dependency_addons,
                 )
+                generated_addon = portable.pop("_generated_addon")
+                _register_generated_dependency_addon(
+                    dependency_addons,
+                    generated_addon,
+                )
                 release_components.append(
                     {
                         "kind": "rule_pack",
@@ -1261,9 +1266,13 @@ def _runtime_probe_artifact_matches(
 
 
 def _unwrapped_tool_result(value: Any) -> Any:
-    if isinstance(value, dict) and isinstance(value.get("result"), dict):
+    if isinstance(value, dict) and "result" in value:
         return value["result"]
     return value
+
+
+def _is_lower_sha256(value: Any) -> bool:
+    return re.fullmatch(r"[0-9a-f]{64}", str(value or "")) is not None
 
 
 def _complete_probe_hit_points(sheet: dict[str, Any], *, source: str) -> None:
@@ -1449,9 +1458,106 @@ async def _run_content_runtime_probes(
             if applied.get("status") in {"pending_choice", "pending_ruling"}:
                 raise RuntimeError(f"runtime probe did not materialize {artifact_name}: {applied}")
             _assert_runtime_expectations(applied, raw_step.get("expect") or [])
+            artifact = matches[0]
+            selection_contract = dict(artifact.get("selection_contract") or {})
+            expected_materializer = str(selection_contract.get("materializer") or "")
+            portable_reviewed_content_hash = str(
+                selection_contract.get("reviewed_content_hash") or ""
+            )
+            content_context = dict(applied.get("content_context") or {})
+            runtime_selection_contract = dict(content_context.get("selection_contract") or {})
+            runtime_reviewed_content_hash = str(
+                runtime_selection_contract.get("reviewed_content_hash") or ""
+            )
+            context_drift = {
+                field: {"expected": expected, "actual": actual}
+                for field, expected, actual in (
+                    ("artifact_id", artifact_id, content_context.get("artifact_id")),
+                    ("pack_id", package.get("id"), content_context.get("pack_id")),
+                    (
+                        "pack_version",
+                        package.get("version"),
+                        content_context.get("pack_version"),
+                    ),
+                    ("selection_status", "ready", runtime_selection_contract.get("status")),
+                    (
+                        "materializer",
+                        expected_materializer,
+                        runtime_selection_contract.get("materializer"),
+                    ),
+                )
+                if actual != expected
+            }
+            if not _is_lower_sha256(content_context.get("content_hash")):
+                context_drift["content_hash"] = {
+                    "expected": "lowercase SHA-256",
+                    "actual": content_context.get("content_hash"),
+                }
+            if not _is_lower_sha256(runtime_reviewed_content_hash):
+                context_drift["runtime_reviewed_content_hash"] = {
+                    "expected": "lowercase SHA-256",
+                    "actual": runtime_reviewed_content_hash,
+                }
+            if not _is_lower_sha256(content_context.get("catalog_review_hash")):
+                context_drift["catalog_review_hash"] = {
+                    "expected": "lowercase SHA-256",
+                    "actual": content_context.get("catalog_review_hash"),
+                }
+            if context_drift:
+                raise RuntimeError(
+                    "runtime probe returned incomplete content context for "
+                    f"{artifact_name}: {json.dumps(context_drift, ensure_ascii=False)}"
+                )
+            response_receipts = [
+                dict(receipt)
+                for receipt in applied.get("rule_receipts") or []
+                if isinstance(receipt, dict) and receipt.get("artifact_id") == artifact_id
+            ]
+            if len(response_receipts) != 1:
+                raise RuntimeError(f"runtime probe needs one content receipt for {artifact_name}")
+            content_receipt = response_receipts[0]
+            if (
+                content_receipt.get("mechanic_id") != expected_materializer
+                or content_receipt.get("reviewed_content_hash") != runtime_reviewed_content_hash
+                or content_receipt.get("selection") != dict(raw_step.get("selection") or {})
+            ):
+                raise RuntimeError(f"runtime probe content receipt drifted for {artifact_name}")
+            replayed_response = await _call(server, "character_content_apply", arguments)
+            replayed = dict(_unwrapped_tool_result(replayed_response))
+            if replayed != applied:
+                raise RuntimeError(f"runtime probe was not idempotent for {artifact_name}")
+            persisted_response = await _call(
+                server,
+                "campaign_rules",
+                {
+                    "campaign_id": campaign_id,
+                    "action": "receipts",
+                    "payload": {"mechanic_id": expected_materializer, "limit": 200},
+                },
+            )
+            persisted_receipts = list(_unwrapped_tool_result(persisted_response))
+            if not any(
+                isinstance(entry, dict)
+                and isinstance(entry.get("receipt"), dict)
+                and entry["receipt"].get("artifact_id") == artifact_id
+                and entry["receipt"].get("mechanic_id") == expected_materializer
+                and entry["receipt"].get("reviewed_content_hash") == runtime_reviewed_content_hash
+                for entry in persisted_receipts
+            ):
+                raise RuntimeError(f"runtime probe receipt was not persisted for {artifact_name}")
             current = applied
             step_summaries.append(
-                {"artifact_id": artifact_id, "rejected": False, "revision": current["revision"]}
+                {
+                    "artifact_id": artifact_id,
+                    "rejected": False,
+                    "revision": current["revision"],
+                    "content_context_hash": content_context["content_hash"],
+                    "portable_reviewed_content_hash": portable_reviewed_content_hash,
+                    "runtime_reviewed_content_hash": runtime_reviewed_content_hash,
+                    "content_receipt": content_receipt,
+                    "idempotent": True,
+                    "persisted_receipt": True,
+                }
             )
         summaries.append(
             {
@@ -1835,6 +1941,24 @@ def _load_dependency_addons(paths: list[Path]) -> dict[tuple[str, str], dict[str
             )
         packages[identity] = package
     return packages
+
+
+def _register_generated_dependency_addon(
+    available: dict[tuple[str, str], dict[str, Any]],
+    package: dict[str, Any],
+) -> None:
+    """Make this run's reviewed addon authoritative for later documents."""
+
+    if not isinstance(package, dict) or package.get("kind") != "addon_pack":
+        raise ValueError("generated dependency is not an addon package")
+    identity = (str(package.get("id") or ""), str(package.get("version") or ""))
+    checksum = str(package.get("checksum") or "")
+    if not all(identity) or re.fullmatch(r"[0-9a-f]{64}", checksum) is None:
+        raise ValueError("generated dependency addon needs exact id, version, and checksum")
+    # A command-line dependency bootstraps a run whose dependent document may
+    # sort after its provider. Once that provider is rebuilt and round-tripped
+    # in this run, its newly reviewed envelope must replace the bootstrap copy.
+    available[identity] = package
 
 
 def _selected_dependency_addons(
@@ -3255,6 +3379,7 @@ async def _portable_roundtrip(
         "preset_failures": preset_summary.get("failures", []),
         "target_source_ids": imported_source_ids,
         "fresh_source_ids": True,
+        "_generated_addon": addon,
         "draft_status": "validated",
         "installed": True,
         "activated": True,

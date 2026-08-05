@@ -42,6 +42,32 @@ def test_catalog_review_token_is_canonical_and_changes_with_agent_decisions() ->
     assert driver._catalog_review_token({}) != driver._catalog_review_token(first)
 
 
+def test_generated_addon_replaces_bootstrap_dependency_for_later_documents() -> None:
+    identity = ("dnd5e.addon.phb", "1.0.0")
+    available = {
+        identity: {
+            "kind": "addon_pack",
+            "id": identity[0],
+            "version": identity[1],
+            "checksum": "a" * 64,
+        }
+    }
+    generated = {
+        "kind": "addon_pack",
+        "id": identity[0],
+        "version": identity[1],
+        "checksum": "b" * 64,
+    }
+
+    driver._register_generated_dependency_addon(available, generated)
+
+    assert available[identity] is generated
+    assert driver._selected_dependency_addons(
+        {"dependency_addons": [{"id": identity[0], "version": identity[1]}]},
+        available,
+    ) == [generated]
+
+
 def test_agent_statblock_slot_reviews_replay_bounded_ocr_corrections() -> None:
     server = _FakeServer(
         [
@@ -146,7 +172,7 @@ def test_agent_statblock_slot_reviews_replay_bounded_ocr_corrections() -> None:
         }
     )[0]
     assert arguments["idempotency_key"] == (
-        "regression-agent-statblock-slot-wrapper-v1-"
+        "regression-agent-statblock-slot-wrapper-v2-"
         f"r{driver.OCR_STATBLOCK_RECOVERY_VERSION}-book-review-"
         f"{driver._statblock_slot_review_token(normalized_spec)}"
     )
@@ -595,6 +621,130 @@ def test_runtime_probe_hp_uses_legal_fixed_average_progression() -> None:
         9,
         9,
         9,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("a" * 64, True),
+        ("A" * 64, False),
+        ("z" * 64, False),
+        ("a" * 63, False),
+        (None, False),
+    ],
+)
+def test_runtime_probe_hash_gate_requires_lowercase_sha256(
+    value: object,
+    expected: bool,
+) -> None:
+    assert driver._is_lower_sha256(value) is expected
+
+
+def test_runtime_probe_requires_context_idempotency_and_persisted_receipt() -> None:
+    artifact_id = "dnd5e.addon.test.item.moon-blade"
+    materializer = "dnd5e.character.inventory_item.v1"
+    portable_reviewed_hash = "b" * 64
+    runtime_reviewed_hash = "d" * 64
+    content_hash = "c" * 64
+    artifact = {
+        "id": artifact_id,
+        "kind": "item",
+        "card": {"name": "Moon Blade"},
+        "selection_contract": {
+            "status": "ready",
+            "materializer": materializer,
+            "reviewed_content_hash": portable_reviewed_hash,
+        },
+    }
+    applied = {
+        "id": "character-1",
+        "revision": 2,
+        "sheet": driver.default_character_sheet(),
+        "content_context": {
+            "artifact_id": artifact_id,
+            "pack_id": "dnd5e.addon.test",
+            "pack_version": "1.0.0",
+            "content_hash": content_hash,
+            "catalog_review_hash": "e" * 64,
+            "selection_contract": {
+                "status": "ready",
+                "materializer": materializer,
+                "reviewed_content_hash": runtime_reviewed_hash,
+            },
+        },
+        "rule_receipts": [
+            {
+                "artifact_id": artifact_id,
+                "mechanic_id": materializer,
+                "reviewed_content_hash": runtime_reviewed_hash,
+                "selection": {},
+            }
+        ],
+    }
+    server = _FakeServer(
+        [
+            (
+                "character_create_from",
+                {
+                    "result": {
+                        "id": "character-1",
+                        "revision": 1,
+                        "sheet": driver.default_character_sheet(),
+                    }
+                },
+            ),
+            ("character_content_apply", {"result": applied}),
+            ("character_content_apply", {"result": applied}),
+            (
+                "campaign_rules",
+                {
+                    "result": [
+                        {
+                            "receipt": {
+                                "artifact_id": artifact_id,
+                                "mechanic_id": materializer,
+                                "reviewed_content_hash": runtime_reviewed_hash,
+                            }
+                        }
+                    ]
+                },
+            ),
+        ]
+    )
+
+    result = asyncio.run(
+        driver._run_content_runtime_probes(
+            server=server,
+            campaign_id="campaign-1",
+            edition="2014",
+            package={
+                "id": "dnd5e.addon.test",
+                "version": "1.0.0",
+                "payload": {"artifacts": [artifact]},
+            },
+            probes=[
+                {
+                    "name": "receipt-proof",
+                    "steps": [{"kind": "item", "name": "Moon Blade"}],
+                }
+            ],
+            id_key="attempt-1",
+        )
+    )
+
+    step = result[0]["steps"][0]
+    assert step["content_context_hash"] == content_hash
+    assert step["portable_reviewed_content_hash"] == portable_reviewed_hash
+    assert step["runtime_reviewed_content_hash"] == runtime_reviewed_hash
+    assert step["content_receipt"]["mechanic_id"] == materializer
+    assert step["idempotent"] is True
+    assert step["persisted_receipt"] is True
+    assert [name for name, _arguments in server.calls] == [
+        "character_create_from",
+        "character_content_apply",
+        "character_content_apply",
+        "campaign_rules",
     ]
 
 

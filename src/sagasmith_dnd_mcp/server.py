@@ -1407,6 +1407,7 @@ def _select_preferred_statblock_reviews(
         heading_text = heading.group(1) if heading is not None else ""
         return (
             mode_rank.get(str(review.get("review_mode") or ""), 0),
+            1 if "Agent named structural statblock slot" in observation else 0,
             int(recovery_version.group(1)) if recovery_version else 0,
             1 if review.get("agent_statblock_fill") is not None else 0,
             1
@@ -1447,7 +1448,31 @@ def _select_preferred_statblock_reviews(
             continue
         selected.append(review)
         selected_names.setdefault(page_number, []).append(name)
-    return selected
+    return sorted(
+        selected,
+        key=lambda review: (
+            int(review.get("page_number") or 0),
+            heading_key(review),
+            hashlib.sha256(str(review.get("normalized_content") or "").encode("utf-8")).hexdigest(),
+        ),
+    )
+
+
+def _portable_statblock_review_audit(
+    review: dict[str, Any],
+    *,
+    reviewed_name: str,
+    basis: str,
+) -> dict[str, Any]:
+    """Describe an excluded source review without leaking a local database id."""
+
+    source_text = str(review.get("normalized_content") or "").strip()
+    return {
+        "source_review_sha256": hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+        "page_number": int(review.get("page_number") or 0),
+        "reviewed_name": reviewed_name,
+        "basis": basis,
+    }
 
 
 def _canonical_statblock_artifact_for_review(
@@ -36935,6 +36960,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             recovered_result["recovery"] = recovered
         content = str(recovered["normalized_content"])
         reviewed_observation = str(recovered_result["observation"])
+        if statblock_slot is not None:
+            reviewed_observation += (
+                " Agent named structural statblock slot; the engine retained "
+                "the checksum-bound layout mechanics."
+            )
         if correction_evidence is not None:
             reviewed_observation += " Agent-authored OCR corrections were bound to " + (
                 "the exact rendered page image checksum."
@@ -46771,9 +46801,9 @@ Useful bounded guidance:
                     )
                     if claim_disposition != "accepted":
                         excluded_source_reviews.append(
-                            {
-                                "review_id": str(review.get("id") or ""),
-                                "reviewed_name": (
+                            _portable_statblock_review_audit(
+                                review,
+                                reviewed_name=(
                                     canonical_artifact[0]
                                     if canonical_artifact is not None
                                     else (
@@ -46782,8 +46812,8 @@ Useful bounded guidance:
                                         else ""
                                     )
                                 ),
-                                "basis": claim_disposition,
-                            }
+                                basis=claim_disposition,
+                            )
                         )
                         continue
                     assert canonical_artifact is not None
@@ -46795,11 +46825,11 @@ Useful bounded guidance:
                     )
                     if catalog_boundary:
                         excluded_source_reviews.append(
-                            {
-                                "review_id": str(review.get("id") or ""),
-                                "reviewed_name": canonical_name,
-                                "basis": "catalog_reviewed_boundary_supersedes_source_review",
-                            }
+                            _portable_statblock_review_audit(
+                                review,
+                                reviewed_name=canonical_name,
+                                basis="catalog_reviewed_boundary_supersedes_source_review",
+                            )
                         )
                         reviewed_ocr_supersessions.append(
                             {
