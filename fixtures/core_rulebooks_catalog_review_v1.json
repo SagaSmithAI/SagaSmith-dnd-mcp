@@ -15,7 +15,23 @@
         "spell": 361,
         "statblock": 31,
         "subclass": 40
-      }
+      },
+      "text_reviews": [
+        {
+          "page_number": 232,
+          "base_text_sha256": "2475fa719660ec0220ca4c8d791dce073a16e3edfa8ffbc092dc6fe9bf556db4",
+          "replacements": [
+            {
+              "old": "8th./evel conjuratian Casling Time: I action Range: 60 feet Components: S Duralion: I hour",
+              "new": "8th-level conjuration Casting Time: 1 action Range: 60 feet Components: S Duration: 1 hour"
+            }
+          ],
+          "rationale": "Agent inspected the checksum-bound page image and restored the visibly printed Demiplane spell header without changing its rules.",
+          "evidence_basis": "rendered_page",
+          "rendered_image_checksum": "4e9328a48f9e688f839aa9138d2902dc68853c52529e584421e3a306c66c4ced",
+          "review_method": "agent"
+        }
+      ]
     }
   }
 }

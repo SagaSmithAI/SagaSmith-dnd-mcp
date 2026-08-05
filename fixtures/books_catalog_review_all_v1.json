@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "strict": true,
+  "includes": [
+    "core_rulebooks_catalog_review_v1.json",
+    "books_catalog_review_dungeon_masters_guide_v1.json",
+    "books_catalog_review_monster_manual_v1.json",
+    "books_catalog_review_v1.json",
+    "books_catalog_review_volo_v1.json",
+    "books_catalog_review_tasha_v1.json",
+    "books_catalog_review_xanathar_v1.json"
+  ],
+  "documents": {}
+}

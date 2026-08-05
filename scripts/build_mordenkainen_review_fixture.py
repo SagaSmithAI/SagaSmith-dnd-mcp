@@ -13,22 +13,65 @@ OUTPUT = ROOT / "fixtures" / "books_catalog_review_mordenkainen_v1.json"
 BOOK = "D&D 5E - Mordenkainen's Tome of Foes.pdf"
 
 SKILLS = [
-    "Acrobatics", "Animal Handling", "Arcana", "Athletics", "Deception",
-    "History", "Insight", "Intimidation", "Investigation", "Medicine",
-    "Nature", "Perception", "Performance", "Persuasion", "Religion",
-    "Sleight of Hand", "Stealth", "Survival",
+    "Acrobatics",
+    "Animal Handling",
+    "Arcana",
+    "Athletics",
+    "Deception",
+    "History",
+    "Insight",
+    "Intimidation",
+    "Investigation",
+    "Medicine",
+    "Nature",
+    "Perception",
+    "Performance",
+    "Persuasion",
+    "Religion",
+    "Sleight of Hand",
+    "Stealth",
+    "Survival",
 ]
 TOOLS = [
-    "Alchemist's Supplies", "Brewer's Supplies", "Calligrapher's Supplies",
-    "Carpenter's Tools", "Cartographer's Tools", "Cobbler's Tools",
-    "Cook's Utensils", "Glassblower's Tools", "Jeweler's Tools",
-    "Leatherworker's Tools", "Mason's Tools", "Painter's Supplies",
-    "Potter's Tools", "Smith's Tools", "Tinker's Tools", "Weaver's Tools",
-    "Woodcarver's Tools", "Disguise Kit", "Forgery Kit", "Herbalism Kit",
-    "Navigator's Tools", "Poisoner's Kit", "Thieves' Tools", "Dice",
-    "Dragonchess", "Playing Cards", "Three-Dragon Ante", "Bagpipes", "Drum",
-    "Dulcimer", "Flute", "Horn", "Lute", "Lyre", "Pan Flute", "Shawm",
-    "Viol", "Vehicles (Land)", "Vehicles (Sea)",
+    "Alchemist's Supplies",
+    "Brewer's Supplies",
+    "Calligrapher's Supplies",
+    "Carpenter's Tools",
+    "Cartographer's Tools",
+    "Cobbler's Tools",
+    "Cook's Utensils",
+    "Glassblower's Tools",
+    "Jeweler's Tools",
+    "Leatherworker's Tools",
+    "Mason's Tools",
+    "Painter's Supplies",
+    "Potter's Tools",
+    "Smith's Tools",
+    "Tinker's Tools",
+    "Weaver's Tools",
+    "Woodcarver's Tools",
+    "Disguise Kit",
+    "Forgery Kit",
+    "Herbalism Kit",
+    "Navigator's Tools",
+    "Poisoner's Kit",
+    "Thieves' Tools",
+    "Dice",
+    "Dragonchess",
+    "Playing Cards",
+    "Three-Dragon Ante",
+    "Bagpipes",
+    "Drum",
+    "Dulcimer",
+    "Flute",
+    "Horn",
+    "Lute",
+    "Lyre",
+    "Pan Flute",
+    "Shawm",
+    "Viol",
+    "Vehicles (Land)",
+    "Vehicles (Sea)",
 ]
 
 STATBLOCK_NAMES = """Allip
@@ -174,7 +217,6 @@ Yagnoloth""".splitlines()
 
 STATBLOCK_NAME_CORRECTIONS = {
     "0RCUS": "Orcus",
-    "0RTHON": "Orthon",
     "ADULT0BLEX": "Adult Oblex",
     "AIR ELEMENTA L M YRMIDON": "Air Elemental Myrmidon",
     "BONEC LAW": "Boneclaw",
@@ -186,7 +228,6 @@ STATBLOCK_NAME_CORRECTIONS = {
     "ELDER0BLEX": "Elder Oblex",
     "FRAZ- URB'LUU": "Fraz-Urb'luu",
     "HELLFIRE ENGIN E": "Hellfire Engine",
-    "I": "Oinoloth",
     "NAGP A": "Nagpa",
     "OGRE B ATT ERING R A M": "Ogre Battering Ram",
     "REDABISHAI": "Red Abishai",
@@ -284,6 +325,11 @@ def _species_card(
 ) -> dict[str, Any]:
     return {
         "base_species": base_species,
+        **(
+            {"replaces_base_traits": ["Ability Score Increase", "Infernal Legacy"]}
+            if base_species == "Tiefling"
+            else {}
+        ),
         "grants": {
             "ability_score_increases": abilities,
             "size": size,
@@ -299,7 +345,10 @@ def _species_card(
 def _tiefling_additions() -> list[dict[str, Any]]:
     specs = [
         (
-            "Tiefling (Baalzebul)", "BAALZEBUL", 22, {"charisma": 2, "intelligence": 1},
+            "Tiefling (Baalzebul)",
+            "BAALZEBUL",
+            22,
+            {"charisma": 2, "intelligence": 1},
             "Legacy of Maladomini",
             [
                 _cantrip("Thaumaturgy", "charisma", eligible_class="Cleric"),
@@ -308,7 +357,10 @@ def _tiefling_additions() -> list[dict[str, Any]]:
             ],
         ),
         (
-            "Tiefling (Dispater)", "DISPATER", 22, {"charisma": 2, "dexterity": 1},
+            "Tiefling (Dispater)",
+            "DISPATER",
+            22,
+            {"charisma": 2, "dexterity": 1},
             "Legacy of Dis",
             [
                 _cantrip("Thaumaturgy", "charisma", eligible_class="Cleric"),
@@ -317,7 +369,10 @@ def _tiefling_additions() -> list[dict[str, Any]]:
             ],
         ),
         (
-            "Tiefling (Fierna)", "FI ERNA", 22, {"charisma": 2, "wisdom": 1},
+            "Tiefling (Fierna)",
+            "FI ERNA",
+            22,
+            {"charisma": 2, "wisdom": 1},
             "Legacy of Phlegethos",
             [
                 _cantrip("Friends", "charisma"),
@@ -326,7 +381,10 @@ def _tiefling_additions() -> list[dict[str, Any]]:
             ],
         ),
         (
-            "Tiefling (Glasya)", "GLASYA", 23, {"charisma": 2, "dexterity": 1},
+            "Tiefling (Glasya)",
+            "GLASYA",
+            23,
+            {"charisma": 2, "dexterity": 1},
             "Legacy of Malbolge",
             [
                 _cantrip("Minor Illusion", "charisma"),
@@ -335,25 +393,49 @@ def _tiefling_additions() -> list[dict[str, Any]]:
             ],
         ),
         (
-            "Tiefling (Levistus)", "L EVISTUS", 23, {"charisma": 2, "constitution": 1},
+            "Tiefling (Levistus)",
+            "L EVISTUS",
+            23,
+            {"charisma": 2, "constitution": 1},
             "Legacy of Stygia",
             [
                 _cantrip("Ray of Frost", "charisma"),
-                _spell_grant("Armor of Agathys", 1, "charisma", eligible_class="Warlock", minimum_level=3, fixed_cast_level=2),
+                _spell_grant(
+                    "Armor of Agathys",
+                    1,
+                    "charisma",
+                    eligible_class="Warlock",
+                    minimum_level=3,
+                    fixed_cast_level=2,
+                ),
                 _spell_grant("Darkness", 2, "charisma", minimum_level=5),
             ],
         ),
         (
-            "Tiefling (Mammon)", "MAMMON", 23, {"charisma": 2, "intelligence": 1},
+            "Tiefling (Mammon)",
+            "MAMMON",
+            23,
+            {"charisma": 2, "intelligence": 1},
             "Legacy of Minauros",
             [
                 _cantrip("Mage Hand", "charisma"),
-                _spell_grant("Tenser's Floating Disk", 1, "charisma", minimum_level=3, recovers_on="short_rest"),
-                _spell_grant("Arcane Lock", 2, "charisma", minimum_level=5, ignore_material_components=True),
+                _spell_grant(
+                    "Tenser's Floating Disk",
+                    1,
+                    "charisma",
+                    minimum_level=3,
+                    recovers_on="short_rest",
+                ),
+                _spell_grant(
+                    "Arcane Lock", 2, "charisma", minimum_level=5, ignore_material_components=True
+                ),
             ],
         ),
         (
-            "Tiefling (Mephistopheles)", "MEPHISTOPHELES", 24, {"charisma": 2, "intelligence": 1},
+            "Tiefling (Mephistopheles)",
+            "MEPHISTOPHELES",
+            24,
+            {"charisma": 2, "intelligence": 1},
             "Legacy of Cania",
             [
                 _cantrip("Mage Hand", "charisma"),
@@ -362,12 +444,24 @@ def _tiefling_additions() -> list[dict[str, Any]]:
             ],
         ),
         (
-            "Tiefling (Zariel)", "ZARIEL", 24, {"charisma": 2, "strength": 1},
+            "Tiefling (Zariel)",
+            "ZARIEL",
+            24,
+            {"charisma": 2, "strength": 1},
             "Legacy of Avernus",
             [
                 _cantrip("Thaumaturgy", "charisma", eligible_class="Cleric"),
-                _spell_grant("Searing Smite", 1, "charisma", eligible_class="Paladin", minimum_level=3, fixed_cast_level=2),
-                _spell_grant("Branding Smite", 2, "charisma", eligible_class="Paladin", minimum_level=5),
+                _spell_grant(
+                    "Searing Smite",
+                    1,
+                    "charisma",
+                    eligible_class="Paladin",
+                    minimum_level=3,
+                    fixed_cast_level=2,
+                ),
+                _spell_grant(
+                    "Branding Smite", 2, "charisma", eligible_class="Paladin", minimum_level=5
+                ),
             ],
         ),
     ]
@@ -444,7 +538,10 @@ def _elf_additions() -> list[dict[str, Any]]:
                 },
                 features=[
                     *base_features,
-                    _feature("Fey Step", "Bonus-action 30-foot teleport; the chosen season adds the source-bound 3rd-level effect."),
+                    _feature(
+                        "Fey Step",
+                        "Bonus-action 30-foot teleport; the chosen season adds the source-bound 3rd-level effect.",
+                    ),
                 ],
                 **base,
             ),
@@ -460,8 +557,14 @@ def _elf_additions() -> list[dict[str, Any]]:
                 weapon_proficiencies=["Spear", "Trident", "Light Crossbow", "Net"],
                 features=[
                     *base_features,
-                    _feature("Child of the Sea", "Breathe air and water and gain a 30-foot swimming speed."),
-                    _feature("Friend of the Sea", "Communicate simple ideas with beasts that have an innate swimming speed."),
+                    _feature(
+                        "Child of the Sea",
+                        "Breathe air and water and gain a 30-foot swimming speed.",
+                    ),
+                    _feature(
+                        "Friend of the Sea",
+                        "Communicate simple ideas with beasts that have an innate swimming speed.",
+                    ),
                 ],
                 **{**base, "languages": ["Common", "Elvish", "Aquan"]},
             ),
@@ -485,7 +588,10 @@ def _elf_additions() -> list[dict[str, Any]]:
                 },
                 features=[
                     *base_features,
-                    _feature("Blessing of the Raven Queen", "Bonus-action 30-foot teleport; from 3rd level its source-bound resistance lasts until the next turn."),
+                    _feature(
+                        "Blessing of the Raven Queen",
+                        "Bonus-action 30-foot teleport; from 3rd level its source-bound resistance lasts until the next turn.",
+                    ),
                 ],
                 **base,
             ),
@@ -512,15 +618,36 @@ def _other_species_and_feat() -> list[dict[str, Any]]:
                 tool_choice_count=1,
                 tool_options=["Smith's Tools", "Brewer's Supplies", "Mason's Tools"],
                 spell_grants=[
-                    _spell_grant("Enlarge/Reduce", 2, "intelligence", minimum_level=3, ignore_material_components=True),
-                    _spell_grant("Invisibility", 2, "intelligence", minimum_level=5, ignore_material_components=True),
+                    _spell_grant(
+                        "Enlarge/Reduce",
+                        2,
+                        "intelligence",
+                        minimum_level=3,
+                        ignore_material_components=True,
+                    ),
+                    _spell_grant(
+                        "Invisibility",
+                        2,
+                        "intelligence",
+                        minimum_level=5,
+                        ignore_material_components=True,
+                    ),
                 ],
                 features=[
                     _feature("Dwarven Resilience", "Base dwarf poison defenses."),
                     _feature("Stonecunning", "Base dwarf stonework knowledge."),
-                    _feature("Duergar Resilience", "Source-bound illusion, charm, and paralysis saving-throw advantage."),
-                    _feature("Duergar Magic", "Source-bound self-only, enlarge-only, sunlight, and component restrictions apply to the granted spells."),
-                    _feature("Sunlight Sensitivity", "Source-bound attack and sight-based Perception disadvantage in direct sunlight."),
+                    _feature(
+                        "Duergar Resilience",
+                        "Source-bound illusion, charm, and paralysis saving-throw advantage.",
+                    ),
+                    _feature(
+                        "Duergar Magic",
+                        "Source-bound self-only, enlarge-only, sunlight, and component restrictions apply to the granted spells.",
+                    ),
+                    _feature(
+                        "Sunlight Sensitivity",
+                        "Source-bound attack and sight-based Perception disadvantage in direct sunlight.",
+                    ),
                 ],
             ),
         ),
@@ -555,9 +682,14 @@ def _other_species_and_feat() -> list[dict[str, Any]]:
                     _spell_grant("Misty Step", 2, "intelligence", minimum_level=5, **no_components),
                 ],
                 features=[
-                    _feature("Decadent Mastery", "Choose one language and one skill or tool proficiency."),
+                    _feature(
+                        "Decadent Mastery", "Choose one language and one skill or tool proficiency."
+                    ),
                     _feature("Martial Prodigy", "Reviewed armor and sword proficiencies."),
-                    _feature("Githyanki Psionics", "Granted spells require no components; Mage Hand is invisible."),
+                    _feature(
+                        "Githyanki Psionics",
+                        "Granted spells require no components; Mage Hand is invisible.",
+                    ),
                 ],
             ),
         ),
@@ -577,8 +709,14 @@ def _other_species_and_feat() -> list[dict[str, Any]]:
                     _spell_grant("Detect Thoughts", 2, "wisdom", minimum_level=5, **no_components),
                 ],
                 features=[
-                    _feature("Mental Discipline", "Advantage on saving throws against charmed and frightened."),
-                    _feature("Githzerai Psionics", "Granted spells require no components; Mage Hand is invisible."),
+                    _feature(
+                        "Mental Discipline",
+                        "Advantage on saving throws against charmed and frightened.",
+                    ),
+                    _feature(
+                        "Githzerai Psionics",
+                        "Granted spells require no components; Mage Hand is invisible.",
+                    ),
                 ],
             ),
         ),
@@ -594,8 +732,13 @@ def _other_species_and_feat() -> list[dict[str, Any]]:
                 darkvision_ft=120,
                 languages=["Common", "Gnomish", "Undercommon"],
                 features=[
-                    _feature("Gnome Cunning", "Base gnome mental saving-throw advantage against magic."),
-                    _feature("Stone Camouflage", "Advantage on Stealth checks to hide in rocky terrain and underground."),
+                    _feature(
+                        "Gnome Cunning", "Base gnome mental saving-throw advantage against magic."
+                    ),
+                    _feature(
+                        "Stone Camouflage",
+                        "Advantage on Stealth checks to hide in rocky terrain and underground.",
+                    ),
                 ],
             ),
         ),
@@ -615,8 +758,13 @@ def _other_species_and_feat() -> list[dict[str, Any]]:
                     "weapon_proficiencies": [],
                     "spell_grants": [
                         _spell_grant(
-                            "Nondetection", 3, "intelligence", method="at_will",
-                            free_casts=0, recovers_on=None, ignore_material_components=True,
+                            "Nondetection",
+                            3,
+                            "intelligence",
+                            method="at_will",
+                            free_casts=0,
+                            recovers_on=None,
+                            ignore_material_components=True,
                         ),
                         _spell_grant("Blindness/Deafness", 2, "intelligence"),
                         _spell_grant("Blur", 2, "intelligence"),
@@ -685,7 +833,10 @@ def _runtime_probes() -> list[dict[str, Any]]:
                     "expect": [
                         {"path": "sheet.abilities.charisma.score", "equals": 12},
                         {"path": "sheet.abilities.intelligence.score", "equals": 11},
-                        {"path": "sheet.content.spells", "contains_names": ["Mage Hand", "Burning Hands", "Flame Blade"]},
+                        {
+                            "path": "sheet.content.spells",
+                            "contains_names": ["Mage Hand", "Burning Hands", "Flame Blade"],
+                        },
                     ],
                 }
             ],
@@ -720,7 +871,10 @@ def _runtime_probes() -> list[dict[str, Any]]:
                     "expect": [
                         {"path": "sheet.skills.arcana.proficiency", "equals": "proficient"},
                         {"path": "sheet.traits.proficiencies.armor", "contains": "medium armor"},
-                        {"path": "sheet.content.spells", "contains_names": ["Mage Hand", "Jump", "Misty Step"]},
+                        {
+                            "path": "sheet.content.spells",
+                            "contains_names": ["Mage Hand", "Jump", "Misty Step"],
+                        },
                     ],
                 }
             ],
@@ -735,7 +889,15 @@ def _runtime_probes() -> list[dict[str, Any]]:
                     "name": "Svirfneblin Magic",
                     "selection": {},
                     "expect": [
-                        {"path": "sheet.content.spells", "contains_names": ["Nondetection", "Blindness/Deafness", "Blur", "Disguise Self"]},
+                        {
+                            "path": "sheet.content.spells",
+                            "contains_names": [
+                                "Nondetection",
+                                "Blindness/Deafness",
+                                "Blur",
+                                "Disguise Self",
+                            ],
+                        },
                     ],
                 },
             ],
@@ -748,7 +910,10 @@ def _runtime_probes() -> list[dict[str, Any]]:
                     "name": "Greater Silver Sword",
                     "selection": {},
                     "expect": [
-                        {"path": "sheet.inventory.items", "contains_names": ["Greater Silver Sword"]},
+                        {
+                            "path": "sheet.inventory.items",
+                            "contains_names": ["Greater Silver Sword"],
+                        },
                     ],
                 }
             ],
@@ -781,19 +946,47 @@ def main() -> None:
             "statblock": len(STATBLOCK_NAMES),
         },
         "expected_actor_names": STATBLOCK_NAMES,
-        "runtime_probes": _runtime_probes(),
-        "decisions": [
+        "statblock_slot_reviews": [
             {
-                "kind": "statblock",
-                "name": extracted_name,
-                "status": "accepted",
-                "artifact_patch": {"card": {"name": canonical_name}},
+                "page_number": 170,
+                "statblock_slot": 1,
+                "name": "Orthon",
+                "expected_identity": "Large fiend (devil), lawful evil",
+                "ocr_corrections": {
+                    "abilities": {
+                        "str": "22 (+6)",
+                        "dex": "16 (+3)",
+                        "con": "21 (+5)",
+                        "int": "15 (+2)",
+                        "wis": "15 (+2)",
+                        "cha": "16 (+3)",
+                    }
+                },
+                "correction_evidence_basis": "rendered_page",
+                "rendered_image_checksum": (
+                    "984b5f0dec025c01667f0dce4a1b47136d58369ec9033d51e151ae71e0a751ac"
+                ),
                 "note": (
-                    "Agent reviewed the same-page identity and corrected only OCR spacing, "
-                    "decorative glyphs, or a split display heading; mechanics remain unchanged."
+                    "Agent read the six ability cells from the rendered Orthon statblock; "
+                    "the text layer confused the printed +5 modifier with +S."
                 ),
             }
-            for extracted_name, canonical_name in STATBLOCK_NAME_CORRECTIONS.items()
+        ],
+        "runtime_probes": _runtime_probes(),
+        "decisions": [
+            *[
+                {
+                    "kind": "statblock",
+                    "name": extracted_name,
+                    "status": "accepted",
+                    "artifact_patch": {"card": {"name": canonical_name}},
+                    "note": (
+                        "Agent reviewed the same-page identity and corrected only OCR spacing, "
+                        "decorative glyphs, or a split display heading; mechanics remain unchanged."
+                    ),
+                }
+                for extracted_name, canonical_name in STATBLOCK_NAME_CORRECTIONS.items()
+            ],
         ],
         "additions": additions,
     }

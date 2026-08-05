@@ -326,7 +326,7 @@
           "name": "Deep Gnome",
           "source_selectors": [
             {
-              "heading_exact": "DEEP GNOMES (SVIRFNEBLIN)",
+              "heading_exact": "SvIRFNEBLIN SuBRACE TRAITS",
               "page_start": 116,
               "content_contains": "Stone Camouflage"
             }
@@ -898,6 +898,9 @@
           ],
           "card": {
             "base_species": "Tiefling",
+            "replaces_base_traits": [
+              "Ability Score Increase"
+            ],
             "grants": {
               "ability_score_increases": {
                 "dexterity": 2,
@@ -928,50 +931,7 @@
               "resistances": [
                 "fire"
               ],
-              "spell_grants": [
-                {
-                  "name": "Thaumaturgy",
-                  "level": 0,
-                  "eligible_classes": [
-                    "Cleric"
-                  ],
-                  "method": "known",
-                  "spellcasting_ability": "charisma",
-                  "free_casts": 0,
-                  "recovers_on": null,
-                  "allow_slot_cast": false,
-                  "minimum_level": 1,
-                  "ritual_only": false
-                },
-                {
-                  "name": "Hellish Rebuke",
-                  "level": 1,
-                  "eligible_classes": [
-                    "Warlock"
-                  ],
-                  "method": "limited_use",
-                  "spellcasting_ability": "charisma",
-                  "free_casts": 1,
-                  "recovers_on": "long_rest",
-                  "allow_slot_cast": false,
-                  "minimum_level": 3,
-                  "ritual_only": false
-                },
-                {
-                  "name": "Darkness",
-                  "level": 2,
-                  "eligible_classes": [
-                    "Wizard"
-                  ],
-                  "method": "limited_use",
-                  "spellcasting_ability": "charisma",
-                  "free_casts": 1,
-                  "recovers_on": "long_rest",
-                  "allow_slot_cast": false,
-                  "minimum_level": 5,
-                  "ritual_only": false
-                }
-              ]
+              "spell_grants": []
             }
           }
         },
@@ -986,6 +946,9 @@
           ],
           "card": {
             "base_species": "Tiefling",
+            "replaces_base_traits": [
+              "Infernal Legacy"
+            ],
             "grants": {
               "ability_score_increases": {
                 "charisma": 2,
@@ -1074,6 +1037,10 @@
           ],
           "card": {
             "base_species": "Tiefling",
+            "replaces_base_traits": [
+              "Ability Score Increase",
+              "Infernal Legacy"
+            ],
             "grants": {
               "ability_score_increases": {
                 "dexterity": 2,
@@ -1162,6 +1129,9 @@
           ],
           "card": {
             "base_species": "Tiefling",
+            "replaces_base_traits": [
+              "Infernal Legacy"
+            ],
             "grants": {
               "ability_score_increases": {
                 "charisma": 2,
@@ -1250,6 +1220,10 @@
           ],
           "card": {
             "base_species": "Tiefling",
+            "replaces_base_traits": [
+              "Ability Score Increase",
+              "Infernal Legacy"
+            ],
             "grants": {
               "ability_score_increases": {
                 "dexterity": 2,
@@ -1338,6 +1312,9 @@
           ],
           "card": {
             "base_species": "Tiefling",
+            "replaces_base_traits": [
+              "Infernal Legacy"
+            ],
             "grants": {
               "ability_score_increases": {
                 "charisma": 2,
@@ -1384,6 +1361,10 @@
           ],
           "card": {
             "base_species": "Tiefling",
+            "replaces_base_traits": [
+              "Ability Score Increase",
+              "Infernal Legacy"
+            ],
             "grants": {
               "ability_score_increases": {
                 "dexterity": 2,
@@ -1855,9 +1836,8 @@
           "name": "Reckless Abandon",
           "source_selectors": [
             {
-              "heading_exact": "BATTLERAGER ARMOR",
-              "page_start": 122,
-              "content_contains": "ReCKLESS ABANDON"
+              "heading_exact": "RECKLESS ABANDON",
+              "page_start": 122
             }
           ],
           "card": {
@@ -4154,7 +4134,7 @@
             {
               "heading_exact": "URBAN BOUNTY HUNTER",
               "page_start": 154,
-              "match_all": false
+              "match_all": true
             }
           ],
           "card": {

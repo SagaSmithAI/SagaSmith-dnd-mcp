@@ -159,6 +159,7 @@ Warlock of the Fiend
 Warlock of the Great Old One""".splitlines()
 
 STATBLOCK_NAME_CORRECTIONS = {
+    "!LINCALLI": "Tlincalli",
     "BANDBRHOBB": "Banderhobb",
     "SWARM OF CrANIUM RATS": "Swarm of Cranium Rats",
     "FIRENEWTWARLOCK OF IMIX": "Firenewt Warlock of Imix",
@@ -821,7 +822,10 @@ def _statblock_additions() -> list[dict[str, Any]]:
         "Mindwitness": [_selector("MINDWITNESS", 177, match_all=True)],
         "Shadow Mastiff": [_selector("SHADOW MASTIFF", 191, match_all=True)],
         "Yuan-ti Anathema": [_selector("A NATHEMA", 203, match_all=True)],
-        "Evoker": [_selector("EV0K.ER", 215, match_all=True), _selector("EVOKER", 215)],
+        "Evoker": [
+            _selector("EV0K.ER", 215, match_all=True),
+            _selector("EVOKER", 215, exact=True),
+        ],
         "Illusionist": [_selector("ILLUSIONIST", 215, match_all=True)],
         "Bard": [_selector("BARD", 212, exact=True, match_all=True)],
         "Warlock of the Archfey": [_selector("WARLOCK OF THE ARCHFEY", 220)],

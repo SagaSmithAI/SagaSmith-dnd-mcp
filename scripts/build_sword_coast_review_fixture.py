@@ -110,10 +110,16 @@ def _species_card(
     speed: int,
     languages: list[str],
     features: list[dict[str, str]],
+    replaces_base_traits: list[str] | None = None,
     **grants: Any,
 ) -> dict[str, Any]:
     return {
         "base_species": base_species,
+        **(
+            {"replaces_base_traits": list(replaces_base_traits)}
+            if replaces_base_traits
+            else {}
+        ),
         "grants": {
             "ability_score_increases": abilities,
             "size": size,
@@ -258,7 +264,7 @@ def _species() -> list[dict[str, Any]]:
         _addition(
             "species",
             "Deep Gnome",
-            [_selector("DEEP GNOMES (SVIRFNEBLIN)", 116, content_contains="Stone Camouflage")],
+            [_selector("SvIRFNEBLIN SuBRACE TRAITS", 116, content_contains="Stone Camouflage")],
             _species_card(
                 base_species="Gnome",
                 abilities={"intelligence": 2, "dexterity": 1},
@@ -283,11 +289,6 @@ def _species() -> list[dict[str, Any]]:
             )
         )
 
-    infernal_spells = [
-        _cantrip("Thaumaturgy", "charisma", eligible_class="Cleric"),
-        _spell_grant("Hellish Rebuke", 1, "charisma", eligible_class="Warlock", minimum_level=3),
-        _spell_grant("Darkness", 2, "charisma", minimum_level=5),
-    ]
     devil_spells = [
         _cantrip("Vicious Mockery", "charisma", eligible_class="Bard"),
         _spell_grant("Charm Person", 1, "charisma", minimum_level=3),
@@ -299,7 +300,7 @@ def _species() -> list[dict[str, Any]]:
         _spell_grant("Darkness", 2, "charisma", minimum_level=5),
     ]
     tieflings = [
-        ("Tiefling (Feral)", {"dexterity": 2, "intelligence": 1}, infernal_spells, 0, "Infernal Legacy"),
+        ("Tiefling (Feral)", {"dexterity": 2, "intelligence": 1}, [], 0, "Infernal Legacy"),
         ("Tiefling (Devil's Tongue)", {"charisma": 2, "intelligence": 1}, devil_spells, 0, "Devil's Tongue"),
         ("Tiefling (Feral + Devil's Tongue)", {"dexterity": 2, "intelligence": 1}, devil_spells, 0, "Devil's Tongue"),
         ("Tiefling (Hellfire)", {"charisma": 2, "intelligence": 1}, hellfire_spells, 0, "Hellfire"),
@@ -311,6 +312,14 @@ def _species() -> list[dict[str, Any]]:
         extra: dict[str, Any] = {"spell_grants": spells}
         if fly_speed:
             extra["fly_speed"] = fly_speed
+        replaced_base_traits = []
+        if "Feral" in name:
+            replaced_base_traits.append("Ability Score Increase")
+        if legacy != "Infernal Legacy":
+            # Each structured variant is a complete replacement contract. For
+            # Hellfire this removes the inherited Infernal Legacy spell list
+            # before adding the reviewed list with Burning Hands substituted.
+            replaced_base_traits.append("Infernal Legacy")
         result.append(
             _addition(
                 "species",
@@ -324,6 +333,7 @@ def _species() -> list[dict[str, Any]]:
                     darkvision_ft=60,
                     languages=["Common", "Infernal"],
                     resistances=["fire"],
+                    replaces_base_traits=replaced_base_traits,
                     features=[
                         _feature_summary("Darkvision", "See in darkness to 60 feet."),
                         _feature_summary("Hellish Resistance", "Resistance to fire damage."),
@@ -563,10 +573,6 @@ def _subclasses_and_features() -> list[dict[str, Any]]:
                 description=description,
                 mechanical_grants=grants,
             )
-        if name == "Reckless Abandon":
-            feature["source_selectors"] = [
-                _selector("BATTLERAGER ARMOR", 122, content_contains="ReCKLESS ABANDON")
-            ]
         result.append(feature)
 
     result.extend(
@@ -802,6 +808,7 @@ def _backgrounds() -> list[dict[str, Any]]:
             skill_options=["Deception", "Insight", "Persuasion", "Stealth"],
             feature="Ear to the Ground", gp=20, items=["Work Clothes"], tool_count=2,
             tool_options=[*GAMING_SETS, *INSTRUMENTS, "Thieves' Tools"],
+            source_match_all=True,
             tool_groups=[
                 {"id": "gaming_set", "maximum": 1, "options": GAMING_SETS},
                 {"id": "instrument", "maximum": 1, "options": INSTRUMENTS},

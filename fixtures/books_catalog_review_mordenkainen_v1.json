@@ -157,6 +157,27 @@
         "Oinoloth",
         "Yagnoloth"
       ],
+      "statblock_slot_reviews": [
+        {
+          "page_number": 170,
+          "statblock_slot": 1,
+          "name": "Orthon",
+          "expected_identity": "Large fiend (devil), lawful evil",
+          "ocr_corrections": {
+            "abilities": {
+              "str": "22 (+6)",
+              "dex": "16 (+3)",
+              "con": "21 (+5)",
+              "int": "15 (+2)",
+              "wis": "15 (+2)",
+              "cha": "16 (+3)"
+            }
+          },
+          "correction_evidence_basis": "rendered_page",
+          "rendered_image_checksum": "984b5f0dec025c01667f0dce4a1b47136d58369ec9033d51e151ae71e0a751ac",
+          "note": "Agent read the six ability cells from the rendered Orthon statblock; the text layer confused the printed +5 modifier with +S."
+        }
+      ],
       "runtime_probes": [
         {
           "name": "mtof-mephistopheles-fixed-upcast",
@@ -314,17 +335,6 @@
         },
         {
           "kind": "statblock",
-          "name": "0RTHON",
-          "status": "accepted",
-          "artifact_patch": {
-            "card": {
-              "name": "Orthon"
-            }
-          },
-          "note": "Agent reviewed the same-page identity and corrected only OCR spacing, decorative glyphs, or a split display heading; mechanics remain unchanged."
-        },
-        {
-          "kind": "statblock",
           "name": "ADULT0BLEX",
           "status": "accepted",
           "artifact_patch": {
@@ -446,17 +456,6 @@
         },
         {
           "kind": "statblock",
-          "name": "I",
-          "status": "accepted",
-          "artifact_patch": {
-            "card": {
-              "name": "Oinoloth"
-            }
-          },
-          "note": "Agent reviewed the same-page identity and corrected only OCR spacing, decorative glyphs, or a split display heading; mechanics remain unchanged."
-        },
-        {
-          "kind": "statblock",
           "name": "NAGP A",
           "status": "accepted",
           "artifact_patch": {
@@ -534,6 +533,10 @@
           ],
           "card": {
             "base_species": "Tiefling",
+            "replaces_base_traits": [
+              "Ability Score Increase",
+              "Infernal Legacy"
+            ],
             "grants": {
               "ability_score_increases": {
                 "charisma": 2,
@@ -621,6 +624,10 @@
           ],
           "card": {
             "base_species": "Tiefling",
+            "replaces_base_traits": [
+              "Ability Score Increase",
+              "Infernal Legacy"
+            ],
             "grants": {
               "ability_score_increases": {
                 "charisma": 2,
@@ -710,6 +717,10 @@
           ],
           "card": {
             "base_species": "Tiefling",
+            "replaces_base_traits": [
+              "Ability Score Increase",
+              "Infernal Legacy"
+            ],
             "grants": {
               "ability_score_increases": {
                 "charisma": 2,
@@ -797,6 +808,10 @@
           ],
           "card": {
             "base_species": "Tiefling",
+            "replaces_base_traits": [
+              "Ability Score Increase",
+              "Infernal Legacy"
+            ],
             "grants": {
               "ability_score_increases": {
                 "charisma": 2,
@@ -881,6 +896,10 @@
           ],
           "card": {
             "base_species": "Tiefling",
+            "replaces_base_traits": [
+              "Ability Score Increase",
+              "Infernal Legacy"
+            ],
             "grants": {
               "ability_score_increases": {
                 "charisma": 2,
@@ -968,6 +987,10 @@
           ],
           "card": {
             "base_species": "Tiefling",
+            "replaces_base_traits": [
+              "Ability Score Increase",
+              "Infernal Legacy"
+            ],
             "grants": {
               "ability_score_increases": {
                 "charisma": 2,
@@ -1055,6 +1078,10 @@
           ],
           "card": {
             "base_species": "Tiefling",
+            "replaces_base_traits": [
+              "Ability Score Increase",
+              "Infernal Legacy"
+            ],
             "grants": {
               "ability_score_increases": {
                 "charisma": 2,
@@ -1142,6 +1169,10 @@
           ],
           "card": {
             "base_species": "Tiefling",
+            "replaces_base_traits": [
+              "Ability Score Increase",
+              "Infernal Legacy"
+            ],
             "grants": {
               "ability_score_increases": {
                 "charisma": 2,

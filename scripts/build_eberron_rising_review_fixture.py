@@ -204,7 +204,7 @@ def _class_addition() -> dict[str, Any]:
             _selector("C LAS S : ARTI FICER", 55),
             _selector("HIT POINTS", 55),
             _selector("PROFICIENCIES", 55),
-            _selector("TH E ARTI FICER", 56),
+            _selector("THE ARTIFICER", 56),
             _selector("SPELLCASTING", 56),
             _selector("PREPARING AND CASTING SPELLS", 56),
             _selector("TH E MAG IC OF ARTI FICE", 57, match_all=True),
@@ -263,7 +263,7 @@ def _class_features() -> list[dict[str, Any]]:
         ("Enhanced Defense", 2, [_selector("ENHANCED DEFENSE", 63)]),
         ("Enhanced Weapon", 2, [_selector("ENHANCED WEAPON", 63)]),
         ("Homunculus Servant", 6, [_selector("HOMUNCULUS SERVANT", 63, content_contains="Prerequisite")]),
-        ("Radiant Weapon", 6, [_selector("RADIANT WEAPON", 63), _selector("C HAPTER 1 I C HARACTER CREATION", 63, content_contains="30-foot radius")]),
+        ("Radiant Weapon", 6, [_selector("RADIANT WEAPON", 63)]),
         ("Repeating Shot", 2, [_selector("REPEATING SHOT", 63)]),
         ("Replicate Magic Item", 2, [_selector("REPLICATE MAGIC ITEM", 64), _selector("REPLICABLE ITE M S (2N D-LEVEL ARTIFI CER)", 64), _selector("REPLICABLE ITE M S (6TH-LEVEL ARTIFICER)", 64)]),
         ("Repulsion Shield", 6, [_selector("REPULSION SHIELD", 64)]),
@@ -316,8 +316,8 @@ def _class_features() -> list[dict[str, Any]]:
         )
     ]
     base_specs = [
-        ("Magical Tinkering", 1, [_selector("MAGICAL TI NKERING", 56, match_all=True)], {}),
-        ("Spellcasting", 1, [_selector("SPELLCASTING", 56), _selector("TOOLS REQUIRED", 56), _selector("CANTRIPS (0 -LEVEL SPELLS)", 56), _selector("PREPARING AND CASTING SPELLS", 56)], {}),
+        ("Magical Tinkering", 1, [_selector("MAGICAL TINKERING", 56, match_all=True)], {}),
+        ("Spellcasting", 1, [_selector("SPELLCASTING", 56), _selector("TOOLS REQUIRED", 56), _selector("CANTRIPS (O-LEVEL SPELLS)", 56), _selector("PREPARING AND CASTING SPELLS", 56)], {}),
         ("Artificer Specialist", 3, [_selector("ARTIFICER S PE C I ALIST", 58)], {}),
         ("The Right Tool for the Job", 3, [_selector("THE RIGHT TO OL FOR THE OB", 58)], {}),
         ("Tool Expertise", 6, [_selector("TO OL EXPERTI S E", 58)], {"tool_expertise_all": True}),
@@ -599,7 +599,6 @@ def _species_additions() -> list[dict[str, Any]]:
                 "Hobgoblin",
                 [
                     _selector("HOBGOBLIN TRAITS", 27),
-                    _selector("C HAPTER 1 I C HARACTER CREATION", 27),
                 ],
                 _species_card(
                     base_species="Hobgoblin",
@@ -679,7 +678,7 @@ def _species_additions() -> list[dict[str, Any]]:
         )
     )
     for variant, abilities, skill, heading in [
-        ("Beasthide", {"constitution": 2, "strength": 1}, "Athletics", "BEASTHIDE"),
+        ("Beasthide", {"constitution": 2, "strength": 1}, "Athletics", "SHI FTER"),
         ("Longtooth", {"strength": 2, "dexterity": 1}, "Intimidation", "LONGTOOTH"),
         ("Swiftstride", {"dexterity": 2, "charisma": 1}, "Acrobatics", "SWIFTSTRIDE"),
         ("Wildhunt", {"wisdom": 2, "dexterity": 1}, "Survival", "WILDHUNT"),
@@ -826,7 +825,11 @@ def _dragonmark_additions() -> list[dict[str, Any]]:
         )
     additions.append(
         _addition(
-            "species", "Mark of Handling", [_selector("MARK OF HANDLING", 43), _selector("C HAPTER I I C HARACTER CREATION", 43)],
+            "species", "Mark of Handling", [
+                _selector("MARK OF HANDLING", 43),
+                _selector("MARK OF HANDLING SPELLS", 43),
+                _selector("PAUL SCOTT CANAVAN", 43),
+            ],
             _mark_card(
                 base_species="Human",
                 abilities={"wisdom": 2},
@@ -849,7 +852,11 @@ def _dragonmark_additions() -> list[dict[str, Any]]:
 def _halfling_marks(no_material: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         _addition(
-            "species", "Mark of Healing", [_selector("MARK OF H EALING", 44)],
+            "species", "Mark of Healing", [
+                _selector("MARK OF HEALING", 44),
+                _selector("ONMEN", 44),
+                _selector("MARK OF HEALING SPELLS", 44),
+            ],
             _mark_card(
                 base_species="Halfling", abilities={"dexterity": 2, "wisdom": 1}, size="small", speed=25,
                 languages=["Common", "Halfling"],
@@ -862,7 +869,11 @@ def _halfling_marks(no_material: dict[str, Any]) -> list[dict[str, Any]]:
             ),
         ),
         _addition(
-            "species", "Mark of Hospitality", [_selector("MARK O F HOSPITALITY", 45)],
+            "species", "Mark of Hospitality", [
+                _selector("MARK OF HOSPITALITY", 45),
+                _selector("MARK OF HOSPITALITY SPELLS", 45),
+                _selector("JASON A. ENGLE", 45),
+            ],
             _mark_card(
                 base_species="Halfling", abilities={"dexterity": 2, "charisma": 1}, size="small", speed=25,
                 languages=["Common", "Halfling"],
@@ -885,7 +896,10 @@ def _human_marks(no_material: dict[str, Any]) -> list[dict[str, Any]]:
     }
     return [
         _addition(
-            "species", "Mark of Making", [_selector("VARIANT HUMAN: MARK OF MAKING", 46)],
+            "species", "Mark of Making", [
+                _selector("WAYNE REYNOLDS", 46),
+                _selector("MARK OF MAKING SPELLS", 46),
+            ],
             _mark_card(
                 base_species="Human", abilities={"intelligence": 2},
                 ability_choice={"count": 1, "amount": 1, "exclude": ["intelligence"], "options": []},
@@ -896,7 +910,11 @@ def _human_marks(no_material: dict[str, Any]) -> list[dict[str, Any]]:
             ),
         ),
         _addition(
-            "species", "Mark of Passage", [_selector("VARIANT HUMAN: MARK OF PAS SAGE", 47), _selector("C HAPTER 1 I C HARACTER CREATION", 47)],
+            "species", "Mark of Passage", [
+                _selector("VARIANT HUMAN: MARK OF PASSAGE", 47),
+                _selector("MARK OF PASSAGE SPELLS", 47),
+                _selector("COLIN BOYER", 47),
+            ],
             _mark_card(
                 base_species="Human", abilities={"dexterity": 2}, speed=35,
                 ability_choice={"count": 1, "amount": 1, "exclude": ["dexterity"], "options": []},
@@ -934,7 +952,10 @@ def _ancestry_marks(no_material: dict[str, Any]) -> list[dict[str, Any]]:
             ),
         ),
         _addition(
-            "species", "Mark of Shadow", [_selector("ELF SUBRAC E : MARK OF SHADOW", 50)],
+            "species", "Mark of Shadow", [
+                _selector("ELF SUBRACE: MARK OF SHADOW", 50),
+                _selector("MARK OF SHADOW SPELLS", 50),
+            ],
             _mark_card(
                 base_species="Elf", abilities={"dexterity": 2, "charisma": 1}, darkvision_ft=60,
                 languages=["Common", "Elvish"], skill_proficiencies=["Perception"],
@@ -946,11 +967,7 @@ def _ancestry_marks(no_material: dict[str, Any]) -> list[dict[str, Any]]:
         _addition(
             "species", "Mark of Storm", [
                 _selector("VARIANT HALF-ELF: MARK OF STORM", 51),
-                _selector(
-                    "C HAPTER 1 I C HARACTER C REATION",
-                    51,
-                    content_contains="Spells oft he Mark",
-                ),
+                _selector("MARK OF STORM SPELLS", 51),
             ],
             _mark_card(
                 base_species="Half-Elf", abilities={"charisma": 2, "dexterity": 1}, darkvision_ft=60,
@@ -962,7 +979,12 @@ def _ancestry_marks(no_material: dict[str, Any]) -> list[dict[str, Any]]:
             ),
         ),
         _addition(
-            "species", "Mark of Warding", [_selector("DWARF SUBRAC E : MARK OF WARDING", 52)],
+            "species", "Mark of Warding", [
+                _selector("DWARF SUBRACE: MARK OF WARDING", 52),
+                _selector("HOWARD LYON", 52),
+                _selector("KUNDARAK VAULT", 52),
+                _selector("MARK OF WARDING SPELLS", 52),
+            ],
             _mark_card(
                 base_species="Dwarf", abilities={"constitution": 2, "intelligence": 1}, speed=25,
                 darkvision_ft=60, languages=["Common", "Dwarvish"], resistances=["poison"],
@@ -978,6 +1000,52 @@ def _ancestry_marks(no_material: dict[str, Any]) -> list[dict[str, Any]]:
             ),
         ),
     ]
+
+
+def _valenar_hound_addition() -> dict[str, Any]:
+    addition = _addition(
+        "statblock",
+        "Valenar Hound",
+        [
+            _selector("VALENAR HOUND", 313),
+            _selector("CHA", 313, content_contains="1 7 (+3) 1 5 (+2) 14 (+2)"),
+            _selector("ACT I O N S", 313, content_contains="Bite."),
+        ],
+        {
+            "name": "Valenar Hound",
+            "normalized_content": """# Valenar Hound
+
+*Medium fey, neutral*
+
+**Armor Class** 14 (natural armor)
+**Hit Points** 19 (3d8 + 6)
+**Speed** 40 ft.
+
+| STR | DEX | CON | INT | WIS | CHA |
+|---:|---:|---:|---:|---:|---:|
+| 17 (+3) | 15 (+2) | 14 (+2) | 10 (+0) | 15 (+2) | 11 (+0) |
+
+**Skills** Perception +4
+**Senses** passive Perception 14
+**Languages** understands Common, Elvish, and Sylvan but can't speak
+**Challenge** 1/2 (100 XP)
+
+## Traits
+
+***Bonding.*** The hound can magically bond with one creature it can see immediately after spending at least 1 hour observing that creature while within 30 feet of it. The bond lasts until the hound bonds with a different creature or the bonded creature dies. While bonded, the hound and bonded creature can communicate telepathically within 100 feet.
+
+***Keen Hearing and Smell.*** The hound has advantage on Wisdom (Perception) checks that rely on hearing or smell.
+
+## Actions
+
+***Bite.*** Melee Weapon Attack: +5 to hit, reach 5 ft., one target. Hit: 6 (1d6 + 3) piercing damage. If the target is a creature, it must succeed on a DC 13 Strength saving throw or be knocked prone.""",
+        },
+    )
+    addition["note"] = (
+        "Agent restored the complete card from the indexed source after the two-column layout "
+        "nested the hound under the preceding Valenar Hawk extraction."
+    )
+    return addition
 
 
 def _gust_decision(wayfinder_document: dict[str, Any]) -> dict[str, Any]:
@@ -1129,6 +1197,7 @@ def main() -> None:
         *_subclasses_and_features(),
         *_items_and_feats(wayfinder_additions),
         *_species_additions(),
+        _valenar_hound_addition(),
     ]
     _mark_automatic_replacements(additions)
     document = {

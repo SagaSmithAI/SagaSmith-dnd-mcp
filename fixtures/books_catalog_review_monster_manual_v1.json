@@ -122,6 +122,7 @@
         {"kind": "statblock", "name": "MANTIC ORE", "status": "accepted", "artifact_patch": {"card": {"name": "Manticore"}}, "note": "Agent removed a spurious OCR word break using the printed stat-block index."},
         {"kind": "statblock", "name": "MARl LITH", "status": "accepted", "artifact_patch": {"card": {"name": "Marilith"}}, "note": "Agent corrected an OCR letter substitution using the printed stat-block index."},
         {"kind": "statblock", "name": "PoLAR BEAR", "status": "accepted", "artifact_patch": {"card": {"name": "Polar Bear"}}, "note": "Agent normalized the mixed-case OCR heading against the printed stat-block index."},
+        {"kind": "statblock", "name": "' SAHU:AGIN PRIESTESS", "status": "accepted", "artifact_patch": {"card": {"name": "Sahuagin Priestess"}}, "note": "Agent restored the page-bound name against the printed stat-block index; mechanics remain unchanged."},
         {"kind": "statblock", "name": "THRI- KREEN", "status": "accepted", "artifact_patch": {"card": {"name": "Thri-kreen"}}, "note": "Agent removed a spurious OCR hyphen gap using the printed stat-block index."},
         {"kind": "statblock", "name": "WHITE DRAGON WY·RMLING", "status": "accepted", "artifact_patch": {"card": {"name": "White Dragon Wyrmling"}}, "note": "Agent removed a decorative OCR insertion using the printed stat-block index."},
         {"kind": "statblock", "name": "-GARGOYLE s ENESC HAL S ST", "status": "rejected", "note": "Agent compared the page-local card slots and index; this decorative carryover is not a statblock heading."},

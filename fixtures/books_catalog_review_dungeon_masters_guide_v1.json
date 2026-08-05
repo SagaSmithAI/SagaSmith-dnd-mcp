@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "documents": {
+    "D&D 5E - Dungeon Master's Guide.pdf": {
+      "complete_review": true,
+      "default_status": "accepted",
+      "rationale": "Agent reviewed the complete DMG catalog against the indexed source. The Larva and Giant Fly statblocks export as static actor cards; Avatar of Death remains a source-bound owner-dependent template whose hit points are materialized from the summoner through the reviewed formula plan.",
+      "expected_counts": {
+        "background": 1,
+        "feature": 434,
+        "item": 275,
+        "species": 1,
+        "statblock": 3,
+        "subclass": 1
+      },
+      "expected_actor_names": [
+        "Giant Fly",
+        "Larva"
+      ]
+    }
+  }
+}

@@ -295,6 +295,17 @@
       "decisions": [
         {
           "kind": "statblock",
+          "name": "!LINCALLI",
+          "status": "accepted",
+          "artifact_patch": {
+            "card": {
+              "name": "Tlincalli"
+            }
+          },
+          "note": "Agent corrected only same-page OCR identity noise after verifying the complete source statblock and its immutable citations."
+        },
+        {
+          "kind": "statblock",
           "name": "BANDBRHOBB",
           "status": "accepted",
           "artifact_patch": {
@@ -1784,7 +1795,7 @@
               "match_all": true
             },
             {
-              "heading_contains": "EVOKER",
+              "heading_exact": "EVOKER",
               "page_start": 215
             }
           ],

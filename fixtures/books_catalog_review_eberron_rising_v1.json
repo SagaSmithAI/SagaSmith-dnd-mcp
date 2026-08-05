@@ -1325,7 +1325,7 @@
               "page_start": 55
             },
             {
-              "heading_exact": "TH E ARTI FICER",
+              "heading_exact": "THE ARTIFICER",
               "page_start": 56
             },
             {
@@ -1931,7 +1931,7 @@
           "name": "Magical Tinkering",
           "source_selectors": [
             {
-              "heading_exact": "MAGICAL TI NKERING",
+              "heading_exact": "MAGICAL TINKERING",
               "page_start": 56,
               "match_all": true
             }
@@ -1961,7 +1961,7 @@
               "page_start": 56
             },
             {
-              "heading_exact": "CANTRIPS (0 -LEVEL SPELLS)",
+              "heading_exact": "CANTRIPS (O-LEVEL SPELLS)",
               "page_start": 56
             },
             {
@@ -2281,11 +2281,6 @@
             {
               "heading_exact": "RADIANT WEAPON",
               "page_start": 63
-            },
-            {
-              "heading_exact": "C HAPTER 1 I C HARACTER CREATION",
-              "page_start": 63,
-              "content_contains": "30-foot radius"
             }
           ],
           "card": {
@@ -3464,10 +3459,6 @@
             {
               "heading_exact": "HOBGOBLIN TRAITS",
               "page_start": 27
-            },
-            {
-              "heading_exact": "C HAPTER 1 I C HARACTER CREATION",
-              "page_start": 27
             }
           ],
           "card": {
@@ -3709,7 +3700,7 @@
               "page_start": 34
             },
             {
-              "heading_exact": "BEASTHIDE",
+              "heading_exact": "SHI FTER",
               "page_start": 35
             }
           ],
@@ -4272,7 +4263,11 @@
               "page_start": 43
             },
             {
-              "heading_exact": "C HAPTER I I C HARACTER CREATION",
+              "heading_exact": "MARK OF HANDLING SPELLS",
+              "page_start": 43
+            },
+            {
+              "heading_exact": "PAUL SCOTT CANAVAN",
               "page_start": 43
             }
           ],
@@ -4373,7 +4368,15 @@
           "name": "Mark of Healing",
           "source_selectors": [
             {
-              "heading_exact": "MARK OF H EALING",
+              "heading_exact": "MARK OF HEALING",
+              "page_start": 44
+            },
+            {
+              "heading_exact": "ONMEN",
+              "page_start": 44
+            },
+            {
+              "heading_exact": "MARK OF HEALING SPELLS",
               "page_start": 44
             }
           ],
@@ -4470,7 +4473,15 @@
           "name": "Mark of Hospitality",
           "source_selectors": [
             {
-              "heading_exact": "MARK O F HOSPITALITY",
+              "heading_exact": "MARK OF HOSPITALITY",
+              "page_start": 45
+            },
+            {
+              "heading_exact": "MARK OF HOSPITALITY SPELLS",
+              "page_start": 45
+            },
+            {
+              "heading_exact": "JASON A. ENGLE",
               "page_start": 45
             }
           ],
@@ -4587,7 +4598,11 @@
           "name": "Mark of Making",
           "source_selectors": [
             {
-              "heading_exact": "VARIANT HUMAN: MARK OF MAKING",
+              "heading_exact": "WAYNE REYNOLDS",
+              "page_start": 46
+            },
+            {
+              "heading_exact": "MARK OF MAKING SPELLS",
               "page_start": 46
             }
           ],
@@ -4711,11 +4726,15 @@
           "name": "Mark of Passage",
           "source_selectors": [
             {
-              "heading_exact": "VARIANT HUMAN: MARK OF PAS SAGE",
+              "heading_exact": "VARIANT HUMAN: MARK OF PASSAGE",
               "page_start": 47
             },
             {
-              "heading_exact": "C HAPTER 1 I C HARACTER CREATION",
+              "heading_exact": "MARK OF PASSAGE SPELLS",
+              "page_start": 47
+            },
+            {
+              "heading_exact": "COLIN BOYER",
               "page_start": 47
             }
           ],
@@ -4970,7 +4989,11 @@
           "name": "Mark of Shadow",
           "source_selectors": [
             {
-              "heading_exact": "ELF SUBRAC E : MARK OF SHADOW",
+              "heading_exact": "ELF SUBRACE: MARK OF SHADOW",
+              "page_start": 50
+            },
+            {
+              "heading_exact": "MARK OF SHADOW SPELLS",
               "page_start": 50
             }
           ],
@@ -5071,9 +5094,8 @@
               "page_start": 51
             },
             {
-              "heading_exact": "C HAPTER 1 I C HARACTER C REATION",
-              "page_start": 51,
-              "content_contains": "Spells oft he Mark"
+              "heading_exact": "MARK OF STORM SPELLS",
+              "page_start": 51
             }
           ],
           "card": {
@@ -5172,7 +5194,19 @@
           "name": "Mark of Warding",
           "source_selectors": [
             {
-              "heading_exact": "DWARF SUBRAC E : MARK OF WARDING",
+              "heading_exact": "DWARF SUBRACE: MARK OF WARDING",
+              "page_start": 52
+            },
+            {
+              "heading_exact": "HOWARD LYON",
+              "page_start": 52
+            },
+            {
+              "heading_exact": "KUNDARAK VAULT",
+              "page_start": 52
+            },
+            {
+              "heading_exact": "MARK OF WARDING SPELLS",
               "page_start": 52
             }
           ],
@@ -5298,6 +5332,31 @@
               ]
             }
           }
+        },
+        {
+          "kind": "statblock",
+          "name": "Valenar Hound",
+          "source_selectors": [
+            {
+              "heading_exact": "VALENAR HOUND",
+              "page_start": 313
+            },
+            {
+              "heading_exact": "CHA",
+              "page_start": 313,
+              "content_contains": "1 7 (+3) 1 5 (+2) 14 (+2)"
+            },
+            {
+              "heading_exact": "ACT I O N S",
+              "page_start": 313,
+              "content_contains": "Bite."
+            }
+          ],
+          "card": {
+            "name": "Valenar Hound",
+            "normalized_content": "# Valenar Hound\n\n*Medium fey, neutral*\n\n**Armor Class** 14 (natural armor)\n**Hit Points** 19 (3d8 + 6)\n**Speed** 40 ft.\n\n| STR | DEX | CON | INT | WIS | CHA |\n|---:|---:|---:|---:|---:|---:|\n| 17 (+3) | 15 (+2) | 14 (+2) | 10 (+0) | 15 (+2) | 11 (+0) |\n\n**Skills** Perception +4\n**Senses** passive Perception 14\n**Languages** understands Common, Elvish, and Sylvan but can't speak\n**Challenge** 1/2 (100 XP)\n\n## Traits\n\n***Bonding.*** The hound can magically bond with one creature it can see immediately after spending at least 1 hour observing that creature while within 30 feet of it. The bond lasts until the hound bonds with a different creature or the bonded creature dies. While bonded, the hound and bonded creature can communicate telepathically within 100 feet.\n\n***Keen Hearing and Smell.*** The hound has advantage on Wisdom (Perception) checks that rely on hearing or smell.\n\n## Actions\n\n***Bite.*** Melee Weapon Attack: +5 to hit, reach 5 ft., one target. Hit: 6 (1d6 + 3) piercing damage. If the target is a creature, it must succeed on a DC 13 Strength saving throw or be knocked prone."
+          },
+          "note": "Agent restored the complete card from the indexed source after the two-column layout nested the hound under the preceding Valenar Hawk extraction."
         }
       ]
     }
