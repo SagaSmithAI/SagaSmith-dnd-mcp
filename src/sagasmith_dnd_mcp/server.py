@@ -4952,6 +4952,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def import_portable_module_package(
         campaign_id: str,
         package: dict[str, Any],
+        blobs: dict[str, bytes],
         *,
         principal_id: str,
         idempotency_key: str,
@@ -4960,6 +4961,67 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Import an exact module component and its actor cards through public services."""
 
         normalized = validate_module_pack(package, expected_system_id=DND5E.id)
+        manifest = dict(normalized["payload"]["manifest"])
+        readiness = dict(normalized["payload"]["readiness"])
+        if activate and readiness["level"] not in {"playable", "complete"}:
+            raise ValueError(
+                "only playable or complete module packages may be activated"
+            )
+        campaign_edition = campaign_rules_edition(campaign_id)
+        supported_editions = list(manifest["compatibility"]["editions"])
+        if supported_editions and campaign_edition not in supported_editions:
+            raise ValueError(
+                f"module does not support campaign edition {campaign_edition}"
+            )
+        expected_blob_checksums = {
+            asset["checksum"] for asset in normalized["payload"]["assets"]
+        }
+        if set(blobs) != expected_blob_checksums:
+            raise ValueError("module archive blobs do not match asset descriptors")
+        dependency_status = []
+        installed_modules = {
+            (
+                str(dict(item.get("portable_package") or {}).get("id") or ""),
+                str(dict(item.get("portable_package") or {}).get("version") or ""),
+                str(dict(item.get("portable_package") or {}).get("checksum") or ""),
+            )
+            for item in modules.list(campaign_id, include_retired=True)
+        }
+        for dependency in normalized["dependencies"]:
+            identity = (
+                dependency["id"],
+                dependency["version"],
+                dependency["checksum"],
+            )
+            status = "missing"
+            if dependency["kind"] == "module_pack":
+                status = "installed" if identity in installed_modules else "missing"
+            else:
+                try:
+                    local = rule_packs.get_version(dependency["id"], dependency["version"])
+                except LookupError:
+                    local = None
+                if local is not None and local.status == "installed":
+                    provenance = rule_packs.provenance(
+                        dependency["id"], dependency["version"]
+                    )
+                    portable = dict(provenance.get("portable_package") or {})
+                    accepted = {
+                        local.checksum,
+                        str(portable.get("definition_checksum") or ""),
+                        str(portable.get("checksum") or ""),
+                    }
+                    status = (
+                        "installed"
+                        if dependency["checksum"] in accepted
+                        else "checksum_mismatch"
+                    )
+            dependency_status.append({**dependency, "status": status})
+            if status != "installed" and not dependency["optional"]:
+                raise ValueError(
+                    "required module dependency is not installed with its exact checksum: "
+                    f"{dependency['kind']}:{dependency['id']}@{dependency['version']}"
+                )
         validated_cards = [
             validate_dnd_actor_card(card) for card in normalized["payload"]["actors"]
         ]
@@ -4977,7 +5039,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "portable module actor cards require build-time semantic "
                 f"resolution: {resolution_audit['unresolved']}"
             )
-        campaign_edition = campaign_rules_edition(campaign_id)
         mismatched = [
             card["id"]
             for card in validated_cards
@@ -4991,7 +5052,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             campaign_id,
             normalized,
             parser=MarkdownModuleParser(profile=DndModuleProfile()),
-            activate=activate,
+            activate=False,
+            asset_loader=lambda asset: blobs[asset["checksum"]],
             asset_writer=storage.store_portable_module_asset,
         )
         actor_map: dict[str, str] = {}
@@ -5044,6 +5106,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         result["actor_map"] = actor_map
         result["actor_binding_ids"] = binding_ids
         result.pop("actor_cards", None)
+        result["dependencies"] = dependency_status
+        result["activated"] = False
+        if activate:
+            activation = modules.activate_candidate(
+                campaign_id,
+                result["module_id"],
+                idempotency_key=f"portable-module-activate:{idempotency_key}",
+            )
+            result["activation"] = activation
+            result["activated"] = True
         return result
 
     def import_portable_addon(
@@ -5234,17 +5306,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 }
             )
 
-        for component in components:
-            if component["kind"] == "module_pack":
-                component_results.append(
-                    {
-                        "kind": "module_pack",
-                        "id": component["id"],
-                        "version": component["version"],
-                        "checksum": component["checksum"],
-                        "status": "campaign_import_required",
-                    }
-                )
         installed = addons.install(imported.addon_id, imported.version)
         response = {
             "addon": asdict(installed),
@@ -40800,15 +40861,40 @@ Useful bounded guidance:
             require_facade_phase(campaign_id, "module_import(import_package)", PROFILE_LOBBY)
             if not idempotency_key:
                 raise ValueError("idempotency_key is required for portable module import")
-            package = portable_input(data, field="package", expected_kind="module_pack")
+            choices = [
+                name
+                for name in ("package", "artifact", "source_path")
+                if data.get(name) is not None
+            ]
+            if len(choices) != 1:
+                raise ValueError(
+                    "provide exactly one of payload.package, payload.artifact, or "
+                    "payload.source_path"
+                )
+            if choices[0] == "package":
+                package = data["package"]
+                if not isinstance(package, dict):
+                    raise ValueError("payload.package must be an object")
+                blobs: dict[str, bytes] = {}
+            else:
+                package, blobs = storage.read_module_archive(
+                    artifact=(str(data["artifact"]) if choices[0] == "artifact" else None),
+                    source_path=(data.get("source_path") if choices[0] == "source_path" else None),
+                )
+            if package.get("kind") != "module_pack":
+                raise ValueError("portable package kind must be module_pack")
+            activate = data.get("activate", True)
+            if not isinstance(activate, bool):
+                raise ValueError("payload.activate must be a boolean")
             return facade_result(
                 action,
                 import_portable_module_package(
                     campaign_id,
                     package,
+                    blobs,
                     principal_id=principal_id,
                     idempotency_key=idempotency_key,
-                    activate=bool(data.get("activate", True)),
+                    activate=activate,
                 ),
             )
         if action == "stage":
@@ -41244,11 +41330,16 @@ Useful bounded guidance:
                     "version",
                     "metadata",
                     "dependencies",
+                    "manifest",
+                    "catalogs",
+                    "narrative",
+                    "readiness",
                     "include_package",
                 },
                 required_names=("module_id", "portable_id"),
             )
             access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+            module_blobs: dict[str, bytes] = {}
             package = modules.export_portable_pack(
                 campaign_id,
                 str(required(data, "module_id")),
@@ -41257,6 +41348,11 @@ Useful bounded guidance:
                 metadata=dict(data.get("metadata") or {}),
                 dependencies=list(data.get("dependencies") or []),
                 asset_loader=managed_module_asset_bytes,
+                blob_sink=module_blobs.__setitem__,
+                manifest=(dict(data["manifest"]) if data.get("manifest") else None),
+                catalogs=(dict(data["catalogs"]) if data.get("catalogs") else None),
+                narrative=(dict(data["narrative"]) if data.get("narrative") else None),
+                readiness=(dict(data["readiness"]) if data.get("readiness") else None),
             )
             finalized_actors = []
             for actor_card in package["payload"]["actors"]:
@@ -41287,23 +41383,33 @@ Useful bounded guidance:
                     portable_id=package["id"],
                     version=package["version"],
                     system_id=package["system_id"],
+                    manifest=module_payload["manifest"],
                     source=module_payload["source"],
                     document=module_payload["document"],
                     scene_atlas=module_payload["scene_atlas"],
                     assets=module_payload["assets"],
                     content_reviews=module_payload["content_reviews"],
                     actors=finalized_actors,
+                    catalogs=module_payload["catalogs"],
+                    narrative=module_payload["narrative"],
+                    readiness=module_payload["readiness"],
                     metadata=package["metadata"],
                     dependencies=package["dependencies"],
                 )
-            artifact = storage.write_portable_package(package)
+            artifact = storage.write_module_archive(package, module_blobs)
             result = {
-                "artifact": artifact,
+                **artifact,
                 "summary": {
                     "scenes": len(package["payload"]["scene_atlas"]),
                     "assets": len(package["payload"]["assets"]),
                     "content_reviews": len(package["payload"]["content_reviews"]),
                     "actors": len(package["payload"]["actors"]),
+                    "catalog_entries": package["payload"]["manifest"][
+                        "content_summary"
+                    ]["catalog_entries"],
+                    "dossiers": len(package["payload"]["narrative"]["dossiers"]),
+                    "endings": len(package["payload"]["narrative"]["endings"]),
+                    "readiness": package["payload"]["readiness"],
                 },
                 **({"package": package} if data.get("include_package") is True else {}),
             }
@@ -42487,7 +42593,6 @@ Useful bounded guidance:
             replay = replay_idempotent(scope, idempotency_key, request)
             if replay is not None:
                 return facade_result(action, replay)
-            receipts: list[dict[str, Any]] = []
             effective_revision = expected_revision
             if enabled:
                 requirements = addons.activation_requirements(
@@ -42498,52 +42603,17 @@ Useful bounded guidance:
                 )
                 if effective_revision is None:
                     effective_revision = int(requirements["campaign_revision"])
-                package = addons.get_package(request["addon_id"], request["version"])
-                embedded = {
-                    (item["kind"], item["id"], item["version"]): item
-                    for item in package["payload"]["components"]
-                }
-                module_policy = str(
-                    dict(requirements["manifest"].get("activation") or {}).get("module_policy")
-                )
-                if module_policy == "campaign":
-                    for component in requirements["components"]:
-                        if component["kind"] != "module_pack":
-                            continue
-                        module_package = embedded[
-                            (
-                                component["kind"],
-                                component["id"],
-                                component["version"],
-                            )
-                        ]
-                        imported_module = import_portable_module_package(
-                            campaign_id,
-                            module_package,
-                            principal_id=principal_id,
-                            idempotency_key=(f"{idempotency_key}:module:{component['checksum']}"),
-                            activate=False,
-                        )
-                        receipts.append(
-                            {
-                                "kind": "module_pack",
-                                "id": component["id"],
-                                "module_id": imported_module["module_id"],
-                            }
-                        )
             activation = addons.set_activation(
                 campaign_id,
                 addon_id=request["addon_id"],
                 version=request["version"],
                 enabled=enabled,
-                component_receipts=receipts,
                 options=request["options"],
                 branch_id=branch_id,
                 expected_campaign_revision=effective_revision,
             )
             response = {
                 "activation": asdict(activation),
-                "module_receipts": receipts,
                 "effective_ruleset": asdict(
                     rule_packs.effective_ruleset(campaign_id, branch_id=branch_id)
                 ),

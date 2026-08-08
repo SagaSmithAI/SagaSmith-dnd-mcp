@@ -216,11 +216,16 @@ Character identity；campaign id、revision、权限与 actor knowledge 不会�
 `artifact_id` 选择卡片。
 
 结构化模组先以 `module_import(action="bind_actor")` 关联 cast、encounter 与
-preset PC，再由 `module_query(view="package")` 导出自包含 module pack。包中保留
-标准化文档、Scene Atlas、内嵌 checksum-bound 资产、审核内容、角色卡和稳定场景
-关联。`module_import(action="import_package")` 在目标 campaign 重新走 Core ingest、
-生成新 actor id 并恢复关联。模组包不是 Snapshot：它不包含 progress、world state、
-memory、actor knowledge、random stream 或 branch DAG。
+preset PC，再由 `module_query(view="package")` 导出唯一受支持的 v2
+`.sagasmith-module` 归档及其可索引 JSON descriptor。descriptor 锁定分类、edition、
+推荐人数/等级/升级方式、连续战役策略、依赖、标准化文档、Scene Atlas、内容目录、
+叙事 dossier/关系/结局、审核内容、角色卡、组件 checksum 与七维 readiness；资产
+字节只存在归档的 `blobs/sha256/`，不再 base64 塞入 JSON。
+`module_import(action="import_package")` 读取托管 artifact 或白名单归档路径，先验证
+全部 descriptor、blob 和精确 rule/module 依赖，在目标 campaign 生成新 actor id 并
+恢复关联，最后才可原子激活；`indexed`/`draft` 包只能导入审核，不能激活。旧
+module-pack v1 和 inline 含资产包直接拒绝，没有兼容路由。模组包不是 Snapshot：它
+不包含 progress、world state、memory、actor knowledge、random stream 或 branch DAG。
 
 扩展规则包通过现有 facade 跨安装迁移：在 Lobby 由 DM 调用
 `rule_pack_query(view="package")` 导出；包内包含 manifest、catalog artifacts、
@@ -263,6 +268,8 @@ OCR 可由清晰能力分数恢复损坏的冗余 modifier，也可在六个分�
 `rule_import(action="inspect_release")` 按完整 envelope checksum 检查组件和本地状态；manifest 本身没有导入、
 安装或启用权限。`metadata.distribution="shareable"` 的规则包必须明确提供 license
 与 attribution；默认导出是 `private`。
+Addon 激活事务不再接收模组 receipts，也不会改变模组 active 状态；模组始终通过
+独立导入、readiness 门禁和自身激活事务处理。
 
 ### Skills、resources 与 prompts
 

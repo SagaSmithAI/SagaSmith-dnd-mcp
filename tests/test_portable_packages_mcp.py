@@ -717,124 +717,37 @@ def test_module_package_round_trip_recreates_cast_bindings(tmp_path: Path) -> No
                 },
             },
         )
-        addon_export = await _call(
-            server,
-            "rule_pack_query",
-            {
-                "view": "addon_package",
-                "payload": {
-                    "campaign_id": source_campaign["id"],
-                    "portable_id": "example.keep.addon",
-                    "version": "1.0.0",
-                    "manifest": {
-                        "id": "example.keep.addon",
-                        "version": "1.0.0",
-                        "system_id": "dnd5e",
-                        "title": "The Keep Addon",
-                        "editions": ["2014"],
-                        "classification": "homebrew",
-                        "content_summary": {"module": 1, "npc": 1},
-                        "activation": {
-                            "rule_policy": "none",
-                            "preset_policy": "none",
-                            "module_policy": "campaign",
-                        },
-                    },
-                    "components": [exported["package"]],
-                    "metadata": {
-                        "distribution": "private",
-                        "license": "user-supplied",
-                    },
-                    "include_package": True,
-                },
-            },
-        )
-        module_addon = addon_export["package"]
-        addon_server = create_server(_config(tmp_path / "module-addon"))
-        addon_campaign = await _call(
-            addon_server,
-            "campaign_create",
-            {
-                "name": "Module addon target",
-                "edition": "2014",
-                "idempotency_key": "campaign",
-            },
-        )
-        addon_imported = await _call(
-            addon_server,
-            "rule_import",
-            {
-                "campaign_id": addon_campaign["id"],
-                "action": "import_addon",
-                "payload": {"addon": module_addon},
-                "idempotency_key": "import-addon",
-            },
-        )
-        assert addon_imported["components"][0]["status"] == ("campaign_import_required")
-        profile = await _call(
-            addon_server,
-            "campaign_rules",
-            {"campaign_id": addon_campaign["id"], "action": "get_profile"},
-        )
-        activated_addon = await _call(
-            addon_server,
-            "campaign_rules",
-            {
-                "campaign_id": addon_campaign["id"],
-                "action": "set_addon",
-                "payload": {
-                    "addon_id": module_addon["id"],
-                    "version": module_addon["version"],
-                },
-                "expected_revision": profile["campaign_revision"],
-                "idempotency_key": "enable-addon",
-            },
-        )
-        module_lock = activated_addon["activation"]["component_locks"][0]
-        assert module_lock["module_id"]
-        addon_modules = await _call(
-            addon_server,
-            "module_query",
-            {"campaign_id": addon_campaign["id"], "view": "list"},
-        )
-        assert len(addon_modules) == 1
-        assert addon_modules[0]["active"] is True
-        addon_campaign_state = await _call(
-            addon_server,
-            "campaign_query",
-            {"view": "get", "payload": {"campaign_id": addon_campaign["id"]}},
-        )
-        disabled_addon = await _call(
-            addon_server,
-            "campaign_rules",
-            {
-                "campaign_id": addon_campaign["id"],
-                "action": "set_addon",
-                "payload": {
-                    "addon_id": module_addon["id"],
-                    "version": module_addon["version"],
-                    "enabled": False,
-                },
-                "expected_revision": addon_campaign_state["revision"],
-                "idempotency_key": "disable-addon",
-            },
-        )
-        assert disabled_addon["activation"]["enabled"] is False
-        addon_modules = await _call(
-            addon_server,
-            "module_query",
-            {"campaign_id": addon_campaign["id"], "view": "list"},
-        )
-        assert addon_modules == []
         target_campaign = await _call(
             server,
             "campaign_create",
             {"name": "Package target", "edition": "2014", "idempotency_key": "target"},
         )
+        with pytest.raises(ValueError, match="payload.activate must be a boolean"):
+            await _call(
+                server,
+                "module_import",
+                {
+                    "campaign_id": target_campaign["id"],
+                    "action": "import_package",
+                    "payload": {"artifact": exported["artifact"], "activate": "false"},
+                    "idempotency_key": "invalid-activation-type",
+                },
+            )
+        with pytest.raises(ValueError, match="only playable or complete"):
+            await _call(
+                server,
+                "module_import",
+                {
+                    "campaign_id": target_campaign["id"],
+                    "action": "import_package",
+                    "payload": {"artifact": exported["artifact"], "activate": True},
+                    "idempotency_key": "blocked-package-import",
+                },
+            )
         import_arguments = {
             "campaign_id": target_campaign["id"],
             "action": "import_package",
-            "payload": {"package": exported["package"]},
+            "payload": {"artifact": exported["artifact"], "activate": False},
             "idempotency_key": "package-import",
         }
         imported = await _call(
@@ -854,6 +767,8 @@ def test_module_package_round_trip_recreates_cast_bindings(tmp_path: Path) -> No
         )
 
         assert exported["summary"]["actors"] == 1
+        assert exported["summary"]["readiness"]["level"] == "indexed"
+        assert imported["activated"] is False
         assert replay["module_id"] == imported["module_id"]
         assert replay["actor_map"] == imported["actor_map"]
         assert len(bindings) == 1

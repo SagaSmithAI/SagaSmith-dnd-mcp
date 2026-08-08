@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import re
@@ -18,7 +17,9 @@ from sagasmith_core import (
     RapidOcrProvider,
     VectorStore,
     create_embedder,
+    dumps_module_archive,
     file_sha256,
+    loads_module_archive,
 )
 from sagasmith_core.database import sqlite_database_url
 from sagasmith_dnd.system import DND5E
@@ -400,6 +401,54 @@ class SagaSmithStorage:
             "version": package.get("version"),
         }
 
+    def write_module_archive(
+        self, package: dict[str, Any], blobs: dict[str, bytes]
+    ) -> dict[str, Any]:
+        """Persist one verified v2 module descriptor and content-addressed blobs."""
+
+        content = dumps_module_archive(package, blobs)
+        checksum = str(package["checksum"])
+        safe_id = re.sub(r"[^A-Za-z0-9._-]+", "-", str(package["id"])).strip("-.")
+        filename = f"{checksum[:12]}-{safe_id}.sagasmith-module"
+        target = (self.config.portable_packages_dir / filename).resolve()
+        if target.parent != self.config.portable_packages_dir.resolve():
+            raise ValueError("invalid module archive artifact name")
+        if not target.exists():
+            target.write_bytes(content)
+        elif hashlib.sha256(target.read_bytes()).hexdigest() != hashlib.sha256(content).hexdigest():
+            raise RuntimeError("managed module archive mismatch")
+        return {
+            "artifact": filename,
+            "checksum": checksum,
+            "archive_checksum": hashlib.sha256(content).hexdigest(),
+            "size": len(content),
+            "kind": "module_pack",
+            "id": package["id"],
+            "version": package["version"],
+        }
+
+    def read_module_archive(
+        self, *, artifact: str | None = None, source_path: str | Path | None = None
+    ) -> tuple[dict[str, Any], dict[str, bytes]]:
+        """Read one managed or allowlisted `.sagasmith-module` archive."""
+
+        if (artifact is None) == (source_path is None):
+            raise ValueError("provide exactly one of artifact or source_path")
+        if artifact is not None:
+            target = (self.config.portable_packages_dir / artifact).resolve()
+            if target.parent != self.config.portable_packages_dir.resolve():
+                raise ValueError("invalid managed module archive artifact")
+        else:
+            target = Path(source_path or "").expanduser().resolve()
+            roots = tuple(path.resolve() for path in self.config.module_import_roots)
+            if not roots or not any(target.is_relative_to(root) for root in roots):
+                raise PermissionError("module archive is outside configured import roots")
+        if not target.is_file() or not target.name.casefold().endswith(".sagasmith-module"):
+            raise LookupError(str(target))
+        if target.stat().st_size > 2 * 1024 * 1024 * 1024:
+            raise ValueError("module archive exceeds the 2 GiB safety limit")
+        return loads_module_archive(target.read_bytes())
+
     def read_portable_package(
         self, *, artifact: str | None = None, source_path: str | Path | None = None
     ) -> dict[str, Any]:
@@ -436,16 +485,12 @@ class SagaSmithStorage:
         return value
 
     def store_portable_module_asset(
-        self, module_id: str, asset: dict[str, Any]
+        self, module_id: str, asset: dict[str, Any], content: bytes
     ) -> str:
-        """Materialize one checksum-verified embedded asset beneath module storage."""
+        """Materialize one checksum-verified archive blob beneath module storage."""
 
         if not re.fullmatch(r"[0-9a-fA-F-]{36}", module_id):
             raise ValueError("invalid module id for portable asset")
-        encoded = asset.get("data_base64")
-        if not isinstance(encoded, str):
-            raise ValueError("portable module asset has no embedded bytes")
-        content = base64.b64decode(encoded, validate=True)
         checksum = hashlib.sha256(content).hexdigest()
         if checksum != asset.get("checksum") or len(content) != asset.get("size"):
             raise ValueError("portable module asset checksum or size mismatch")
