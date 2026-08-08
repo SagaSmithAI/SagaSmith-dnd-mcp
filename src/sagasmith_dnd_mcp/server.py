@@ -42622,6 +42622,7 @@ Useful bounded guidance:
                     "version",
                     "provenance",
                     "bindings",
+                    "image",
                     "metadata",
                     "dependencies",
                 },
@@ -42651,6 +42652,7 @@ Useful bounded guidance:
                 notes=character.notes,
                 provenance=dict(data.get("provenance") or {}),
                 bindings=list(data.get("bindings") or []),
+                image=(dict(data["image"]) if data.get("image") is not None else None),
                 metadata=dict(data.get("metadata") or {}),
                 dependencies=list(data.get("dependencies") or []),
             )
@@ -42664,6 +42666,7 @@ Useful bounded guidance:
                     "revision",
                     "actor_knowledge",
                     "snapshots",
+                    "portable_card_image",
                 ],
             }
         elif view == "batch":
@@ -43304,6 +43307,7 @@ Useful bounded guidance:
                     "checksum": card["checksum"],
                     "provenance": deepcopy(card_payload.get("provenance") or {}),
                     "bindings": deepcopy(card_payload.get("bindings") or []),
+                    "image_retained_by_runtime": False,
                 },
                 "actor_knowledge_imported": False,
             }

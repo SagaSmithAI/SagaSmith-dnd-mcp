@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 import hashlib
 import json
@@ -556,6 +557,20 @@ def test_character_card_export_and_import_uses_fresh_identity(tmp_path: Path) ->
                 "payload": {
                     "character_id": actor["id"],
                     "portable_id": "example.portable-scout",
+                    "image": {
+                        "media_type": "image/png",
+                        "data_base64": base64.b64encode(
+                            b"\x89PNG\r\n\x1a\nportable-scout"
+                        ).decode("ascii"),
+                        "checksum": hashlib.sha256(
+                            b"\x89PNG\r\n\x1a\nportable-scout"
+                        ).hexdigest(),
+                        "size": 22,
+                        "alt": "Portable Scout portrait",
+                        "license": "CC0-1.0",
+                        "attribution": "Test fixture",
+                        "source_ref": "fixture:portable-scout.png",
+                    },
                 },
             },
         )
@@ -573,6 +588,9 @@ def test_character_card_export_and_import_uses_fresh_identity(tmp_path: Path) ->
         assert imported["character"]["campaign_id"] is None
         assert imported["portable_card"]["id"] == "example.portable-scout"
         assert imported["actor_knowledge_imported"] is False
+        assert imported["portable_card"]["image_retained_by_runtime"] is False
+        assert "image" not in imported["character"]
+        assert exported["card"]["payload"]["image"]["license"] == "CC0-1.0"
         assert exported["artifact"]["artifact"].endswith(".sagasmith.json")
         assert "campaign_id" not in exported["card"]["payload"]
         requirement = exported["card"]["payload"]["sheet"]["content"]["features"][0][
