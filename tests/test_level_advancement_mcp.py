@@ -17,6 +17,8 @@ from sagasmith_dnd_mcp.server import (
     create_server,
 )
 
+CORE_ADVANCEMENT_RULE_REF = "bundled:srd2014/03_Characterization/Beyond_1st_Level.md"
+
 
 class _SequenceRng:
     def __init__(self, *values: int) -> None:
@@ -30,10 +32,7 @@ class _SequenceRng:
 
 async def _call(server, name: str, arguments: dict):
     _, result = await server.call_tool(name, arguments)
-    value = result.get("result", result) if isinstance(result, dict) else result
-    if isinstance(value, dict) and "action" in value and "result" in value:
-        return value["result"]
-    return value
+    return result.get("result", result) if isinstance(result, dict) else result
 
 
 def test_all_declared_srd_feature_contracts_are_fail_closed_or_supported() -> None:
@@ -324,7 +323,7 @@ def _land_druid_sheet() -> dict:
     return sheet
 
 
-def test_lobby_resource_sync_removes_legacy_shadow_counter_via_public_facade(
+def test_lobby_resource_sync_preserves_independent_top_level_counter_via_public_facade(
     tmp_path: Path,
 ) -> None:
     workspace = Path(__file__).resolve().parents[2]
@@ -365,12 +364,7 @@ def test_lobby_resource_sync_removes_legacy_shadow_counter_via_public_facade(
         arguments = {
             "character_id": actor["id"],
             "action": "resource_sync",
-            "payload": {
-                "reason": (
-                    "Remove a legacy top-level counter shadowed by the "
-                    "authoritative Bardic Inspiration card uses."
-                )
-            },
+            "payload": {"reason": "Synchronize the Bardic Inspiration card uses."},
             "expected_revision": actor["revision"],
             "idempotency_key": "resource-sync",
         }
@@ -380,9 +374,8 @@ def test_lobby_resource_sync_removes_legacy_shadow_counter_via_public_facade(
 
         assert replay == synchronized
         assert synchronized["status"] == "committed"
-        assert synchronized["changes"][-1]["operation"] == "remove_shadow"
         sheet = synchronized["character"]["sheet"]
-        assert "bardic_inspiration" not in sheet["resources"]
+        assert sheet["resources"]["bardic_inspiration"]["value"] == 3
         bardic = next(
             item
             for item in sheet["content"]["features"]
@@ -1632,17 +1625,17 @@ def test_signature_spells_are_always_prepared_and_use_explicit_free_resources(
 
         cast = await _call(
             server,
-            "character_cast_spell",
+            "character_action",
             {
                 "character_id": actor["id"],
-                "spell_id": spell_ids[0],
-                "cast_level": 3,
-                "signature_free_cast": True,
+                "action": "cast_spell",
+                "payload": {"spell_id": spell_ids[0], "cast_level": 3, "signature_free_cast": True},
+                "principal_id": "system:local",
                 "expected_revision": applied_character["revision"],
                 "idempotency_key": "free-fireball",
             },
         )
-        assert cast["payment"]["economy"] == "signature_spell"
+        assert cast["result"]["payment"]["economy"] == "signature_spell"
         updated = await _call(
             server,
             "character_query",
@@ -1654,12 +1647,16 @@ def test_signature_spells_are_always_prepared_and_use_explicit_free_resources(
         with pytest.raises(Exception, match="free use is unavailable"):
             await _call(
                 server,
-                "character_cast_spell",
+                "character_action",
                 {
                     "character_id": actor["id"],
-                    "spell_id": spell_ids[0],
-                    "cast_level": 3,
-                    "signature_free_cast": True,
+                    "action": "cast_spell",
+                    "payload": {
+                        "spell_id": spell_ids[0],
+                        "cast_level": 3,
+                        "signature_free_cast": True,
+                    },
+                    "principal_id": "system:local",
                     "expected_revision": updated["revision"],
                     "idempotency_key": "free-fireball-again",
                 },
@@ -1856,7 +1853,7 @@ def test_spell_mastery_preserves_existing_preparation_state(
                     "selection": {
                         "spell_artifact_ids": spell_ids[2:],
                         "replace_existing": True,
-                        "study_started_elapsed_minutes": 0,
+                        "study_started_elapsed_ticks": 0,
                     },
                     "expected_revision": applied["revision"],
                     "idempotency_key": "too-early",
@@ -1871,12 +1868,7 @@ def test_spell_mastery_preserves_existing_preparation_state(
                 "payload": {
                     "period": "minute",
                     "count": 480,
-                    "expected_world_time": {
-                        "day": 1,
-                        "hour": 8,
-                        "minute": 0,
-                        "elapsed_minutes": 480,
-                    },
+                    "expected_elapsed_ticks": 4800,
                 },
                 "expected_revision": clock["campaign_revision"],
                 "idempotency_key": "study",
@@ -1891,7 +1883,7 @@ def test_spell_mastery_preserves_existing_preparation_state(
                 "selection": {
                     "spell_artifact_ids": spell_ids[2:],
                     "replace_existing": True,
-                    "study_started_elapsed_minutes": 0,
+                    "study_started_elapsed_ticks": 0,
                 },
                 "expected_revision": applied["revision"],
                 "idempotency_key": "replace",
@@ -2072,7 +2064,7 @@ def test_land_druid_bonus_cantrip_and_non_list_circle_spells_are_materialized(
                     "class_name": "Druid",
                     "hp_method": "fixed",
                     "reason": "milestone",
-                    "source_ref": "module:chapter-2",
+                    "source_ref": CORE_ADVANCEMENT_RULE_REF,
                 },
                 "expected_revision": bonus["revision"],
                 "idempotency_key": "level-3",
@@ -2135,7 +2127,7 @@ def test_ability_score_improvement_is_applied_and_repeats_at_later_unlocks(
                     "class_name": "Fighter",
                     "hp_method": "fixed",
                     "reason": "milestone",
-                    "source_ref": "module:chapter-1",
+                    "source_ref": CORE_ADVANCEMENT_RULE_REF,
                 },
                 "expected_revision": actor["revision"],
                 "idempotency_key": "level-4",
@@ -2182,7 +2174,7 @@ def test_ability_score_improvement_is_applied_and_repeats_at_later_unlocks(
                         "class_name": "Fighter",
                         "hp_method": "fixed",
                         "reason": "milestone",
-                        "source_ref": f"module:chapter-{level - 2}",
+                        "source_ref": CORE_ADVANCEMENT_RULE_REF,
                     },
                     "expected_revision": current["revision"]
                     if "revision" in current
@@ -2299,7 +2291,7 @@ def test_prepared_spell_limit_tracks_spellcasting_ability_score_improvement(
                     "class_name": "Cleric",
                     "hp_method": "fixed",
                     "reason": "milestone",
-                    "source_ref": "module:chapter-1",
+                    "source_ref": CORE_ADVANCEMENT_RULE_REF,
                 },
                 "expected_revision": actor["revision"],
                 "idempotency_key": "level-4",
@@ -2410,7 +2402,7 @@ def test_lobby_level_advance_is_source_bound_and_reports_catalog_follow_up(
             },
         )
         assert plan["follow_up"]["prepared_spell_event"] is None
-        long_source_ref = "module:chapter-1:" + ("indexed-source-" * 25)
+        advancement_source_ref = CORE_ADVANCEMENT_RULE_REF
         arguments = {
             "character_id": actor["id"],
             "action": "level_advance",
@@ -2418,7 +2410,7 @@ def test_lobby_level_advance_is_source_bound_and_reports_catalog_follow_up(
                 "class_name": "Cleric",
                 "hp_method": "fixed",
                 "reason": "survived the opening encounter",
-                "source_ref": long_source_ref,
+                "source_ref": advancement_source_ref,
             },
             "expected_revision": actor["revision"],
             "idempotency_key": "level-2",
@@ -2436,7 +2428,7 @@ def test_lobby_level_advance_is_source_bound_and_reports_catalog_follow_up(
         assert sum(item["value"] for item in sheet["combat"]["hp_progression"]) == 21
         hp_gain = sheet["combat"]["hp_progression"][-1]
         assert hp_gain["source"] == "Cleric level 2"
-        assert hp_gain["source_ref"] == long_source_ref
+        assert hp_gain["source_ref"] == advancement_source_ref
         assert hp_gain["reason"] == "survived the opening encounter"
         assert sheet["spellcasting"]["spell_slots"]["1"]["value"] == 1
         assert sheet["spellcasting"]["spell_slots"]["1"]["max"] == 3
@@ -2567,7 +2559,7 @@ def test_lobby_level_advance_is_source_bound_and_reports_catalog_follow_up(
                             "class_name": "Cleric",
                             "hp_method": "fixed",
                             "reason": f"resource scaling regression level {level}",
-                            "source_ref": f"test:cleric-level-{level}",
+                            "source_ref": CORE_ADVANCEMENT_RULE_REF,
                         },
                         "expected_revision": current_character["revision"],
                         "idempotency_key": f"cleric-level-{level}",
@@ -2612,7 +2604,7 @@ def test_lobby_level_advance_is_source_bound_and_reports_catalog_follow_up(
                         "class_name": "Cleric",
                         "hp_method": "fixed",
                         "reason": "milestone",
-                        "source_ref": "module:test",
+                        "source_ref": CORE_ADVANCEMENT_RULE_REF,
                     },
                     "expected_revision": unresolvable["revision"],
                     "idempotency_key": "unresolvable-level",
@@ -2683,7 +2675,7 @@ def test_level_advance_materializes_new_always_prepared_domain_spells(
                     "class_name": "Cleric",
                     "hp_method": "fixed",
                     "reason": "module milestone",
-                    "source_ref": "module:chapter-1",
+                    "source_ref": CORE_ADVANCEMENT_RULE_REF,
                 },
                 "expected_revision": selected["revision"],
                 "idempotency_key": "level-2",
@@ -2699,7 +2691,7 @@ def test_level_advance_materializes_new_always_prepared_domain_spells(
                     "class_name": "Cleric",
                     "hp_method": "fixed",
                     "reason": "module milestone",
-                    "source_ref": "module:chapter-2",
+                    "source_ref": CORE_ADVANCEMENT_RULE_REF,
                 },
                 "expected_revision": level_two["character"]["revision"],
                 "idempotency_key": "level-3",
@@ -2777,7 +2769,7 @@ def test_rolled_level_hp_is_engine_owned_idempotent_and_revision_safe(
                 "class_name": "Cleric",
                 "hp_method": "rolled",
                 "reason": "milestone",
-                "source_ref": "module:test",
+                "source_ref": CORE_ADVANCEMENT_RULE_REF,
             },
             "expected_revision": actor["revision"],
             "idempotency_key": "rolled-level",
@@ -2817,7 +2809,7 @@ def test_rolled_level_hp_is_engine_owned_idempotent_and_revision_safe(
             )
         assert calls == ["1d8"]
 
-        with pytest.raises(Exception, match="unexpected fields.*hp_roll"):
+        with pytest.raises(Exception, match="unsupported .* payload fields: hp_roll"):
             await _call(
                 server,
                 "character_state_change",
@@ -2888,7 +2880,7 @@ def test_level_advance_is_rejected_outside_lobby(tmp_path: Path) -> None:
                         "class_name": "Cleric",
                         "hp_method": "fixed",
                         "reason": "milestone",
-                        "source_ref": "module:test",
+                        "source_ref": CORE_ADVANCEMENT_RULE_REF,
                     },
                     "expected_revision": actor["revision"],
                     "idempotency_key": "level",
@@ -2937,7 +2929,7 @@ def test_xp_mode_awards_atomically_and_enforces_level_threshold(tmp_path: Path) 
             },
         )
 
-        exact_source_ref = '{"chunk_id":"' + ("a" * 400) + '","page_start":7}'
+        exact_source_ref = CORE_ADVANCEMENT_RULE_REF
         first_arguments = {
             "campaign_id": campaign["id"],
             "action": "experience_award",
@@ -2973,7 +2965,7 @@ def test_xp_mode_awards_atomically_and_enforces_level_threshold(tmp_path: Path) 
                         "class_name": "Cleric",
                         "hp_method": "fixed",
                         "reason": "premature",
-                        "source_ref": "module:test",
+                        "source_ref": CORE_ADVANCEMENT_RULE_REF,
                     },
                     "expected_revision": first["awards"][0]["character"]["revision"],
                     "idempotency_key": "premature-level",
@@ -2995,7 +2987,7 @@ def test_xp_mode_awards_atomically_and_enforces_level_threshold(tmp_path: Path) 
                         }
                     ],
                     "reason": "completed the objective",
-                    "source_ref": "module:test#objective-1",
+                    "source_ref": CORE_ADVANCEMENT_RULE_REF,
                 },
                 "expected_revision": first["campaign"]["revision"],
                 "idempotency_key": "xp-1",
@@ -3016,7 +3008,7 @@ def test_xp_mode_awards_atomically_and_enforces_level_threshold(tmp_path: Path) 
                     "class_name": "Cleric",
                     "hp_method": "fixed",
                     "reason": "reached 300 XP",
-                    "source_ref": "module:test#objective-1",
+                    "source_ref": CORE_ADVANCEMENT_RULE_REF,
                 },
                 "expected_revision": recipient["character"]["revision"],
                 "idempotency_key": "level-2",

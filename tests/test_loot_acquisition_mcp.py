@@ -48,10 +48,11 @@ def test_source_bound_loot_is_atomic_idempotent_and_branch_audited(tmp_path: Pat
         )
         character = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Tribute owner",
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Tribute owner"},
+                "principal_id": "system:local",
                 "idempotency_key": "tribute-owner",
             },
         )
@@ -227,9 +228,7 @@ def test_source_bound_loot_is_atomic_idempotent_and_branch_audited(tmp_path: Pat
             "jade-frog",
         ]
         assert acquired["campaign"]["revision"] == play["campaign_revision"] + 1
-        assert acquired["campaign"]["state"]["loot_acquisitions"][0]["id"] == (
-            "chapter-one-chest"
-        )
+        assert acquired["campaign"]["state"]["loot_acquisitions"][0]["id"] == ("chapter-one-chest")
         with pytest.raises(Exception, match="acquisition_id already exists"):
             await _call(
                 server,
@@ -333,9 +332,7 @@ def test_source_bound_loot_is_atomic_idempotent_and_branch_audited(tmp_path: Pat
             "campaign_query",
             {"view": "party", "payload": {"campaign_id": campaign["id"]}},
         )
-        assert any(
-            item["id"] == "jade-frog" for item in unchanged["inventory"]["items"]
-        )
+        assert any(item["id"] == "jade-frog" for item in unchanged["inventory"]["items"])
         item_spent = await _call(server, "campaign_change", item_spend_arguments)
         item_spend_replay = await _call(
             server,
@@ -349,10 +346,7 @@ def test_source_bound_loot_is_atomic_idempotent_and_branch_audited(tmp_path: Pat
         assert item_spend_replay == item_spent
         assert item_spent["status"] == "committed"
         assert item_spent["removed"]["id"] == "jade-frog"
-        assert all(
-            item["id"] != "jade-frog"
-            for item in item_spent["party"]["inventory"]["items"]
-        )
+        assert all(item["id"] != "jade-frog" for item in item_spent["party"]["inventory"]["items"])
         assert item_spent["campaign"]["state"]["item_spends"] == [
             {
                 "id": "offer-jade-frog",

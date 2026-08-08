@@ -185,9 +185,7 @@ def test_manifest_recovery_revalidates_imported_modules_and_reviewed_templates()
         campaign_line_id="storm-kings-thunder",
     )
 
-    assert [item["module_id"] for item in recovered["module_documents"]] == [
-        "module-1"
-    ]
+    assert [item["module_id"] for item in recovered["module_documents"]] == ["module-1"]
     assert recovered["review_blocks"] == []
 
 
@@ -606,8 +604,7 @@ def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None
     assert len(client.progress_calls) == 2
     assert client.progress_calls[-1]["status"] == "current"
     assert (
-        client.progress_calls[-1]["idempotency_key"]
-        != client.progress_calls[0]["idempotency_key"]
+        client.progress_calls[-1]["idempotency_key"] != client.progress_calls[0]["idempotency_key"]
     )
 
     client.manifest["world_state"]["visit_marker"] = 2
@@ -641,14 +638,8 @@ def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None
     transition_ruling = {
         "default_resolver": "agent",
         "ruling_kind": "agent_dm_adjudication",
-        "decision": (
-            "The survivors take the established road from the current "
-            "scene to Town."
-        ),
-        "reason": (
-            "The cited source establishes the destination but not the "
-            "descriptive route."
-        ),
+        "decision": ("The survivors take the established road from the current scene to Town."),
+        "reason": ("The cited source establishes the destination but not the descriptive route."),
     }
     client.manifest["current"]["scene_id"] = "scene-old"
     asyncio.run(
@@ -1058,11 +1049,7 @@ def test_core_relock_driver_skips_current_runtime_without_snapshot_or_sync() -> 
             assert tool_id == "campaign_rules"
             assert arguments["action"] == "get_profile"
             return {
-                "profile": {
-                    "options": {
-                        "_core_rule_pack_lock": {"fingerprint": "current-core"}
-                    }
-                },
+                "profile": {"options": {"_core_rule_pack_lock": {"fingerprint": "current-core"}}},
                 "available_core_pack": {
                     "id": "dnd5e.core.2014",
                     "fingerprint": "current-core",
@@ -3362,10 +3349,7 @@ def test_healing_spell_driver_pays_rolls_and_applies_public_healing(
         "committed": True,
     }
     assert result["agent_ruling"] == expected_ruling
-    assert (
-        client.continuity_payload["event"]["payload"]["agent_ruling"]
-        == expected_ruling
-    )
+    assert client.continuity_payload["event"]["payload"]["agent_ruling"] == expected_ruling
 
 
 def test_healing_spell_driver_returns_precommit_ruling_before_rolling() -> None:
@@ -7380,16 +7364,16 @@ def test_knowledge_recipient_preflight_covers_every_mutating_driver_action() -> 
     assert regression_playthrough._knowledge_preflight_actor_ids(event) == ["event-actor"]
     assert regression_playthrough._knowledge_preflight_actor_ids(unrelated) == []
     assert {
-            "register-replacement",
-            "resolve-check",
-            "resolve-group-check",
-            "resolve-contest",
+        "register-replacement",
+        "resolve-check",
+        "resolve-group-check",
+        "resolve-contest",
         "apply-damage",
         "initialize-source-state",
-            "stand-up",
-            "use-activity",
-            "cast-spell",
-            "cast-source-spell",
+        "stand-up",
+        "use-activity",
+        "cast-spell",
+        "cast-source-spell",
         "cast-healing-spell",
         "advance-time",
         "recover-stable",
@@ -8074,6 +8058,11 @@ def test_time_advance_commits_evidence_clock_knowledge_and_snapshot(
     class Client:
         def __init__(self) -> None:
             self.revision = 4
+            self.game_time = {
+                "schema_version": 1,
+                "tick_seconds": 6,
+                "elapsed_ticks": 16800,
+            }
             self.world_time = {
                 "day": 2,
                 "hour": 4,
@@ -8090,6 +8079,7 @@ def test_time_advance_commits_evidence_clock_knowledge_and_snapshot(
                     "revision": self.revision,
                     "state": {
                         "game_phase": "play",
+                        "game_time": deepcopy(self.game_time),
                         "world_time": deepcopy(self.world_time),
                     },
                 }
@@ -8114,12 +8104,7 @@ def test_time_advance_commits_evidence_clock_knowledge_and_snapshot(
                 assert arguments["payload"] == {
                     "period": "hour",
                     "count": 13,
-                    "expected_world_time": {
-                        "day": 2,
-                        "hour": 17,
-                        "minute": 0,
-                        "elapsed_minutes": 2460,
-                    },
+                    "expected_elapsed_ticks": 24600,
                 }
                 self.world_time = {
                     "day": 2,
@@ -8128,8 +8113,13 @@ def test_time_advance_commits_evidence_clock_knowledge_and_snapshot(
                     "elapsed_minutes": 2460,
                     "label": "Trail",
                 }
+                self.game_time = {
+                    **self.game_time,
+                    "elapsed_ticks": 24600,
+                }
                 self.revision += 1
                 return {
+                    "game_time": deepcopy(self.game_time),
                     "world_time": deepcopy(self.world_time),
                     "campaign_revision": self.revision,
                 }
@@ -8190,6 +8180,7 @@ def test_time_advance_commits_evidence_clock_knowledge_and_snapshot(
             agent_ruling=None if evidence_mode == "source" else agent_ruling,
             knowledge_actor_ids=["actor-1", "npc-1"],
             defer_checkpoint=defer_checkpoint,
+            expected_after_ticks=24600,
             expected_after={
                 "day": 2,
                 "hour": 17,
@@ -8235,6 +8226,11 @@ def test_time_advance_recovers_clock_response_without_advancing_twice() -> None:
                     "revision": self.revision,
                     "state": {
                         "game_phase": "play",
+                        "game_time": {
+                            "schema_version": 1,
+                            "tick_seconds": 6,
+                            "elapsed_ticks": 24600,
+                        },
                         # The first attempt committed this exact clock target,
                         # then lost its response before continuity was written.
                         "world_time": {
@@ -8263,16 +8259,16 @@ def test_time_advance_recovers_clock_response_without_advancing_twice() -> None:
                 assert arguments["payload"] == {
                     "period": "hour",
                     "count": 13,
-                    "expected_world_time": {
-                        "day": 2,
-                        "hour": 17,
-                        "minute": 0,
-                        "elapsed_minutes": 2460,
-                    },
+                    "expected_elapsed_ticks": 24600,
                 }
                 # Public idempotency replays the original response. It does not
                 # execute a second 13-hour advance.
                 return {
+                    "game_time": {
+                        "schema_version": 1,
+                        "tick_seconds": 6,
+                        "elapsed_ticks": 24600,
+                    },
                     "world_time": {
                         "day": 2,
                         "hour": 17,
@@ -8314,6 +8310,7 @@ def test_time_advance_recovers_clock_response_without_advancing_twice() -> None:
             agent_ruling=None,
             knowledge_actor_ids=[],
             defer_checkpoint=True,
+            expected_after_ticks=24600,
             expected_after={
                 "day": 2,
                 "hour": 17,
@@ -8352,6 +8349,11 @@ def test_time_advance_recovery_binds_continuity_to_original_clock_revision() -> 
                     "revision": self.revision,
                     "state": {
                         "game_phase": "play",
+                        "game_time": {
+                            "schema_version": 1,
+                            "tick_seconds": 6,
+                            "elapsed_ticks": 24600,
+                        },
                         "world_time": {
                             "day": 2,
                             "hour": 17,
@@ -8374,6 +8376,11 @@ def test_time_advance_recovery_binds_continuity_to_original_clock_revision() -> 
                 return [{"id": "branch-1", "is_current": True}]
             if tool_id == "campaign_change":
                 return {
+                    "game_time": {
+                        "schema_version": 1,
+                        "tick_seconds": 6,
+                        "elapsed_ticks": 24600,
+                    },
                     "world_time": {
                         "day": 2,
                         "hour": 17,
@@ -8405,6 +8412,7 @@ def test_time_advance_recovery_binds_continuity_to_original_clock_revision() -> 
                 agent_ruling=None,
                 knowledge_actor_ids=[],
                 defer_checkpoint=True,
+                expected_after_ticks=24600,
                 expected_after={
                     "day": 2,
                     "hour": 17,
@@ -8431,12 +8439,7 @@ def test_time_advance_recovers_a_committed_clock_without_a_rich_response() -> No
         "period": "hour",
         "count": 13,
         "branch_id": branch_id,
-        "expected_world_time": {
-            "day": 2,
-            "hour": 17,
-            "minute": 0,
-            "elapsed_minutes": 2460,
-        },
+        "expected_elapsed_ticks": 24600,
     }
 
     class Client:
@@ -8450,6 +8453,11 @@ def test_time_advance_recovers_a_committed_clock_without_a_rich_response() -> No
                     "revision": self.revision,
                     "state": {
                         "game_phase": "play",
+                        "game_time": {
+                            "schema_version": 1,
+                            "tick_seconds": 6,
+                            "elapsed_ticks": 24600,
+                        },
                         "world_time": {
                             "day": 2,
                             "hour": 17,
@@ -8531,6 +8539,7 @@ def test_time_advance_recovers_a_committed_clock_without_a_rich_response() -> No
             agent_ruling=None,
             knowledge_actor_ids=[],
             defer_checkpoint=True,
+            expected_after_ticks=24600,
             expected_after={
                 "day": 2,
                 "hour": 17,
@@ -8923,6 +8932,11 @@ def test_long_rest_rejects_wrong_start_clock_before_campaign_mutation() -> None:
                     "revision": 4,
                     "state": {
                         "game_phase": "play",
+                        "game_time": {
+                            "schema_version": 1,
+                            "tick_seconds": 6,
+                            "elapsed_ticks": 14400,
+                        },
                         "world_time": {
                             "day": 2,
                             "hour": 0,
@@ -9032,6 +9046,11 @@ def test_time_advance_rejects_wrong_road_calendar_delta_before_clock_write() -> 
                     "revision": 10,
                     "state": {
                         "game_phase": "play",
+                        "game_time": {
+                            "schema_version": 1,
+                            "tick_seconds": 6,
+                            "elapsed_ticks": 634230,
+                        },
                         "world_time": {
                             "day": 45,
                             "hour": 1,
@@ -9053,7 +9072,7 @@ def test_time_advance_rejects_wrong_road_calendar_delta_before_clock_write() -> 
             raise AssertionError((tool_id, arguments))
 
     client = Client()
-    with pytest.raises(ValueError, match="does not reach expected target"):
+    with pytest.raises(ValueError, match="does not reach expected tick target"):
         asyncio.run(
             _advance_time(
                 client,
@@ -9076,6 +9095,7 @@ def test_time_advance_rejects_wrong_road_calendar_delta_before_clock_write() -> 
                     "count": 13197,
                 },
                 knowledge_actor_ids=[],
+                expected_after_ticks=781800,
                 expected_after={
                     "day": 55,
                     "hour": 7,
@@ -10722,7 +10742,6 @@ def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint(
     else:
         assert result["checkpoint"]["verification"]["valid"] is True
 
-
     assert result["scene"]["source_scene_id"] == "source-scene-1"
     assert result["scene"]["agent_ruling"]["committed"] is True
     assert client.continuity_payload["event"]["payload"]["source_scene_id"] == ("source-scene-1")
@@ -11183,8 +11202,6 @@ def test_start_play_uses_public_quality_gate_phase_and_scene_tools() -> None:
     assert client.manifest["traversal"]["visited_scene_ids"] == ["scene-1"]
     assert any(name == "game_phase" for name, _ in client.calls)
     progress_call = next(
-        arguments
-        for name, arguments in client.calls
-        if name == "module_set_progress"
+        arguments for name, arguments in client.calls if name == "module_set_progress"
     )
     assert progress_call["status"] == "current"

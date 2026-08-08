@@ -47,6 +47,8 @@ async def _call(server, name: str, arguments: dict):
 
 async def _raw(server, name: str, arguments: dict):
     _, result = await server.call_tool(name, arguments)
+    if name in {"combat_movement", "combat_hp_change"}:
+        return result["result"]
     return result
 
 
@@ -134,8 +136,7 @@ def _hypnotic_pattern() -> dict:
                 ),
             },
             "effect": (
-                "Each creature in the area who sees the pattern must make "
-                "a Wisdom saving throw."
+                "Each creature in the area who sees the pattern must make a Wisdom saving throw."
             ),
         },
         "mechanic_refs": [CORE_HYPNOTIC_PATTERN_MECHANIC_ID],
@@ -168,16 +169,12 @@ def _fly() -> dict:
                 "material": True,
                 "material_description": "a wing feather from any bird",
             },
-            "effect": (
-                "The target gains a flying speed of 60 feet for the duration."
-            ),
+            "effect": ("The target gains a flying speed of 60 feet for the duration."),
         },
         "mechanic_refs": [CORE_FLY_MECHANIC_ID],
         "pack_id": "dnd5e.content.srd2014",
         "pack_version": "1.16.0",
-        "rule_refs": [
-            "bundled:srd2014/07_Spells/Spells_Each/Fly.md"
-        ],
+        "rule_refs": ["bundled:srd2014/07_Spells/Spells_Each/Fly.md"],
     }
 
 
@@ -216,9 +213,7 @@ def _invisibility() -> dict:
         "mechanic_refs": [CORE_INVISIBILITY_MECHANIC_ID],
         "pack_id": "dnd5e.content.srd2014",
         "pack_version": "1.18.0",
-        "rule_refs": [
-            "bundled:srd2014/07_Spells/Spells_Each/Invisibility.md"
-        ],
+        "rule_refs": ["bundled:srd2014/07_Spells/Spells_Each/Invisibility.md"],
     }
 
 
@@ -263,16 +258,20 @@ async def _campaign_with_combat(
         actors.append(
             await _call(
                 server,
-                "character_create",
+                "character_create_from",
                 {
-                    "campaign_id": campaign["id"],
-                    "name": name,
-                    "sheet": sheet,
+                    "mode": "direct",
+                    "payload": {"campaign_id": campaign["id"], "name": name, "sheet": sheet},
+                    "principal_id": "system:local",
                     "idempotency_key": f"actor-{index}",
                 },
             )
         )
-    refreshed = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+    refreshed = await _call(
+        server,
+        "campaign_query",
+        {"view": "get", "payload": {"campaign_id": campaign["id"]}, "principal_id": "system:local"},
+    )
     phase = await _call(
         server,
         "game_phase",
@@ -358,19 +357,42 @@ def test_healing_word_cast_roll_and_feature_bonus_commit_once(tmp_path: Path, mo
         assert result["result"]["kind"] == "healing"
         assert result["result"]["healing"]["bonus_amount"] == 3
         assert result["combat"]["combatants"][0]["turn_budget"]["bonus_action"] == 0
-        caster_after = await _call(server, "character_get", {"character_id": actors[0]["id"]})
-        target_after = await _call(server, "character_get", {"character_id": actors[1]["id"]})
+        caster_after = await _call(
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": actors[0]["id"]},
+                "principal_id": "system:local",
+            },
+        )
+        target_after = await _call(
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": actors[1]["id"]},
+                "principal_id": "system:local",
+            },
+        )
         assert caster_after["sheet"]["spellcasting"]["spell_slots"]["1"]["value"] == 0
         assert target_after["sheet"]["combat"]["hp"]["value"] > 1
 
         replay = await _raw(server, "combat_cast_spell", arguments)
         assert replay["campaign_revision"] == result["campaign_revision"]
         target_replayed = await _call(
-            server, "character_get", {"character_id": actors[1]["id"]}
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": actors[1]["id"]},
+                "principal_id": "system:local",
+            },
         )
-        assert target_replayed["sheet"]["combat"]["hp"]["value"] == target_after["sheet"][
-            "combat"
-        ]["hp"]["value"]
+        assert (
+            target_replayed["sheet"]["combat"]["hp"]["value"]
+            == target_after["sheet"]["combat"]["hp"]["value"]
+        )
 
     asyncio.run(exercise())
 
@@ -457,7 +479,15 @@ def test_scorching_ray_cast_locks_then_settles_each_source_bound_attack(
             item.get("kind") == "spell_attack_resolution"
             for item in settled["combat"].get("pending", [])
         )
-        caster_after = await _call(server, "character_get", {"character_id": actors[0]["id"]})
+        caster_after = await _call(
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": actors[0]["id"]},
+                "principal_id": "system:local",
+            },
+        )
         assert caster_after["sheet"]["spellcasting"]["spell_slots"]["2"]["value"] == 0
 
     asyncio.run(exercise())
@@ -568,9 +598,7 @@ def test_witch_bolt_hard_runtime_tethers_sustains_and_breaks_on_range(
                 "campaign_id": campaign_id,
                 "actor_id": actors[0]["id"],
                 "target_id": actors[1]["id"],
-                "action": {
-                    "spell_resolution_id": cast["result"]["resolution_id"]
-                },
+                "action": {"spell_resolution_id": cast["result"]["resolution_id"]},
                 "expected_revision": cast["campaign_revision"],
                 "idempotency_key": "witch-bolt-hit",
             },
@@ -582,8 +610,12 @@ def test_witch_bolt_hard_runtime_tethers_sustains_and_breaks_on_range(
         assert tether["repeat_damage"] == "1d12"
         caster_after_hit = await _call(
             server,
-            "character_get",
-            {"character_id": actors[0]["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": actors[0]["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert any(
             item.get("active")
@@ -614,8 +646,12 @@ def test_witch_bolt_hard_runtime_tethers_sustains_and_breaks_on_range(
         )
         target_before = await _call(
             server,
-            "character_get",
-            {"character_id": actors[1]["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": actors[1]["id"]},
+                "principal_id": "system:local",
+            },
         )
         sustained = await _raw(
             server,
@@ -643,8 +679,12 @@ def test_witch_bolt_hard_runtime_tethers_sustains_and_breaks_on_range(
         assert sustained["result"]["damage_roll"]["expression"] == "1d12"
         target_after = await _call(
             server,
-            "character_get",
-            {"character_id": actors[1]["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": actors[1]["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert (
             target_after["sheet"]["combat"]["hp"]["value"]
@@ -663,12 +703,13 @@ def test_witch_bolt_hard_runtime_tethers_sustains_and_breaks_on_range(
         )
         moved = await _raw(
             server,
-            "combat_move",
+            "combat_movement",
             {
                 "campaign_id": campaign_id,
                 "actor_id": actors[1]["id"],
-                "distance": 15,
-                "destination": {"x": 7, "y": 0},
+                "action": "move",
+                "payload": {"distance": 15, "destination": {"x": 7, "y": 0}},
+                "principal_id": "system:local",
                 "expected_revision": next_turn["campaign_revision"],
                 "idempotency_key": "witch-target-out-of-range",
             },
@@ -676,8 +717,12 @@ def test_witch_bolt_hard_runtime_tethers_sustains_and_breaks_on_range(
         assert moved["ended_witch_bolt_tether_ids"] == [tether["id"]]
         caster_after_move = await _call(
             server,
-            "character_get",
-            {"character_id": actors[0]["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": actors[0]["id"]},
+                "principal_id": "system:local",
+            },
         )
         concentration = next(
             item
@@ -721,13 +766,15 @@ def test_blade_ward_cast_uses_hard_standard_mechanic_without_agent_fill(
         assert "semantic_solution" not in cast["result"]
         actor = await _call(
             server,
-            "character_get",
-            {"character_id": actors[0]["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": actors[0]["id"]},
+                "principal_id": "system:local",
+            },
         )
         effect = next(
-            item
-            for item in actor["sheet"]["effects"]
-            if item["id"] == cast["result"]["effect_id"]
+            item for item in actor["sheet"]["effects"] if item["id"] == cast["result"]["effect_id"]
         )
         assert effect["active"] is True
         assert effect["concentration"] is False
@@ -766,21 +813,25 @@ def test_noncombat_fly_commits_willing_targets_and_reconciles_replacement(
         caster_sheet["content"]["spells"] = [_fly()]
         caster = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Caster",
-                "sheet": caster_sheet,
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Caster", "sheet": caster_sheet},
+                "principal_id": "system:local",
                 "idempotency_key": "fly-caster",
             },
         )
         target = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Target",
-                "sheet": default_character_sheet(),
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Target",
+                    "sheet": default_character_sheet(),
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "fly-target",
             },
         )
@@ -804,21 +855,26 @@ def test_noncombat_fly_commits_willing_targets_and_reconciles_replacement(
         assert first["status"] == "committed"
         assert first["result"]["automatic_effect"] == "fly"
         assert first["result"]["target_ids"] == [target["id"]]
-        assert (
-            await _call(server, "character_action", first_arguments)
-            == first
-        )
+        assert await _call(server, "character_action", first_arguments) == first
         target_flying = await _call(
             server,
-            "character_get",
-            {"character_id": target["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": target["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert target_flying["derived"]["speed"]["fly"] == 60
 
         caster_after = await _call(
             server,
-            "character_get",
-            {"character_id": caster["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": caster["id"]},
+                "principal_id": "system:local",
+            },
         )
         second = await _call(
             server,
@@ -839,13 +895,21 @@ def test_noncombat_fly_commits_willing_targets_and_reconciles_replacement(
         assert second["status"] == "committed"
         target_grounded = await _call(
             server,
-            "character_get",
-            {"character_id": target["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": target["id"]},
+                "principal_id": "system:local",
+            },
         )
         caster_flying = await _call(
             server,
-            "character_get",
-            {"character_id": caster["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": caster["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert target_grounded["derived"]["speed"]["fly"] == 0
         assert caster_flying["derived"]["speed"]["fly"] == 60
@@ -896,13 +960,15 @@ def test_combat_fly_uses_touch_range_and_encounter_dependency(
         assert cast["status"] == "committed"
         assert cast["result"]["kind"] == "fly"
         assert cast["result"]["targets"][0]["flying_speed_ft"] == 60
-        assert cast["combat"]["dependent_effects"][0][
-            "mechanic_id"
-        ] == CORE_FLY_MECHANIC_ID
+        assert cast["combat"]["dependent_effects"][0]["mechanic_id"] == CORE_FLY_MECHANIC_ID
         target = await _call(
             server,
-            "character_get",
-            {"character_id": actors[1]["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": actors[1]["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert target["derived"]["speed"]["fly"] == 60
 
@@ -939,21 +1005,25 @@ def test_noncombat_invisibility_commits_targets_and_reconciles_replacement(
         caster_sheet["content"]["spells"] = [_invisibility()]
         caster = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Caster",
-                "sheet": caster_sheet,
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Caster", "sheet": caster_sheet},
+                "principal_id": "system:local",
                 "idempotency_key": "invisibility-caster",
             },
         )
         target = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Target",
-                "sheet": default_character_sheet(),
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Target",
+                    "sheet": default_character_sheet(),
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "invisibility-target",
             },
         )
@@ -976,15 +1046,23 @@ def test_noncombat_invisibility_commits_targets_and_reconciles_replacement(
         assert await _call(server, "character_action", arguments) == first
         target_invisible = await _call(
             server,
-            "character_get",
-            {"character_id": target["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": target["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert "invisible" in target_invisible["sheet"]["conditions"]
 
         caster_after = await _call(
             server,
-            "character_get",
-            {"character_id": caster["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": caster["id"]},
+                "principal_id": "system:local",
+            },
         )
         second = await _call(
             server,
@@ -1005,13 +1083,21 @@ def test_noncombat_invisibility_commits_targets_and_reconciles_replacement(
         assert second["status"] == "committed"
         target_visible = await _call(
             server,
-            "character_get",
-            {"character_id": target["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": target["id"]},
+                "principal_id": "system:local",
+            },
         )
         caster_invisible = await _call(
             server,
-            "character_get",
-            {"character_id": caster["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": caster["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert "invisible" not in target_visible["sheet"]["conditions"]
         assert "invisible" in caster_invisible["sheet"]["conditions"]
@@ -1061,13 +1147,17 @@ def test_combat_invisibility_uses_touch_range_and_encounter_dependency(
         assert cast["status"] == "committed"
         assert cast["result"]["kind"] == "invisibility"
         assert cast["result"]["targets"][0]["condition"] == "invisible"
-        assert cast["combat"]["dependent_effects"][0][
-            "mechanic_id"
-        ] == CORE_INVISIBILITY_MECHANIC_ID
+        assert (
+            cast["combat"]["dependent_effects"][0]["mechanic_id"] == CORE_INVISIBILITY_MECHANIC_ID
+        )
         target = await _call(
             server,
-            "character_get",
-            {"character_id": actors[1]["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": actors[1]["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert "invisible" in target["sheet"]["conditions"]
 
@@ -1117,9 +1207,7 @@ def test_witch_bolt_stale_tether_ends_without_spending_action(
                 "campaign_id": campaign_id,
                 "actor_id": actors[0]["id"],
                 "target_id": actors[1]["id"],
-                "action": {
-                    "spell_resolution_id": cast["result"]["resolution_id"]
-                },
+                "action": {"spell_resolution_id": cast["result"]["resolution_id"]},
                 "expected_revision": cast["campaign_revision"],
                 "idempotency_key": "stale-witch-hit",
             },
@@ -1127,19 +1215,19 @@ def test_witch_bolt_stale_tether_ends_without_spending_action(
         tether = resolved["result"]["witch_bolt"]["effect"]
         damaged = await _raw(
             server,
-            "combat_apply_damage",
+            "combat_hp_change",
             {
                 "campaign_id": campaign_id,
                 "target_id": actors[0]["id"],
-                "parts": [{"amount": 60, "damage_type": "force"}],
+                "action": "damage",
+                "payload": {"parts": [{"amount": 60, "damage_type": "force"}]},
+                "principal_id": "system:local",
                 "expected_revision": resolved["campaign_revision"],
                 "idempotency_key": "damage-witch-concentration",
             },
         )
         concentration = next(
-            item
-            for item in damaged["combat"]["pending"]
-            if item["kind"] == "concentration"
+            item for item in damaged["combat"]["pending"] if item["kind"] == "concentration"
         )
         checked = await _raw(
             server,
@@ -1252,7 +1340,15 @@ def test_scorching_ray_reuses_shield_reaction_before_each_damage_roll(
         assert defense_result["hit"] is False
         assert defense_result["damage"] is None
         assert defense_result["spell_resolution"]["remaining_attacks"] == 2
-        target_after = await _call(server, "character_get", {"character_id": actors[1]["id"]})
+        target_after = await _call(
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": actors[1]["id"]},
+                "principal_id": "system:local",
+            },
+        )
         assert target_after["sheet"]["spellcasting"]["spell_slots"]["1"]["value"] == 0
         assert any(
             effect["active"] and effect["kind"] == "spell_shield"
@@ -1262,9 +1358,7 @@ def test_scorching_ray_reuses_shield_reaction_before_each_damage_roll(
     asyncio.run(exercise())
 
 
-def test_fireball_settles_saves_and_area_enumeration(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_fireball_settles_saves_and_area_enumeration(tmp_path: Path, monkeypatch) -> None:
     _deterministic_rolls(monkeypatch)
 
     async def exercise() -> None:
@@ -1366,7 +1460,13 @@ def test_fireball_settles_saves_and_area_enumeration(
                 },
             )
         unchanged = await _call(
-            server, "character_get", {"character_id": actors[0]["id"]}
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": actors[0]["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert unchanged["sheet"]["spellcasting"]["spell_slots"]["3"]["value"] == 1
         result = await _raw(
@@ -1392,15 +1492,13 @@ def test_fireball_settles_saves_and_area_enumeration(
         assert result["result"]["area"]["radius_ft"] == 20
         assert result["result"]["damage_roll"]["expression"] == "8d6"
         trait_target = next(
-            item
-            for item in result["result"]["targets"]
-            if item["target_id"] == actors[1]["id"]
+            item for item in result["result"]["targets"] if item["target_id"] == actors[1]["id"]
         )
         assert trait_target["damage_reduction"] in {"none", "half"}
         assert trait_target["save"]["rule_receipts"] == []
-        assert [
-            receipt["mechanic_id"] for receipt in trait_target["rule_receipts"]
-        ] == ["dnd5e.core.save.evasion"]
+        assert [receipt["mechanic_id"] for receipt in trait_target["rule_receipts"]] == [
+            "dnd5e.core.save.evasion"
+        ]
         assert result["combat"]["combatants"][0]["turn_budget"]["main_action"] == 0
 
     asyncio.run(exercise())
@@ -1569,9 +1667,7 @@ def test_hypnotic_pattern_hard_settles_cube_saves_and_every_end_condition(
         assert cast["status"] == "committed"
         assert cast["result"]["kind"] == "hypnotic_pattern"
         assert cast["result"]["save_dc"] == 20
-        results = {
-            item["target_id"]: item for item in cast["result"]["targets"]
-        }
+        results = {item["target_id"]: item for item in cast["result"]["targets"]}
         assert set(results) == {
             actors[1]["id"],
             actors[2]["id"],
@@ -1579,24 +1675,21 @@ def test_hypnotic_pattern_hard_settles_cube_saves_and_every_end_condition(
         }
         assert results[actors[1]["id"]]["outcome"] == "affected"
         assert results[actors[2]["id"]]["outcome"] == "affected"
-        assert (
-            results[actors[3]["id"]]["outcome"]
-            == "did_not_see_pattern"
-        )
+        assert results[actors[3]["id"]]["outcome"] == "did_not_see_pattern"
         assert results[actors[3]["id"]]["save"] is None
 
         first_card = await _call(
             server,
-            "character_get",
-            {"character_id": actors[1]["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": actors[1]["id"]},
+                "principal_id": "system:local",
+            },
         )
-        assert {"charmed", "incapacitated"} <= set(
-            first_card["sheet"]["conditions"]
-        )
+        assert {"charmed", "incapacitated"} <= set(first_card["sheet"]["conditions"])
         first_combatant = next(
-            item
-            for item in cast["combat"]["combatants"]
-            if item["actor_id"] == actors[1]["id"]
+            item for item in cast["combat"]["combatants"] if item["actor_id"] == actors[1]["id"]
         )
         assert first_combatant["speed_multiplier"] == 0.0
 
@@ -1627,43 +1720,52 @@ def test_hypnotic_pattern_hard_settles_cube_saves_and_every_end_condition(
         assert shaken["condition_resolution"]["ended_reason"] == "shaken_awake"
         first_card = await _call(
             server,
-            "character_get",
-            {"character_id": actors[1]["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": actors[1]["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert "charmed" not in first_card["sheet"]["conditions"]
         assert "incapacitated" not in first_card["sheet"]["conditions"]
 
         damaged = await _raw(
             server,
-            "combat_apply_damage",
+            "combat_hp_change",
             {
                 "campaign_id": campaign_id,
                 "target_id": actors[0]["id"],
-                "parts": [{"amount": 100, "damage_type": "force"}],
+                "action": "damage",
+                "payload": {"parts": [{"amount": 100, "damage_type": "force"}]},
+                "principal_id": "system:local",
                 "expected_revision": shaken["campaign_revision"],
                 "idempotency_key": "break-pattern-concentration",
             },
         )
         second_card = await _call(
             server,
-            "character_get",
-            {"character_id": actors[2]["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": actors[2]["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert "charmed" not in second_card["sheet"]["conditions"]
         assert "incapacitated" not in second_card["sheet"]["conditions"]
         links = damaged["combat"]["dependent_effects"]
         assert links
         assert all(link["active"] is False for link in links)
-        assert {
-            link["ended_reason"] for link in links
-        } == {"target_effect_ended", "source_effect_ended"}
+        assert {link["ended_reason"] for link in links} == {
+            "target_effect_ended",
+            "source_effect_ended",
+        }
 
     asyncio.run(exercise())
 
 
-def test_sacred_flame_direct_save_needs_no_manual_damage_step(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_sacred_flame_direct_save_needs_no_manual_damage_step(tmp_path: Path, monkeypatch) -> None:
     _deterministic_rolls(monkeypatch)
 
     async def exercise() -> None:

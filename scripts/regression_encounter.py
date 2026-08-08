@@ -6530,7 +6530,6 @@ async def _settle_agent_turn_ruling(
     *,
     branch_id: str,
     ruling: dict[str, Any],
-    sequence: int,
 ) -> dict[str, Any]:
     """Pay one descriptive action and persist the Agent's source-bound outcome."""
 
@@ -6592,87 +6591,14 @@ async def _settle_agent_turn_ruling(
         if damage_contract
         else None
     )
-    legacy_history: list[dict[str, Any]] | None = None
-    legacy_action_sequence = 0
-    recovered_transaction_keys: set[str] = set()
-
-    async def transaction_history() -> list[dict[str, Any]]:
-        nonlocal legacy_history
-        if legacy_history is None:
-            value = await client.domain(
-                "combat_query",
-                {
-                    "campaign_id": args.campaign_id,
-                    "view": "transaction_history",
-                    "payload": {"limit": 500},
-                },
-            )
-            legacy_history = [
-                dict(item) for item in value if isinstance(item, dict)
-            ]
-        return legacy_history
-
-    async def transaction_receipt(key: str) -> dict[str, Any]:
-        value = await client.domain(
-            "combat_query",
-            {
-                "campaign_id": args.campaign_id,
-                "view": "transaction_receipt",
-                "payload": {
-                    "idempotency_key": key,
-                    "branch_id": branch_id,
-                },
-            },
-        )
-        return dict(value)
-
-    def action_response_matches(
-        tool_id: str,
-        response: dict[str, Any],
-    ) -> bool:
-        combat = dict(response.get("combat") or {})
-        combatants = list(combat.get("combatants") or [])
-        turn_index = int(combat.get("turn_index", -1) or 0)
-        current_actor_id = (
-            str(dict(combatants[turn_index]).get("actor_id") or "")
-            if 0 <= turn_index < len(combatants)
-            else ""
-        )
-        if (
-            not combat.get("active")
-            or int(combat.get("round", 0) or 0) != int(ruling["round"])
-            or current_actor_id != actor_id
-        ):
-            return False
-        log = list(combat.get("log") or [])
-        if tool_id != "combat_common_action":
-            return False
-        return any(
-            isinstance(item, dict)
-            and item.get("type") == "common_action"
-            and item.get("action") == "improvise"
-            and str(item.get("actor_id") or "") == actor_id
-            and str(dict(item.get("payload") or {}).get("application_id") or "")
-            == str(ruling["application_id"])
-            for item in log
-        )
-
     async def pay_action(
         tool_id: str,
         arguments: dict[str, Any],
         *,
         idempotency_prefix: str,
     ) -> dict[str, Any]:
-        """Replay a partially paid ruling without charging its action twice.
+        """Pay a ruling action under its durable application identity."""
 
-        Agent rulings span several public MCP transactions.  Their action payment
-        therefore needs an identity derived from the durable application, not from
-        a driver's process-local loop counter.  The legacy keys remain replayable
-        so an encounter interrupted between payment and its final map receipt can
-        recover through the server's own idempotency ledger.
-        """
-
-        nonlocal legacy_action_sequence
         application_id = str(ruling["application_id"])
         stable_key = idempotency_prefix + _agent_turn_transaction_token(
             args,
@@ -6680,89 +6606,9 @@ async def _settle_agent_turn_ruling(
             application_id=application_id,
             parts=("action", tool_id),
         )
-        request = {**arguments, "idempotency_key": stable_key}
-        try:
-            return await client.domain(tool_id, request)
-        except RuntimeError as error:
-            if not any(
-                "no action remaining" in message.casefold()
-                for message in exception_leaf_messages(error)
-            ):
-                raise
-
-        combat = await client.domain(
-            "combat_query",
-            {"campaign_id": args.campaign_id, "view": "status"},
-        )
-        combatants = list(combat.get("combatants") or [])
-        absolute_turn_sequence = (
-            max(int(combat.get("round", 1) or 1) - 1, 0) * len(combatants)
-            + int(combat.get("turn_index", 0) or 0)
-            + 1
-        )
-        legacy_sequences: list[int] = []
-        for candidate in (sequence, absolute_turn_sequence):
-            if candidate > 0 and candidate not in legacy_sequences:
-                legacy_sequences.append(candidate)
-        last_error: RuntimeError | None = None
-        for legacy_sequence in legacy_sequences:
-            legacy_key = idempotency_prefix + _operation_token(
-                args,
-                application_id,
-                legacy_sequence,
-            )
-            if legacy_key == stable_key:
-                continue
-            campaign = await _campaign(client, args.campaign_id)
-            legacy_request = {
-                **arguments,
-                "expected_revision": campaign["revision"],
-                "idempotency_key": legacy_key,
-            }
-            try:
-                replayed = await client.domain(tool_id, legacy_request)
-            except RuntimeError as error:
-                last_error = error
-                if any(
-                    "no action remaining" in message.casefold()
-                    for message in exception_leaf_messages(error)
-                ):
-                    continue
-                raise
-            replayed["recovered_legacy_action_payment"] = True
-            replayed["legacy_turn_sequence"] = legacy_sequence
-            return replayed
-        expected_operation = "combat.common.improvise"
-        history = await transaction_history()
-        candidates: dict[str, int] = {}
-        for item in history:
-            key = str(item.get("idempotency_key") or "")
-            if not key or str(item.get("operation") or "") != expected_operation:
-                continue
-            candidates[key] = max(
-                candidates.get(key, 0),
-                int(item.get("sequence", 0) or 0),
-            )
-        for key, history_sequence in sorted(
-            candidates.items(),
-            key=lambda item: item[1],
-            reverse=True,
-        ):
-            receipt = await transaction_receipt(key)
-            response = dict(receipt.get("response") or {})
-            if not action_response_matches(tool_id, response):
-                continue
-            legacy_action_sequence = history_sequence
-            recovered_transaction_keys.add(key)
-            response["recovered_legacy_action_payment"] = True
-            response["legacy_history_sequence"] = history_sequence
-            response["legacy_idempotency_key"] = key
-            return response
-        if last_error is not None:
-            raise last_error
-        raise RuntimeError(
-            "Agent turn ruling action was already spent without a replayable "
-            "application receipt"
+        return await client.domain(
+            tool_id,
+            {**arguments, "idempotency_key": stable_key},
         )
 
     campaign = await _campaign(client, args.campaign_id)
@@ -6842,40 +6688,6 @@ async def _settle_agent_turn_ruling(
         if action_result.get("status") != "committed":
             raise RuntimeError("Agent-adjudicated feature did not pay its combat action")
 
-    async def recover_legacy_transaction(
-        operation: str,
-        predicate: Any,
-    ) -> dict[str, Any] | None:
-        if legacy_action_sequence <= 0:
-            return None
-        history = await transaction_history()
-        candidates: dict[str, int] = {}
-        for item in history:
-            key = str(item.get("idempotency_key") or "")
-            item_sequence = int(item.get("sequence", 0) or 0)
-            if (
-                not key
-                or key in recovered_transaction_keys
-                or str(item.get("operation") or "") != operation
-                or item_sequence <= legacy_action_sequence
-            ):
-                continue
-            candidates[key] = min(
-                candidates.get(key, item_sequence),
-                item_sequence,
-            )
-        for key, history_sequence in sorted(candidates.items(), key=lambda item: item[1]):
-            receipt = await transaction_receipt(key)
-            response = dict(receipt.get("response") or {})
-            if not predicate(response):
-                continue
-            recovered_transaction_keys.add(key)
-            response["recovered_legacy_transaction"] = True
-            response["legacy_history_sequence"] = history_sequence
-            response["legacy_idempotency_key"] = key
-            return response
-        return None
-
     save_result = None
     save_results: list[dict[str, Any]] = []
     save_success = None
@@ -6902,162 +6714,130 @@ async def _settle_agent_turn_ruling(
         )
     if save_contract:
         if damage_contract:
-            damage_roll = await recover_legacy_transaction(
-                "dnd.dice.roll",
-                lambda response: (
-                    str(response.get("expression") or "").replace(" ", "").casefold()
-                    == str(damage_contract["expression"]).replace(" ", "").casefold()
-                    and bool(response.get("random_stream_receipt"))
-                ),
-            )
-            if damage_roll is None:
-                campaign = await _campaign(client, args.campaign_id)
-                atomic_save_damage = _facade_value(
-                    await client.domain(
-                        "combat_hp_change",
-                        {
-                            "campaign_id": args.campaign_id,
-                            "target_id": target_ids[0],
-                            "action": "save_damage",
-                            "payload": {
-                                "target_ids": target_ids,
-                                "source_actor_id": actor_id,
-                                "source_card_id": source_card_id,
-                                "source_card_kind": source_card_kind,
-                                "save_ability": str(save_contract["ability"]),
-                                "save_dc": int(save_contract["dc"]),
-                                "save_advantage": bool(
-                                    save_contract["advantage"]
-                                ),
-                                "save_disadvantage": bool(
-                                    save_contract["disadvantage"]
-                                ),
-                                "damage_expression": str(
-                                    damage_contract["expression"]
-                                ),
-                                "damage_type": str(
-                                    damage_contract["damage_type"]
-                                ),
-                                "half_on_success": bool(
-                                    damage_contract["half_on_success"]
-                                ),
-                                "mechanic_source_excerpt": (
-                                    mechanic_source_excerpt
-                                ),
-                                "agent_ruling": scene_agent_ruling,
-                            },
-                            "branch_id": branch_id,
-                            "expected_revision": campaign["revision"],
-                            "idempotency_key": (
-                                "encounter-agent-turn-save-damage-"
-                                + _agent_turn_transaction_token(
-                                    args,
-                                    branch_id=branch_id,
-                                    application_id=str(
-                                        ruling["application_id"]
-                                    ),
-                                    parts=("save_damage", *target_ids),
-                                )
-                            ),
-                        },
-                    )
-                )
-                atomic_result = dict(atomic_save_damage.get("result") or {})
-                damage_roll = deepcopy(atomic_result.get("damage_roll"))
-                for target_result in atomic_result.get("targets", []):
-                    save_target_id = str(target_result["target_id"])
-                    current_success = bool(target_result["success"])
-                    current_outcome = str(
-                        save_contract["success_outcome"]
-                        if current_success
-                        else save_contract["failure_outcome"]
-                    )
-                    current_save = {
-                        "status": "committed",
-                        "result": deepcopy(target_result["save"]),
-                        "combat": deepcopy(atomic_save_damage.get("combat")),
-                        "atomic_save_damage": True,
-                    }
-                    save_results.append(
-                        {
-                            "target_id": save_target_id,
-                            "result": current_save,
-                            "success": current_success,
-                            "outcome": current_outcome,
-                        }
-                    )
-                    damage_results.append(
-                        {
-                            "target_id": save_target_id,
-                            "rolled": _roll_total(dict(damage_roll or {})),
-                            "applied_amount": int(
-                                target_result.get("damage_amount", 0) or 0
-                            ),
-                            "result": {
-                                "status": "committed",
-                                "result": deepcopy(
-                                    target_result.get("damage")
-                                ),
-                                "atomic_save_damage": True,
-                            },
-                        }
-                    )
-        for save_target_id in (
-            [] if atomic_save_damage is not None else target_ids
-        ):
-            def matching_save(response: dict[str, Any]) -> bool:
-                result = dict(response.get("result") or {})
-                log = list(dict(response.get("combat") or {}).get("log") or [])
-                logged_actor_id = next(
-                    (
-                        str(item.get("actor_id") or "")
-                        for item in reversed(log)
-                        if isinstance(item, dict) and item.get("type") == "save"
-                    ),
-                    "",
-                )
-                return (
-                    response.get("status") == "committed"
-                    and result.get("kind") == "save"
-                    and int(result.get("dc", 0) or 0) == int(save_contract["dc"])
-                    and logged_actor_id == save_target_id
-                )
-
-            current_save = await recover_legacy_transaction(
-                "combat.save",
-                matching_save,
-            )
-            if current_save is None:
-                campaign = await _campaign(client, args.campaign_id)
-                current_save = await client.domain(
-                    "combat_check",
+            campaign = await _campaign(client, args.campaign_id)
+            atomic_save_damage = _facade_value(
+                await client.domain(
+                    "combat_hp_change",
                     {
                         "campaign_id": args.campaign_id,
-                        "actor_id": save_target_id,
-                        "kind": "save",
-                        "ability": str(save_contract["ability"]),
-                        "dc": int(save_contract["dc"]),
-                        "advantage": bool(save_contract["advantage"]),
-                        "disadvantage": bool(save_contract["disadvantage"]),
-                        "rule_facts": {
-                            "source_ref": deepcopy(
-                                ruling["agent_ruling"]["source_ref"]
+                        "target_id": target_ids[0],
+                        "action": "save_damage",
+                        "payload": {
+                            "target_ids": target_ids,
+                            "source_actor_id": actor_id,
+                            "source_card_id": source_card_id,
+                            "source_card_kind": source_card_kind,
+                            "save_ability": str(save_contract["ability"]),
+                            "save_dc": int(save_contract["dc"]),
+                            "save_advantage": bool(
+                                save_contract["advantage"]
                             ),
-                            "agent_ruling_id": str(ruling["application_id"]),
+                            "save_disadvantage": bool(
+                                save_contract["disadvantage"]
+                            ),
+                            "damage_expression": str(
+                                damage_contract["expression"]
+                            ),
+                            "damage_type": str(
+                                damage_contract["damage_type"]
+                            ),
+                            "half_on_success": bool(
+                                damage_contract["half_on_success"]
+                            ),
+                            "mechanic_source_excerpt": (
+                                mechanic_source_excerpt
+                            ),
+                            "agent_ruling": scene_agent_ruling,
                         },
                         "branch_id": branch_id,
                         "expected_revision": campaign["revision"],
                         "idempotency_key": (
-                            "encounter-agent-turn-save-"
+                            "encounter-agent-turn-save-damage-"
                             + _agent_turn_transaction_token(
                                 args,
                                 branch_id=branch_id,
-                                application_id=str(ruling["application_id"]),
-                                parts=("save", save_target_id),
+                                application_id=str(
+                                    ruling["application_id"]
+                                ),
+                                parts=("save_damage", *target_ids),
                             )
                         ),
                     },
                 )
+            )
+            atomic_result = dict(atomic_save_damage.get("result") or {})
+            damage_roll = deepcopy(atomic_result.get("damage_roll"))
+            for target_result in atomic_result.get("targets", []):
+                save_target_id = str(target_result["target_id"])
+                current_success = bool(target_result["success"])
+                current_outcome = str(
+                    save_contract["success_outcome"]
+                    if current_success
+                    else save_contract["failure_outcome"]
+                )
+                current_save = {
+                    "status": "committed",
+                    "result": deepcopy(target_result["save"]),
+                    "combat": deepcopy(atomic_save_damage.get("combat")),
+                    "atomic_save_damage": True,
+                }
+                save_results.append(
+                    {
+                        "target_id": save_target_id,
+                        "result": current_save,
+                        "success": current_success,
+                        "outcome": current_outcome,
+                    }
+                )
+                damage_results.append(
+                    {
+                        "target_id": save_target_id,
+                        "rolled": _roll_total(dict(damage_roll or {})),
+                        "applied_amount": int(
+                            target_result.get("damage_amount", 0) or 0
+                        ),
+                        "result": {
+                            "status": "committed",
+                            "result": deepcopy(
+                                target_result.get("damage")
+                            ),
+                            "atomic_save_damage": True,
+                        },
+                    }
+                )
+        for save_target_id in (
+            [] if atomic_save_damage is not None else target_ids
+        ):
+            campaign = await _campaign(client, args.campaign_id)
+            current_save = await client.domain(
+                "combat_check",
+                {
+                    "campaign_id": args.campaign_id,
+                    "actor_id": save_target_id,
+                    "kind": "save",
+                    "ability": str(save_contract["ability"]),
+                    "dc": int(save_contract["dc"]),
+                    "advantage": bool(save_contract["advantage"]),
+                    "disadvantage": bool(save_contract["disadvantage"]),
+                    "rule_facts": {
+                        "source_ref": deepcopy(
+                            ruling["agent_ruling"]["source_ref"]
+                        ),
+                        "agent_ruling_id": str(ruling["application_id"]),
+                    },
+                    "branch_id": branch_id,
+                    "expected_revision": campaign["revision"],
+                    "idempotency_key": (
+                        "encounter-agent-turn-save-"
+                        + _agent_turn_transaction_token(
+                            args,
+                            branch_id=branch_id,
+                            application_id=str(ruling["application_id"]),
+                            parts=("save", save_target_id),
+                        )
+                    ),
+                },
+            )
             current_success = bool(
                 dict(current_save.get("result") or {}).get("success")
             )
@@ -7074,58 +6854,6 @@ async def _settle_agent_turn_ruling(
                     "outcome": current_outcome,
                 }
             )
-            if damage_contract:
-                # Recovery-only compatibility for an encounter interrupted
-                # after the legacy driver had already committed its shared
-                # damage roll. New executions use atomic save_damage above.
-                rolled_damage = _roll_total(dict(damage_roll or {}))
-                amount = (
-                    rolled_damage // 2
-                    if current_success and damage_contract["half_on_success"]
-                    else 0
-                    if current_success
-                    else rolled_damage
-                )
-                applied = None
-                if amount:
-                    campaign = await _campaign(client, args.campaign_id)
-                    applied = await client.domain(
-                        "combat_hp_change",
-                        {
-                            "campaign_id": args.campaign_id,
-                            "target_id": save_target_id,
-                            "action": "damage",
-                            "payload": {
-                                "parts": [
-                                    {
-                                        "amount": amount,
-                                        "damage_type": str(
-                                            damage_contract["damage_type"]
-                                        ),
-                                    }
-                                ]
-                            },
-                            "branch_id": branch_id,
-                            "expected_revision": campaign["revision"],
-                            "idempotency_key": (
-                                "encounter-agent-turn-damage-"
-                                + _agent_turn_transaction_token(
-                                    args,
-                                    branch_id=branch_id,
-                                    application_id=str(ruling["application_id"]),
-                                    parts=("damage", save_target_id),
-                                )
-                            ),
-                        },
-                    )
-                damage_results.append(
-                    {
-                        "target_id": save_target_id,
-                        "rolled": rolled_damage,
-                        "applied_amount": amount,
-                        "result": applied,
-                    }
-                )
         if len(save_results) == 1:
             save_result = save_results[0]["result"]
             save_success = bool(save_results[0]["success"])
@@ -8333,7 +8061,6 @@ async def _auto_run(
                 args,
                 branch_id=str(branch["id"]),
                 ruling=agent_turn_ruling,
-                sequence=sequence,
             )
             completed_agent_turn_ruling_ids.add(
                 str(agent_turn_ruling["application_id"])

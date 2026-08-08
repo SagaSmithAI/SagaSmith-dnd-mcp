@@ -48,11 +48,11 @@ def test_medicine_stabilization_pays_action_and_commits_target_atomically(
         helper_sheet["skills"]["medicine"]["proficiency"] = "proficient"
         helper = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Helper",
-                "sheet": helper_sheet,
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Helper", "sheet": helper_sheet},
+                "principal_id": "system:local",
                 "idempotency_key": "stabilize-helper",
             },
         )
@@ -62,15 +62,23 @@ def test_medicine_stabilization_pays_action_and_commits_target_atomically(
         target_sheet["conditions"] = ["prone", "unconscious"]
         target = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Target",
-                "sheet": target_sheet,
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Target", "sheet": target_sheet},
+                "principal_id": "system:local",
                 "idempotency_key": "stabilize-target",
             },
         )
-        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        campaign = await _call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
+        )
         phase = await _call(
             server,
             "game_phase",
@@ -119,7 +127,13 @@ def test_medicine_stabilization_pays_action_and_commits_target_atomically(
             },
         )
         before_far_attempt = await _call(
-            server, "campaign_get", {"campaign_id": campaign["id"]}
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
         )
         with pytest.raises(ToolError, match="within 5 feet"):
             await _call(
@@ -136,7 +150,13 @@ def test_medicine_stabilization_pays_action_and_commits_target_atomically(
                 },
             )
         after_far_attempt = await _call(
-            server, "campaign_get", {"campaign_id": campaign["id"]}
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert after_far_attempt["revision"] == before_far_attempt["revision"]
         moved_back = await _call(
@@ -183,7 +203,13 @@ def test_medicine_stabilization_pays_action_and_commits_target_atomically(
         )
         assert helper_combatant["turn_budget"]["main_action"] == 0
         target_after = await _call(
-            server, "character_get", {"character_id": target["id"]}
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": target["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert target_after["sheet"]["combat"]["hp"]["value"] == 0
         if expected_success:

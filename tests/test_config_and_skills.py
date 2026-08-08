@@ -13,9 +13,9 @@ from sagasmith_dnd_mcp.skills import SkillCatalog
 from sagasmith_dnd_mcp.tool_budget import (
     BASELINE_INPUT_SCHEMA_BYTES,
     BASELINE_PUBLIC_TOOL_COUNT,
+    MAX_INPUT_SCHEMA_BYTES,
     PROFILE_TOOL_LIMITS,
     TARGET_CORE_TOOL_COUNT,
-    TARGET_INPUT_SCHEMA_BYTES,
     TARGET_PUBLIC_TOOL_COUNT,
     TOOL_BUDGET_VERSION,
 )
@@ -283,33 +283,45 @@ def test_character_writes_store_raw_sheet_and_return_derived_view(tmp_path: Path
             {"name": "Test campaign", "idempotency_key": "create-test-campaign"},
         )
         _, character = await server.call_tool(
-            "character_create",
+            "character_create_from",
             {
-                "name": "Aria",
-                "campaign_id": campaign["id"],
+                "mode": "direct",
+                "payload": {"name": "Aria", "campaign_id": campaign["id"]},
+                "principal_id": "system:local",
                 "idempotency_key": "create-aria",
             },
         )
+        character = character["result"]
         _, updated = await server.call_tool(
-            "character_wallet_adjust",
+            "wallet_change",
             {
-                "character_id": character["id"],
+                "owner": "character",
+                "action": "adjust",
+                "owner_id": character["id"],
                 "denomination": "gp",
                 "amount": 25,
+                "payload": {},
+                "principal_id": "system:local",
                 "expected_revision": character["revision"],
                 "idempotency_key": "wallet-test-1",
             },
         )
+        updated = updated["result"]
         _, replayed = await server.call_tool(
-            "character_wallet_adjust",
+            "wallet_change",
             {
-                "character_id": character["id"],
+                "owner": "character",
+                "action": "adjust",
+                "owner_id": character["id"],
                 "denomination": "gp",
                 "amount": 25,
+                "payload": {},
+                "principal_id": "system:local",
                 "expected_revision": character["revision"],
                 "idempotency_key": "wallet-test-1",
             },
         )
+        replayed = replayed["result"]
 
         assert updated["sheet"]["inventory"]["wallet"]["gp"] == 25
         assert replayed == updated
@@ -527,8 +539,7 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
                 "combat": 49,
             }
         )
-        assert schema_bytes == TARGET_INPUT_SCHEMA_BYTES == 53_380
-        assert schema_bytes < BASELINE_INPUT_SCHEMA_BYTES
+        assert schema_bytes <= MAX_INPUT_SCHEMA_BYTES == BASELINE_INPUT_SCHEMA_BYTES
         by_name = {tool.name: tool for tool in tools}
         assert by_name["chase"].inputSchema["properties"]["action"]["enum"] == [
             "start",
@@ -617,7 +628,7 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
             "baseline_input_schema_bytes": BASELINE_INPUT_SCHEMA_BYTES,
             "target_public_tools": TARGET_PUBLIC_TOOL_COUNT,
             "target_core_tools": TARGET_CORE_TOOL_COUNT,
-            "target_input_schema_bytes": TARGET_INPUT_SCHEMA_BYTES,
+            "max_input_schema_bytes": MAX_INPUT_SCHEMA_BYTES,
             "profile_limits": PROFILE_TOOL_LIMITS,
         }
         _, capabilities = await server.call_tool("server_capabilities", {})

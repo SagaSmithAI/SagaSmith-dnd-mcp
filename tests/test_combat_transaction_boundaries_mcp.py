@@ -19,6 +19,8 @@ async def _call(server, name: str, arguments: dict):
 
 async def _call_raw(server, name: str, arguments: dict):
     _, result = await server.call_tool(name, arguments)
+    if name in {"character_action", "combat_movement", "combat_hp_change"}:
+        return result["result"]
     return result
 
 
@@ -50,17 +52,22 @@ def test_combat_query_exposes_dm_transaction_history_and_receipts(
         )
         actor = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Receipt actor",
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Receipt actor"},
+                "principal_id": "system:local",
                 "idempotency_key": "receipt-actor",
             },
         )
         campaign = await _call(
             server,
-            "campaign_get",
-            {"campaign_id": campaign["id"]},
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
         )
         phase = await _call(
             server,
@@ -118,15 +125,24 @@ def test_end_turn_does_not_revision_unchanged_character_documents(tmp_path: Path
             actors.append(
                 await _call(
                     server,
-                    "character_create",
+                    "character_create_from",
                     {
-                        "campaign_id": campaign["id"],
-                        "name": f"Actor {index + 1}",
+                        "mode": "direct",
+                        "payload": {"campaign_id": campaign["id"], "name": f"Actor {index + 1}"},
+                        "principal_id": "system:local",
                         "idempotency_key": f"actor-{index + 1}",
                     },
                 )
             )
-        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        campaign = await _call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
+        )
         started = await _call(
             server,
             "combat_start",
@@ -153,15 +169,22 @@ def test_end_turn_does_not_revision_unchanged_character_documents(tmp_path: Path
             },
         )
         current = [
-            await _call(server, "character_get", {"character_id": item["id"]}) for item in actors
+            await _call(
+                server,
+                "character_query",
+                {
+                    "view": "get",
+                    "payload": {"character_id": item["id"]},
+                    "principal_id": "system:local",
+                },
+            )
+            for item in actors
         ]
 
         assert [item["entity_type"] for item in ended["revisions"]] == ["campaign"]
         assert [item["revision"] for item in current] == [item["revision"] for item in actors]
 
     asyncio.run(exercise())
-
-
 
 
 def test_available_actions_explicitly_discovers_required_death_save(
@@ -186,15 +209,23 @@ def test_available_actions_explicitly_discovers_required_death_save(
         sheet["conditions"] = ["prone", "unconscious"]
         actor = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Dying PC",
-                "sheet": sheet,
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Dying PC", "sheet": sheet},
+                "principal_id": "system:local",
                 "idempotency_key": "actor",
             },
         )
-        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        campaign = await _call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
+        )
         started = await _call(
             server,
             "combat_start",
@@ -211,8 +242,13 @@ def test_available_actions_explicitly_discovers_required_death_save(
 
         available = await _call(
             server,
-            "combat_available_actions",
-            {"campaign_id": campaign["id"], "actor_id": actor["id"]},
+            "combat_query",
+            {
+                "campaign_id": campaign["id"],
+                "view": "available_actions",
+                "actor_id": actor["id"],
+                "principal_id": "system:local",
+            },
         )
 
         assert started["combat"]["round"] == 1
@@ -233,8 +269,13 @@ def test_available_actions_explicitly_discovers_required_death_save(
 
         after = await _call(
             server,
-            "combat_available_actions",
-            {"campaign_id": campaign["id"], "actor_id": actor["id"]},
+            "combat_query",
+            {
+                "campaign_id": campaign["id"],
+                "view": "available_actions",
+                "actor_id": actor["id"],
+                "principal_id": "system:local",
+            },
         )
         assert after["actions"] == []
 
@@ -262,14 +303,23 @@ def test_invalid_branch_is_rejected_before_noncombat_check_rolls(
         )
         actor = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Checker",
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Checker"},
+                "principal_id": "system:local",
                 "idempotency_key": "actor",
             },
         )
-        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        campaign = await _call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
+        )
         await _call(
             server,
             "game_phase",
@@ -281,7 +331,15 @@ def test_invalid_branch_is_rejected_before_noncombat_check_rolls(
                 "idempotency_key": "enter-play",
             },
         )
-        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        campaign = await _call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
+        )
 
         with pytest.raises(Exception, match="checked-out branch"):
             await _call(
@@ -328,19 +386,28 @@ def test_jack_of_all_trades_is_applied_and_receipted_by_public_tools(
                 "id": "dnd5e.content.srd2014.feature.bard-jack-of-all-trades",
                 "name": "Jack of All Trades",
                 "source_key": "Bard",
+                "mechanic_refs": ["dnd5e.core.check.jack_of_all_trades"],
             }
         ]
         actor = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Bard",
-                "sheet": sheet,
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Bard", "sheet": sheet},
+                "principal_id": "system:local",
                 "idempotency_key": "actor",
             },
         )
-        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        campaign = await _call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
+        )
         await _call(
             server,
             "game_phase",
@@ -352,7 +419,15 @@ def test_jack_of_all_trades_is_applied_and_receipted_by_public_tools(
                 "idempotency_key": "enter-play",
             },
         )
-        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        campaign = await _call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
+        )
         checked = await _call(
             server,
             "character_check",
@@ -375,7 +450,15 @@ def test_jack_of_all_trades_is_applied_and_receipted_by_public_tools(
             "dnd5e.core.check.jack_of_all_trades"
         ]
 
-        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        campaign = await _call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
+        )
         started = await _call(
             server,
             "combat_start",
@@ -392,8 +475,13 @@ def test_jack_of_all_trades_is_applied_and_receipted_by_public_tools(
 
         receipts = await _call(
             server,
-            "campaign_rule_receipts",
-            {"campaign_id": campaign["id"]},
+            "campaign_rules",
+            {
+                "campaign_id": campaign["id"],
+                "action": "receipts",
+                "payload": {},
+                "principal_id": "system:local",
+            },
         )
         jack_receipts = [
             item
@@ -437,15 +525,23 @@ def test_action_surge_is_settled_without_a_manual_ruling(tmp_path: Path) -> None
         ]
         actor = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Fighter",
-                "sheet": sheet,
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Fighter", "sheet": sheet},
+                "principal_id": "system:local",
                 "idempotency_key": "actor",
             },
         )
-        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        campaign = await _call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
+        )
         started = await _call_raw(
             server,
             "combat_start",
@@ -478,7 +574,15 @@ def test_action_surge_is_settled_without_a_manual_ruling(tmp_path: Path) -> None
             item["mechanic_id"] == "dnd5e.core.activity.action_surge"
             for item in surged["result"]["rule_receipts"]
         )
-        actor_after = await _call(server, "character_get", {"character_id": actor["id"]})
+        actor_after = await _call(
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": actor["id"]},
+                "principal_id": "system:local",
+            },
+        )
         assert actor_after["sheet"]["content"]["features"][0]["uses"]["value"] == 0
 
     asyncio.run(exercise())
@@ -531,27 +635,36 @@ def test_recharge_weapon_use_is_committed_on_attack_declaration(
         ]
         attacker = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Recharge attacker",
-                "sheet": sheet,
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Recharge attacker",
+                    "sheet": sheet,
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "attacker",
             },
         )
         target = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Target",
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Target"},
+                "principal_id": "system:local",
                 "idempotency_key": "target",
             },
         )
         campaign = await _call(
             server,
-            "campaign_get",
-            {"campaign_id": campaign["id"]},
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
         )
         started = await _call_raw(
             server,
@@ -593,8 +706,12 @@ def test_recharge_weapon_use_is_committed_on_attack_declaration(
         )
         after = await _call(
             server,
-            "character_get",
-            {"character_id": attacker["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": attacker["id"]},
+                "principal_id": "system:local",
+            },
         )
 
         assert attacked["result"]["limited_use"]["remaining"] == 0
@@ -617,9 +734,7 @@ def test_locked_dragonborn_breath_uses_generic_area_and_save_primitives(
                 "idempotency_key": "campaign",
             },
         )
-        activity_id = (
-            "dnd5e.content.standard2014.species.dragonborn.activity.breath-weapon"
-        )
+        activity_id = "dnd5e.content.standard2014.species.dragonborn.activity.breath-weapon"
         source_sheet = default_character_sheet()
         source_sheet["progression"]["level"] = 1
         source_sheet["content"]["activities"] = [
@@ -663,37 +778,43 @@ def test_locked_dragonborn_breath_uses_generic_area_and_save_primitives(
                 "pack_id": "dnd5e.content.standard2014",
                 "pack_version": "1.4.0",
                 "rule_refs": ["book:players-handbook-2014:p34"],
-                "mechanic_refs": [
-                    "dnd5e.core.activity.dragonborn_breath_weapon"
-                ],
+                "mechanic_refs": ["dnd5e.core.activity.dragonborn_breath_weapon"],
             }
         ]
         target_sheet = default_character_sheet()
         target_sheet["combat"]["hp"] = {"value": 30, "max": 30, "temp": 0}
         source = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Dragonborn",
-                "sheet": source_sheet,
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Dragonborn",
+                    "sheet": source_sheet,
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "source",
             },
         )
         target = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Target",
-                "sheet": target_sheet,
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Target", "sheet": target_sheet},
+                "principal_id": "system:local",
                 "idempotency_key": "target",
             },
         )
         campaign = await _call(
             server,
-            "campaign_get",
-            {"campaign_id": campaign["id"]},
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
         )
         started = await _call_raw(
             server,
@@ -727,9 +848,7 @@ def test_locked_dragonborn_breath_uses_generic_area_and_save_primitives(
                 "activity_id": activity_id,
                 "declaration": {
                     "origin": {"x": 1, "y": 0},
-                    "target_contexts": [
-                        {"target_id": target["id"], "cover": "none"}
-                    ],
+                    "target_contexts": [{"target_id": target["id"], "cover": "none"}],
                 },
                 "expected_revision": started["campaign_revision"],
                 "idempotency_key": "breath",
@@ -737,13 +856,21 @@ def test_locked_dragonborn_breath_uses_generic_area_and_save_primitives(
         )
         source_after = await _call(
             server,
-            "character_get",
-            {"character_id": source["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": source["id"]},
+                "principal_id": "system:local",
+            },
         )
         target_after = await _call(
             server,
-            "character_get",
-            {"character_id": target["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": target["id"]},
+                "principal_id": "system:local",
+            },
         )
 
         effect = used["result"]["core_effect"]
@@ -757,12 +884,6 @@ def test_locked_dragonborn_breath_uses_generic_area_and_save_primitives(
         assert target_after["sheet"]["combat"]["hp"]["value"] < 30
 
     asyncio.run(exercise())
-
-
-
-
-
-
 
 
 @pytest.mark.parametrize("edition", ["2014", "2024"])
@@ -795,34 +916,48 @@ def test_second_wind_heals_and_pays_bonus_action_atomically(
                 "source_key": "Fighter",
             }
         feature = {
-                "id": second_wind_id,
-                "name": "Second Wind",
-                "source_key": "Fighter",
-                "description": "Regain 1d10 + Fighter level hit points.",
-                **({"uses": {
-                    "label": "Second Wind",
-                    "value": 1,
-                    "max": 1,
-                    "recovers_on": "short_rest",
-                }} if edition == "2014" else {}),
-                "resource_key": "second_wind" if edition == "2024" else "",
-                "activation": {"type": "bonus_action", "cost": 1, "trigger": ""},
-                "scaling": [],
-                "choices": {"outcome": "roll 1d10 + fighter level"},
-                "mechanic_refs": ["dnd5e.core.activity.second_wind"],
-            }
+            "id": second_wind_id,
+            "name": "Second Wind",
+            "source_key": "Fighter",
+            "description": "Regain 1d10 + Fighter level hit points.",
+            **(
+                {
+                    "uses": {
+                        "label": "Second Wind",
+                        "value": 1,
+                        "max": 1,
+                        "recovers_on": "short_rest",
+                    }
+                }
+                if edition == "2014"
+                else {}
+            ),
+            "resource_key": "second_wind" if edition == "2024" else "",
+            "activation": {"type": "bonus_action", "cost": 1, "trigger": ""},
+            "scaling": [],
+            "choices": {"outcome": "roll 1d10 + fighter level"},
+            "mechanic_refs": ["dnd5e.core.activity.second_wind"],
+        }
         sheet["content"]["features"] = [feature]
         actor = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Fighter",
-                "sheet": sheet,
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Fighter", "sheet": sheet},
+                "principal_id": "system:local",
                 "idempotency_key": "actor",
             },
         )
-        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        campaign = await _call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
+        )
         started = await _call_raw(
             server,
             "combat_start",
@@ -855,7 +990,15 @@ def test_second_wind_heals_and_pays_bonus_action_atomically(
         assert 4 <= effect["after_hp"] <= 13
         current = result["combat"]["combatants"][result["combat"]["turn_index"]]
         assert current["turn_budget"]["bonus_action"] == 0
-        actor_after = await _call(server, "character_get", {"character_id": actor["id"]})
+        actor_after = await _call(
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": actor["id"]},
+                "principal_id": "system:local",
+            },
+        )
         assert actor_after["sheet"]["combat"]["hp"]["value"] == effect["after_hp"]
         if edition == "2014":
             assert actor_after["sheet"]["content"]["features"][0]["uses"]["value"] == 0
@@ -910,11 +1053,11 @@ def test_second_wind_heals_and_advances_random_stream_outside_combat(
         ]
         actor = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Fighter",
-                "sheet": sheet,
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Fighter", "sheet": sheet},
+                "principal_id": "system:local",
                 "idempotency_key": "actor",
             },
         )
@@ -925,7 +1068,15 @@ def test_second_wind_heals_and_advances_random_stream_outside_combat(
             "idempotency_key": "second-wind",
         }
 
-        before = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        before = await _call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
+        )
         stream = server_module.CampaignRandomStream.from_campaign_state(
             campaign["id"],
             before["state"],
@@ -933,9 +1084,32 @@ def test_second_wind_heals_and_advances_random_stream_outside_combat(
             idempotency_key="second-wind",
         )
         with server_module.use_random_stream(stream):
-            result = await _call_raw(server, "character_use_activity", arguments)
+            result = await _call_raw(
+                server,
+                "character_action",
+                {
+                    "character_id": arguments["character_id"],
+                    "action": "use_activity",
+                    "payload": {"activity_id": arguments["activity_id"]},
+                    "expected_revision": arguments["expected_revision"],
+                    "idempotency_key": arguments["idempotency_key"],
+                },
+            )
         assert stream.has_unpersisted_draws is False
-        assert await _call_raw(server, "character_use_activity", arguments) == result
+        assert (
+            await _call_raw(
+                server,
+                "character_action",
+                {
+                    "character_id": actor["id"],
+                    "action": "use_activity",
+                    "payload": {"activity_id": "dnd5e.content.srd2014.feature.fighter-second-wind"},
+                    "expected_revision": actor["revision"],
+                    "idempotency_key": "second-wind",
+                },
+            )
+            == result
+        )
         assert result["status"] == "committed"
         effect = result["result"]["core_effect"]
         assert effect["kind"] == "second_wind"
@@ -947,7 +1121,15 @@ def test_second_wind_heals_and_advances_random_stream_outside_combat(
             item["mechanic_id"] == "dnd5e.core.activity.second_wind"
             for item in result["result"]["rule_receipts"]
         )
-        current = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        current = await _call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
+        )
         assert current["state"]["random_stream"]["position"] == 1
 
     asyncio.run(exercise())
@@ -987,15 +1169,23 @@ def test_cunning_action_dash_uses_bonus_action_and_doubles_movement(tmp_path: Pa
         ]
         actor = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Rogue",
-                "sheet": sheet,
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Rogue", "sheet": sheet},
+                "principal_id": "system:local",
                 "idempotency_key": "actor",
             },
         )
-        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        campaign = await _call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
+        )
         started = await _call_raw(
             server,
             "combat_start",
@@ -1047,23 +1237,33 @@ def test_combat_move_charges_reviewed_difficult_cells_and_records_core_receipt(
         )
         mover = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Mover",
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Mover"},
+                "principal_id": "system:local",
                 "idempotency_key": "mover",
             },
         )
         other = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Other",
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Other"},
+                "principal_id": "system:local",
                 "idempotency_key": "other",
             },
         )
-        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        campaign = await _call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
+        )
         started = await _call_raw(
             server,
             "combat_start",
@@ -1096,12 +1296,13 @@ def test_combat_move_charges_reviewed_difficult_cells_and_records_core_receipt(
 
         pending = await _call(
             server,
-            "combat_move",
+            "combat_movement",
             {
                 "campaign_id": campaign["id"],
                 "actor_id": mover["id"],
-                "distance": 10,
-                "destination": {"x": 2, "y": 0},
+                "action": "move",
+                "payload": {"distance": 10, "destination": {"x": 2, "y": 0}},
+                "principal_id": "system:local",
                 "expected_revision": started["campaign_revision"],
                 "idempotency_key": "move-without-path",
             },
@@ -1114,13 +1315,17 @@ def test_combat_move_charges_reviewed_difficult_cells_and_records_core_receipt(
 
         moved = await _call_raw(
             server,
-            "combat_move",
+            "combat_movement",
             {
                 "campaign_id": campaign["id"],
                 "actor_id": mover["id"],
-                "distance": 10,
-                "destination": {"x": 2, "y": 0},
-                "path": [{"x": 0, "y": 0}, {"x": 1, "y": 0}, {"x": 2, "y": 0}],
+                "action": "move",
+                "payload": {
+                    "distance": 10,
+                    "destination": {"x": 2, "y": 0},
+                    "path": [{"x": 0, "y": 0}, {"x": 1, "y": 0}, {"x": 2, "y": 0}],
+                },
+                "principal_id": "system:local",
                 "expected_revision": started["campaign_revision"],
                 "idempotency_key": "move",
             },
@@ -1130,8 +1335,13 @@ def test_combat_move_charges_reviewed_difficult_cells_and_records_core_receipt(
         assert current["turn_budget"]["movement"] == 15
         receipts = await _call(
             server,
-            "campaign_rule_receipts",
-            {"campaign_id": campaign["id"]},
+            "campaign_rules",
+            {
+                "campaign_id": campaign["id"],
+                "action": "receipts",
+                "payload": {},
+                "principal_id": "system:local",
+            },
         )
         assert any(
             item["mechanic_id"] == "dnd5e.core.movement.difficult_terrain" for item in receipts

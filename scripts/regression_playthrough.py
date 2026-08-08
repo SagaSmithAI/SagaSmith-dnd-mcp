@@ -42,7 +42,6 @@ from sagasmith_dnd.game_time import (
     advance_calendar_minutes_from_elapsed,
     calendar_minute_point,
     calendar_minute_point_from_elapsed,
-    game_time_from_ticks,
     game_time_ticks,
     validate_calendar_minute_point,
 )
@@ -475,7 +474,7 @@ def _arguments() -> argparse.Namespace:
         type=json.loads,
         help=(
             "Optional anchored-calendar day/hour/minute/elapsed_minutes target "
-            "for advance-time; legacy calls may use this instead of the tick target"
+            "for additional advance-time projection verification"
         ),
     )
     parser.add_argument(
@@ -483,7 +482,7 @@ def _arguments() -> argparse.Namespace:
         type=int,
         help=(
             "Canonical state.game_time.elapsed_ticks target for advance-time; "
-            "required when no calendar target is supplied"
+            "required for every advance-time operation"
         ),
     )
     parser.add_argument(
@@ -1405,7 +1404,7 @@ def _validate_world_time_precondition(
     campaign: dict[str, Any],
     expected: Any,
 ) -> dict[str, int] | None:
-    normalized_expected = _normalize_expected_world_time(expected)
+    normalized_expected = _normalize_expected_calendar_time(expected)
     if normalized_expected is None:
         return None
     world_time = dict(dict(campaign.get("state") or {}).get("world_time") or {})
@@ -2459,7 +2458,7 @@ def _settled_time_agent_ruling(
     return normalized
 
 
-def _normalize_expected_world_time(value: Any) -> dict[str, int] | None:
+def _normalize_expected_calendar_time(value: Any) -> dict[str, int] | None:
     if value is None:
         return None
     return validate_calendar_minute_point(value, field="expected world time")
@@ -8033,7 +8032,7 @@ async def _advance_time(
         or not normalized_reason
     ):
         raise ValueError("advance-time requires scene, positive count, period, and reason")
-    normalized_expected_after = _normalize_expected_world_time(expected_after)
+    normalized_expected_after = _normalize_expected_calendar_time(expected_after)
     if expected_after_ticks is not None and (
         isinstance(expected_after_ticks, bool)
         or not isinstance(expected_after_ticks, int)
@@ -8042,7 +8041,7 @@ async def _advance_time(
         raise ValueError("advance-time expected tick target must be nonnegative")
     if normalized_expected_after is None and expected_after_ticks is None:
         raise ValueError(
-            "advance-time requires --time-expected-after-ticks or legacy "
+            "advance-time requires --time-expected-after-ticks or "
             "--time-expected-after-json so every elapsed interval is bound to "
             "one machine-verifiable destination"
         )
@@ -8102,12 +8101,6 @@ async def _advance_time(
     campaign_state = dict(campaign.get("state") or {})
     before = deepcopy(dict(campaign_state.get("world_time") or {}))
     before_game_time = deepcopy(dict(campaign_state.get("game_time") or {}))
-    migrated_legacy_game_time = not before_game_time
-    if not before_game_time and before:
-        legacy_elapsed = before.get("elapsed_minutes")
-        if isinstance(legacy_elapsed, bool) or not isinstance(legacy_elapsed, int):
-            raise RuntimeError("legacy campaign clock has no canonical elapsed position")
-        before_game_time = game_time_from_ticks(legacy_elapsed * TICKS_PER_MINUTE)
     expected_tick_delta = game_time_ticks(period, count)
     expected_minutes = expected_tick_delta // TICKS_PER_MINUTE
     current_ticks = before_game_time.get("elapsed_ticks")
@@ -8124,20 +8117,9 @@ async def _advance_time(
         raise ValueError(
             "advance-time calendar target requires an existing or supplied start clock"
         )
-    current_projection = (
-        {key: projected_before.get(key) for key in CALENDAR_MINUTE_FIELDS}
-        if projected_before
-        else None
-    )
-    legacy_calendar_recovery = (
-        normalized_expected_after is not None and current_projection == normalized_expected_after
-    )
     if expected_after_ticks is None:
-        expected_target_ticks = (
-            current_ticks if legacy_calendar_recovery else current_ticks + expected_tick_delta
-        )
-    else:
-        expected_target_ticks = expected_after_ticks
+        raise ValueError("advance-time requires the canonical expected tick target")
+    expected_target_ticks = expected_after_ticks
     clock_recovery = current_ticks == expected_target_ticks
     if not clock_recovery and current_ticks + expected_tick_delta != expected_target_ticks:
         raise ValueError(
@@ -8199,8 +8181,6 @@ async def _advance_time(
     }
     if expected_after_ticks is not None:
         advance_payload["expected_elapsed_ticks"] = expected_target_ticks
-    if normalized_expected_after is not None:
-        advance_payload["expected_world_time"] = normalized_expected_after
     advanced = await client.domain(
         "campaign_change",
         {
@@ -8258,10 +8238,6 @@ async def _advance_time(
             raise RuntimeError("clock recovery receipt campaign revisions are invalid")
         current_clock = deepcopy(dict(dict(campaign.get("state") or {}).get("world_time") or {}))
         current_game_time = deepcopy(dict(dict(campaign.get("state") or {}).get("game_time") or {}))
-        if not current_game_time and current_clock:
-            current_game_time = game_time_from_ticks(
-                int(current_clock["elapsed_minutes"]) * TICKS_PER_MINUTE
-            )
         if current_game_time.get("elapsed_ticks") != expected_target_ticks:
             raise RuntimeError("clock recovery current game time does not match the exact target")
         if (
@@ -8285,10 +8261,6 @@ async def _advance_time(
         raise RuntimeError("campaign clock response has no integer campaign revision")
     after = deepcopy(dict(advanced.get("world_time") or {}))
     after_game_time = deepcopy(dict(advanced.get("game_time") or {}))
-    if not after_game_time and migrated_legacy_game_time:
-        after_game_time = game_time_from_ticks(
-            int(before_game_time["elapsed_ticks"]) + expected_tick_delta
-        )
     if bool(before) != bool(after):
         raise RuntimeError("campaign calendar anchor changed during time advancement")
     if before and (
@@ -8326,7 +8298,7 @@ async def _advance_time(
                 "elapsed_minutes": expected_minutes,
                 "elapsed_ticks": expected_tick_delta,
                 "expected_elapsed_ticks": expected_target_ticks,
-                "expected_world_time": normalized_expected_after,
+                "expected_calendar_time": normalized_expected_after,
                 "game_time_before": before_game_time,
                 "game_time_after": after_game_time,
                 "world_time_before": before,

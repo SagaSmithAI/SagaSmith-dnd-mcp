@@ -77,6 +77,7 @@ def test_public_combat_attack_enforces_monster_multiattack_sequence(tmp_path: Pa
                 "id": "bandit-captain-multiattack",
                 "name": "Multiattack",
                 "source_key": "Bandit Captain",
+                "mechanic_refs": ["dnd5e.core.action.multiattack_choice"],
                 "activation": {"type": "action"},
                 "choices": {
                     "multiattack_options": [
@@ -101,12 +102,16 @@ def test_public_combat_attack_enforces_monster_multiattack_sequence(tmp_path: Pa
         ]
         captain = await call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Captain",
-                "character_type": "monster",
-                "sheet": captain_sheet,
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Captain",
+                    "character_type": "monster",
+                    "sheet": captain_sheet,
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "multiattack-captain",
             },
         )
@@ -115,16 +120,22 @@ def test_public_combat_attack_enforces_monster_multiattack_sequence(tmp_path: Pa
         target_sheet["combat"]["ac"]["override"] = 1
         target = await call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Target",
-                "sheet": target_sheet,
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Target", "sheet": target_sheet},
+                "principal_id": "system:local",
                 "idempotency_key": "multiattack-target",
             },
         )
         campaign = await call(
-            server, "campaign_get", {"campaign_id": campaign["id"]}
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
         )
         phase = await call(
             server,
@@ -189,9 +200,7 @@ def test_public_combat_attack_enforces_monster_multiattack_sequence(tmp_path: Pa
             await attack("scimitar", "multiattack-illegal-third")
         third = await attack("dagger", "multiattack-third")
         current = next(
-            item
-            for item in third["combat"]["combatants"]
-            if item["actor_id"] == captain["id"]
+            item for item in third["combat"]["combatants"] if item["actor_id"] == captain["id"]
         )
         assert current["turn_budget"]["attack_budget"] == 0
 

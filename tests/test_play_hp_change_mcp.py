@@ -41,12 +41,16 @@ def test_play_hp_changes_use_the_same_zero_hp_and_recovery_rules(tmp_path: Path)
         pc_sheet["conditions"] = ["stable", "unconscious", "prone"]
         pc = await call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "name": "Fallen PC",
-                "campaign_id": campaign["id"],
-                "character_type": "pc",
-                "sheet": pc_sheet,
+                "mode": "direct",
+                "payload": {
+                    "name": "Fallen PC",
+                    "campaign_id": campaign["id"],
+                    "character_type": "pc",
+                    "sheet": pc_sheet,
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "pc",
             },
         )
@@ -122,12 +126,16 @@ def test_play_hp_changes_use_the_same_zero_hp_and_recovery_rules(tmp_path: Path)
         monster_sheet["combat"]["hp"] = {"value": 5, "max": 5, "temp": 0}
         monster = await call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "name": "Monster",
-                "campaign_id": campaign["id"],
-                "character_type": "monster",
-                "sheet": monster_sheet,
+                "mode": "direct",
+                "payload": {
+                    "name": "Monster",
+                    "campaign_id": campaign["id"],
+                    "character_type": "monster",
+                    "sheet": monster_sheet,
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "monster",
             },
         )
@@ -151,12 +159,16 @@ def test_play_hp_changes_use_the_same_zero_hp_and_recovery_rules(tmp_path: Path)
         fallen_sheet["conditions"] = ["dead", "prone", "unconscious"]
         fallen = await call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "name": "Raise Dead target",
-                "campaign_id": campaign["id"],
-                "character_type": "pc",
-                "sheet": fallen_sheet,
+                "mode": "direct",
+                "payload": {
+                    "name": "Raise Dead target",
+                    "campaign_id": campaign["id"],
+                    "character_type": "pc",
+                    "sheet": fallen_sheet,
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "fallen",
             },
         )

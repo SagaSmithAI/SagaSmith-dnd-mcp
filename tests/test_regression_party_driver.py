@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
-from copy import deepcopy
 
 import pytest
 from sagasmith_dnd.character_schema import default_character_sheet
@@ -18,8 +16,6 @@ from scripts.regression_party import (
     _initialize_prepared_spells,
     _item_weight_oz,
     _pack_contents,
-    _repair_existing_party_equipment,
-    _source_linked_starting_items,
     _spellcasting_audit,
     _switch_phase,
     audit_profiles,
@@ -148,14 +144,8 @@ def test_party_profiles_have_source_linked_gear_and_complete_ability_input() -> 
     assert all(item["source_key"] for profile in profiles for item in profile["items"])
     assert {profile["background_base"] for profile in profiles} == {"Acolyte"}
     assert len({profile["background"] for profile in profiles}) == len(profiles)
-    assert all(
-        len(profile["background_skills"]) == 2
-        for profile in profiles
-    )
-    assert all(
-        len(_background_starting_items(profile)) == 6
-        for profile in profiles
-    )
+    assert all(len(profile["background_skills"]) == 2 for profile in profiles)
+    assert all(len(_background_starting_items(profile)) == 6 for profile in profiles)
     assert all(_class_starting_supplements(profile) for profile in profiles)
     assert all(len(profile["abilities"]) == 6 for profile in profiles)
 
@@ -168,11 +158,7 @@ def test_base_casters_record_their_spell_class_list(
     class_name: str,
     expected_class_list: str,
 ) -> None:
-    profile = next(
-        item
-        for item in waterdeep_party_profiles()
-        if item["class"] == class_name
-    )
+    profile = next(item for item in waterdeep_party_profiles() if item["class"] == class_name)
     actor = {"sheet": default_character_sheet()}
     catalog = []
     seen: set[tuple[str, str]] = set()
@@ -185,9 +171,7 @@ def test_base_casters_record_their_spell_class_list(
         name = str(item["source_key"])
         if (kind, name) not in seen:
             seen.add((kind, name))
-            catalog.append(
-                {"id": f"{kind}:{len(catalog)}", "kind": kind, "name": name}
-            )
+            catalog.append({"id": f"{kind}:{len(catalog)}", "kind": kind, "name": name})
 
     sheet = _configure_base_sheet(actor, profile, catalog)
 
@@ -202,11 +186,7 @@ def test_base_casters_record_their_spell_class_list(
 
 
 def test_spellcasting_audit_reports_class_and_species_cantrips_separately() -> None:
-    profile = next(
-        item
-        for item in storm_kings_party_profiles()
-        if item["name"] == "Aelar Quill"
-    )
+    profile = next(item for item in storm_kings_party_profiles() if item["name"] == "Aelar Quill")
     sheet = default_character_sheet()
     sheet["progression"]["level"] = 1
     configured = profile["spellcasting"]
@@ -250,8 +230,7 @@ def test_spellcasting_audit_reports_class_and_species_cantrips_separately() -> N
         "spell_ids": spell_ids,
     }
     sheet["spellcasting"]["preparation"]["selected_spell_ids"] = [
-        name.casefold().replace(" ", "-")
-        for name in configured["prepared"]
+        name.casefold().replace(" ", "-") for name in configured["prepared"]
     ]
 
     audit = _spellcasting_audit({"sheet": sheet}, profile)
@@ -270,9 +249,7 @@ def test_spellcasting_audit_reports_class_and_species_cantrips_separately() -> N
 
 def test_spellcasting_audit_rejects_a_missing_level_one_cantrip() -> None:
     profile = next(
-        item
-        for item in storm_kings_party_profiles()
-        if item["name"] == "Seraphine Vale"
+        item for item in storm_kings_party_profiles() if item["name"] == "Seraphine Vale"
     )
     sheet = default_character_sheet()
     sheet["progression"]["level"] = 1
@@ -299,12 +276,8 @@ def test_spellcasting_audit_rejects_a_missing_level_one_cantrip() -> None:
 
 
 def test_starting_equipment_packs_expand_to_rule_accurate_consumable_items() -> None:
-    rogue = next(
-        profile for profile in lost_mine_party_profiles() if profile["class"] == "Rogue"
-    )
-    bard = next(
-        profile for profile in lost_mine_party_profiles() if profile["class"] == "Bard"
-    )
+    rogue = next(profile for profile in lost_mine_party_profiles() if profile["class"] == "Rogue")
+    bard = next(profile for profile in lost_mine_party_profiles() if profile["class"] == "Bard")
     burglar_items = _pack_contents(rogue, "Burglar's Pack")
     diplomat_items = _pack_contents(bard, "Diplomat's Pack")
 
@@ -322,12 +295,11 @@ def test_starting_equipment_packs_expand_to_rule_accurate_consumable_items() -> 
         "trigger_damage_type": "fire",
         "additional_fire_damage": 5,
     }
-    assert next(
-        item for item in burglar_items if item["name"] == "Candle"
-    )["quantity"] == 5
-    assert next(
-        item for item in diplomat_items if item["name"] == "Paper (one sheet)"
-    )["quantity"] == 5
+    assert next(item for item in burglar_items if item["name"] == "Candle")["quantity"] == 5
+    assert (
+        next(item for item in diplomat_items if item["name"] == "Paper (one sheet)")["quantity"]
+        == 5
+    )
 
 
 def test_starting_item_weights_follow_srd_units_including_fractional_ammunition() -> None:
@@ -337,135 +309,6 @@ def test_starting_item_weights_follow_srd_units_including_fractional_ammunition(
     assert _item_weight_oz("Chain mail") == 880
     assert _item_weight_oz("Waterskin") == 80
     assert _item_weight_oz("Candle") == 0
-
-
-def test_existing_opaque_pack_is_repaired_only_through_public_inventory_calls(
-    tmp_path,
-) -> None:
-    profile = next(
-        item for item in waterdeep_party_profiles() if item["class"] == "Rogue"
-    )
-    raw_items = [
-        *profile["items"],
-        *_class_starting_supplements(profile),
-        *_background_starting_items(profile),
-    ]
-    catalog: list[dict] = []
-    seen: set[tuple[str, str]] = set()
-    for item in raw_items:
-        kind = str(item.get("_source_kind") or "item")
-        name = str(item["source_key"])
-        if (kind, name) in seen:
-            continue
-        seen.add((kind, name))
-        catalog.append(
-            {"id": f"{kind}:{len(catalog)}", "kind": kind, "name": name}
-        )
-    desired = _source_linked_starting_items(profile, catalog)
-    pack_ids = {
-        item["id"] for item in _pack_contents(profile, "Burglar's Pack")
-    }
-    initial_items = [
-        {**deepcopy(item), "weight_oz": 0}
-        for item in desired
-        if item["id"] not in pack_ids
-    ]
-    initial_items.append(
-        {
-            "id": "pip-underbough-burglars-pack",
-            "name": "Burglar's Pack",
-            "kind": "equipment",
-            "quantity": 1,
-            "weight_oz": 0,
-        }
-    )
-
-    class Client:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, dict]] = []
-            self.actor = {
-                "id": "pip",
-                "campaign_id": "campaign",
-                "name": profile["name"],
-                "revision": 1,
-                "sheet": {"inventory": {"items": initial_items}},
-                "derived": {
-                    "inventory": {
-                        "total_weight_oz": 0,
-                        "encumbrance": {"carried_weight_oz": 0},
-                    }
-                },
-            }
-
-        def _refresh(self) -> None:
-            total = sum(
-                item.get("weight_oz", 0) * item.get("quantity", 1)
-                for item in self.actor["sheet"]["inventory"]["items"]
-            )
-            self.actor["revision"] += 1
-            self.actor["derived"]["inventory"] = {
-                "total_weight_oz": total,
-                "encumbrance": {"carried_weight_oz": total},
-            }
-
-        async def domain(self, tool_id: str, arguments: dict):
-            self.calls.append((tool_id, deepcopy(arguments)))
-            if tool_id == "character_query":
-                return deepcopy(self.actor)
-            assert tool_id == "inventory_change"
-            assert arguments["owner"] == "character"
-            assert arguments["expected_revision"] == self.actor["revision"]
-            payload = arguments["payload"]
-            if arguments["action"] == "remove":
-                self.actor["sheet"]["inventory"]["items"] = [
-                    item
-                    for item in self.actor["sheet"]["inventory"]["items"]
-                    if item["id"] != payload["item_id"]
-                ]
-            elif arguments["action"] == "add":
-                self.actor["sheet"]["inventory"]["items"].append(
-                    deepcopy(payload["item"])
-                )
-            else:
-                item = next(
-                    item
-                    for item in self.actor["sheet"]["inventory"]["items"]
-                    if item["id"] == payload["item_id"]
-                )
-                item.update(deepcopy(payload["patch"]))
-            self._refresh()
-            return deepcopy(self.actor)
-
-    report_path = tmp_path / "party.json"
-    report_path.write_text(
-        json.dumps(
-            {
-                "campaign_id": "campaign",
-                "characters": [{"actor_id": "pip", "name": profile["name"]}],
-            }
-        ),
-        encoding="utf-8",
-    )
-    client = Client()
-    repaired, changes = asyncio.run(
-        _repair_existing_party_equipment(
-            client,
-            campaign_id="campaign",
-            run_id="run",
-            profiles=[profile],
-            catalog=catalog,
-            report_path=report_path,
-        )
-    )
-
-    final_ids = {
-        item["id"] for item in client.actor["sheet"]["inventory"]["items"]
-    }
-    assert "pip-underbough-burglars-pack" not in final_ids
-    assert pack_ids <= final_ids
-    assert repaired[0]["total_weight_oz"] > 0
-    assert changes[0]["changes"][0]["action"] == "remove_opaque_pack"
-    assert all(tool_id in {"character_query", "inventory_change"} for tool_id, _ in client.calls)
 
 
 def test_waterdeep_party_uses_explicit_dm_review_not_a_fake_module_range() -> None:
@@ -555,9 +398,10 @@ def test_six_character_campaign_parties_use_source_maximum_and_ranger(
     assert audit["spell_resource_models"] == ["known", "prepared", "spellbook"]
     if campaign_line_id == "storm-kings-thunder":
         assert audit["pregenerated_first"]["associated_archetype_templates"] == 7
-        assert "leave identity, level, all ability scores" in audit["pregenerated_first"][
-            "disposition"
-        ]
+        assert (
+            "leave identity, level, all ability scores"
+            in audit["pregenerated_first"]["disposition"]
+        )
     assert ranger["feature_choices"]["Favored Enemy"]["favored_enemy"] == {
         "creature_type": "Giants",
         "humanoid_races": [],
@@ -600,19 +444,13 @@ def test_one_replacement_reuses_a_legal_profile_without_inheriting_identity() ->
     assert len(selected) == 1
     assert selected[0]["name"] == "Mira Emberleaf"
     assert selected[0]["class"] == "Wizard"
-    spellbook = next(
-        item for item in selected[0]["items"] if item["name"] == "Spellbook"
-    )
+    spellbook = next(item for item in selected[0]["items"] if item["name"] == "Spellbook")
     assert spellbook["mechanics"]["owner_mark"] == "Mira Emberleaf"
     assert audit["source_profile_name"] == "Aelar Quill"
     assert audit["knowledge_inheritance"] == "none"
-    source_wizard = next(
-        item for item in lost_mine_party_profiles() if item["class"] == "Wizard"
-    )
+    source_wizard = next(item for item in lost_mine_party_profiles() if item["class"] == "Wizard")
     assert source_wizard["name"] == "Aelar Quill"
-    source_spellbook = next(
-        item for item in source_wizard["items"] if item["name"] == "Spellbook"
-    )
+    source_spellbook = next(item for item in source_wizard["items"] if item["name"] == "Spellbook")
     assert source_spellbook["mechanics"]["owner_mark"] == "Aelar Quill"
 
 

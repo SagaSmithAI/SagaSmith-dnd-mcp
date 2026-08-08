@@ -118,25 +118,41 @@ def test_divine_spark_combat_measures_visibility_and_range_then_commits_atomical
         )
         cleric = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Cleric",
-                "sheet": _cleric_sheet(),
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Cleric",
+                    "sheet": _cleric_sheet(),
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "cleric",
             },
         )
         target = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Target",
-                "sheet": _target_sheet(),
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Target",
+                    "sheet": _target_sheet(),
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "target",
             },
         )
-        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        campaign = await _call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
+        )
         phase = await _call(
             server,
             "game_phase",
@@ -191,7 +207,15 @@ def test_divine_spark_combat_measures_visibility_and_range_then_commits_atomical
                     "idempotency_key": "too-far",
                 },
             )
-        unchanged = await _call(server, "character_get", {"character_id": cleric["id"]})
+        unchanged = await _call(
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": cleric["id"]},
+                "principal_id": "system:local",
+            },
+        )
         assert unchanged["sheet"]["resources"]["channel_divinity"]["value"] == 2
 
         moved = await _call(
@@ -233,10 +257,22 @@ def test_divine_spark_combat_measures_visibility_and_range_then_commits_atomical
             for item in resolved["result"]["rule_receipts"]
         )
         cleric_after = await _call(
-            server, "character_get", {"character_id": cleric["id"]}
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": cleric["id"]},
+                "principal_id": "system:local",
+            },
         )
         target_after = await _call(
-            server, "character_get", {"character_id": target["id"]}
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": target["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert cleric_after["sheet"]["resources"]["channel_divinity"]["value"] == 1
         assert target_after["sheet"]["combat"]["hp"]["value"] < 30
@@ -259,25 +295,41 @@ def test_divine_spark_noncombat_uses_public_facade_and_target_revision(
         )
         cleric = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Cleric",
-                "sheet": _cleric_sheet(),
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Cleric",
+                    "sheet": _cleric_sheet(),
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "cleric",
             },
         )
         target = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Target",
-                "sheet": _target_sheet(current_hp=4),
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Target",
+                    "sheet": _target_sheet(current_hp=4),
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "target",
             },
         )
-        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        campaign = await _call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
+        )
         await _call(
             server,
             "game_phase",

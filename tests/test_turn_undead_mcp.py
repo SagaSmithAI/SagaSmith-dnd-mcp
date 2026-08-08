@@ -60,9 +60,7 @@ def _cleric_sheet(edition: str) -> dict:
         "max": 2 if edition == "2024" else 1,
         "recovers_on": "long_rest" if edition == "2024" else "short_rest",
         **(
-            {"recovery_amounts": {"short_rest": 1, "long_rest": "all"}}
-            if edition == "2024"
-            else {}
+            {"recovery_amounts": {"short_rest": 1, "long_rest": "all"}} if edition == "2024" else {}
         ),
         "source_key": "Cleric",
     }
@@ -119,9 +117,7 @@ def test_turn_undead_preflights_then_commits_all_actors_atomically(
             rng=random.Random(1),
         )
 
-    monkeypatch.setattr(
-        server_module, "resolve_turn_undead_to_sheets", deterministic_turn
-    )
+    monkeypatch.setattr(server_module, "resolve_turn_undead_to_sheets", deterministic_turn)
 
     async def exercise() -> None:
         server = create_server(_config(tmp_path))
@@ -132,25 +128,41 @@ def test_turn_undead_preflights_then_commits_all_actors_atomically(
         )
         cleric = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Cleric",
-                "sheet": _cleric_sheet(edition),
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Cleric",
+                    "sheet": _cleric_sheet(edition),
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "cleric",
             },
         )
         undead = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Skeleton",
-                "sheet": _undead_sheet(edition),
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Skeleton",
+                    "sheet": _undead_sheet(edition),
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "undead",
             },
         )
-        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        campaign = await _call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
+        )
         phase = await _call(
             server,
             "game_phase",
@@ -187,9 +199,7 @@ def test_turn_undead_preflights_then_commits_all_actors_atomically(
             },
         )
 
-        with pytest.raises(
-            Exception, match="adjudicate every living undead within 30 feet"
-        ):
+        with pytest.raises(Exception, match="adjudicate every living undead within 30 feet"):
             await _raw(
                 server,
                 "combat_use_activity",
@@ -207,7 +217,15 @@ def test_turn_undead_preflights_then_commits_all_actors_atomically(
                 },
             )
 
-        unchanged = await _call(server, "character_get", {"character_id": cleric["id"]})
+        unchanged = await _call(
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": cleric["id"]},
+                "principal_id": "system:local",
+            },
+        )
         assert unchanged["sheet"]["resources"]["channel_divinity"]["value"] == (
             2 if edition == "2024" else 1
         )
@@ -224,9 +242,7 @@ def test_turn_undead_preflights_then_commits_all_actors_atomically(
                 "declaration": {
                     "option": "turn_undead",
                     **({"sear_undead": True} if edition == "2024" else {}),
-                    "perception": [
-                        {"target_id": undead["id"], "can_see_or_hear": True}
-                    ],
+                    "perception": [{"target_id": undead["id"], "can_see_or_hear": True}],
                 },
                 "expected_revision": started["campaign_revision"],
                 "idempotency_key": "valid",
@@ -248,9 +264,7 @@ def test_turn_undead_preflights_then_commits_all_actors_atomically(
             )
         assert len(effect["dependencies"]) == (1 if edition == "2024" else 0)
         if edition == "2024":
-            assert effect["dependencies"][0]["dependency"] == (
-                "source_actor_capable"
-            )
+            assert effect["dependencies"][0]["dependency"] == ("source_actor_capable")
         assert any(
             item["mechanic_id"] == "dnd5e.core.activity.turn_undead"
             for item in resolved["result"]["rule_receipts"]
@@ -258,18 +272,28 @@ def test_turn_undead_preflights_then_commits_all_actors_atomically(
         current = resolved["combat"]["combatants"][resolved["combat"]["turn_index"]]
         assert current["turn_budget"]["main_action"] == 0
         undead_combatant = next(
-            item
-            for item in resolved["combat"]["combatants"]
-            if item["actor_id"] == undead["id"]
+            item for item in resolved["combat"]["combatants"] if item["actor_id"] == undead["id"]
         )
         assert undead_combatant["turned"]["source_actor_id"] == cleric["id"]
         assert undead_combatant["turn_budget"]["reaction"] == 0
 
         cleric_after = await _call(
-            server, "character_get", {"character_id": cleric["id"]}
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": cleric["id"]},
+                "principal_id": "system:local",
+            },
         )
         undead_after = await _call(
-            server, "character_get", {"character_id": undead["id"]}
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": undead["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert cleric_after["sheet"]["resources"]["channel_divinity"]["value"] == (
             1 if edition == "2024" else 0

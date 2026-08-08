@@ -37,9 +37,7 @@ from sagasmith_dnd_mcp.tool_profiles import CORE_TOOLS, GROUP_BY_ID
 
 
 def test_pending_ruling_envelope_defaults_to_agent_reasoning() -> None:
-    assert _ruling_status("committed", "generic_spell_effect") == {
-        "status": "committed"
-    }
+    assert _ruling_status("committed", "generic_spell_effect") == {"status": "committed"}
     assert _ruling_status("pending_ruling", "generic_spell_effect") == {
         "status": "pending_ruling",
         "default_resolver": "agent",
@@ -131,7 +129,7 @@ def test_exposure_inspect_returns_action_specific_payload_contract(
             "source_ability",
             "target_ability",
         ]
-        _, compatibility_result = await server.call_tool(
+        _, module_result = await server.call_tool(
             "exposure_inspect",
             {
                 "group_id": "lobby.modules",
@@ -139,16 +137,10 @@ def test_exposure_inspect_returns_action_specific_payload_contract(
                 "selector": "scene",
             },
         )
-        compatibility_contract = compatibility_result["tool_contract"]["actions"][
-            "scene"
-        ]
-        assert compatibility_contract["contract_kind"] == "runtime_field_guide"
-        assert compatibility_contract["payload_variants"][0][
-            "additional_properties"
-        ] is True
-        assert compatibility_contract["payload_variants"][0]["required_fields"] == [
-            "scene_id"
-        ]
+        module_contract = module_result["tool_contract"]["actions"]["scene"]
+        assert module_contract["contract_kind"] == "exact_field_contract"
+        assert module_contract["payload_variants"][0]["additional_properties"] is False
+        assert module_contract["payload_variants"][0]["required_fields"] == ["scene_id"]
 
     asyncio.run(exercise())
 
@@ -195,7 +187,7 @@ def test_nested_pending_rulings_and_facade_results_preserve_external_ownership()
 
 
 def test_unknown_dm_ruling_kind_defaults_to_agent_adjudication() -> None:
-    result = _ruling_status("pending_ruling", "legacy_manual_dm_review")
+    result = _ruling_status("pending_ruling", "unclassified_manual_review")
 
     assert result["default_resolver"] == "agent"
     assert result["ruling_kind"] == "agent_dm_adjudication"
@@ -392,9 +384,7 @@ def test_nested_pending_results_default_to_agent_and_preserve_exceptions() -> No
         )
         == "player_owned_choice"
     )
-    assert _pending_result_ruling_kind({"status": "pending_ruling"}) == (
-        "agent_dm_adjudication"
-    )
+    assert _pending_result_ruling_kind({"status": "pending_ruling"}) == ("agent_dm_adjudication")
     assert (
         _pending_result_ruling_kind(
             {
@@ -406,9 +396,7 @@ def test_nested_pending_results_default_to_agent_and_preserve_exceptions() -> No
     )
 
 
-def test_exposure_call_marks_live_dm_ruling_for_agent(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_exposure_call_marks_live_dm_ruling_for_agent(tmp_path: Path, monkeypatch) -> None:
     config = McpConfig(
         home=tmp_path / "home",
         database_url=None,
@@ -544,8 +532,7 @@ def test_unbound_exposure_only_loads_bootstrap_or_local_admin() -> None:
 
 def test_phase_groups_separate_player_reads_from_dm_control() -> None:
     assert all(
-        not group.roles or group.roles == CAMPAIGN_DM_ROLES
-        for group in GROUP_BY_ID.values()
+        not group.roles or group.roles == CAMPAIGN_DM_ROLES for group in GROUP_BY_ID.values()
     )
     assert GROUP_BY_ID["lobby.memory"].roles == frozenset()
     assert GROUP_BY_ID["lobby.memory_control"].roles == frozenset({"owner", "dm"})
@@ -641,7 +628,7 @@ def test_player_exposure_loads_scene_reads_but_not_scene_control(tmp_path: Path)
     asyncio.run(exercise())
 
 
-def test_exposure_ttl_is_deterministic_and_expired_sessions_are_pruned() -> None:
+def test_exposure_time_lease_is_deterministic_and_loaded_groups_persist() -> None:
     registry = ExposureRegistry(ttl=timedelta(microseconds=-1))
     expired = registry.open(
         session_key="session:expired",
@@ -660,13 +647,11 @@ def test_exposure_ttl_is_deterministic_and_expired_sessions_are_pruned() -> None
         phase="combat",
     )
     registry.load(exposure, "combat.observe")
-    registry.load(exposure, "combat.actions", ttl_calls=1)
-    assert registry.consume_tool(exposure, "rule_search") is False
+    registry.load(exposure, "combat.actions")
     assert "combat.actions" in exposure.loaded_groups
-    assert registry.consume_tool(exposure, "combat_check") is True
-    assert "combat.actions" not in exposure.loaded_groups
-    with pytest.raises(ExposureError, match="not exposed"):
-        registry.require_tool(exposure, "combat_check")
+    registry.require_tool(exposure, "combat_check")
+    registry.require_tool(exposure, "combat_check")
+    assert "combat.actions" in exposure.loaded_groups
 
 
 def test_exposure_lease_uses_one_injected_operational_clock() -> None:
@@ -690,57 +675,6 @@ def test_exposure_lease_uses_one_injected_operational_clock() -> None:
     assert exposure.expires_at == exposure.created_at + timedelta(hours=2)
     registry.touch(exposure)
     assert exposure.updated_at == datetime(2026, 7, 28, 1, 2, tzinfo=UTC)
-
-
-@pytest.mark.parametrize(
-    ("retired_name", "replacement"),
-    [
-        ("chase_start", "chase(action='start')"),
-        ("chase_query", "chase(action='query')"),
-        ("chase_take_turn", "chase(action='take_turn')"),
-        ("chase_end", "chase(action='end')"),
-        ("character_contest", "character_check(action='contest')"),
-        ("campaign_core_relock", "campaign_rules(action='core_relock')"),
-        ("rule_document_page_render", "rule_import(action='render_page')"),
-        ("module_page_render", "module_review(action='render_page')"),
-        ("module_content_review", "module_review(action='submit_content')"),
-        ("continuity_commit", "memory_change(action='commit')"),
-        ("continuity_diagnostics", "memory_query(view='diagnostics')"),
-        ("combat_on_hit_ruling", "combat_choice(action='on_hit_ruling')"),
-        ("character_rest", "campaign_change(action='party_rest')"),
-        ("character_memory_add", "actor_knowledge_change(action='add')"),
-        ("character_memory_resolve", "actor_knowledge_change(action='revise')"),
-    ],
-)
-def test_exposure_call_explains_retired_tool_replacements(
-    tmp_path: Path,
-    retired_name: str,
-    replacement: str,
-) -> None:
-    config = McpConfig(
-        home=tmp_path / "home",
-        database_url=None,
-        chroma_url=None,
-        chroma_path_override=None,
-        dnd_skills_dir=tmp_path / "dnd",
-        modulegen_skills_dir=tmp_path / "modulegen",
-        auto_seed_rules=False,
-    )
-
-    async def exercise() -> None:
-        server = create_server(config)
-        with pytest.raises(Exception, match="is retired") as caught:
-            await server.call_tool(
-                "exposure_call",
-                {
-                    "exposure_id": "unused-for-retired-tool",
-                    "tool_id": retired_name,
-                    "arguments": {},
-                },
-            )
-        assert replacement in str(caught.value)
-
-    asyncio.run(exercise())
 
 
 def test_native_tool_list_starts_core_and_expands_per_session(tmp_path) -> None:
@@ -797,8 +731,7 @@ def test_stdio_session_uses_native_refresh_and_exposure_call_fallback(tmp_path) 
                 assert initialized.capabilities.tools.listChanged is True
                 assert {tool.name for tool in (await session.list_tools()).tools} == set(CORE_TOOLS)
                 assert "sagasmith://bootstrap" in {
-                    str(resource.uri)
-                    for resource in (await session.list_resources()).resources
+                    str(resource.uri) for resource in (await session.list_resources()).resources
                 }
                 outlined = await session.call_tool(
                     "skill_query",
@@ -810,8 +743,7 @@ def test_stdio_session_uses_native_refresh_and_exposure_call_fallback(tmp_path) 
                 )
                 outlined_payload = json.loads(outlined.content[0].text)["result"]
                 assert any(
-                    heading["title"] == "Startup"
-                    for heading in outlined_payload["headings"]
+                    heading["title"] == "Startup" for heading in outlined_payload["headings"]
                 )
 
                 principal_id = "discord:user-42"
@@ -861,9 +793,9 @@ def test_stdio_session_uses_native_refresh_and_exposure_call_fallback(tmp_path) 
                 )
                 resumed_payload = json.loads(resumed.content[0].text)["result"]
                 assert resumed_payload["campaign"]["id"] == campaign_id
-                assert resumed_payload["continuity"]["context_receipt"][
-                    "campaign_id"
-                ] == campaign_id
+                assert (
+                    resumed_payload["continuity"]["context_receipt"]["campaign_id"] == campaign_id
+                )
                 synchronized = await session.call_tool(
                     "campaign_query",
                     {
@@ -872,9 +804,7 @@ def test_stdio_session_uses_native_refresh_and_exposure_call_fallback(tmp_path) 
                         "principal_id": principal_id,
                     },
                 )
-                synchronized_payload = json.loads(synchronized.content[0].text)[
-                    "result"
-                ]
+                synchronized_payload = json.loads(synchronized.content[0].text)["result"]
                 assert synchronized_payload["campaign_id"] == campaign_id
                 assert synchronized_payload["principal_fingerprint"]
                 assert synchronized_payload["role"] == "owner"
@@ -893,9 +823,10 @@ def test_stdio_session_uses_native_refresh_and_exposure_call_fallback(tmp_path) 
                     },
                 )
                 inspected_payload = json.loads(inspected.content[0].text)
-                assert inspected_payload["tool_contract"]["actions"]["stage"][
-                    "contract_kind"
-                ] == "exact_field_contract"
+                assert (
+                    inspected_payload["tool_contract"]["actions"]["stage"]["contract_kind"]
+                    == "exact_field_contract"
+                )
                 fallback = await session.call_tool(
                     "exposure_call",
                     {
@@ -970,9 +901,7 @@ def test_stdio_process_binding_overwrites_model_authored_principal(tmp_path) -> 
                     {"principal_id": "another:forged-user"},
                 )
                 listed_payload = json.loads(listed.content[0].text)["result"]
-                assert [item["name"] for item in listed_payload] == [
-                    "Principal-bound campaign"
-                ]
+                assert [item["name"] for item in listed_payload] == ["Principal-bound campaign"]
 
     asyncio.run(exercise())
 

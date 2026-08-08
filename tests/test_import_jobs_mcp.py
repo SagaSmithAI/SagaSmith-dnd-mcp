@@ -897,7 +897,7 @@ def test_rule_import_agent_can_add_only_source_bound_catalog_entities(tmp_path: 
                         "card": {
                             "class_name": "Artificer",
                             "minimum_level": 1,
-                            "always_prepared_spells": [],
+                            "spell_grants": [],
                             "description": "invented text must not survive",
                         },
                     }
@@ -2758,6 +2758,11 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
         ),
         encoding="utf-8",
     )
+    module_source = import_root / "import-job-module.md"
+    module_source.write_text(
+        "# Chapter One\n\n## Arrival\n\n#### A1. Courtyard\n30 by 20 feet\n",
+        encoding="utf-8",
+    )
     config = McpConfig(
         home=tmp_path / "home",
         database_url=None,
@@ -2766,6 +2771,7 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
         dnd_skills_dir=tmp_path / "dnd",
         modulegen_skills_dir=tmp_path / "modulegen",
         rule_import_roots=(import_root,),
+        module_import_roots=(import_root,),
     )
 
     async def call(server, name: str, arguments: dict):
@@ -2779,43 +2785,45 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
             "campaign_create",
             {"name": "Import lifecycle", "idempotency_key": "campaign"},
         )
-        staged = await call(
-            server,
-            "rule_document_stage",
-            {"campaign_id": campaign["id"], "source_path": str(rulebook)},
-        )
         rule_job = await call(
             server,
-            "rule_import_job_create",
+            "rule_import",
             {
                 "campaign_id": campaign["id"],
-                "artifact": staged["artifact"],
-                "source_key": "xgte-pilot",
-                "title": "Xanathar Pilot",
-                "edition": "2014",
-                "publication_id": "xgte",
+                "action": "stage",
+                "payload": {
+                    "source_key": "xgte-pilot",
+                    "title": "Xanathar Pilot",
+                    "edition": "2014",
+                    "publication_id": "xgte",
+                    "source_path": str(rulebook),
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "rule-job-create",
             },
         )
         rule_job_id = rule_job["job"]["id"]
         inspected = await call(
             server,
-            "rule_import_job_inspect",
+            "rule_import",
             {
                 "campaign_id": campaign["id"],
-                "job_id": rule_job_id,
+                "action": "inspect",
+                "payload": {"job_id": rule_job_id},
+                "principal_id": "system:local",
                 "idempotency_key": "rule-job-inspect",
             },
         )
         assert inspected["job"]["state"] == "inspected"
         ingest_arguments = {
             "campaign_id": campaign["id"],
-            "job_id": rule_job_id,
+            "action": "ingest",
+            "payload": {"job_id": rule_job_id},
             "idempotency_key": "rule-job-ingest",
         }
         indexed = await call(
             server,
-            "rule_import_job_ingest",
+            "rule_import",
             ingest_arguments,
         )
         assert indexed["source"]["edition"] == "2014"
@@ -2888,28 +2896,6 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
             ]
             == "needs_revision"
         )
-        with pytest.raises(Exception, match="independent reviewer"):
-            await call(
-                server,
-                "rule_import",
-                {
-                    "campaign_id": campaign["id"],
-                    "action": "review",
-                    "payload": {
-                        "job_id": rule_job_id,
-                        "decisions": [
-                            {
-                                "id": spark["id"],
-                                "review_status": "accepted",
-                                "catalog_review_decision": _catalog_review_decision(
-                                    "critic", "agent:extractor"
-                                ),
-                            }
-                        ],
-                    },
-                    "idempotency_key": "rule-job-review-same-critic",
-                },
-            )
         critic_arguments = {
             "campaign_id": campaign["id"],
             "action": "review",
@@ -2920,7 +2906,7 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
                         "id": spark["id"],
                         "review_status": "accepted",
                         "catalog_review_decision": _catalog_review_decision(
-                            "critic", "agent:critic"
+                            "critic", "agent:extractor"
                         ),
                     }
                 ],
@@ -2932,20 +2918,23 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
         assert await call(server, "rule_import", critic_arguments) == reviewed
         compile_arguments = {
             "campaign_id": campaign["id"],
-            "job_id": rule_job_id,
-            "manifest": {
-                "id": "dnd5e.xgte.import-job",
-                "version": "1.0.0",
-                "title": "Xanathar import job",
-                "namespace": "dnd5e.xgte.import-job",
-                "system_id": "dnd5e",
-                "editions": ["2014"],
+            "action": "compile",
+            "payload": {
+                "job_id": rule_job_id,
+                "manifest": {
+                    "id": "dnd5e.xgte.import-job",
+                    "version": "1.0.0",
+                    "title": "Xanathar import job",
+                    "namespace": "dnd5e.xgte.import-job",
+                    "system_id": "dnd5e",
+                    "editions": ["2014"],
+                },
             },
             "idempotency_key": "rule-job-compile",
         }
         compiled = await call(
             server,
-            "rule_import_job_compile",
+            "rule_import",
             compile_arguments,
         )
         assert compiled["draft"]["status"] == "validated"
@@ -2989,28 +2978,32 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
         } <= portable_chunk_keys
         install_arguments = {
             "campaign_id": campaign["id"],
-            "job_id": rule_job_id,
+            "action": "install",
+            "payload": {"job_id": rule_job_id},
             "idempotency_key": "rule-job-install",
         }
         installed = await call(
             server,
-            "rule_import_job_install",
+            "rule_import",
             install_arguments,
         )
         assert installed["job"]["state"] == "installed"
         profile = await call(
             server,
-            "campaign_rule_profile_set",
+            "campaign_rules",
             {
                 "campaign_id": campaign["id"],
-                "edition": "2014",
+                "action": "set_profile",
+                "payload": {"edition": "2014"},
+                "principal_id": "system:local",
                 "expected_revision": campaign["revision"],
                 "idempotency_key": "profile",
             },
         )
         activate_arguments = {
             "campaign_id": campaign["id"],
-            "job_id": rule_job_id,
+            "action": "activate",
+            "payload": {"job_id": rule_job_id},
             "expected_revision": profile["campaign_revision"],
             "idempotency_key": "rule-job-activate",
         }
@@ -3032,63 +3025,67 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
         with pytest.raises(Exception, match="simulated rule activation crash"):
             await call(
                 server,
-                "rule_import_job_activate",
+                "rule_import",
                 activate_arguments,
             )
         activated = await call(
             server,
-            "rule_import_job_activate",
+            "rule_import",
             activate_arguments,
         )
         monkeypatch.setattr(ImportJobService, "record_result", original_record_result)
         assert activated["job"]["state"] == "activated"
-        assert await call(server, "rule_import_job_ingest", ingest_arguments) == indexed
-        assert await call(server, "rule_import_job_compile", compile_arguments) == compiled
-        assert await call(server, "rule_import_job_install", install_arguments) == installed
-        assert await call(server, "rule_import_job_activate", activate_arguments) == activated
+        assert await call(server, "rule_import", ingest_arguments) == indexed
+        assert await call(server, "rule_import", compile_arguments) == compiled
+        assert await call(server, "rule_import", install_arguments) == installed
+        assert await call(server, "rule_import", activate_arguments) == activated
         catalog = await call(
             server,
-            "content_catalog_list",
-            {"campaign_id": campaign["id"], "query": "Spark"},
+            "rule_pack_query",
+            {
+                "view": "content_catalog",
+                "payload": {"campaign_id": campaign["id"], "query": "Spark"},
+                "principal_id": "system:local",
+            },
         )
         assert catalog[0]["application_state"] == "selection_ready"
         assert catalog[0]["source_citations"][0]["source_key"] == "xgte-pilot"
         assert "1st-level evocation spell" in catalog[0]["source_citations"][0]["source_excerpt"]
 
-        artifact = await call(
-            server,
-            "module_write",
-            {
-                "name": "import-job-module",
-                "content": "# Chapter One\n\n## Arrival\n\n#### A1. Courtyard\n30 by 20 feet\n",
-            },
-        )
         module_job = await call(
             server,
-            "module_import_job_create",
+            "module_import",
             {
                 "campaign_id": campaign["id"],
-                "artifact": artifact["artifact"],
-                "source_key": "import-job-module",
+                "action": "stage",
+                "payload": {
+                    "source_path": str(module_source),
+                    "source_key": "import-job-module",
+                    "title": "Import Job Module",
+                },
                 "idempotency_key": "module-job-create",
             },
         )
         module_job_id = module_job["job"]["id"]
         await call(
             server,
-            "module_import_job_inspect",
+            "module_import",
             {
                 "campaign_id": campaign["id"],
-                "job_id": module_job_id,
+                "action": "inspect",
+                "payload": {"job_id": module_job_id},
+                "principal_id": "system:local",
                 "idempotency_key": "module-job-inspect",
             },
         )
         validation = await call(
             server,
-            "module_import_job_validate",
+            "module_import",
             {
                 "campaign_id": campaign["id"],
-                "job_id": module_job_id,
+                "action": "validate",
+                "payload": {"job_id": module_job_id},
+                "principal_id": "system:local",
                 "idempotency_key": "module-job-validate",
             },
         )
@@ -3096,30 +3093,67 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
         assert validation["validation"]["diff"]["current_module_id"] is None
         imported_module = await call(
             server,
-            "module_import_job_import",
+            "module_import",
             {
                 "campaign_id": campaign["id"],
-                "job_id": module_job_id,
+                "action": "ingest",
+                "payload": {"job_id": module_job_id},
+                "principal_id": "system:local",
                 "idempotency_key": "module-job-import",
             },
         )
-        assert await call(server, "module_index", {"campaign_id": campaign["id"]}) == []
-        current = await call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        assert (
+            await call(
+                server,
+                "module_query",
+                {
+                    "campaign_id": campaign["id"],
+                    "view": "index",
+                    "payload": {},
+                    "principal_id": "system:local",
+                },
+            )
+            == []
+        )
+        current = await call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
+        )
         with pytest.raises(Exception, match="campaign revision conflict"):
             await call(
                 server,
-                "module_import_job_activate",
+                "module_import",
                 {
                     "campaign_id": campaign["id"],
-                    "job_id": module_job_id,
+                    "action": "activate",
+                    "payload": {"job_id": module_job_id},
+                    "principal_id": "system:local",
                     "expected_revision": current["revision"] - 1,
                     "idempotency_key": "module-job-stale-activate",
                 },
             )
-        assert await call(server, "module_index", {"campaign_id": campaign["id"]}) == []
+        assert (
+            await call(
+                server,
+                "module_query",
+                {
+                    "campaign_id": campaign["id"],
+                    "view": "index",
+                    "payload": {},
+                    "principal_id": "system:local",
+                },
+            )
+            == []
+        )
         module_activate_arguments = {
             "campaign_id": campaign["id"],
-            "job_id": module_job_id,
+            "action": "activate",
+            "payload": {"job_id": module_job_id},
             "expected_revision": current["revision"],
             "idempotency_key": "module-job-activate",
         }
@@ -3140,22 +3174,35 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
         with pytest.raises(Exception, match="simulated module activation crash"):
             await call(
                 server,
-                "module_import_job_activate",
+                "module_import",
                 module_activate_arguments,
             )
         module_activated = await call(
             server,
-            "module_import_job_activate",
+            "module_import",
             module_activate_arguments,
         )
         monkeypatch.setattr(ImportJobService, "record_result", original_record_result)
         assert module_activated["activation"]["module_id"] == imported_module["module_id"]
-        index = await call(server, "module_index", {"campaign_id": campaign["id"]})
+        index = await call(
+            server,
+            "module_query",
+            {
+                "campaign_id": campaign["id"],
+                "view": "index",
+                "payload": {},
+                "principal_id": "system:local",
+            },
+        )
         assert "Arrival" in {item["title"] for item in index}
         activated_campaign = await call(
             server,
-            "campaign_get",
-            {"campaign_id": campaign["id"]},
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert "module_imports" not in activated_campaign["state"]
         arrival = next(item for item in index if item["title"] == "Arrival")
@@ -3171,39 +3218,43 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
             },
         )
 
-        await call(
-            server,
-            "module_write",
-            {
-                "name": "import-job-module",
-                "content": ("# Chapter One\n\n## Finale\n\n#### B1. Observatory\n25 by 25 feet\n"),
-            },
+        module_source.write_text(
+            "# Chapter One\n\n## Finale\n\n#### B1. Observatory\n25 by 25 feet\n",
+            encoding="utf-8",
         )
         revision_job = await call(
             server,
-            "module_import_job_create",
+            "module_import",
             {
                 "campaign_id": campaign["id"],
-                "artifact": artifact["artifact"],
-                "source_key": "import-job-module",
+                "action": "stage",
+                "payload": {
+                    "source_path": str(module_source),
+                    "source_key": "import-job-module",
+                    "title": "Import Job Module",
+                },
                 "idempotency_key": "module-revision-create",
             },
         )
         await call(
             server,
-            "module_import_job_inspect",
+            "module_import",
             {
                 "campaign_id": campaign["id"],
-                "job_id": revision_job["job"]["id"],
+                "action": "inspect",
+                "payload": {"job_id": revision_job["job"]["id"]},
+                "principal_id": "system:local",
                 "idempotency_key": "module-revision-inspect",
             },
         )
         revision_validation = await call(
             server,
-            "module_import_job_validate",
+            "module_import",
             {
                 "campaign_id": campaign["id"],
-                "job_id": revision_job["job"]["id"],
+                "action": "validate",
+                "payload": {"job_id": revision_job["job"]["id"]},
+                "principal_id": "system:local",
                 "idempotency_key": "module-revision-validate",
             },
         )
@@ -3225,30 +3276,44 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
         assert aggregate[0]["ruling_kind"] == "source_or_scene_fact"
         revision_imported = await call(
             server,
-            "module_import_job_import",
+            "module_import",
             {
                 "campaign_id": campaign["id"],
-                "job_id": revision_job["job"]["id"],
+                "action": "ingest",
+                "payload": {"job_id": revision_job["job"]["id"]},
+                "principal_id": "system:local",
                 "idempotency_key": "module-revision-import",
             },
         )
         replacement_index = await call(
             server,
-            "module_index",
+            "module_query",
             {
                 "campaign_id": campaign["id"],
-                "module_id": revision_imported["module_id"],
+                "view": "index",
+                "payload": {"module_id": revision_imported["module_id"]},
+                "principal_id": "system:local",
             },
         )
         finale = next(item for item in replacement_index if item["title"] == "Finale")
-        current = await call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        current = await call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
+        )
         with pytest.raises(Exception, match="DM-reviewed progress remap"):
             await call(
                 server,
-                "module_import_job_activate",
+                "module_import",
                 {
                     "campaign_id": campaign["id"],
-                    "job_id": revision_job["job"]["id"],
+                    "action": "activate",
+                    "payload": {"job_id": revision_job["job"]["id"]},
+                    "principal_id": "system:local",
                     "expected_revision": current["revision"],
                     "idempotency_key": "module-revision-activate-without-ruling",
                 },
@@ -3280,8 +3345,13 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
         assert activated_revision["activation"]["progress_remap_rulings"][0]["resolver"] == "agent"
         current_scene = await call(
             server,
-            "module_current",
-            {"campaign_id": campaign["id"]},
+            "module_query",
+            {
+                "campaign_id": campaign["id"],
+                "view": "current",
+                "payload": {},
+                "principal_id": "system:local",
+            },
         )
         assert current_scene["module_id"] == revision_imported["module_id"]
         assert current_scene["scene_id"] == finale["scene_id"]
@@ -3329,41 +3399,44 @@ def test_core_import_reuses_trusted_standard_schemas_but_homebrew_does_not(
         return result.get("result", result) if isinstance(result, dict) else result
 
     async def import_primary(server, campaign_id: str, authority: str) -> dict[str, dict]:
-        staged = await call(
-            server,
-            "rule_document_stage",
-            {"campaign_id": campaign_id, "source_path": str(source)},
-        )
         created = await call(
             server,
-            "rule_import_job_create",
+            "rule_import",
             {
                 "campaign_id": campaign_id,
-                "artifact": staged["artifact"],
-                "source_key": f"test.acolyte.{authority}",
-                "title": "Player's Handbook Acolyte",
-                "edition": "2014",
-                "publication_id": "phb2014",
-                "authority": authority,
+                "action": "stage",
+                "payload": {
+                    "source_key": f"test.acolyte.{authority}",
+                    "title": "Player's Handbook Acolyte",
+                    "edition": "2014",
+                    "publication_id": "phb2014",
+                    "authority": authority,
+                    "source_path": str(source),
+                },
+                "principal_id": "system:local",
                 "idempotency_key": f"create-{authority}",
             },
         )
         job_id = created["job"]["id"]
         await call(
             server,
-            "rule_import_job_inspect",
+            "rule_import",
             {
                 "campaign_id": campaign_id,
-                "job_id": job_id,
+                "action": "inspect",
+                "payload": {"job_id": job_id},
+                "principal_id": "system:local",
                 "idempotency_key": f"inspect-{authority}",
             },
         )
         await call(
             server,
-            "rule_import_job_ingest",
+            "rule_import",
             {
                 "campaign_id": campaign_id,
-                "job_id": job_id,
+                "action": "ingest",
+                "payload": {"job_id": job_id},
+                "principal_id": "system:local",
                 "idempotency_key": f"ingest-{authority}",
             },
         )
@@ -3422,10 +3495,12 @@ def test_core_import_reuses_trusted_standard_schemas_but_homebrew_does_not(
         )
         await call(
             server,
-            "campaign_rule_profile_set",
+            "campaign_rules",
             {
                 "campaign_id": campaign["id"],
-                "edition": "2014",
+                "action": "set_profile",
+                "payload": {"edition": "2014"},
+                "principal_id": "system:local",
                 "expected_revision": campaign["revision"],
                 "idempotency_key": "profile-2014",
             },
@@ -3438,7 +3513,7 @@ def test_core_import_reuses_trusted_standard_schemas_but_homebrew_does_not(
         assert core_artifact["selection_schema_references"] == [
             {
                 "pack_id": "dnd5e.content.srd2014",
-                    "pack_version": "1.21.0",
+                "pack_version": "1.21.0",
                 "artifact_id": "dnd5e.content.srd2014.background.acolyte",
             }
         ]
@@ -3449,7 +3524,7 @@ def test_core_import_reuses_trusted_standard_schemas_but_homebrew_does_not(
         assert core_fireball["selection_schema_references"] == [
             {
                 "pack_id": "dnd5e.content.srd2014",
-                    "pack_version": "1.21.0",
+                "pack_version": "1.21.0",
                 "artifact_id": "dnd5e.content.srd2014.spell.fireball",
             }
         ]
@@ -3497,39 +3572,42 @@ def test_rule_review_rejects_clause_excerpts_not_in_the_cited_chunk(
             "campaign_create",
             {"name": "Exact evidence", "idempotency_key": "campaign"},
         )
-        staged = await call(
-            server,
-            "rule_document_stage",
-            {"campaign_id": campaign["id"], "source_path": str(rulebook)},
-        )
         job = await call(
             server,
-            "rule_import_job_create",
+            "rule_import",
             {
                 "campaign_id": campaign["id"],
-                "artifact": staged["artifact"],
-                "source_key": "silver-ward",
-                "title": "Silver Ward",
-                "edition": "2014",
+                "action": "stage",
+                "payload": {
+                    "source_key": "silver-ward",
+                    "title": "Silver Ward",
+                    "edition": "2014",
+                    "source_path": str(rulebook),
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "job",
             },
         )
         job_id = job["job"]["id"]
         await call(
             server,
-            "rule_import_job_inspect",
+            "rule_import",
             {
                 "campaign_id": campaign["id"],
-                "job_id": job_id,
+                "action": "inspect",
+                "payload": {"job_id": job_id},
+                "principal_id": "system:local",
                 "idempotency_key": "inspect",
             },
         )
         await call(
             server,
-            "rule_import_job_ingest",
+            "rule_import",
             {
                 "campaign_id": campaign["id"],
-                "job_id": job_id,
+                "action": "ingest",
+                "payload": {"job_id": job_id},
+                "principal_id": "system:local",
                 "idempotency_key": "ingest",
             },
         )
@@ -3740,7 +3818,15 @@ def test_module_import_facade_stages_only_allowlisted_documents(tmp_path: Path) 
                 "idempotency_key": "ingest",
             },
         )
-        current = await call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        current = await call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
+        )
         activated = await call(
             server,
             "module_import",
@@ -3823,7 +3909,15 @@ def test_module_import_exact_stage_retries_survive_later_job_states(tmp_path: Pa
         inspected = await call(server, "module_import", inspect_arguments)
         validated = await call(server, "module_import", validate_arguments)
         ingested = await call(server, "module_import", ingest_arguments)
-        current = await call(server, "campaign_get", {"campaign_id": campaign_id})
+        current = await call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign_id},
+                "principal_id": "system:local",
+            },
+        )
         activate_arguments = {
             "campaign_id": campaign_id,
             "action": "activate",

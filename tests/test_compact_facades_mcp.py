@@ -42,10 +42,11 @@ def test_compact_facades_reject_unknown_fields_and_wrong_phases(
         )
         actor = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Facade actor",
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Facade actor"},
+                "principal_id": "system:local",
                 "idempotency_key": "actor",
             },
         )
@@ -93,8 +94,12 @@ def test_compact_facades_reject_unknown_fields_and_wrong_phases(
 
         current = await _call(
             server,
-            "campaign_get",
-            {"campaign_id": campaign["id"]},
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
         )
         await _call(
             server,
@@ -109,8 +114,12 @@ def test_compact_facades_reject_unknown_fields_and_wrong_phases(
         )
         before = await _call(
             server,
-            "campaign_get",
-            {"campaign_id": campaign["id"]},
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
         )
         await _call(
             server,
@@ -188,7 +197,13 @@ def test_compact_facades_reject_unknown_fields_and_wrong_phases(
                 {
                     "campaign_id": campaign["id"],
                     "action": "submit_content",
-                    "payload": {},
+                    "payload": {
+                        "module_id": "module",
+                        "scene_id": "scene",
+                        "content_key": "key",
+                        "normalized_content": "content",
+                        "observation": "review",
+                    },
                     "idempotency_key": "play-content-review",
                 },
             )
@@ -238,8 +253,12 @@ def test_compact_facades_reject_unknown_fields_and_wrong_phases(
 
         after = await _call(
             server,
-            "campaign_get",
-            {"campaign_id": campaign["id"]},
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert after["revision"] == before["revision"]
 

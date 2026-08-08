@@ -32,33 +32,39 @@ def test_actor_scoped_event_is_visible_only_to_witnesses(tmp_path: Path) -> None
         )
         witness = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Witness",
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Witness"},
+                "principal_id": "system:local",
                 "idempotency_key": "witness",
             },
         )
         unaware = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Unaware",
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Unaware"},
+                "principal_id": "system:local",
                 "idempotency_key": "unaware",
             },
         )
         event = await _call(
             server,
-            "event_add",
+            "campaign_event",
             {
                 "campaign_id": campaign["id"],
-                "summary": "The witness sees the masked visitor leave.",
-                "event_type": "revelation",
-                "audience_scope": "actor",
-                "known_by_actor_ids": [witness["id"]],
-                "knowledge_key": "masked-visitor-departed",
-                "knowledge_proposition": "The masked visitor left by the east door.",
+                "action": "add",
+                "payload": {
+                    "summary": "The witness sees the masked visitor leave.",
+                    "event_type": "revelation",
+                    "audience_scope": "actor",
+                    "known_by_actor_ids": [witness["id"]],
+                    "knowledge_key": "masked-visitor-departed",
+                    "knowledge_proposition": "The masked visitor left by the east door.",
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "event",
             },
         )
@@ -165,44 +171,65 @@ def test_actor_scoped_event_is_visible_only_to_witnesses(tmp_path: Path) -> None
 
         before = await _call(
             server,
-            "event_list",
-            {"campaign_id": campaign["id"]},
+            "campaign_event",
+            {
+                "campaign_id": campaign["id"],
+                "action": "list",
+                "payload": {},
+                "principal_id": "system:local",
+            },
         )
         with pytest.raises(Exception, match="knowledge key already exists"):
             await _call(
                 server,
-                "event_add",
+                "campaign_event",
                 {
                     "campaign_id": campaign["id"],
-                    "summary": "A duplicate witnessed fact must roll back.",
-                    "audience_scope": "party",
-                    "known_by_actor_ids": [unaware["id"], witness["id"]],
-                    "knowledge_key": "masked-visitor-departed",
-                    "knowledge_proposition": "A conflicting departure account.",
+                    "action": "add",
+                    "payload": {
+                        "summary": "A duplicate witnessed fact must roll back.",
+                        "audience_scope": "party",
+                        "known_by_actor_ids": [unaware["id"], witness["id"]],
+                        "knowledge_key": "masked-visitor-departed",
+                        "knowledge_proposition": "A conflicting departure account.",
+                    },
+                    "principal_id": "system:local",
                     "idempotency_key": "duplicate-event",
                 },
             )
         after = await _call(
             server,
-            "event_list",
-            {"campaign_id": campaign["id"]},
+            "campaign_event",
+            {
+                "campaign_id": campaign["id"],
+                "action": "list",
+                "payload": {},
+                "principal_id": "system:local",
+            },
         )
         assert [item["id"] for item in after] == [item["id"] for item in before]
         unaware_knowledge = await _call(
             server,
-            "actor_knowledge_list",
-            {"campaign_id": campaign["id"], "actor_id": unaware["id"]},
+            "actor_knowledge_query",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": unaware["id"],
+                "view": "list",
+                "payload": {},
+                "principal_id": "system:local",
+            },
         )
         assert unaware_knowledge == []
 
         with pytest.raises(Exception, match="require known_by_actor_ids"):
             await _call(
                 server,
-                "event_add",
+                "campaign_event",
                 {
                     "campaign_id": campaign["id"],
-                    "summary": "Missing witnesses",
-                    "audience_scope": "actor",
+                    "action": "add",
+                    "payload": {"summary": "Missing witnesses", "audience_scope": "actor"},
+                    "principal_id": "system:local",
                     "idempotency_key": "invalid-event",
                 },
             )
@@ -322,9 +349,7 @@ def test_campaign_reads_do_not_bypass_player_visibility_boundaries(tmp_path: Pat
 
         assert player["state_redacted"] is True
         assert "dm_secret" not in player["state"]
-        assert {effect["id"] for effect in player["state"]["world_effects"]} == {
-            "visible-light"
-        }
+        assert {effect["id"] for effect in player["state"]["world_effects"]} == {"visible-light"}
         assert listed[0]["state"] == player["state"]
         assert owner["state"]["dm_secret"] == "the eastern statue is trapped"
         assert {effect["id"] for effect in owner["state"]["world_effects"]} == {
@@ -430,16 +455,20 @@ def test_nonlocal_character_library_read_redacts_private_template_notes(tmp_path
         server = create_server(config)
         created = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "name": "Reusable Rival",
-                "character_type": "npc",
-                "notes": {
-                    "profile": {
-                        "summary": "A reusable rival.",
-                        "dm_notes": "Secretly serves Zariel.",
-                    }
+                "mode": "direct",
+                "payload": {
+                    "name": "Reusable Rival",
+                    "character_type": "npc",
+                    "notes": {
+                        "profile": {
+                            "summary": "A reusable rival.",
+                            "dm_notes": "Secretly serves Zariel.",
+                        }
+                    },
                 },
+                "principal_id": "system:local",
                 "idempotency_key": "library-character",
             },
         )

@@ -49,46 +49,25 @@ def test_character_state_facade_has_no_second_actor_memory_authority(
             "campaign_create",
             {"name": "One knowledge authority", "idempotency_key": "campaign"},
         )
-        actor = await _call(
-            server,
-            "character_create_from",
-            {
-                "mode": "direct",
-                "payload": {
-                    "campaign_id": campaign["id"],
-                    "name": "Legacy witness",
-                    "notes": {
-                        "memories": [
-                            {
-                                "id": "legacy-memory",
-                                "summary": "Imported only.",
-                            }
-                        ]
-                    },
-                },
-                "idempotency_key": "actor",
-            },
-        )
-        with pytest.raises(Exception, match="import-only"):
+        with pytest.raises(Exception, match="unsupported fields: memories"):
             await _call(
                 server,
-                "character_metadata_update",
+                "character_create_from",
                 {
-                    "character_id": actor["id"],
+                    "mode": "direct",
                     "payload": {
+                        "campaign_id": campaign["id"],
+                        "name": "Invalid witness",
                         "notes": {
-                            **actor["notes"],
                             "memories": [
-                                *actor["notes"]["memories"],
                                 {
-                                    "id": "bypass",
-                                    "summary": "Must use ActorKnowledge.",
+                                    "id": "invalid-memory",
+                                    "summary": "Must use ActorKnowledge instead.",
                                 },
                             ],
-                        }
+                        },
                     },
-                    "expected_revision": actor["revision"],
-                    "idempotency_key": "legacy-bypass",
+                    "idempotency_key": "invalid-actor",
                 },
             )
 

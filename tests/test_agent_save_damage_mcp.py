@@ -31,9 +31,7 @@ def test_agent_save_damage_requires_one_paid_immutable_action_and_replays(
 ) -> None:
     module_root = tmp_path / "modules"
     module_root.mkdir()
-    encounter_excerpt = (
-        "The dragon catches both heroes in its cone and uses Poison Breath."
-    )
+    encounter_excerpt = "The dragon catches both heroes in its cone and uses Poison Breath."
     mechanic_excerpt = (
         "Poison Breath. Each creature in the area must make a DC 18 "
         "Constitution saving throw, taking 16d6 poison damage on a failed "
@@ -41,9 +39,7 @@ def test_agent_save_damage_requires_one_paid_immutable_action_and_replays(
     )
     source = module_root / "tower.md"
     source.write_text(
-        "# Dragon Tower\n\n"
-        "## Poison Breath\n\n"
-        f"{encounter_excerpt}\n\n{mechanic_excerpt}\n",
+        f"# Dragon Tower\n\n## Poison Breath\n\n{encounter_excerpt}\n\n{mechanic_excerpt}\n",
         encoding="utf-8",
     )
     config = McpConfig(
@@ -161,31 +157,43 @@ def test_agent_save_damage_requires_one_paid_immutable_action_and_replays(
         )
         dragon = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Dragon",
-                "character_type": "monster",
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Dragon",
+                    "character_type": "monster",
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "dragon",
             },
         )
         agile = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Agile Hero",
-                "character_type": "pc",
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Agile Hero",
+                    "character_type": "pc",
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "agile",
             },
         )
         clumsy = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Clumsy Hero",
-                "character_type": "pc",
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Clumsy Hero",
+                    "character_type": "pc",
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "clumsy",
             },
         )
@@ -409,26 +417,30 @@ def test_agent_save_damage_requires_one_paid_immutable_action_and_replays(
         )
         assert settled["status"] == "committed"
         assert settled["result"]["damage_roll"]["total"] > 0
-        targets = {
-            item["target_id"]: item for item in settled["result"]["targets"]
-        }
+        targets = {item["target_id"]: item for item in settled["result"]["targets"]}
         assert targets[agile["id"]]["success"] is True
         assert targets[clumsy["id"]]["success"] is False
         assert targets[agile["id"]]["damage_amount"] == (
             settled["result"]["damage_roll"]["total"] // 2
         )
-        assert targets[clumsy["id"]]["damage_amount"] == (
-            settled["result"]["damage_roll"]["total"]
-        )
+        assert targets[clumsy["id"]]["damage_amount"] == (settled["result"]["damage_roll"]["total"])
         agile_after = await _call(
             server,
-            "character_get",
-            {"character_id": agile["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": agile["id"]},
+                "principal_id": "system:local",
+            },
         )
         clumsy_after = await _call(
             server,
-            "character_get",
-            {"character_id": clumsy["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": clumsy["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert agile_after["sheet"]["combat"]["hp"]["value"] == (
             100 - targets[agile["id"]]["damage_amount"]
@@ -464,8 +476,12 @@ def test_agent_save_damage_requires_one_paid_immutable_action_and_replays(
             )
         agile_final = await _call(
             server,
-            "character_get",
-            {"character_id": agile["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": agile["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert (
             agile_final["sheet"]["combat"]["hp"]["value"]

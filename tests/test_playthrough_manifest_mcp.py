@@ -151,9 +151,7 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
             },
         )
         source_asset = next(
-            item
-            for item in assets
-            if Path(item["source_path"]).name == "Campaign.md"
+            item for item in assets if Path(item["source_path"]).name == "Campaign.md"
         )
         source_ref = {
             "purpose": "campaign_setup",
@@ -497,6 +495,7 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
                 "hit_points": {"current": 1, "maximum": 1},
                 "resources": {},
                 "equipment": [],
+                "wallet": {},
                 "knowledge_scope_actor_id": actor["id"],
             }
         ]
@@ -514,10 +513,10 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
             "objective": "Complete the source-defined ending.",
         }
         updated_manifest["ending"]["conditions"] = [
-                {
-                    "id": "victory",
-                    "label": "The campaign threat is defeated",
-                    "source_ref": source_ref,
+            {
+                "id": "victory",
+                "label": "The campaign threat is defeated",
+                "source_ref": source_ref,
                 "all_of": [
                     {
                         "kind": "manifest_value",

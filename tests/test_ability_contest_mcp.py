@@ -43,8 +43,12 @@ def test_character_check_facade_rejects_attack_kind_before_actor_lookup(
         )
         current = await _call(
             server,
-            "campaign_get",
-            {"campaign_id": campaign["id"]},
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
         )
         await _call(
             server,
@@ -100,28 +104,40 @@ def test_character_check_contest_is_atomic_branch_scoped_and_replayable(
         target_sheet["skills"]["insight"]["proficiency"] = "proficient"
         source = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Deceiver",
-                "sheet": source_sheet,
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Deceiver",
+                    "sheet": source_sheet,
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "source",
             },
         )
         target = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Observer",
-                "sheet": target_sheet,
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Observer",
+                    "sheet": target_sheet,
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "target",
             },
         )
         current = await _call(
             server,
-            "campaign_get",
-            {"campaign_id": campaign["id"]},
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
         )
         await _call(
             server,
@@ -136,8 +152,12 @@ def test_character_check_contest_is_atomic_branch_scoped_and_replayable(
         )
         current = await _call(
             server,
-            "campaign_get",
-            {"campaign_id": campaign["id"]},
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
         )
         branches = await _call(
             server,
@@ -210,14 +230,15 @@ def test_character_check_contest_is_atomic_branch_scoped_and_replayable(
                 "idempotency_key": "source-modified-skill-check",
             },
         )
-        assert (
-            adjusted_check["total"] - adjusted_check["natural"]
-            == 9
-        )
+        assert adjusted_check["total"] - adjusted_check["natural"] == 9
         current = await _call(
             server,
-            "campaign_get",
-            {"campaign_id": campaign["id"]},
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
         )
         arguments["expected_revision"] = current["revision"]
         settled = await _call(server, "character_check", arguments)
@@ -231,10 +252,7 @@ def test_character_check_contest_is_atomic_branch_scoped_and_replayable(
         assert len(settled["target_check"]["rolls"]) == 2
         assert "dc" not in settled["source_check"]
         assert "success" not in settled["target_check"]
-        assert (
-            settled["source_check"]["total"] - settled["source_check"]["natural"]
-            == 9
-        )
+        assert settled["source_check"]["total"] - settled["source_check"]["natural"] == 9
         source_total = settled["source_check"]["total"]
         target_total = settled["target_check"]["total"]
         assert settled["tie"] is (source_total == target_total)
@@ -247,8 +265,12 @@ def test_character_check_contest_is_atomic_branch_scoped_and_replayable(
         )
         after = await _call(
             server,
-            "campaign_get",
-            {"campaign_id": campaign["id"]},
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert after["revision"] == current["revision"] + 1
         assert after["state"]["resolution_log"][-1]["type"] == "ability_contest"
@@ -277,19 +299,27 @@ def test_character_check_group_is_atomic_branch_scoped_and_replayable(
             actors.append(
                 await _call(
                     server,
-                    "character_create",
+                    "character_create_from",
                     {
-                        "campaign_id": campaign["id"],
-                        "name": f"Scout {index + 1}",
-                        "sheet": sheet,
+                        "mode": "direct",
+                        "payload": {
+                            "campaign_id": campaign["id"],
+                            "name": f"Scout {index + 1}",
+                            "sheet": sheet,
+                        },
+                        "principal_id": "system:local",
                         "idempotency_key": f"scout-{index + 1}",
                     },
                 )
             )
         current = await _call(
             server,
-            "campaign_get",
-            {"campaign_id": campaign["id"]},
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
         )
         await _call(
             server,
@@ -304,8 +334,12 @@ def test_character_check_group_is_atomic_branch_scoped_and_replayable(
         )
         current = await _call(
             server,
-            "campaign_get",
-            {"campaign_id": campaign["id"]},
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
         )
         branches = await _call(
             server,
@@ -335,9 +369,9 @@ def test_character_check_group_is_atomic_branch_scoped_and_replayable(
         assert settled["participant_count"] == 6
         assert settled["required_successes"] == 3
         assert settled["success"] is (settled["success_count"] >= 3)
-        assert {
-            participant["actor_id"] for participant in settled["participants"]
-        } == {actor["id"] for actor in actors}
+        assert {participant["actor_id"] for participant in settled["participants"]} == {
+            actor["id"] for actor in actors
+        }
         assert all(
             participant["check"]["roll_mode"] == "advantage"
             for participant in settled["participants"]
@@ -347,8 +381,12 @@ def test_character_check_group_is_atomic_branch_scoped_and_replayable(
         ]
         after = await _call(
             server,
-            "campaign_get",
-            {"campaign_id": campaign["id"]},
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert after["revision"] == current["revision"] + 1
         assert after["state"]["resolution_log"][-1]["type"] == "ability_group_check"
@@ -388,18 +426,23 @@ def test_character_check_contest_rejects_2024_campaigns(tmp_path: Path) -> None:
             actors.append(
                 await _call(
                     server,
-                    "character_create",
+                    "character_create_from",
                     {
-                        "campaign_id": campaign["id"],
-                        "name": f"Actor {index + 1}",
+                        "mode": "direct",
+                        "payload": {"campaign_id": campaign["id"], "name": f"Actor {index + 1}"},
+                        "principal_id": "system:local",
                         "idempotency_key": f"actor-{index + 1}",
                     },
                 )
             )
         current = await _call(
             server,
-            "campaign_get",
-            {"campaign_id": campaign["id"]},
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
         )
         await _call(
             server,
@@ -414,8 +457,12 @@ def test_character_check_contest_rejects_2024_campaigns(tmp_path: Path) -> None:
         )
         current = await _call(
             server,
-            "campaign_get",
-            {"campaign_id": campaign["id"]},
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
         )
 
         with pytest.raises(Exception, match="2014 rules procedure"):

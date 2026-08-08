@@ -42,7 +42,7 @@ def test_public_attack_pauses_for_parry_before_damage(tmp_path: Path, monkeypatc
 
     async def call_raw(server, name: str, arguments: dict):
         _, result = await server.call_tool(name, arguments)
-        return result
+        return result["result"] if isinstance(result, dict) and "action" in result else result
 
     async def exercise() -> None:
         server = create_server(config)
@@ -53,19 +53,38 @@ def test_public_attack_pauses_for_parry_before_damage(tmp_path: Path, monkeypatc
         )
         staged = await call(
             server,
-            "rule_document_stage",
-            {"campaign_id": campaign["id"], "source_path": str(source)},
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "stage",
+                "payload": {
+                    "source_path": str(source),
+                    "source_key": "parry-lore",
+                    "title": "Parry Lore",
+                    "edition": "2014",
+                },
+                "idempotency_key": "parry-rule:stage",
+            },
+        )
+        job_id = staged["job"]["id"]
+        await call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "inspect",
+                "payload": {"job_id": job_id},
+                "idempotency_key": "parry-rule:inspect",
+            },
         )
         await call(
             server,
-            "rule_document_import",
+            "rule_import",
             {
                 "campaign_id": campaign["id"],
-                "artifact": staged["artifact"],
-                "source_key": "parry-lore",
-                "title": "Parry Lore",
-                "edition": "2014",
-                "idempotency_key": "parry-rule-import",
+                "action": "ingest",
+                "payload": {"job_id": job_id},
+                "idempotency_key": "parry-rule:ingest",
             },
         )
         hits = await call(
@@ -99,11 +118,15 @@ def test_public_attack_pauses_for_parry_before_damage(tmp_path: Path, monkeypatc
         attacker_sheet["inventory"]["equipment_slots"]["main_hand"] = "longsword"
         attacker = await call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Attacker",
-                "sheet": attacker_sheet,
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Attacker",
+                    "sheet": attacker_sheet,
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "parry-attacker",
             },
         )
@@ -145,11 +168,11 @@ def test_public_attack_pauses_for_parry_before_damage(tmp_path: Path, monkeypatc
         ]
         target = await call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Target",
-                "sheet": target_sheet,
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Target", "sheet": target_sheet},
+                "principal_id": "system:local",
                 "idempotency_key": "parry-target",
             },
         )
@@ -204,7 +227,13 @@ def test_public_attack_pauses_for_parry_before_damage(tmp_path: Path, monkeypatc
         )
         assert compiled["status"] == "compiled"
         campaign = await call(
-            server, "campaign_get", {"campaign_id": campaign["id"]}
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
         )
         phase = await call(
             server,
@@ -290,13 +319,17 @@ def test_public_attack_pauses_for_parry_before_damage(tmp_path: Path, monkeypatc
         assert semantic["plan_fingerprint"] == compiled["solution"]["plan_fingerprint"]
         assert semantic["compiled_by"]["default_resolver"] == "agent"
         target_state = next(
-            item
-            for item in resolved["combat"]["combatants"]
-            if item["actor_id"] == target["id"]
+            item for item in resolved["combat"]["combatants"] if item["actor_id"] == target["id"]
         )
         assert target_state["turn_budget"]["reaction"] == 0
         reread = await call(
-            server, "character_get", {"character_id": target["id"]}
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": target["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert reread["sheet"]["combat"]["hp"]["value"] == 20
 
@@ -327,7 +360,7 @@ def test_shield_reaction_atomically_pays_and_expires_at_next_turn_start(
 
     async def call_raw(server, name: str, arguments: dict):
         _, result = await server.call_tool(name, arguments)
-        return result
+        return result["result"] if isinstance(result, dict) and "action" in result else result
 
     async def exercise() -> None:
         server = create_server(config)
@@ -357,11 +390,15 @@ def test_shield_reaction_atomically_pays_and_expires_at_next_turn_start(
         attacker_sheet["inventory"]["equipment_slots"]["main_hand"] = "longsword"
         attacker = await call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Attacker",
-                "sheet": attacker_sheet,
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Attacker",
+                    "sheet": attacker_sheet,
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "shield-attacker",
             },
         )
@@ -399,15 +436,23 @@ def test_shield_reaction_atomically_pays_and_expires_at_next_turn_start(
         ]
         target = await call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Wizard",
-                "sheet": target_sheet,
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Wizard", "sheet": target_sheet},
+                "principal_id": "system:local",
                 "idempotency_key": "shield-target",
             },
         )
-        campaign = await call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        campaign = await call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
+        )
         phase = await call(
             server,
             "game_phase",
@@ -496,7 +541,15 @@ def test_shield_reaction_atomically_pays_and_expires_at_next_turn_start(
             item for item in resolved["combat"]["combatants"] if item["actor_id"] == target["id"]
         )
         assert target_state["turn_budget"]["reaction"] == 0
-        shielded = await call(server, "character_get", {"character_id": target["id"]})
+        shielded = await call(
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": target["id"]},
+                "principal_id": "system:local",
+            },
+        )
         assert shielded["sheet"]["spellcasting"]["spell_slots"]["1"]["value"] == 0
         assert shielded["derived"]["armor_class"] == 23
 
@@ -511,7 +564,15 @@ def test_shield_reaction_atomically_pays_and_expires_at_next_turn_start(
             },
         )
         assert resolved["result"]["reaction_defense"]["effect_id"] in ended["effects_expired"]
-        expired = await call(server, "character_get", {"character_id": target["id"]})
+        expired = await call(
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": target["id"]},
+                "principal_id": "system:local",
+            },
+        )
         assert expired["derived"]["armor_class"] == 18
         effect = next(
             item

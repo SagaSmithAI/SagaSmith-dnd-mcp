@@ -34,7 +34,6 @@ class Exposure:
     updated_at: datetime
     expires_at: datetime
     loaded_groups: set[str] = field(default_factory=set)
-    remaining_calls: dict[str, int | None] = field(default_factory=dict)
 
 
 class ExposureRegistry:
@@ -138,15 +137,10 @@ class ExposureRegistry:
         exposure.loaded_groups = {
             group_id for group_id in exposure.loaded_groups if GROUP_BY_ID[group_id].phase == phase
         }
-        exposure.remaining_calls = {
-            group_id: calls
-            for group_id, calls in exposure.remaining_calls.items()
-            if group_id in exposure.loaded_groups
-        }
         self.touch(exposure)
         return True
 
-    def load(self, exposure: Exposure, group_id: str, ttl_calls: int | None = None) -> Exposure:
+    def load(self, exposure: Exposure, group_id: str) -> Exposure:
         group = GROUP_BY_ID.get(group_id)
         if group is None:
             raise ExposureError(f"Unknown tool group: {group_id}")
@@ -164,16 +158,12 @@ class ExposureRegistry:
             raise ExposureError(
                 f"Tool group {group_id!r} is restricted to {LOCAL_SYSTEM_PRINCIPAL_ID}."
             )
-        if ttl_calls is not None and ttl_calls < 1:
-            raise ExposureError("ttl_calls must be at least 1 when provided.")
         exposure.loaded_groups.add(group_id)
-        exposure.remaining_calls[group_id] = ttl_calls
         self.touch(exposure)
         return exposure
 
     def unload(self, exposure: Exposure, group_id: str) -> Exposure:
         exposure.loaded_groups.discard(group_id)
-        exposure.remaining_calls.pop(group_id, None)
         self.touch(exposure)
         return exposure
 
@@ -198,43 +188,7 @@ class ExposureRegistry:
                 f"Tool {tool_id!r} is not exposed for this session. "
                 "Use exposure_search and exposure_load first."
             )
-        valid_groups: list[str] = []
-        for group_id in sorted(groups):
-            remaining = exposure.remaining_calls.get(group_id)
-            if remaining is None:
-                valid_groups.append(group_id)
-                continue
-            if remaining <= 0:
-                self.unload(exposure, group_id)
-                continue
-            valid_groups.append(group_id)
-        if not valid_groups:
-            raise ExposureError(
-                f"Tool {tool_id!r} has no remaining exposure calls. "
-                "Load its capability group again."
-            )
-
-    def consume_tool(self, exposure: Exposure, tool_id: str) -> bool:
-        """Consume one TTL unit after a successful non-core invocation."""
-        changed = False
-        matching = sorted(
-            group_id
-            for group_id in exposure.loaded_groups
-            if tool_id in GROUP_BY_ID[group_id].tools
-        )
-        if any(exposure.remaining_calls.get(group_id) is None for group_id in matching):
-            self.touch(exposure)
-            return False
-        for group_id in matching:
-            remaining = exposure.remaining_calls.get(group_id)
-            changed = True
-            if remaining <= 1:
-                self.unload(exposure, group_id)
-            else:
-                exposure.remaining_calls[group_id] = remaining - 1
-                self.touch(exposure)
-            break
-        return changed
+        self.touch(exposure)
 
     def status(self, exposure: Exposure) -> dict[str, Any]:
         return {

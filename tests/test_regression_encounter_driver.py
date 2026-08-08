@@ -194,9 +194,7 @@ def test_active_content_solution_pays_then_executes_generic_plan(
         async def domain(self, tool_id: str, arguments: dict) -> dict:
             calls.append((tool_id, arguments))
             if tool_id == payment_tool:
-                commitment = arguments["declaration"][
-                    "agent_resolution_commitment"
-                ]
+                commitment = arguments["declaration"]["agent_resolution_commitment"]
                 result = (
                     {"semantic_plan": {"commitment": commitment}}
                     if source_card_kind == "spell"
@@ -370,9 +368,7 @@ def test_encounter_readiness_reports_unready_actor_blockers() -> None:
                         "actors": [
                             {
                                 "id": "mage-1",
-                                "combat_card": {
-                                    "blocking_reasons": ["missing_attack_range"]
-                                },
+                                "combat_card": {"blocking_reasons": ["missing_attack_range"]},
                             }
                         ],
                     }
@@ -428,9 +424,7 @@ def test_agent_attack_contexts_bind_source_and_attack_mode() -> None:
 
     ruling = contexts[("dragon-1", "", "melee")]
     assert ruling["context"]["disadvantage"] is True
-    assert ruling["context"]["disadvantage_sources"] == [
-        f"agent-ruling:{ruling['application_id']}"
-    ]
+    assert ruling["context"]["disadvantage_sources"] == [f"agent-ruling:{ruling['application_id']}"]
     assert ruling["agent_ruling"]["source_ref"] == source_ref
     assert ruling["agent_ruling"]["ruling_kind"] == "source_or_scene_fact"
     assert ruling["context"]["agent_ruling"] == ruling["agent_ruling"]
@@ -556,9 +550,7 @@ def test_agent_target_reaction_contexts_bind_source_and_target() -> None:
     ruling = contexts[("tile-creature", "melee")]
     assert ruling["actor_id"] == "tile-creature"
     assert ruling["context"]["disadvantage"] is True
-    assert ruling["context"]["disadvantage_sources"] == [
-        f"agent-ruling:{ruling['application_id']}"
-    ]
+    assert ruling["context"]["disadvantage_sources"] == [f"agent-ruling:{ruling['application_id']}"]
     assert ruling["agent_ruling"]["source_ref"] == source_ref
 
 
@@ -639,9 +631,7 @@ def test_agent_turn_rulings_bind_source_cited_action_check_and_truce() -> None:
                 "source_ref": source_ref,
                 "procedure_source_excerpt": procedure_excerpt,
                 "encounter_source_excerpt": procedure_excerpt,
-                "decision": (
-                    "The bard names Serissa and asks the king to stand down."
-                ),
+                "decision": ("The bard names Serissa and asks the king to stand down."),
                 "ruling_reason": (
                     "The exact scene procedure permits this action and grants "
                     "advantage when Serissa is named."
@@ -701,9 +691,7 @@ def test_agent_turn_rulings_reject_cross_edition_check_action() -> None:
         "procedure_source_excerpt": procedure_excerpt,
         "encounter_source_excerpt": procedure_excerpt,
         "decision": "The bard asks the hostile king to stand down.",
-        "ruling_reason": (
-            "The exact scene procedure permits a persuasion action."
-        ),
+        "ruling_reason": ("The exact scene procedure permits a persuasion action."),
         "check_ability": "persuasion",
         "check_dc": 18,
         "check_action": "influence",
@@ -798,7 +786,6 @@ def test_agent_turn_ruling_pays_action_rolls_save_and_persists_world_patch() -> 
                 SimpleNamespace(campaign_id="campaign-1", run_id="run-1"),
                 branch_id="branch-1",
                 ruling=ruling,
-                sequence=4,
             )
         )
 
@@ -871,9 +858,7 @@ def test_agent_turn_ruling_settles_action_check_and_returns_combat_outcome() -> 
             "default_resolver": "agent",
             "ruling_kind": "agent_dm_adjudication",
             "decision": "The bard names Serissa and asks the king to stand down.",
-            "reason": (
-                "The exact scene procedure permits the action with advantage."
-            ),
+            "reason": ("The exact scene procedure permits the action with advantage."),
             "source_ref": source_ref,
         },
     }
@@ -888,7 +873,6 @@ def test_agent_turn_ruling_settles_action_check_and_returns_combat_outcome() -> 
                 SimpleNamespace(campaign_id="campaign-1", run_id="run-1"),
                 branch_id="branch-1",
                 ruling=ruling,
-                sequence=1,
             )
         )
 
@@ -1525,10 +1509,6 @@ def test_captured_hostile_ids_uses_actual_public_character_state() -> None:
     assert captured == {"stable-1"}
 
 
-
-
-
-
 def test_preflight_tries_a_recorded_thrown_weapon_at_range() -> None:
     class Client:
         def __init__(self) -> None:
@@ -1621,8 +1601,7 @@ def test_preflight_uses_only_agent_declared_weapon_modes_in_order() -> None:
     assert target_id == "pc-1"
     assert action == {"weapon_id": "scimitar", "attack_mode": "melee"}
     assert [
-        (call["action"]["weapon_id"], call["action"]["attack_mode"])
-        for call in client.calls
+        (call["action"]["weapon_id"], call["action"]["attack_mode"]) for call in client.calls
     ] == [("shortbow", "ranged"), ("scimitar", "melee")]
 
 
@@ -1790,9 +1769,7 @@ def test_preflight_agent_declines_unsatisfied_positional_attack_and_continues() 
                 "status": "pending_ruling",
                 "default_resolver": "agent",
                 "ruling_kind": "agent_dm_adjudication",
-                "reason": (
-                    "Dropped Rock uses a source-defined positional target restriction"
-                ),
+                "reason": ("Dropped Rock uses a source-defined positional target restriction"),
                 "missing": ["weapon.targeting:dropped-rock"],
                 "committed": False,
             },
@@ -1832,9 +1809,7 @@ def test_pending_combat_start_returns_to_agent_before_combat_exposure() -> None:
 
 
 def test_committed_combat_start_requires_an_active_encounter() -> None:
-    combat = _require_committed_encounter_start(
-        {"combat": {"id": "combat-1", "active": True}}
-    )
+    combat = _require_committed_encounter_start({"combat": {"id": "combat-1", "active": True}})
 
     assert combat["id"] == "combat-1"
     with pytest.raises(RuntimeError, match="without an active committed"):
@@ -1955,14 +1930,15 @@ def test_party_loadout_equips_owned_weapon_before_initiative() -> None:
             assert tool_id == "character_query"
             return [actor]
 
-    declarations = [
-        {"actor_id": "pc-1", "item_id": "shortbow", "slot": "main_hand"}
-    ]
-    assert _party_loadouts(
-        declarations,
-        party_ids=["pc-1"],
-        actors={"pc-1": actor},
-    ) == declarations
+    declarations = [{"actor_id": "pc-1", "item_id": "shortbow", "slot": "main_hand"}]
+    assert (
+        _party_loadouts(
+            declarations,
+            party_ids=["pc-1"],
+            actors={"pc-1": actor},
+        )
+        == declarations
+    )
 
     client = Client()
     results, actors = asyncio.run(
@@ -2208,20 +2184,6 @@ def test_source_passive_allies_require_unique_allies_and_exact_evidence() -> Non
             ],
             ally_ids=["losser"],
         )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def test_action_budget_preserves_bonus_action_spell_followup() -> None:
@@ -2646,10 +2608,7 @@ def test_single_target_dexterity_save_requires_explicit_cover_semantics() -> Non
         },
     }
 
-    assert (
-        _safe_single_target_spell_declaration(spell, target_id="goblin")
-        is None
-    )
+    assert _safe_single_target_spell_declaration(spell, target_id="goblin") is None
 
 
 def test_agent_common_action_priority_is_explicit_and_source_neutral() -> None:
@@ -2888,9 +2847,7 @@ def test_party_spell_tactics_choose_safe_structured_area_damage() -> None:
         "goblin-2",
         "goblin-3",
     }
-    assert "ally" not in {
-        item["target_id"] for item in declaration["target_contexts"]
-    }
+    assert "ally" not in {item["target_id"] for item in declaration["target_contexts"]}
 
 
 def test_area_spell_tactics_exclude_dead_combatants_from_target_contexts() -> None:
@@ -2971,9 +2928,7 @@ def test_area_spell_tactics_exclude_dead_combatants_from_target_contexts() -> No
     )
 
     assert choice is not None
-    assert {
-        item["target_id"] for item in choice[3]["target_contexts"]
-    } == {"goblin-1", "goblin-2"}
+    assert {item["target_id"] for item in choice[3]["target_contexts"]} == {"goblin-1", "goblin-2"}
 
 
 def test_party_spell_tactics_choose_safe_hypnotic_pattern_cube() -> None:
@@ -3018,9 +2973,7 @@ def test_party_spell_tactics_choose_safe_hypnotic_pattern_cube() -> None:
                 "actor_id": actor_id,
                 "position": position,
                 "conditions": [],
-                "disposition": (
-                    "friendly" if actor_id in {"bard", "ally"} else "hostile"
-                ),
+                "disposition": ("friendly" if actor_id in {"bard", "ally"} else "hostile"),
             }
             for actor_id, position in positions.items()
         ],
@@ -3074,9 +3027,7 @@ def test_party_spell_tactics_hydrate_legacy_lightning_bolt_line() -> None:
             "mechanic_refs": [],
         }
     )
-    wizard["sheet"]["spellcasting"]["spell_slots"] = {
-        "3": {"value": 1, "max": 1}
-    }
+    wizard["sheet"]["spellcasting"]["spell_slots"] = {"3": {"value": 1, "max": 1}}
     actors = {
         "wizard": wizard,
         "ally": _spell_actor(slots=0),
@@ -3101,9 +3052,7 @@ def test_party_spell_tactics_hydrate_legacy_lightning_bolt_line() -> None:
                 "actor_id": actor_id,
                 "position": position,
                 "conditions": [],
-                "disposition": (
-                    "friendly" if actor_id in {"wizard", "ally"} else "hostile"
-                ),
+                "disposition": ("friendly" if actor_id in {"wizard", "ally"} else "hostile"),
             }
             for actor_id, position in positions.items()
         ],
@@ -3137,9 +3086,7 @@ def test_party_spell_tactics_hydrate_legacy_lightning_bolt_line() -> None:
 
     assert choice is not None
     assert choice[:3] == (spell_id, "goblin-1", 3)
-    assert {
-        item["target_id"] for item in choice[3]["target_contexts"]
-    } == {"goblin-1", "goblin-2"}
+    assert {item["target_id"] for item in choice[3]["target_contexts"]} == {"goblin-1", "goblin-2"}
 
 
 def test_party_tactics_do_not_target_unobserved_hidden_combatants() -> None:
@@ -3423,15 +3370,18 @@ def test_source_flee_becomes_ready_immediately_after_another_actors_damage() -> 
         critical_hit_actor_ids=set(),
         flee_on_critical=False,
     ) == ["glazhael"]
-    assert _ready_immediate_source_flee_actor_ids(
-        flee_actor_ids={"glazhael"},
-        actors=actors,
-        already_fled_actor_ids={"glazhael"},
-        damage_taken_by_actor={"glazhael": 161},
-        flee_after_damage=161,
-        critical_hit_actor_ids=set(),
-        flee_on_critical=False,
-    ) == []
+    assert (
+        _ready_immediate_source_flee_actor_ids(
+            flee_actor_ids={"glazhael"},
+            actors=actors,
+            already_fled_actor_ids={"glazhael"},
+            damage_taken_by_actor={"glazhael": 161},
+            flee_after_damage=161,
+            critical_hit_actor_ids=set(),
+            flee_on_critical=False,
+        )
+        == []
+    )
 
 
 def test_source_flee_uses_authoritative_current_hp_after_driver_resume() -> None:
@@ -3465,16 +3415,19 @@ def test_source_flee_uses_authoritative_current_hp_after_driver_resume() -> None
     )
 
     actors["neronvain"]["sheet"]["combat"]["hp"]["value"] = 59
-    assert _ready_immediate_source_flee_actor_ids(
-        flee_actor_ids={"neronvain"},
-        actors=actors,
-        already_fled_actor_ids=set(),
-        damage_taken_by_actor={"neronvain": 98},
-        flee_after_damage=0,
-        critical_hit_actor_ids=set(),
-        flee_on_critical=False,
-        flee_at_hp=58,
-    ) == []
+    assert (
+        _ready_immediate_source_flee_actor_ids(
+            flee_actor_ids={"neronvain"},
+            actors=actors,
+            already_fled_actor_ids=set(),
+            damage_taken_by_actor={"neronvain": 98},
+            flee_after_damage=0,
+            critical_hit_actor_ids=set(),
+            flee_on_critical=False,
+            flee_at_hp=58,
+        )
+        == []
+    )
 
 
 def test_immediate_source_flee_ignores_defeat_turn_triggers() -> None:
@@ -3487,15 +3440,18 @@ def test_immediate_source_flee_ignores_defeat_turn_triggers() -> None:
         }
     }
 
-    assert _ready_immediate_source_flee_actor_ids(
-        flee_actor_ids={"runner"},
-        actors=actors,
-        already_fled_actor_ids=set(),
-        damage_taken_by_actor={"runner": 0},
-        flee_after_damage=0,
-        critical_hit_actor_ids=set(),
-        flee_on_critical=False,
-    ) == []
+    assert (
+        _ready_immediate_source_flee_actor_ids(
+            flee_actor_ids={"runner"},
+            actors=actors,
+            already_fled_actor_ids=set(),
+            damage_taken_by_actor={"runner": 0},
+            flee_after_damage=0,
+            critical_hit_actor_ids=set(),
+            flee_on_critical=False,
+        )
+        == []
+    )
 
 
 def test_linked_source_flee_waits_for_cited_trigger_and_active_arrival() -> None:
@@ -3504,13 +3460,16 @@ def test_linked_source_flee_waits_for_cited_trigger_and_active_arrival() -> None
         "troll-2": {"sheet": {"combat": {"hp": {"value": 84}}, "conditions": []}},
     }
 
-    assert _ready_linked_source_flee_actor_ids(
-        linked_flee_actor_ids={"troll-1", "troll-2"},
-        trigger_fled_actor_id="dragon",
-        fled_hostile_ids=set(),
-        actors=actors,
-        active_combatant_ids={"troll-1", "troll-2"},
-    ) == []
+    assert (
+        _ready_linked_source_flee_actor_ids(
+            linked_flee_actor_ids={"troll-1", "troll-2"},
+            trigger_fled_actor_id="dragon",
+            fled_hostile_ids=set(),
+            actors=actors,
+            active_combatant_ids={"troll-1", "troll-2"},
+        )
+        == []
+    )
     assert _ready_linked_source_flee_actor_ids(
         linked_flee_actor_ids={"troll-1", "troll-2"},
         trigger_fled_actor_id="dragon",
@@ -3556,12 +3515,8 @@ def test_source_flee_configuration_allows_authored_current_hp_threshold() -> Non
             linked_flee_actor_id=[],
             linked_flee_trigger_actor_id="",
             linked_flee_source_excerpt="",
-            flee_source_excerpt=(
-                "He flees when he is reduced to half his hit points or fewer."
-            ),
-            source_excerpt=(
-                "He flees when he is reduced to half his hit points or fewer."
-            ),
+            flee_source_excerpt=("He flees when he is reduced to half his hit points or fewer."),
+            source_excerpt=("He flees when he is reduced to half his hit points or fewer."),
         ),
         hostile_ids=["neronvain"],
     ) == {"neronvain"}
@@ -3726,18 +3681,6 @@ def test_source_flee_damage_history_restores_interrupted_combat_counter() -> Non
     assert critical == {"lennithon"}
 
 
-
-
-
-
-
-
-
-
-
-
-
-
 def test_source_separation_is_cited_and_places_dragon_at_least_twenty_five_feet_away() -> None:
     excerpt = (
         "During this attack, Lennithon flies over the keep and uses his breath "
@@ -3766,17 +3709,21 @@ def test_source_separation_is_cited_and_places_dragon_at_least_twenty_five_feet_
     )
     by_actor = {item["actor_id"]: item for item in positioned}
 
-    assert max(
-        abs(by_actor["lennithon"]["position"]["x"] - by_actor["pc-1"]["position"]["x"]),
-        abs(by_actor["lennithon"]["position"]["y"] - by_actor["pc-1"]["position"]["y"]),
-    ) >= 5
-    assert max(
-        abs(by_actor["lennithon"]["position"]["x"] - by_actor["pc-2"]["position"]["x"]),
-        abs(by_actor["lennithon"]["position"]["y"] - by_actor["pc-2"]["position"]["y"]),
-    ) >= 5
-    assert _source_separation_target("pc-1", ["lennithon"], separation) == separation[
-        "lennithon"
-    ]
+    assert (
+        max(
+            abs(by_actor["lennithon"]["position"]["x"] - by_actor["pc-1"]["position"]["x"]),
+            abs(by_actor["lennithon"]["position"]["y"] - by_actor["pc-1"]["position"]["y"]),
+        )
+        >= 5
+    )
+    assert (
+        max(
+            abs(by_actor["lennithon"]["position"]["x"] - by_actor["pc-2"]["position"]["x"]),
+            abs(by_actor["lennithon"]["position"]["y"] - by_actor["pc-2"]["position"]["y"]),
+        )
+        >= 5
+    )
+    assert _source_separation_target("pc-1", ["lennithon"], separation) == separation["lennithon"]
     assert _source_separation_target("outsider", ["lennithon"], separation) is None
 
 
@@ -4069,9 +4016,7 @@ def test_agent_object_interactions_require_an_exact_source_condition() -> None:
         "heading_path": ["Nightstone", "4G. Nesper Farm"],
         "content_sha256": "a" * 64,
     }
-    source_excerpt = (
-        "While wearing the pumpkins, the goblins are effectively blinded."
-    )
+    source_excerpt = "While wearing the pumpkins, the goblins are effectively blinded."
     declaration = {
         "actor_id": "goblin-1",
         "round": 1,
@@ -4082,8 +4027,7 @@ def test_agent_object_interactions_require_an_exact_source_condition() -> None:
         "source_excerpt": source_excerpt,
         "decision": "The goblin removes the loose pumpkin from its own head.",
         "ruling_reason": (
-            "Removing the ordinary worn object ends only the source-authored "
-            "blindness it causes."
+            "Removing the ordinary worn object ends only the source-authored blindness it causes."
         ),
     }
 
@@ -4133,8 +4077,6 @@ def test_agent_object_interactions_require_an_exact_source_condition() -> None:
                 }
             ],
         )
-
-
 
 
 def test_source_target_priorities_preserve_authored_roles_and_tactical_order() -> None:
@@ -4316,8 +4258,6 @@ def test_source_opening_item_casts_preserve_authored_order_and_evidence() -> Non
     assert all(item["source_item_id"] == "staff-of-defense" for item in casts)
 
 
-
-
 @pytest.mark.parametrize(
     "event_type",
     ["movement_hazard_marked", "trap_detected", "trap_locations_shared"],
@@ -4373,14 +4313,6 @@ def test_source_avoidance_requires_public_actor_knowledge(
     assert evidence[0]["source_ref"] == {"chunk_id": "chunk-1"}
 
 
-
-
-
-
-
-
-
-
 def test_source_ammunition_selection_requires_owned_source_stack() -> None:
     selections = _source_ammunition_selections(
         [
@@ -4420,11 +4352,7 @@ def test_source_ammunition_selection_requires_owned_source_stack() -> None:
         },
     )
 
-    assert selections[("archer", "shortbow")]["ammunition_item_id"] == (
-        "dragon-slaying-arrow"
-    )
-
-
+    assert selections[("archer", "shortbow")]["ammunition_item_id"] == ("dragon-slaying-arrow")
 
 
 def test_auto_run_starts_from_play_before_loading_combat_tools() -> None:
@@ -4701,20 +4629,6 @@ def test_auto_run_does_not_finalize_a_different_completed_encounter() -> None:
     }
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def test_source_surrender_requires_threshold_life_no_escape_and_resolved_party() -> None:
     assert _source_surrender_outcome(
         actor_hit_points=8,
@@ -4762,17 +4676,12 @@ def test_primary_hostile_evidence_can_be_narrower_than_encounter_procedure() -> 
         _primary_hostile_source_excerpt(
             SimpleNamespace(
                 source_excerpt=procedure,
-                hostile_source_excerpt=(
-                    "The adult blue dragon Lennithon accompanied this raid."
-                ),
+                hostile_source_excerpt=("The adult blue dragon Lennithon accompanied this raid."),
             )
         )
         == "The adult blue dragon Lennithon accompanied this raid."
     )
-    assert (
-        _primary_hostile_source_excerpt(SimpleNamespace(source_excerpt=procedure))
-        == procedure
-    )
+    assert _primary_hostile_source_excerpt(SimpleNamespace(source_excerpt=procedure)) == procedure
 
 
 def test_encounter_manifest_tracks_arrived_source_group_separately() -> None:
@@ -5022,10 +4931,7 @@ def test_default_layout_fits_large_source_authored_battle_without_scaling() -> N
     )
 
     assert len(config) == 36
-    positions = [
-        (int(item["position"]["x"]), int(item["position"]["y"]))
-        for item in config
-    ]
+    positions = [(int(item["position"]["x"]), int(item["position"]["y"])) for item in config]
     assert len(positions) == len(set(positions))
     assert all(0 <= x < 12 and 0 <= y < 12 for x, y in positions)
     by_actor = {item["actor_id"]: item for item in config}
@@ -5093,9 +4999,10 @@ def test_source_eleven_hostile_layout_keeps_every_actor_on_a_unique_space() -> N
     assert len(config) == 15
     assert len(positions) == len(set(positions))
     assert {item["actor_id"] for item in config} == {*party_ids, *hostile_ids}
-    assert next(
-        item["position"] for item in config if item["actor_id"] == "ritual-hostile-11"
-    ) == {"x": 10, "y": 6}
+    assert next(item["position"] for item in config if item["actor_id"] == "ritual-hostile-11") == {
+        "x": 10,
+        "y": 6,
+    }
 
 
 def test_movement_idempotency_distinguishes_replanned_destinations() -> None:
@@ -5592,7 +5499,7 @@ def test_agent_weapon_priority_is_explicit_and_card_validated() -> None:
                 ]
             },
             "multiattack_options": [],
-        }
+        },
     }
 
     priorities = _agent_weapon_priorities(
@@ -5615,10 +5522,7 @@ def test_agent_weapon_priority_is_explicit_and_card_validated() -> None:
         {"weapon_id": "shortbow", "attack_mode": "ranged"},
         {"weapon_id": "scimitar", "attack_mode": "melee"},
     ]
-    assert (
-        priorities["goblin"]["agent_ruling"]["ruling_kind"]
-        == "agent_dm_adjudication"
-    )
+    assert priorities["goblin"]["agent_ruling"]["ruling_kind"] == "agent_dm_adjudication"
 
 
 def test_agent_can_select_standard_unarmed_strike_with_other_weapons() -> None:
@@ -5676,8 +5580,8 @@ def test_agent_multiattack_priority_must_begin_with_the_declared_attack() -> Non
                     "id": "ranged",
                     "attacks": [{"weapon_id": "shortbow", "attack_mode": "ranged", "count": 2}],
                 },
-            ]
-        }
+            ],
+        },
     }
 
     priorities = _agent_weapon_priorities(
@@ -5758,9 +5662,7 @@ def test_completed_source_opening_weapons_are_rebuilt_from_public_combat_log() -
         "ettercap-2": {"weapon_id": "web-garrote"},
     }
 
-    assert _completed_source_opening_weapon_actor_ids(combat, openings) == {
-        "ettercap-1"
-    }
+    assert _completed_source_opening_weapon_actor_ids(combat, openings) == {"ettercap-1"}
     assert (
         _required_source_opening_weapon(
             openings,

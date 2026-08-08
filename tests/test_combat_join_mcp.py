@@ -43,16 +43,24 @@ def test_combat_join_queues_actor_until_next_round(tmp_path: Path) -> None:
                 sheet["skills"]["persuasion"]["proficiency"] = "proficient"
             actor = await _call(
                 server,
-                "character_create",
+                "character_create_from",
                 {
-                    "campaign_id": campaign["id"],
-                    "name": name,
-                    "sheet": sheet,
+                    "mode": "direct",
+                    "payload": {"campaign_id": campaign["id"], "name": name, "sheet": sheet},
+                    "principal_id": "system:local",
                     "idempotency_key": f"join-actor-{index}",
                 },
             )
             actors.append(actor)
-        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        campaign = await _call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
+        )
         phase = await _call(
             server,
             "game_phase",
@@ -118,9 +126,7 @@ def test_combat_join_queues_actor_until_next_round(tmp_path: Path) -> None:
         )
         assert joined["queued"]["actor_id"] == actors[2]["id"]
         assert joined["queued"]["join_round"] == 2
-        assert actors[2]["id"] not in {
-            item["actor_id"] for item in joined["combat"]["combatants"]
-        }
+        assert actors[2]["id"] not in {item["actor_id"] for item in joined["combat"]["combatants"]}
         scheduled = await _call(
             server,
             "combat_join",
@@ -261,15 +267,27 @@ def test_combat_end_accepts_source_surrender_outcome(tmp_path: Path) -> None:
         )
         actor = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Source Hostile",
-                "sheet": default_character_sheet(),
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Source Hostile",
+                    "sheet": default_character_sheet(),
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "surrender-actor",
             },
         )
-        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        campaign = await _call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
+        )
         phase = await _call(
             server,
             "game_phase",

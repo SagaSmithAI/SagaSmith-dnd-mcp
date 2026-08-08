@@ -28,11 +28,7 @@ def _config(tmp_path: Path, *, bundled_skills: bool = False) -> McpConfig:
         database_url=None,
         chroma_url=None,
         chroma_path_override=None,
-        dnd_skills_dir=(
-            workspace / "SagaSmith-dnd-skills"
-            if bundled_skills
-            else tmp_path / "dnd"
-        ),
+        dnd_skills_dir=(workspace / "SagaSmith-dnd-skills" if bundled_skills else tmp_path / "dnd"),
         modulegen_skills_dir=tmp_path / "modulegen",
         auto_seed_rules=False,
     )
@@ -52,11 +48,15 @@ def test_2024_campaign_uses_only_the_source_linked_2024_catalog(tmp_path: Path) 
         )
         fireball = await _call(
             server,
-            "content_catalog_list",
+            "rule_pack_query",
             {
-                "campaign_id": campaign_2024["id"],
-                "kind": "spell",
-                "query": "Fireball",
+                "view": "content_catalog",
+                "payload": {
+                    "campaign_id": campaign_2024["id"],
+                    "kind": "spell",
+                    "query": "Fireball",
+                },
+                "principal_id": "system:local",
             },
         )
         exact_fireball = next(item for item in fireball if item["name"] == "Fireball")
@@ -66,11 +66,15 @@ def test_2024_campaign_uses_only_the_source_linked_2024_catalog(tmp_path: Path) 
 
         longsword = await _call(
             server,
-            "content_catalog_list",
+            "rule_pack_query",
             {
-                "campaign_id": campaign_2024["id"],
-                "kind": "item",
-                "query": "Longsword",
+                "view": "content_catalog",
+                "payload": {
+                    "campaign_id": campaign_2024["id"],
+                    "kind": "item",
+                    "query": "Longsword",
+                },
+                "principal_id": "system:local",
             },
         )
         assert len(longsword) == 1
@@ -79,22 +83,30 @@ def test_2024_campaign_uses_only_the_source_linked_2024_catalog(tmp_path: Path) 
 
         tools = await _call(
             server,
-            "content_catalog_list",
+            "rule_pack_query",
             {
-                "campaign_id": campaign_2024["id"],
-                "kind": "item",
-                "query": "Calligrapher's Supplies",
+                "view": "content_catalog",
+                "payload": {
+                    "campaign_id": campaign_2024["id"],
+                    "kind": "item",
+                    "query": "Calligrapher's Supplies",
+                },
+                "principal_id": "system:local",
             },
         )
         assert [item["name"] for item in tools] == ["Calligrapher's Supplies"]
 
         backgrounds = await _call(
             server,
-            "content_catalog_list",
+            "rule_pack_query",
             {
-                "campaign_id": campaign_2024["id"],
-                "kind": "background",
-                "query": "Acolyte",
+                "view": "content_catalog",
+                "payload": {
+                    "campaign_id": campaign_2024["id"],
+                    "kind": "background",
+                    "query": "Acolyte",
+                },
+                "principal_id": "system:local",
             },
         )
         requirements = backgrounds[0]["selection_requirements"]
@@ -116,11 +128,15 @@ def test_2024_campaign_uses_only_the_source_linked_2024_catalog(tmp_path: Path) 
         )
         old_fireball = await _call(
             server,
-            "content_catalog_list",
+            "rule_pack_query",
             {
-                "campaign_id": campaign_2014["id"],
-                "kind": "spell",
-                "query": "Fireball",
+                "view": "content_catalog",
+                "payload": {
+                    "campaign_id": campaign_2014["id"],
+                    "kind": "spell",
+                    "query": "Fireball",
+                },
+                "principal_id": "system:local",
             },
         )
         assert old_fireball
@@ -234,9 +250,7 @@ def test_2024_class_resource_cards_materialize_and_scale_through_public_mcp(
             "long_rest": "all",
         }
 
-        sorcerer = await create_class_actor(
-            name="Ember", class_name="Sorcerer", level=8, hit_die=6
-        )
+        sorcerer = await create_class_actor(name="Ember", class_name="Sorcerer", level=8, hit_die=6)
         sorcerer = await _call(
             server,
             "character_content_apply",
@@ -264,9 +278,7 @@ def test_2024_class_resource_cards_materialize_and_scale_through_public_mcp(
             },
         )
         metamagic = next(
-            item
-            for item in sorcerer["sheet"]["content"]["features"]
-            if item["name"] == "Metamagic"
+            item for item in sorcerer["sheet"]["content"]["features"] if item["name"] == "Metamagic"
         )
         assert metamagic["choices"]["options"] == [
             "Careful Spell",
@@ -277,10 +289,7 @@ def test_2024_class_resource_cards_materialize_and_scale_through_public_mcp(
             "character_content_apply",
             {
                 "character_id": sorcerer["id"],
-                "artifact_id": (
-                    "dnd5e.content.srd2024.feature."
-                    "sorcerer-sorcerous-restoration"
-                ),
+                "artifact_id": ("dnd5e.content.srd2024.feature.sorcerer-sorcerous-restoration"),
                 "selection": {},
                 "expected_revision": sorcerer["revision"],
                 "idempotency_key": "sorcerous-restoration",
@@ -320,8 +329,12 @@ def test_2024_class_resource_cards_materialize_and_scale_through_public_mcp(
         assert preflight["sorcerous_restoration_points"] == 4
         current_campaign = await _call(
             server,
-            "campaign_get",
-            {"campaign_id": campaign["id"]},
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
         )
         rested = await _call(
             server,
@@ -345,9 +358,7 @@ def test_2024_class_resource_cards_materialize_and_scale_through_public_mcp(
                 "idempotency_key": "short-rest",
             },
         )
-        restoration = rested["recovered"][sorcerer["id"]][
-            "sorcerous_restoration"
-        ]
+        restoration = rested["recovered"][sorcerer["id"]]["sorcerous_restoration"]
         assert restoration["recovered"] == 4
         assert restoration["feature_uses_remaining"] == 0
 
@@ -374,9 +385,7 @@ def test_2024_advancement_feat_and_background_choices_commit_atomically(
         fighter_sheet["progression"].update(
             {
                 "level": 4,
-                "classes": [
-                    {"name": "Fighter", "level": 4, "subclass": "", "hit_die": 10}
-                ],
+                "classes": [{"name": "Fighter", "level": 4, "subclass": "", "hit_die": 10}],
             }
         )
         fighter = await _call(
@@ -397,16 +406,11 @@ def test_2024_advancement_feat_and_background_choices_commit_atomically(
             "character_content_apply",
             {
                 "character_id": fighter["id"],
-                "artifact_id": (
-                    "dnd5e.content.srd2024.feature."
-                    "fighter-ability-score-improvement"
-                ),
+                "artifact_id": ("dnd5e.content.srd2024.feature.fighter-ability-score-improvement"),
                 "selection": {
                     "grant_level": 4,
                     "feat_choice": {
-                        "artifact_id": (
-                            "dnd5e.content.srd2024.feat.ability-score-improvement"
-                        ),
+                        "artifact_id": ("dnd5e.content.srd2024.feat.ability-score-improvement"),
                         "selection": {"ability_score_increases": {"strength": 2}},
                     },
                 },
@@ -452,9 +456,7 @@ def test_2024_advancement_feat_and_background_choices_commit_atomically(
                 "idempotency_key": "thieves-cant",
             },
         )
-        assert {"Thieves' Cant", "Undercommon"}.issubset(
-            set(rogue["sheet"]["traits"]["languages"])
-        )
+        assert {"Thieves' Cant", "Undercommon"}.issubset(set(rogue["sheet"]["traits"]["languages"]))
         rogue = await _call(
             server,
             "character_content_apply",
@@ -473,9 +475,7 @@ def test_2024_advancement_feat_and_background_choices_commit_atomically(
             },
         )
         assert rogue["sheet"]["skills"]["arcana"]["proficiency"] == "proficient"
-        assert "Herbalism Kit" in rogue["sheet"]["traits"]["proficiencies"][
-            "tools"
-        ]
+        assert "Herbalism Kit" in rogue["sheet"]["traits"]["proficiencies"]["tools"]
 
         acolyte_sheet = default_character_sheet()
         acolyte_sheet["edition"] = "2024"
@@ -511,9 +511,7 @@ def test_2024_advancement_feat_and_background_choices_commit_atomically(
                             "dnd5e.content.srd2024.spell.guidance",
                             "dnd5e.content.srd2024.spell.sacred-flame",
                         ],
-                        "level_1_spell_artifact_id": (
-                            "dnd5e.content.srd2024.spell.cure-wounds"
-                        ),
+                        "level_1_spell_artifact_id": ("dnd5e.content.srd2024.spell.cure-wounds"),
                     },
                 },
                 "expected_revision": acolyte["revision"],
@@ -525,13 +523,9 @@ def test_2024_advancement_feat_and_background_choices_commit_atomically(
         assert acolyte["sheet"]["abilities"]["wisdom"]["score"] == 12
         assert acolyte["sheet"]["abilities"]["intelligence"]["score"] == 11
         assert acolyte["sheet"]["skills"]["insight"]["proficiency"] == "proficient"
-        assert "Calligrapher's Supplies" in acolyte["sheet"]["traits"][
-            "proficiencies"
-        ]["tools"]
+        assert "Calligrapher's Supplies" in acolyte["sheet"]["traits"]["proficiencies"]["tools"]
         assert acolyte["sheet"]["inventory"]["wallet"]["gp"] == 8
-        equipment = {
-            item["name"]: item for item in acolyte["sheet"]["inventory"]["items"]
-        }
+        equipment = {item["name"]: item for item in acolyte["sheet"]["inventory"]["items"]}
         assert set(equipment) >= {
             "Calligrapher's Supplies",
             "Book (prayers)",
@@ -540,28 +534,24 @@ def test_2024_advancement_feat_and_background_choices_commit_atomically(
             "Robe",
         }
         assert equipment["Parchment"]["quantity"] == 10
-        assert set(
-            acolyte["sheet"]["progression"]["background_grants"][
-                "equipment_item_ids"
-            ]
-        ) == {item["id"] for item in equipment.values()}
-        assert any(
-            item["name"] == "Magic Initiate"
-            for item in acolyte["sheet"]["content"]["feats"]
-        )
-        spell_names = {
-            item["name"] for item in acolyte["sheet"]["content"]["spells"]
+        assert set(acolyte["sheet"]["progression"]["background_grants"]["equipment_item_ids"]) == {
+            item["id"] for item in equipment.values()
         }
+        assert any(
+            item["name"] == "Magic Initiate" for item in acolyte["sheet"]["content"]["feats"]
+        )
+        spell_names = {item["name"] for item in acolyte["sheet"]["content"]["spells"]}
         assert {"Guidance", "Sacred Flame", "Cure Wounds"}.issubset(spell_names)
         cure_wounds = next(
-            item
-            for item in acolyte["sheet"]["content"]["spells"]
-            if item["name"] == "Cure Wounds"
+            item for item in acolyte["sheet"]["content"]["spells"] if item["name"] == "Cure Wounds"
         )
         assert cure_wounds["access"]["always_prepared"] is True
-        assert acolyte["sheet"]["resources"][
-            "magic_initiate:cleric:dnd5e.content.srd2024.spell.cure-wounds"
-        ]["max"] == 1
+        assert (
+            acolyte["sheet"]["resources"][
+                "magic_initiate:cleric:dnd5e.content.srd2024.spell.cure-wounds"
+            ]["max"]
+            == 1
+        )
 
     asyncio.run(exercise())
 
@@ -585,9 +575,7 @@ def test_2024_eldritch_invocations_enforce_levels_targets_and_repeat_grants(
         sheet["progression"].update(
             {
                 "level": 2,
-                "classes": [
-                    {"name": "Warlock", "level": 2, "subclass": "", "hit_die": 8}
-                ],
+                "classes": [{"name": "Warlock", "level": 2, "subclass": "", "hit_die": 8}],
             }
         )
         sheet["spellcasting"]["ability"] = "charisma"
@@ -615,9 +603,7 @@ def test_2024_eldritch_invocations_enforce_levels_targets_and_repeat_grants(
                 "idempotency_key": "eldritch-blast",
             },
         )
-        invocation_id = (
-            "dnd5e.content.srd2024.feature.warlock-eldritch-invocations"
-        )
+        invocation_id = "dnd5e.content.srd2024.feature.warlock-eldritch-invocations"
         first = await _call(
             server,
             "character_content_apply",
@@ -644,9 +630,7 @@ def test_2024_eldritch_invocations_enforce_levels_targets_and_repeat_grants(
                     "eldritch_invocations": [
                         {
                             "option": "Agonizing Blast",
-                            "target_artifact_id": (
-                                "dnd5e.content.srd2024.spell.eldritch-blast"
-                            ),
+                            "target_artifact_id": ("dnd5e.content.srd2024.spell.eldritch-blast"),
                         },
                         {"option": "Mask of Many Faces"},
                     ],
@@ -695,18 +679,22 @@ def test_heroic_inspiration_rerolls_one_exact_recorded_die_atomically(
         sheet["combat"]["inspiration"] = True
         actor = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Inspired Hero",
-                "sheet": sheet,
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Inspired Hero", "sheet": sheet},
+                "principal_id": "system:local",
                 "idempotency_key": "actor",
             },
         )
         current = await _call(
             server,
-            "campaign_get",
-            {"campaign_id": campaign["id"]},
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
         )
         await _call(
             server,
@@ -721,8 +709,12 @@ def test_heroic_inspiration_rerolls_one_exact_recorded_die_atomically(
         )
         current = await _call(
             server,
-            "campaign_get",
-            {"campaign_id": campaign["id"]},
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
         )
         checked = await _call_raw(
             server,
@@ -756,8 +748,12 @@ def test_heroic_inspiration_rerolls_one_exact_recorded_die_atomically(
         }
         stream_state = await _call(
             server,
-            "campaign_get",
-            {"campaign_id": campaign["id"]},
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
         )
         stream = CampaignRandomStream.from_campaign_state(
             campaign["id"],
@@ -771,27 +767,31 @@ def test_heroic_inspiration_rerolls_one_exact_recorded_die_atomically(
 
         assert replay == rerolled
         assert rerolled["result"]["rolls"][1] == original["rolls"][1]
-        assert rerolled["result"]["rolls"][0] == rerolled[
-            "heroic_inspiration_reroll"
-        ]["new_roll"]
+        assert rerolled["result"]["rolls"][0] == rerolled["heroic_inspiration_reroll"]["new_roll"]
         assert rerolled["result"]["natural"] == max(rerolled["result"]["rolls"])
         assert rerolled["result"]["total"] == (
-            rerolled["result"]["natural"]
-            + original["total"]
-            - original["natural"]
+            rerolled["result"]["natural"] + original["total"] - original["natural"]
         )
         assert rerolled["random_stream_receipt"]["draw_count"] == 1
         refreshed = await _call(
             server,
-            "character_get",
-            {"character_id": actor["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": actor["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert refreshed["sheet"]["combat"]["inspiration"] is False
 
         after = await _call(
             server,
-            "campaign_get",
-            {"campaign_id": campaign["id"]},
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
         )
         with pytest.raises(Exception, match="identify one check"):
             await _call_raw(

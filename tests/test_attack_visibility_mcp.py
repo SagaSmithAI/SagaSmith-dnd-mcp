@@ -36,18 +36,20 @@ def test_hidden_attack_reveals_attacker_to_its_target(tmp_path: Path) -> None:
             {"name": "Reveal attack", "idempotency_key": "campaign"},
         )
         attacker = await call(
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Hidden attacker",
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Hidden attacker"},
+                "principal_id": "system:local",
                 "idempotency_key": "attacker",
             },
         )
         target = await call(
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Target",
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Target"},
+                "principal_id": "system:local",
                 "idempotency_key": "target",
             },
         )
@@ -68,7 +70,12 @@ def test_hidden_attack_reveals_attacker_to_its_target(tmp_path: Path) -> None:
             else:
                 target = updated
         campaign = await call(
-            "campaign_get", {"campaign_id": campaign["id"]}
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
         )
         started = await raw(
             "combat_start",
@@ -106,9 +113,7 @@ def test_hidden_attack_reveals_attacker_to_its_target(tmp_path: Path) -> None:
         )
         assert attacked["result"]["reveals_attacker"] is True
         attacker_state = next(
-            item
-            for item in attacked["combat"]["combatants"]
-            if item["actor_id"] == attacker["id"]
+            item for item in attacked["combat"]["combatants"] if item["actor_id"] == attacker["id"]
         )
         assert attacker_state["hidden"] is False
         assert attacker_state["visible_to_actor_ids"] is None
@@ -131,9 +136,9 @@ def test_hidden_attack_reveals_attacker_to_its_target(tmp_path: Path) -> None:
                 "action": {"weapon_id": "unarmed-strike", "attack_mode": "melee"},
             },
         )
-        assert ended["combat"]["combatants"][ended["combat"]["turn_index"]][
-            "actor_id"
-        ] == target["id"]
+        assert (
+            ended["combat"]["combatants"][ended["combat"]["turn_index"]]["actor_id"] == target["id"]
+        )
         assert counterattack["target_can_see_attacker"] is True
         assert counterattack["disadvantage"] is False
 

@@ -686,14 +686,18 @@ def test_party_long_rest_accounts_for_2014_preparation_time(tmp_path: Path) -> N
         )
         prepared_setup = await _call(
             server,
-            "character_spell_prepare_list",
+            "character_spell_prepare",
             {
                 "character_id": cleric["id"],
-                "spell_ids": [
-                    "dnd5e.content.srd2014.spell.bless",
-                    "dnd5e.content.srd2014.spell.aid",
-                ],
-                "event": "setup",
+                "mode": "replace_all",
+                "payload": {
+                    "spell_ids": [
+                        "dnd5e.content.srd2014.spell.bless",
+                        "dnd5e.content.srd2014.spell.aid",
+                    ],
+                    "event": "setup",
+                },
+                "principal_id": "system:local",
                 "expected_revision": cleric["revision"],
                 "idempotency_key": "prepared-setup",
             },
@@ -830,11 +834,15 @@ def test_party_long_rest_accounts_for_2014_preparation_time(tmp_path: Path) -> N
         with pytest.raises(Exception, match="unambiguous source class"):
             await _call(
                 server,
-                "character_spell_prepare_list",
+                "character_spell_prepare",
                 {
                     "character_id": multiclass["id"],
-                    "spell_ids": ["dnd5e.content.srd2014.spell.cure-wounds"],
-                    "event": "setup",
+                    "mode": "replace_all",
+                    "payload": {
+                        "spell_ids": ["dnd5e.content.srd2014.spell.cure-wounds"],
+                        "event": "setup",
+                    },
+                    "principal_id": "system:local",
                     "expected_revision": multiclass["revision"],
                     "idempotency_key": "ambiguous-multiclass-preparation",
                 },

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import hmac
+import inspect
 import json
 import math
 import re
@@ -79,7 +79,7 @@ from sagasmith_core import (
 from sagasmith_core.access import CAMPAIGN_DM_ROLES, LOCAL_SYSTEM_PRINCIPAL_ID
 from sagasmith_core.context_anchors import normalize_context_entity_ref
 from sagasmith_core.idempotency import request_hash
-from sagasmith_core.integrity import canonical_json
+from sagasmith_core.integrity import canonical_json, json_sha256
 from sagasmith_core.modules import (
     EXACT_MODULE_SOURCE_FIELD_ORDER,
     EXACT_MODULE_SOURCE_FIELDS,
@@ -91,7 +91,7 @@ from sagasmith_core.modules import (
 from sagasmith_core.modules import (
     normalize_source_evidence_text as _normalize_source_evidence_text,
 )
-from sagasmith_core.rule_packs import RulePackError, RulesetUnavailableError, content_checksum
+from sagasmith_core.rule_packs import RulePackError, RulesetUnavailableError
 from sagasmith_core.systems import SystemRegistry
 from sagasmith_core.text import ascii_slug, compact_ascii_key
 from sagasmith_core.visibility import (
@@ -109,6 +109,7 @@ from sagasmith_dnd.activities import (
     consume_activity,
     recharge_activities_at_turn_start,
 )
+from sagasmith_dnd.activity_identity import is_multiattack_source_name
 from sagasmith_dnd.actor_types import (
     NON_PLAYER_CHARACTER_TYPES,
     require_agent_decidable_character_type,
@@ -142,7 +143,6 @@ from sagasmith_dnd.character_schema import (
     set_spell_prepared,
     update_inventory_item,
     validate_character_notes,
-    validate_character_notes_update,
     validate_character_sheet,
     validate_party_state,
     validate_world_effect,
@@ -262,7 +262,6 @@ from sagasmith_dnd.document_layout import DND5E_DOCUMENT_LAYOUT_PROFILE
 from sagasmith_dnd.editions import DEFAULT_CAMPAIGN_EDITION, normalize_dnd_edition
 from sagasmith_dnd.engine import resolve_check, roll
 from sagasmith_dnd.game_time import (
-    CALENDAR_MINUTE_FIELDS,
     FIXED_GAME_TIME_PERIODS,
     NARRATIVE_GAME_TIME_PERIODS,
     TICKS_PER_MINUTE,
@@ -271,7 +270,6 @@ from sagasmith_dnd.game_time import (
     calendar_minute_point,
     game_time_ticks,
     rules_day_from_ticks,
-    validate_calendar_minute_point,
 )
 from sagasmith_dnd.heroic_inspiration import spend_heroic_inspiration_reroll
 from sagasmith_dnd.lifecycle import (
@@ -474,6 +472,7 @@ from sagasmith_dnd_mcp.exposure import Exposure, ExposureError, ExposureRegistry
 from sagasmith_dnd_mcp.facade_contracts import (
     ACTION_PAYLOAD_CONTRACTS,
     action_payload_contract,
+    validate_action_payload,
 )
 from sagasmith_dnd_mcp.npc_turns import (
     NPC_NARRATIVE_ACTION_KINDS,
@@ -491,6 +490,7 @@ from sagasmith_dnd_mcp.random_state import (
 from sagasmith_dnd_mcp.random_state import (
     bind_idempotency_request,
 )
+from sagasmith_dnd_mcp.receipt_signing import sign_receipt, verify_receipt_signature
 from sagasmith_dnd_mcp.skill_plans import (
     RESULT_OPERATION_PHASES,
     SkillPlanCatalog,
@@ -501,9 +501,9 @@ from sagasmith_dnd_mcp.storage import SagaSmithStorage
 from sagasmith_dnd_mcp.tool_budget import (
     BASELINE_INPUT_SCHEMA_BYTES,
     BASELINE_PUBLIC_TOOL_COUNT,
+    MAX_INPUT_SCHEMA_BYTES,
     PROFILE_TOOL_LIMITS,
     TARGET_CORE_TOOL_COUNT,
-    TARGET_INPUT_SCHEMA_BYTES,
     TARGET_PUBLIC_TOOL_COUNT,
     TOOL_BUDGET_VERSION,
 )
@@ -2387,20 +2387,14 @@ def _validated_narrative_choices(
 
 
 def _subclass_spell_grants(card: dict[str, Any]) -> list[dict[str, Any]]:
-    """Normalize legacy domain lists and explicit subclass access grants."""
+    """Return explicit subclass spell-access grants."""
 
-    raw_legacy = card.get("always_prepared_spells") or []
     raw_grants = card.get("spell_grants") or []
-    if not isinstance(raw_legacy, list) or not isinstance(raw_grants, list):
+    if not isinstance(raw_grants, list):
         raise RulesetUnavailableError("subclass spell grants are not executable")
-    grants = [
-        {**deepcopy(dict(item)), "method": "always_prepared"}
-        for item in raw_legacy
-        if isinstance(item, dict)
-    ]
-    if len(grants) != len(raw_legacy) or any(not isinstance(item, dict) for item in raw_grants):
+    if any(not isinstance(item, dict) for item in raw_grants):
         raise RulesetUnavailableError("subclass spell grants are not structured")
-    grants.extend(deepcopy(list(raw_grants)))
+    grants = deepcopy(list(raw_grants))
     names = [str(item.get("name") or "").strip().casefold() for item in grants]
     if any(not name for name in names) or len(names) != len(set(names)):
         raise RulesetUnavailableError("subclass spell grants are empty or duplicated")
@@ -3495,15 +3489,9 @@ class SessionExposureFastMCP(FastMCP):
                         result = await super().call_tool(name, arguments)
                         random_receipt = self._finalize_random_stream(random_stream)
                 result = self._attach_random_receipt(result, random_receipt)
-                exposure_changed = self.exposure_registry.consume_tool(exposure, name)
         else:
             result = await super().call_tool(name, arguments)
-            exposure_changed = False
         if name in {"exposure_open", "exposure_load", "exposure_unload"}:
-            session = self._sessions.get(session_key)
-            if session is not None:
-                await session.send_tool_list_changed()
-        if exposure_changed:
             session = self._sessions.get(session_key)
             if session is not None:
                 await session.send_tool_list_changed()
@@ -3649,7 +3637,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 *list(value["mechanics"]),
                 *(mechanic for provider in native for mechanic in provider["mechanics"]),
             ]
-            value["fingerprint"] = content_checksum(
+            value["fingerprint"] = json_sha256(
                 {"base": effective.fingerprint, "native": native}
             )
         try:
@@ -3725,7 +3713,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         value: str | dict[str, Any],
         *,
-        allow_legacy_without_manifest: bool = False,
         require_exact: bool = False,
         expected_scene_id: str | None = None,
         require_active_module: bool = False,
@@ -3741,20 +3728,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         try:
             source = json.loads(normalized)
         except json.JSONDecodeError as exc:
-            if allow_legacy_without_manifest and not exact_required:
-                return normalized, None, None
             raise ValueError("source_ref must be a JSON object") from exc
         if not isinstance(source, dict):
-            if allow_legacy_without_manifest and not exact_required:
-                return normalized, None, None
             raise ValueError("source_ref must be a JSON object")
         unknown_fields = sorted(set(source) - EXACT_MODULE_SOURCE_FIELDS)
         if unknown_fields:
             raise ValueError("source_ref has unsupported fields: " + ", ".join(unknown_fields))
         missing_managed = sorted(MANAGED_MODULE_SOURCE_FIELDS - set(source))
         if missing_managed:
-            if allow_legacy_without_manifest and not exact_required:
-                return normalized, None, None
             raise ValueError(
                 "source_ref requires " + ", ".join(sorted(MANAGED_MODULE_SOURCE_FIELDS))
             )
@@ -3818,6 +3799,52 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             canonical_json(normalized_source),
             normalized_source,
             expanded,
+        )
+
+    def advancement_source_ref(
+        campaign_id: str,
+        value: str | dict[str, Any],
+        *,
+        branch_id: str | None = None,
+    ) -> str:
+        """Resolve advancement evidence from a module or the active ruleset.
+
+        Bare labels are not evidence. A rule citation must exactly match an
+        artifact ``rule_ref`` in the branch's immutable ruleset lock.
+        """
+
+        if isinstance(value, dict):
+            return managed_module_source_ref(campaign_id, value)[0]
+        normalized = str(value).strip()
+        if not normalized or len(normalized) > 8192:
+            raise ValueError("source_ref must contain 1 to 8192 characters")
+        if normalized.startswith("{"):
+            return managed_module_source_ref(campaign_id, normalized)[0]
+
+        rules = effective_rule_context(campaign_id)
+        core_citations = {
+            str(evidence.citation).strip()
+            for boundary in rules.core_pack.boundaries
+            for evidence in (boundary, *boundary.evidence)
+        }
+        if normalized in core_citations:
+            return normalized
+
+        effective = rule_packs.effective_ruleset(campaign_id, branch_id=branch_id)
+        for locked in effective.lock:
+            version = rule_packs.get_version(
+                str(locked["pack_id"]),
+                str(locked["version"]),
+            )
+            for artifact in version.artifacts:
+                references = artifact.get("rule_refs")
+                if isinstance(references, list) and normalized in {
+                    str(reference).strip() for reference in references
+                }:
+                    return normalized
+        raise ValueError(
+            "source_ref must identify an indexed module chunk or an exact "
+            "rule_ref in the active branch ruleset"
         )
 
     def managed_module_source_excerpt(
@@ -5138,11 +5165,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             list(normalized["payload"]["components"])
         )
         declared_readiness = manifest.get("readiness")
-        readiness_policy = str(manifest.get("readiness_policy") or "legacy")
+        readiness_policy = str(manifest.get("readiness_policy") or "")
         if declared_readiness is not None and declared_readiness != actual_readiness:
             raise ValueError("D&D addon readiness manifest does not match embedded content")
         if readiness_policy not in {
-            "legacy",
             "review_required",
             "build_time_complete",
         }:
@@ -5606,6 +5632,55 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         bound_principal_id=config.bound_principal_id,
     )
 
+    def internal_operation(function: Callable[..., Any]) -> Callable[..., Any]:
+        """Keep facade implementation seams callable without registering MCP tools."""
+
+        return function
+
+    def public_tool() -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        """Register one public tool with its action-specific payload contract."""
+
+        def decorate(function: Callable[..., Any]) -> Callable[..., Any]:
+            signature = inspect.signature(function)
+
+            def validate_call(args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+                bound = signature.bind_partial(*args, **kwargs)
+                bound.apply_defaults()
+                arguments = bound.arguments
+                selector = next(
+                    (
+                        str(arguments[field])
+                        for field in ("action", "view", "mode")
+                        if field in arguments and arguments[field] is not None
+                    ),
+                    None,
+                )
+                validate_action_payload(
+                    tool_id=function.__name__,
+                    selector=selector,
+                    payload=arguments.get("payload"),
+                )
+
+            if inspect.iscoroutinefunction(function):
+
+                @wraps(function)
+                async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                    validate_call(args, kwargs)
+                    return await function(*args, **kwargs)
+
+                registered = async_wrapper
+            else:
+
+                @wraps(function)
+                def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+                    validate_call(args, kwargs)
+                    return function(*args, **kwargs)
+
+                registered = sync_wrapper
+            return mcp.tool()(registered)
+
+        return decorate
+
     def skill_session_key(principal_id: str) -> str:
         request = mcp._request_session()
         return request[0] if request is not None else f"direct:{principal_id}"
@@ -5811,12 +5886,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "issued_monotonic_ns": issued_ns,
             "expires_monotonic_ns": issued_ns + context_receipt_ttl_ns,
         }
-        signature = hmac.new(
-            context_receipt_secret,
-            canonical_json(payload).encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
-        return {**payload, "signature": signature}
+        return sign_receipt(payload, context_receipt_secret)
 
     def verify_context_receipt(
         receipt: Any,
@@ -5828,20 +5898,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> None:
         """Verify a source-bound narrative commit used current pinned context."""
 
-        if not isinstance(receipt, dict):
-            raise ValueError(
+        payload = verify_receipt_signature(
+            receipt,
+            context_receipt_secret,
+            missing_error=(
                 "payload.context_receipt is required when a continuity commit cites "
                 "a pinned context-anchor source"
-            )
-        payload = dict(receipt)
-        signature = str(payload.pop("signature", ""))
-        expected_signature = hmac.new(
-            context_receipt_secret,
-            canonical_json(payload).encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
-        if not hmac.compare_digest(signature, expected_signature):
-            raise ValueError("payload.context_receipt signature is invalid")
+            ),
+            invalid_error="payload.context_receipt signature is invalid",
+        )
         if payload.get("campaign_id") != campaign_id:
             raise ValueError("payload.context_receipt belongs to another campaign")
         if payload.get("branch_id") != branch_id:
@@ -6053,12 +6118,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "issued_monotonic_ns": issued_ns,
             "expires_monotonic_ns": issued_ns + npc_turn_receipt_ttl_ns,
         }
-        signature = hmac.new(
-            context_receipt_secret,
-            canonical_json(payload).encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
-        return {**payload, "signature": signature}
+        return sign_receipt(payload, context_receipt_secret)
 
     def verify_npc_turn_receipt(
         receipt: Any,
@@ -6069,17 +6129,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         required_source_digests: set[str] | None = None,
         require_fresh: bool = True,
     ) -> dict[str, Any]:
-        if not isinstance(receipt, dict):
-            raise ValueError("npc_turn.bundle_receipt is required")
-        payload = dict(receipt)
-        signature = str(payload.pop("signature", ""))
-        expected_signature = hmac.new(
+        payload = verify_receipt_signature(
+            receipt,
             context_receipt_secret,
-            canonical_json(payload).encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
-        if not hmac.compare_digest(signature, expected_signature):
-            raise ValueError("npc_turn.bundle_receipt signature is invalid")
+            missing_error="npc_turn.bundle_receipt is required",
+            invalid_error="npc_turn.bundle_receipt signature is invalid",
+        )
         if payload.get("schema_version") != 2 or payload.get("purpose") != "npc_turn":
             raise ValueError("npc_turn.bundle_receipt has the wrong purpose or schema")
         if payload.get("campaign_id") != campaign_id:
@@ -6233,12 +6288,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "issued_monotonic_ns": issued_ns,
             "expires_monotonic_ns": issued_ns + bounded_evaluation_receipt_ttl_ns,
         }
-        signature = hmac.new(
-            context_receipt_secret,
-            canonical_json(payload).encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
-        return {**payload, "signature": signature}
+        return sign_receipt(payload, context_receipt_secret)
 
     def verify_bounded_evaluation_receipt(
         receipt: Any,
@@ -6250,17 +6300,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> dict[str, Any]:
         """Verify a bounded proposal still belongs to the live epistemic epoch."""
 
-        if not isinstance(receipt, dict):
-            raise ValueError("bounded evaluation bundle_receipt is required")
-        payload = dict(receipt)
-        signature = str(payload.pop("signature", ""))
-        expected_signature = hmac.new(
+        payload = verify_receipt_signature(
+            receipt,
             context_receipt_secret,
-            canonical_json(payload).encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
-        if not hmac.compare_digest(signature, expected_signature):
-            raise ValueError("bounded evaluation bundle_receipt signature is invalid")
+            missing_error="bounded evaluation bundle_receipt is required",
+            invalid_error="bounded evaluation bundle_receipt signature is invalid",
+        )
         receipt_purpose = str(payload.get("purpose") or "")
         if payload.get("schema_version") != 1 or receipt_purpose not in BOUNDED_EVALUATION_PURPOSES:
             raise ValueError("bounded evaluation bundle_receipt has the wrong purpose or schema")
@@ -6669,7 +6714,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         name: str,
         summary: str = "",
     ) -> dict[str, Any]:
-        """Normalize actor notes and repair the legacy blank NPC summary once."""
+        """Normalize actor notes and supply the required NPC summary."""
 
         value = validate_character_notes(notes or default_character_notes())
         if character_type in NON_PLAYER_CHARACTER_TYPES and not value["profile"]["summary"]:
@@ -6799,15 +6844,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
         manual_rulings = list(dict.fromkeys(manual_rulings))
         normalization_notes = list(dict.fromkeys(normalization_notes))
-        legacy_normalization_notes = [
-            item for item in manual_rulings if is_statblock_normalization_note(item)
-        ]
-        normalization_notes = list(
-            dict.fromkeys([*normalization_notes, *legacy_normalization_notes])
-        )
-        manual_rulings = [
-            item for item in manual_rulings if not is_statblock_normalization_note(item)
-        ]
         specific_multiattacks = {
             item.split(":", 1)[0]
             for item in manual_rulings
@@ -7273,7 +7309,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         multiattacks = [
             activity
             for activity in dict(sheet.get("content") or {}).get("activities", [])
-            if str(activity.get("name") or "").strip().casefold() == "multiattack"
+            if is_multiattack_source_name(activity.get("name"))
+            or dict(dict(activity.get("choices") or {}).get("manual_ruling") or {}).get(
+                "kind"
+            )
+            == "multiattack_composition"
         ]
         unresolved = [
             activity
@@ -7290,11 +7330,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             source_excerpt = " ".join(str(manual_ruling.get("source_excerpt") or "").split())
             description = " ".join(str(activity.get("description") or "").split())
             if (
-            manual_ruling.get("default_resolver") != "agent"
-            or not source_excerpt
-            or source_excerpt != description
-            or bool(activity.get("mechanic_refs"))
-        ):
+                manual_ruling.get("kind") != "multiattack_composition"
+                or manual_ruling.get("default_resolver") != "agent"
+                or not source_excerpt
+                or source_excerpt != description
+                or bool(activity.get("mechanic_refs"))
+            ):
                 invalid_unresolved.append(activity)
         if invalid_unresolved:
             names = sorted(
@@ -8566,34 +8607,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
             except ResolutionPlanExecutionError as error:
                 raise CombatEngineError(str(error)) from error
-            if bound_plan.compiled.schema_version == 1:
-                target_validations = [
-                    dict(step.get("args") or {})
-                    for step in bound_plan.steps
-                    if step.get("op") == "target.validate"
-                ]
-                if not target_validations or any(
-                    {str(target) for target in validation.get("target_ids", [])} != {target_id}
-                    for validation in target_validations
-                ):
-                    raise CombatEngineError(
-                        "legacy item on-hit plan must validate only the triggering attack target"
-                    )
-                for step in bound_plan.steps:
-                    arguments = dict(step.get("args") or {})
-                    if "target_ids" in arguments and {
-                        str(target) for target in arguments["target_ids"]
-                    } != {target_id}:
-                        raise CombatEngineError(
-                            "legacy item on-hit plan cannot affect a different attack target"
-                        )
-                    if (
-                        "target_actor_id" in arguments
-                        and str(arguments["target_actor_id"]) != target_id
-                    ):
-                        raise CombatEngineError(
-                            "legacy item on-hit plan cannot affect a different attack target"
-                        )
             return {
                 "type": "attack_after_hit",
                 "application_id": str(window["id"]),
@@ -10455,8 +10468,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             return replay
         normalized_sheet = validate_character_sheet(sheet if sheet is not None else before.sheet)
         normalized_notes = (
-            validate_character_notes_update(
-                before.notes,
+            validate_character_notes(
                 canonical_character_notes(
                     notes,
                     character_type=before.character_type,
@@ -10912,12 +10924,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             idempotency.remember(scope, key, payload, response, campaign_id=campaign_id)
         return response
 
-    @mcp.tool()
+    @public_tool()
     def storage_status() -> dict[str, Any]:
         """Return the MCP-owned SQLite, ChromaDB, and artifact locations."""
         return storage.status()
 
-    @mcp.tool()
+    @public_tool()
     def server_capabilities() -> dict[str, Any]:
         """Describe the MCP contract and the automatic-vs-ruling combat boundary."""
         return {
@@ -11010,7 +11022,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "player_safe_combat_maps": True,
                 "rule_aware_noncombat_checks": True,
                 "compact_domain_facades": True,
-                "legacy_tool_aliases": False,
                 "session_scoped_tool_exposure": True,
                 "native_tools_list_filtering": True,
                 "native_tools_list_changed_advertised": True,
@@ -11219,7 +11230,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "baseline_input_schema_bytes": BASELINE_INPUT_SCHEMA_BYTES,
                     "target_public_tools": TARGET_PUBLIC_TOOL_COUNT,
                     "target_core_tools": TARGET_CORE_TOOL_COUNT,
-                    "target_input_schema_bytes": TARGET_INPUT_SCHEMA_BYTES,
+                    "max_input_schema_bytes": MAX_INPUT_SCHEMA_BYTES,
                     "profile_limits": PROFILE_TOOL_LIMITS,
                 },
                 "phases": [PROFILE_LOBBY, PROFILE_PLAY, PROFILE_COMBAT],
@@ -11231,13 +11242,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             },
         }
 
-    @mcp.tool()
+    @public_tool()
     def storage_migrate() -> dict[str, str]:
         """Run the embedded SQLite schema migrations."""
         storage.migrate()
         return {"status": "ok", "database": storage.database.url}
 
-    @mcp.tool()
+    @public_tool()
     def rule_seed_status() -> dict[str, Any]:
         """Return whether the bundled SRD corpus is indexed."""
         return {
@@ -11246,12 +11257,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "coverage": bundled_rule_seed_status(),
         }
 
-    @mcp.tool()
+    @public_tool()
     def rule_seed_bundled(max_files: int | None = None) -> dict[str, Any]:
         """Idempotently index the complete bundled SRD corpus."""
         return seed_bundled_rules(max_files=max_files)
 
-    @mcp.tool()
+    @public_tool()
     def system_list() -> list[dict[str, Any]]:
         """List systems exposed by this MCP server."""
         registry = SystemRegistry()
@@ -11266,7 +11277,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             for system in registry.list()
         ]
 
-    @mcp.tool()
+    @public_tool()
     def campaign_create(
         name: str,
         description: str = "",
@@ -11319,7 +11330,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return asdict(created)
 
-    @mcp.tool()
+    @internal_operation
     def campaign_list(
         status: str | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
@@ -11359,14 +11370,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         value["state_redacted"] = True
         return value
 
-    @mcp.tool()
+    @internal_operation
     def campaign_get(
         campaign_id: str, principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID
     ) -> dict[str, Any]:
         """Read one campaign, including its persisted party and combat state."""
         return campaign_audience_view(campaign_id, principal_id)
 
-    @mcp.tool()
+    @public_tool()
     def server_tool_profiles() -> dict[str, Any]:
         """List phase profiles and session-loadable capability groups."""
         return {
@@ -11379,12 +11390,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "baseline_input_schema_bytes": BASELINE_INPUT_SCHEMA_BYTES,
                 "target_public_tools": TARGET_PUBLIC_TOOL_COUNT,
                 "target_core_tools": TARGET_CORE_TOOL_COUNT,
-                "target_input_schema_bytes": TARGET_INPUT_SCHEMA_BYTES,
+                "max_input_schema_bytes": MAX_INPUT_SCHEMA_BYTES,
                 "profile_limits": PROFILE_TOOL_LIMITS,
             },
         }
 
-    @mcp.tool()
+    @internal_operation
     def game_phase_get(
         campaign_id: str,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
@@ -11400,7 +11411,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "campaign_revision": campaign.revision,
         }
 
-    @mcp.tool()
+    @internal_operation
     def game_phase_set(
         campaign_id: str,
         tool_profile: str,
@@ -11464,7 +11475,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return phase_response(list(revisions_result or []))
 
-    @mcp.tool()
+    @internal_operation
     def import_job_get(
         campaign_id: str,
         job_id: str,
@@ -11474,7 +11485,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         return import_job_view(require_import_job(campaign_id, job_id))
 
-    @mcp.tool()
+    @internal_operation
     def import_job_list(
         campaign_id: str,
         kind: str | None = None,
@@ -11484,7 +11495,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         return [import_job_view(item) for item in import_jobs.list(campaign_id, kind=kind)]
 
-    @mcp.tool()
+    @internal_operation
     def rule_import_job_create(
         campaign_id: str,
         artifact: str,
@@ -11533,7 +11544,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return {"job": import_job_view(job)}
 
-    @mcp.tool()
+    @internal_operation
     def rule_import_job_inspect(
         campaign_id: str,
         job_id: str,
@@ -11573,7 +11584,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return {"job": import_job_view(updated), "inspection": inspection}
 
-    @mcp.tool()
+    @internal_operation
     @_agent_ruling_boundary
     def rule_import_job_ingest(
         campaign_id: str,
@@ -11735,7 +11746,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         f"{field} source_excerpt is not exact text from its indexed chunk"
                     )
 
-    @mcp.tool()
+    @internal_operation
     def rule_content_candidates_extract(
         campaign_id: str,
         job_id: str,
@@ -12252,7 +12263,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "replaced_candidate_ids": replaced_ids,
         }
 
-    @mcp.tool()
+    @internal_operation
     def import_job_review_candidates(
         campaign_id: str,
         job_id: str,
@@ -12555,7 +12566,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         candidate_views = [import_candidate_view(item) for item in updated.candidates]
         return {"job": import_job_view(updated), "candidates": candidate_views}
 
-    @mcp.tool()
+    @internal_operation
     def campaign_member_grant(
         campaign_id: str,
         principal_id: str,
@@ -12568,7 +12579,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         access.ensure_principal(principal_id, platform="mcp", external_id=principal_id)
         return asdict(access.grant_campaign(campaign_id, principal_id, role=role))
 
-    @mcp.tool()
+    @internal_operation
     def actor_grant(
         campaign_id: str,
         principal_id: str,
@@ -12591,7 +12602,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         )
 
-    @mcp.tool()
+    @internal_operation
     def campaign_update(
         campaign_id: str,
         name: str | None = None,
@@ -12741,10 +12752,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError("reason and source_ref are required for audited experience awards")
         if len(normalized_reason) > 1000:
             raise ValueError("experience award reason must not exceed 1000 characters")
-        normalized_source_ref, _, _ = managed_module_source_ref(
+        normalized_source_ref = advancement_source_ref(
             campaign_id,
             source_ref,
-            allow_legacy_without_manifest=True,
+            branch_id=resolved_branch_id,
         )
         if not isinstance(awards, list) or not awards:
             raise ValueError("awards must be a non-empty array")
@@ -13523,7 +13534,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "source_excerpt": normalized_excerpt,
         }
 
-    @mcp.tool()
+    @internal_operation
     def chase_start(
         campaign_id: str,
         participant_ids: list[str],
@@ -13742,7 +13753,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return response
 
-    @mcp.tool()
+    @internal_operation
     def chase_query(
         campaign_id: str,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
@@ -13764,7 +13775,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "campaign_revision": campaign.revision,
         }
 
-    @mcp.tool()
+    @internal_operation
     @_agent_ruling_boundary
     def chase_take_turn(
         campaign_id: str,
@@ -13984,7 +13995,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return response
 
-    @mcp.tool()
+    @internal_operation
     def chase_end(
         campaign_id: str,
         status: ChaseManualOutcomeStatus,
@@ -14060,7 +14071,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return response
 
-    @mcp.tool()
+    @public_tool()
     @_agent_ruling_boundary
     def combat_start(
         campaign_id: str,
@@ -14413,7 +14424,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return result
 
-    @mcp.tool()
+    @public_tool()
     @_agent_ruling_boundary
     def combat_join(
         campaign_id: str,
@@ -14591,7 +14602,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             join_response(list(revisions_result or [])),
         )
 
-    @mcp.tool()
+    @internal_operation
     def combat_status(
         campaign_id: str,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
@@ -14599,7 +14610,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Read an audience-filtered structured encounter."""
         return combat_view(campaign_id, principal_id)
 
-    @mcp.tool()
+    @internal_operation
     def combat_available_actions(
         campaign_id: str,
         actor_id: str,
@@ -14638,7 +14649,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "turn_budget": combatant.get("turn_budget", {}),
         }
 
-    @mcp.tool()
+    @public_tool()
     @_agent_ruling_boundary
     def combat_preflight_attack(
         campaign_id: str,
@@ -14723,7 +14734,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             }
         return plan
 
-    @mcp.tool()
+    @public_tool()
     @_agent_ruling_boundary
     def combat_resolve_attack(
         campaign_id: str,
@@ -15355,7 +15366,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             attack_response(list(revisions_result or [])),
         )
 
-    @mcp.tool()
+    @internal_operation
     @_agent_ruling_boundary
     def combat_on_hit_ruling(
         campaign_id: str,
@@ -15411,7 +15422,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
 
 
-    @mcp.tool()
+    @public_tool()
     @_agent_ruling_boundary
     def combat_end_turn(
         campaign_id: str,
@@ -15800,7 +15811,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return world_effect_response(list(revisions_result or []))
 
-    @mcp.tool()
+    @internal_operation
     def campaign_clock_set(
         campaign_id: str,
         day: int,
@@ -15882,7 +15893,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return clock_set_response(list(revisions_result or []))
 
-    @mcp.tool()
+    @internal_operation
     def campaign_advance_effects(
         campaign_id: str,
         period: str,
@@ -15891,7 +15902,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
-        expected_world_time: dict[str, Any] | None = None,
         expected_elapsed_ticks: int | None = None,
     ) -> dict[str, Any]:
         """Advance the campaign clock and matching timed effects atomically."""
@@ -15903,32 +15913,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError("period must be minute, hour, day, round, or encounter")
         if isinstance(count, bool) or not isinstance(count, int) or count < 1:
             raise ValueError("count must be a positive integer")
-        normalized_expected_world_time: dict[str, int] | None = None
         if expected_elapsed_ticks is not None and (
             isinstance(expected_elapsed_ticks, bool)
             or not isinstance(expected_elapsed_ticks, int)
             or expected_elapsed_ticks < 0
         ):
             raise ValueError("expected_elapsed_ticks must be a nonnegative integer")
-        if expected_world_time is not None:
-            normalized_expected_world_time = validate_calendar_minute_point(
-                expected_world_time,
-                field="expected_world_time",
-            )
         if (
             normalized_period in NARRATIVE_GAME_TIME_PERIODS
-            and normalized_expected_world_time is None
             and expected_elapsed_ticks is None
         ):
-            raise ValueError(
-                "minute, hour, and day advances require expected_elapsed_ticks "
-                "or legacy expected_world_time"
-            )
-        if (
-            normalized_period not in NARRATIVE_GAME_TIME_PERIODS
-            and normalized_expected_world_time is not None
-        ):
-            raise ValueError("expected_world_time is valid only for minute, hour, and day advances")
+            raise ValueError("minute, hour, and day advances require expected_elapsed_ticks")
         if normalized_period == "encounter" and expected_elapsed_ticks is not None:
             raise ValueError(
                 "expected_elapsed_ticks is invalid for an encounter advance "
@@ -15939,8 +15934,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "count": count,
             "branch_id": resolved_branch_id,
         }
-        if normalized_expected_world_time is not None:
-            payload["expected_world_time"] = normalized_expected_world_time
         if expected_elapsed_ticks is not None:
             payload["expected_elapsed_ticks"] = expected_elapsed_ticks
         scope = f"campaign-advance-effects:{campaign_id}:{resolved_branch_id}:{principal_id}"
@@ -15956,11 +15949,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         next_state = validate_party_state(deepcopy(campaign.state or {}))
         if bool(dict(next_state.get("combat") or {}).get("active")):
             raise CombatEngineError("campaign time cannot advance during active combat")
-        if normalized_expected_world_time is not None and not next_state.get("world_time"):
-            raise ValueError(
-                "expected_world_time requires an anchored calendar; "
-                "use expected_elapsed_ticks for an unanchored campaign"
-            )
         world_time: dict[str, Any] | None = None
         time_transition: dict[str, Any] | None = None
         if normalized_period in FIXED_GAME_TIME_PERIODS:
@@ -15977,18 +15965,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise ValueError(
                     "clock advance does not reach expected_elapsed_ticks: "
                     f"computed {time_transition['after']['elapsed_ticks']}"
-                )
-            if (
-                normalized_expected_world_time is not None
-                and world_time is not None
-                and {key: int(world_time[key]) for key in CALENDAR_MINUTE_FIELDS}
-                != normalized_expected_world_time
-            ):
-                raise ValueError(
-                    "clock advance does not reach expected_world_time: "
-                    f"computed day {world_time['day']} "
-                    f"{world_time['hour']:02}:{world_time['minute']:02}, "
-                    f"elapsed {world_time['elapsed_minutes']}"
                 )
         elapsed_ticks = int(time_transition["elapsed_ticks"]) if time_transition is not None else 0
         elapsed_minutes = (
@@ -16115,7 +16091,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             scope, idempotency_key, payload, response, campaign_id=campaign_id
         )
 
-    @mcp.tool()
+    @public_tool()
     @_agent_ruling_boundary
     def combat_reaction_attack(
         campaign_id: str,
@@ -16784,7 +16760,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return combat_response(campaign_id, principal_id, response)
 
-    @mcp.tool()
+    @internal_operation
     @_agent_ruling_boundary
     def combat_move(
         campaign_id: str,
@@ -16931,7 +16907,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return combat_response(campaign_id, principal_id, response)
 
-    @mcp.tool()
+    @internal_operation
     def combat_stand(
         campaign_id: str,
         actor_id: str,
@@ -16992,7 +16968,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return combat_response(campaign_id, principal_id, response)
 
-    @mcp.tool()
+    @public_tool()
     def combat_common_action(
         campaign_id: str,
         actor_id: str,
@@ -17801,7 +17777,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         return combat_response(campaign_id, principal_id, response)
 
-    @mcp.tool()
+    @internal_operation
     def combat_reactions(
         campaign_id: str,
         actor_id: str,
@@ -17829,7 +17805,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             {key: value for key, value in window.items() if key in allowed} for window in windows
         ]
 
-    @mcp.tool()
+    @public_tool()
     @_agent_ruling_boundary
     def combat_cast_spell(
         campaign_id: str,
@@ -19276,7 +19252,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return combat_response(campaign_id, principal_id, response)
 
-    @mcp.tool()
+    @internal_operation
     @_agent_ruling_boundary
     def combat_ready_spell(
         campaign_id: str,
@@ -19393,7 +19369,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return combat_response(campaign_id, principal_id, response)
 
-    @mcp.tool()
+    @internal_operation
     def combat_readied_spell_trigger(
         campaign_id: str,
         readied_id: str,
@@ -19469,7 +19445,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return combat_response(campaign_id, principal_id, response)
 
-    @mcp.tool()
+    @internal_operation
     def combat_readied_spell_resolve(
         campaign_id: str,
         actor_id: str,
@@ -19607,7 +19583,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return combat_response(campaign_id, principal_id, response)
 
-    @mcp.tool()
+    @internal_operation
     def combat_readied_action_trigger(
         campaign_id: str,
         readied_id: str,
@@ -19650,7 +19626,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return combat_response(campaign_id, principal_id, response)
 
-    @mcp.tool()
+    @internal_operation
     def combat_readied_action_resolve(
         campaign_id: str,
         actor_id: str,
@@ -19721,7 +19697,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return combat_response(campaign_id, principal_id, response)
 
-    @mcp.tool()
+    @public_tool()
     @_agent_ruling_boundary
     def combat_use_activity(
         campaign_id: str,
@@ -20657,7 +20633,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return combat_response(campaign_id, principal_id, response)
 
-    @mcp.tool()
+    @internal_operation
     @_agent_ruling_boundary
     def character_check(
         campaign_id: str,
@@ -21081,7 +21057,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return group_check_response(list(revisions_result or []))
 
-    @mcp.tool()
+    @internal_operation
     @_agent_ruling_boundary
     def character_contest(
         campaign_id: str,
@@ -21253,7 +21229,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return contest_response(list(revisions_result or []))
 
-    @mcp.tool()
+    @internal_operation
     def character_source_object_attack(
         character_id: str,
         object_state: dict[str, Any],
@@ -21604,7 +21580,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return source_object_response(list(revisions_result or []))
 
-    @mcp.tool()
+    @public_tool()
     @_agent_ruling_boundary
     def combat_check(
         campaign_id: str,
@@ -21949,7 +21925,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return combat_response(campaign_id, principal_id, response)
 
-    @mcp.tool()
+    @public_tool()
     @_agent_ruling_boundary
     def combat_concentration_check(
         campaign_id: str,
@@ -23371,7 +23347,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return combat_response(campaign_id, principal_id, response)
 
-    @mcp.tool()
+    @internal_operation
     @_agent_ruling_boundary
     def combat_apply_damage(
         campaign_id: str,
@@ -23478,7 +23454,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return combat_response(campaign_id, principal_id, response)
 
-    @mcp.tool()
+    @internal_operation
     @_agent_ruling_boundary
     def combat_heal(
         campaign_id: str,
@@ -23569,7 +23545,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return combat_response(campaign_id, principal_id, response)
 
 
-    @mcp.tool()
+    @internal_operation
     def combat_choice_open(
         campaign_id: str,
         actor_id: str,
@@ -23629,7 +23605,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return combat_response(campaign_id, principal_id, response)
 
-    @mcp.tool()
+    @internal_operation
     def combat_choice_resolve(
         campaign_id: str,
         actor_id: str,
@@ -23719,7 +23695,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return combat_response(campaign_id, principal_id, response)
 
-    @mcp.tool()
+    @internal_operation
     def branch_list(
         campaign_id: str, principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID
     ) -> list[dict[str, Any]]:
@@ -23731,7 +23707,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             return [item for item in values if item["id"] == current]
         return values
 
-    @mcp.tool()
+    @internal_operation
     def branch_compare(
         campaign_id: str,
         left_branch_id: str,
@@ -23742,7 +23718,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         return branches.compare(campaign_id, left_branch_id, right_branch_id)
 
-    @mcp.tool()
+    @internal_operation
     def branch_create(
         campaign_id: str,
         name: str,
@@ -23810,7 +23786,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             response["snapshot"] = asdict(snapshot)
         return response
 
-    @mcp.tool()
+    @internal_operation
     def branch_checkout(
         campaign_id: str,
         branch_id: str,
@@ -23877,7 +23853,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         }
         return response
 
-    @mcp.tool()
+    @public_tool()
     def snapshot_create(
         campaign_id: str,
         label: str = "",
@@ -23924,14 +23900,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return response
 
-    @mcp.tool()
+    @internal_operation
     def snapshot_list(
         campaign_id: str, principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID
     ) -> list[dict[str, Any]]:
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         return [asdict(item) for item in snapshots.list(campaign_id)]
 
-    @mcp.tool()
+    @public_tool()
     def snapshot_restore(
         campaign_id: str,
         slot: int,
@@ -23978,7 +23954,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return response
 
-    @mcp.tool()
+    @internal_operation
     def snapshot_core_lock(
         campaign_id: str,
         slot: int,
@@ -24025,7 +24001,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ),
         }
 
-    @mcp.tool()
+    @internal_operation
     def snapshot_restore_core_upgrade(
         campaign_id: str,
         slot: int,
@@ -24134,7 +24110,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         assert committed is not None and committed.response is not None
         return committed.response
 
-    @mcp.tool()
+    @internal_operation
     def snapshot_verify(
         campaign_id: str, slot: int, principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID
     ) -> dict[str, bool | int]:
@@ -24147,7 +24123,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "captured_campaign_revision": int(campaign.get("revision") or 0),
         }
 
-    @mcp.tool()
+    @internal_operation
     def snapshot_lineage(
         campaign_id: str,
         slot: int | None = None,
@@ -24157,7 +24133,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         return [asdict(item) for item in snapshots.lineage(campaign_id, slot)]
 
-    @mcp.tool()
+    @internal_operation
     def snapshot_regenerate_recap(
         campaign_id: str, slot: int, principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID
     ) -> dict[str, Any]:
@@ -24165,7 +24141,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         return snapshots.regenerate_recap(campaign_id, slot)
 
-    @mcp.tool()
+    @internal_operation
     @_agent_ruling_boundary
     def character_create(
         name: str,
@@ -24212,7 +24188,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         )
 
-    @mcp.tool()
+    @internal_operation
     def character_list(
         campaign_id: str | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
@@ -24225,7 +24201,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             for item in characters.list(system_id=DND5E.id, campaign_id=campaign_id)
         ]
 
-    @mcp.tool()
+    @internal_operation
     def character_library_list(
         character_type: str | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
@@ -24236,7 +24212,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             for item in characters.list_library(system_id=DND5E.id, character_type=character_type)
         ]
 
-    @mcp.tool()
+    @internal_operation
     @_agent_ruling_boundary
     def character_instantiate(
         template_id: str,
@@ -24269,7 +24245,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         )
 
-    @mcp.tool()
+    @internal_operation
     @_agent_ruling_boundary
     def character_build(
         campaign_id: str,
@@ -24307,7 +24283,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return {"template": character_view(template), "instance": character_view(instance)}
 
-    @mcp.tool()
+    @internal_operation
     def character_get(
         character_id: str, principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID
     ) -> dict[str, Any]:
@@ -24362,7 +24338,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             rule_receipts=rule_receipts,
         )
 
-    @mcp.tool()
+    @public_tool()
     @_agent_ruling_boundary
     def character_sheet_replace(
         character_id: str,
@@ -24399,7 +24375,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             payload={"sheet": normalized_sheet, "notes": normalized_notes},
         )
 
-    @mcp.tool()
+    @internal_operation
     def character_wallet_adjust(
         character_id: str,
         denomination: str,
@@ -24422,7 +24398,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             payload={"denomination": denomination, "amount": amount},
         )
 
-    @mcp.tool()
+    @internal_operation
     def character_inventory_add(
         character_id: str,
         item: dict[str, Any],
@@ -24453,7 +24429,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             response_extra={"item_id": item_id},
         )
 
-    @mcp.tool()
+    @internal_operation
     def character_inventory_update(
         character_id: str,
         item_id: str,
@@ -24520,7 +24496,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             payload={"item_id": item_id, "patch": normalized_patch},
         )
 
-    @mcp.tool()
+    @internal_operation
     def character_inventory_remove(
         character_id: str,
         item_id: str,
@@ -24545,7 +24521,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             response_extra={"removed": removed},
         )
 
-    @mcp.tool()
+    @internal_operation
     def character_inventory_equip(
         character_id: str,
         item_id: str,
@@ -24568,7 +24544,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             payload={"item_id": item_id, "slot": slot},
         )
 
-    @mcp.tool()
+    @internal_operation
     def character_inventory_recharge(
         character_id: str,
         item_id: str,
@@ -24629,7 +24605,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             rule_receipts=receipts,
         )
 
-    @mcp.tool()
+    @internal_operation
     def character_ammunition_consume(
         character_id: str,
         weapon_id: str,
@@ -24654,7 +24630,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             response_extra={"consumed": consumed},
         )
 
-    @mcp.tool()
+    @internal_operation
     def character_inventory_transfer(
         source_character_id: str,
         target_character_id: str,
@@ -24741,7 +24717,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return response
 
-    @mcp.tool()
+    @internal_operation
     def character_effect_add(
         character_id: str,
         effect: dict[str, Any],
@@ -24765,7 +24741,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             response_extra={"effect_id": effect_id},
         )
 
-    @mcp.tool()
+    @internal_operation
     def character_effect_remove(
         character_id: str,
         effect_id: str,
@@ -25356,12 +25332,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError("reason and source_ref are required for audited level advancement")
         if len(normalized_reason) > 1000:
             raise ValueError("level advancement reason must not exceed 1000 characters")
-        normalized_source_ref, _, _ = managed_module_source_ref(
+        branch_id = require_current_branch(current.campaign_id, None)
+        normalized_source_ref = advancement_source_ref(
             current.campaign_id,
             source_ref,
-            allow_legacy_without_manifest=True,
+            branch_id=branch_id,
         )
-        branch_id = require_current_branch(current.campaign_id, None)
         mutation_payload = {
             "class_name": class_name,
             "hp_method": hp_method,
@@ -25589,7 +25565,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             },
         }
 
-    @mcp.tool()
+    @internal_operation
     @_agent_ruling_boundary
     def character_cast_spell(
         character_id: str,
@@ -26525,7 +26501,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return party_rest_response(list(revisions_result or []))
 
-    @mcp.tool()
+    @internal_operation
     def character_use_activity(
         character_id: str,
         activity_id: str,
@@ -26978,7 +26954,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return response
 
-    @mcp.tool()
+    @internal_operation
     def character_resource_set(
         character_id: str,
         resource: str,
@@ -27001,7 +26977,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             payload={"resource": resource, "value": value},
         )
 
-    @mcp.tool()
+    @internal_operation
     def character_exhaustion_set(
         character_id: str,
         value: int,
@@ -27199,7 +27175,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             rule_receipts=rule_receipts,
         )
 
-    @mcp.tool()
+    @internal_operation
     def character_spell_prepare(
         character_id: str,
         spell_id: str,
@@ -27258,7 +27234,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ),
         )
 
-    @mcp.tool()
+    @internal_operation
     def character_spell_prepare_list(
         character_id: str,
         spell_ids: list[str],
@@ -27330,7 +27306,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ),
         )
 
-    @mcp.tool()
+    @public_tool()
     def character_ability_apply(
         character_id: str,
         method: str,
@@ -27415,7 +27391,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             rule_receipts=ability_receipts,
         )
 
-    @mcp.tool()
+    @internal_operation
     def party_show(
         campaign_id: str, principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID
     ) -> dict[str, Any]:
@@ -27423,7 +27399,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         access.require_campaign(campaign_id, principal_id)
         return party_view_from_state(campaigns.get(campaign_id).state)
 
-    @mcp.tool()
+    @internal_operation
     def party_inventory_add(
         campaign_id: str,
         item: dict[str, Any],
@@ -27469,7 +27445,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "campaign": asdict(after),
         }
 
-    @mcp.tool()
+    @internal_operation
     def party_inventory_remove(
         campaign_id: str,
         item_id: str,
@@ -27521,7 +27497,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "campaign": asdict(after),
         }
 
-    @mcp.tool()
+    @internal_operation
     def party_inventory_transfer(
         campaign_id: str,
         character_id: str,
@@ -27613,7 +27589,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return response
 
-    @mcp.tool()
+    @internal_operation
     def party_wallet_adjust(
         campaign_id: str,
         denomination: str,
@@ -27663,7 +27639,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "campaign": asdict(after),
         }
 
-    @mcp.tool()
+    @internal_operation
     def party_wallet_transfer(
         campaign_id: str,
         character_id: str,
@@ -27815,7 +27791,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         return response
 
-    @mcp.tool()
+    @public_tool()
     def dnd_dice_roll(
         campaign_id: str,
         expression: str,
@@ -27836,7 +27812,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             resolver=lambda: asdict(roll(expression)),
         )
 
-    @mcp.tool()
+    @public_tool()
     def dnd_check(
         campaign_id: str,
         dc: int,
@@ -27874,7 +27850,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             resolver=lambda: resolve_check(**payload),
         )
 
-    @mcp.tool()
+    @public_tool()
     def dnd_ability_roll(
         campaign_id: str,
         edition: str = "",
@@ -27900,7 +27876,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             resolver=lambda: roll_ability_scores(authoritative_edition),
         )
 
-    @mcp.tool()
+    @internal_operation
     def character_update(
         character_id: str,
         name: str | None = None,
@@ -27949,7 +27925,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             },
         )
 
-    @mcp.tool()
+    @internal_operation
     def memory_add(
         campaign_id: str,
         content: str,
@@ -28042,7 +28018,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         return readiness
 
-    @mcp.tool()
+    @internal_operation
     def memory_list(
         campaign_id: str,
         kind: str | None = None,
@@ -28062,7 +28038,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         ]
 
-    @mcp.tool()
+    @internal_operation
     def memory_search(
         campaign_id: str,
         query: str,
@@ -28084,7 +28060,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         ]
 
-    @mcp.tool()
+    @internal_operation
     def event_add(
         campaign_id: str,
         summary: str,
@@ -28177,7 +28153,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         response = {**asdict(created), "actor_knowledge_ids": knowledge_ids}
         return response
 
-    @mcp.tool()
+    @internal_operation
     def event_list(
         campaign_id: str,
         limit: int = 50,
@@ -28205,7 +28181,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return [asdict(item) for item in values]
 
-    @mcp.tool()
+    @internal_operation
     def actor_knowledge_add(
         campaign_id: str,
         actor_id: str,
@@ -28266,7 +28242,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return response
 
-    @mcp.tool()
+    @internal_operation
     def actor_knowledge_revise(
         knowledge_id: str,
         proposition: str,
@@ -28332,7 +28308,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return response
 
-    @mcp.tool()
+    @internal_operation
     def actor_knowledge_list(
         campaign_id: str,
         actor_id: str,
@@ -28361,7 +28337,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ]
         return [asdict(item) for item in values]
 
-    @mcp.tool()
+    @internal_operation
     def actor_knowledge_search(
         campaign_id: str,
         actor_id: str,
@@ -28412,7 +28388,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         )
 
-    @mcp.tool()
+    @internal_operation
     def state_history(
         campaign_id: str,
         limit: int = 100,
@@ -28422,7 +28398,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         return [asdict(item) for item in revisions.history(campaign_id, limit=limit)]
 
-    @mcp.tool()
+    @internal_operation
     def state_undo(
         campaign_id: str,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
@@ -28465,7 +28441,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return response
 
-    @mcp.tool()
+    @internal_operation
     def state_redo(
         campaign_id: str,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
@@ -28508,7 +28484,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return response
 
-    @mcp.tool()
+    @public_tool()
     def combat_map_patch(
         campaign_id: str,
         patches: list[dict[str, Any]],
@@ -28657,7 +28633,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return response
 
-    @mcp.tool()
+    @public_tool()
     def combat_end(
         campaign_id: str,
         outcome: dict[str, Any] | None = None,
@@ -28803,7 +28779,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return result
 
-    @mcp.tool()
+    @public_tool()
     def continuity_context(
         campaign_id: str,
         query: str = "",
@@ -29157,7 +29133,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return result
 
-    @mcp.tool()
+    @public_tool()
     def bounded_evaluation(
         campaign_id: str,
         action: Literal["validate"],
@@ -29212,14 +29188,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "principal_fingerprint": receipt_principal_fingerprint(principal_id),
             "expires_monotonic_ns": int(receipt["expires_monotonic_ns"]),
         }
-        validation_receipt = {
-            **validation_payload,
-            "signature": hmac.new(
-                context_receipt_secret,
-                canonical_json(validation_payload).encode("utf-8"),
-                hashlib.sha256,
-            ).hexdigest(),
-        }
+        validation_receipt = sign_receipt(validation_payload, context_receipt_secret)
         result: dict[str, Any] = {
             "validated": True,
             "authoritative_state_changed": False,
@@ -29239,7 +29208,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             }
         return result
 
-    @mcp.tool()
+    @internal_operation
     def continuity_diagnostics(
         campaign_id: str,
         branch_id: str | None = None,
@@ -29274,7 +29243,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         }
         return result
 
-    @mcp.tool()
+    @internal_operation
     def continuity_commit(
         campaign_id: str,
         payload: dict[str, Any],
@@ -29618,7 +29587,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         response["skill_manifest"] = manifest
         return response
 
-    @mcp.tool()
+    @internal_operation
     def module_import_job_create(
         campaign_id: str,
         artifact: str,
@@ -29677,7 +29646,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return {"job": import_job_view(job)}
 
-    @mcp.tool()
+    @internal_operation
     def module_import_job_inspect(
         campaign_id: str,
         job_id: str,
@@ -29718,7 +29687,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return {"job": import_job_view(updated), "preview": preview}
 
-    @mcp.tool()
+    @internal_operation
     def module_import_job_validate(
         campaign_id: str,
         job_id: str,
@@ -29785,7 +29754,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return {"job": import_job_view(updated), "validation": validation}
 
-    @mcp.tool()
+    @internal_operation
     def module_import_job_import(
         campaign_id: str,
         job_id: str,
@@ -29839,7 +29808,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return {"job": import_job_view(updated), **asdict(result)}
 
-    @mcp.tool()
+    @internal_operation
     def module_import_job_activate(
         campaign_id: str,
         job_id: str,
@@ -29994,7 +29963,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         }
         return response
 
-    @mcp.tool()
+    @internal_operation
     def module_write(
         name: str, content: str, principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID
     ) -> dict[str, str]:
@@ -30004,7 +29973,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         path = storage.write_module(name, content)
         return {"artifact": path.name, "path": str(path)}
 
-    @mcp.tool()
+    @internal_operation
     def module_inspect(
         artifact: str, principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID
     ) -> dict[str, Any]:
@@ -30017,43 +29986,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             **module_document_options(),
         )
 
-    @mcp.tool()
-    def module_import_legacy(
-        campaign_id: str,
-        artifact: str,
-        title: str | None = None,
-        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
-        idempotency_key: str | None = None,
-    ) -> dict[str, Any]:
-        """Import a managed module artifact into a campaign."""
-        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
-        if not idempotency_key:
-            raise ValueError("idempotency_key is required for module import")
-        payload = {"artifact": artifact, "title": title}
-        scope = f"module-import:{campaign_id}:{principal_id}"
-        replay = replay_idempotent(scope, idempotency_key, payload)
-        if replay is not None:
-            return replay
-        path = storage.artifact_module_path(artifact)
-        embedder, vectors = storage.dense_components()
-        result = modules.ingest_path(
-            campaign_id=campaign_id,
-            path=path,
-            title=title,
-            parser=MarkdownModuleParser(profile=DndModuleProfile()),
-            embedder=embedder,
-            vector_store=vectors,
-            **module_document_options(),
-            idempotency_key=idempotency_key,
-            idempotency_write=IdempotencyWrite(
-                scope=scope,
-                payload=payload,
-                response=lambda value: asdict(value),
-            ),
-        )
-        return asdict(result)
-
-    @mcp.tool()
+    @internal_operation
     def module_list(
         campaign_id: str, principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID
     ) -> list[dict[str, Any]]:
@@ -30067,7 +30000,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             for row in rows
         ]
 
-    @mcp.tool()
+    @internal_operation
     def module_index(
         campaign_id: str,
         module_id: str | None = None,
@@ -30084,7 +30017,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if item.get("visibility", "keeper") in PLAYER_MODULE_VISIBILITY_SCOPES
         ]
 
-    @mcp.tool()
+    @public_tool()
     def module_expand(
         chunk_id: str, principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID
     ) -> dict[str, Any]:
@@ -30216,7 +30149,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise RuntimeError("module PDF no longer matches its imported checksum")
         return source_asset
 
-    @mcp.tool()
+    @internal_operation
     def module_page_render(
         campaign_id: str,
         module_id: str,
@@ -30413,7 +30346,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             campaign_id=campaign_id,
         )
 
-    @mcp.tool()
+    @internal_operation
     def module_content_review(
         campaign_id: str,
         module_id: str,
@@ -30607,7 +30540,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             candidate["scene_id"] = candidate["source_scene_ids"][0]
         return candidates
 
-    @mcp.tool()
+    @internal_operation
     def module_read_scene(
         campaign_id: str,
         scene_id: str,
@@ -30783,7 +30716,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "optional_actor_ids": optional_actor_ids,
         }
 
-    @mcp.tool()
+    @internal_operation
     def module_current(
         campaign_id: str,
         scope_id: str = "party",
@@ -30818,7 +30751,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         }
         return [item for item in result if item["scene_id"] in visible_scene_ids]
 
-    @mcp.tool()
+    @public_tool()
     def module_set_progress(
         campaign_id: str,
         scene_id: str,
@@ -30894,7 +30827,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return response
 
-    @mcp.tool()
+    @public_tool()
     def module_search(
         campaign_id: str,
         query: str,
@@ -30921,7 +30854,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if hit.metadata.get("visibility", "keeper") in PLAYER_MODULE_VISIBILITY_SCOPES
         ]
 
-    @mcp.tool()
+    @public_tool()
     def rule_search(
         query: str,
         edition: str | None = None,
@@ -30947,12 +30880,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return [asdict(hit) for hit in hits]
 
-    @mcp.tool()
+    @public_tool()
     def rule_expand(chunk_id: str) -> dict[str, Any]:
         """Read a complete indexed D&D rule chunk after it was selected by search."""
         return rules.expand(chunk_id)
 
-    @mcp.tool()
+    @internal_operation
     def rule_document_stage(
         campaign_id: str,
         source_path: str,
@@ -30962,7 +30895,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         return storage.stage_rulebook(source_path)
 
-    @mcp.tool()
+    @internal_operation
     def rule_document_inspect(
         campaign_id: str,
         artifact: str,
@@ -30975,7 +30908,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             **rule_document_options(storage.rulebook_checksum(artifact)),
         )
 
-    @mcp.tool()
+    @internal_operation
     def rule_document_page_render(
         campaign_id: str,
         job_id: str,
@@ -33027,7 +32960,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return evidence
 
-    @mcp.tool()
+    @internal_operation
     def rule_statblock_review(
         campaign_id: str,
         job_id: str,
@@ -33372,7 +33305,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             review_id,
         )
 
-    @mcp.tool()
+    @internal_operation
     def rule_document_import(
         campaign_id: str,
         artifact: str,
@@ -33467,7 +33400,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         }
         return response
 
-    @mcp.tool()
+    @internal_operation
     def rule_ingest(
         source_key: str,
         title: str,
@@ -33491,7 +33424,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return asdict(result)
 
-    @mcp.tool()
+    @internal_operation
     def rule_pack_draft(
         manifest: dict[str, Any],
         artifacts: list[dict[str, Any]] | None = None,
@@ -33506,7 +33439,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             provenance=provenance,
         )
 
-    @mcp.tool()
+    @internal_operation
     def rule_pack_draft_from_source(
         source_id: str,
         manifest: dict[str, Any],
@@ -33620,7 +33553,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             provenance=bound_provenance,
         )
 
-    @mcp.tool()
+    @internal_operation
     def rule_import_job_compile(
         campaign_id: str,
         job_id: str,
@@ -33683,7 +33616,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return {"job": import_job_view(updated), "draft": draft}
 
-    @mcp.tool()
+    @internal_operation
     def rule_import_job_install(
         campaign_id: str,
         job_id: str,
@@ -33725,7 +33658,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return {"job": import_job_view(updated), "installed": installed}
 
-    @mcp.tool()
+    @internal_operation
     def rule_import_job_activate(
         campaign_id: str,
         job_id: str,
@@ -33782,23 +33715,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         response = {"job": import_job_view(updated), "activation": activation}
         return response
 
-    @mcp.tool()
+    @internal_operation
     def rule_pack_install(pack_id: str, version: str) -> dict[str, Any]:
         """Install one validated immutable version without enabling it for a campaign."""
         require_rule_pack_resolution_readiness(pack_id, version)
         return asdict(rule_packs.install(pack_id, version))
 
-    @mcp.tool()
+    @internal_operation
     def rule_pack_list(pack_id: str | None = None) -> list[dict[str, Any]]:
         """List draft, rejected, validated, and installed rule-pack versions."""
         return [asdict(item) for item in rule_packs.list_versions(pack_id)]
 
-    @mcp.tool()
+    @internal_operation
     def rule_pack_inspect(pack_id: str, version: str) -> dict[str, Any]:
         """Inspect an exact draft or installed version, including validation evidence."""
         return asdict(rule_packs.get_version(pack_id, version))
 
-    @mcp.tool()
+    @internal_operation
     def rule_pack_test(pack_id: str, version: str) -> dict[str, Any]:
         """Run declarative positive/negative examples embedded in a pack manifest."""
         value = rule_packs.get_version(pack_id, version)
@@ -33808,13 +33741,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             fingerprint=value.checksum,
         )
 
-    @mcp.tool()
+    @internal_operation
     def rule_pack_remove(pack_id: str, version: str) -> dict[str, Any]:
         """Remove an unreferenced version; any branch lock makes removal fail closed."""
         rule_packs.remove_version(pack_id, version)
         return {"status": "removed", "pack_id": pack_id, "version": version}
 
-    @mcp.tool()
+    @internal_operation
     def campaign_rule_profile_get(
         campaign_id: str, principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID
     ) -> dict[str, Any] | None:
@@ -33838,7 +33771,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "campaign_revision": campaign.revision,
         }
 
-    @mcp.tool()
+    @internal_operation
     def campaign_rule_profile_set(
         campaign_id: str,
         edition: str,
@@ -33885,7 +33818,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         assert committed is not None and committed.response is not None
         return committed.response
 
-    @mcp.tool()
+    @internal_operation
     def campaign_core_relock(
         campaign_id: str,
         expected_core_fingerprint: str,
@@ -33999,7 +33932,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         assert committed is not None and committed.response is not None
         return committed.response
 
-    @mcp.tool()
+    @internal_operation
     def campaign_rule_pack_set(
         campaign_id: str,
         pack_id: str,
@@ -34087,7 +34020,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         assert committed is not None and committed.response is not None
         return committed.response
 
-    @mcp.tool()
+    @internal_operation
     def campaign_rule_pack_remove(
         campaign_id: str,
         pack_id: str,
@@ -34132,7 +34065,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         assert committed is not None and committed.response is not None
         return committed.response
 
-    @mcp.tool()
+    @internal_operation
     def campaign_rules_explain(
         campaign_id: str,
         event: str | None = None,
@@ -34162,7 +34095,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "coverage": sorted({item.event for item in context.mechanics}),
         }
 
-    @mcp.tool()
+    @internal_operation
     def campaign_rule_receipts(
         campaign_id: str,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
@@ -35418,7 +35351,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ),
         }
 
-    @mcp.tool()
+    @internal_operation
     def content_catalog_list(
         campaign_id: str,
         kind: str | None = None,
@@ -35979,7 +35912,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return response
 
-    @mcp.tool()
+    @internal_operation
     def character_content_apply(
         character_id: str,
         artifact_id: str,
@@ -38088,7 +38021,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         {
                             "replace_existing",
                             "study_started_elapsed_ticks",
-                            "study_started_elapsed_minutes",
                         }
                     )
                 unsupported_selection_fields = set(selection) - allowed_selection_fields
@@ -38103,29 +38035,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             "feature selection replacement is available only during play"
                         )
                     study_started_ticks = selection.get("study_started_elapsed_ticks")
-                    legacy_study_minutes = selection.get("study_started_elapsed_minutes")
-                    if legacy_study_minutes is not None and (
-                        isinstance(legacy_study_minutes, bool)
-                        or not isinstance(legacy_study_minutes, int)
-                    ):
-                        raise CombatEngineError(
-                            "feature replacement study start must be an integer"
-                        )
-                    if study_started_ticks is None and legacy_study_minutes is not None:
-                        study_started_ticks = legacy_study_minutes * TICKS_PER_MINUTE
                     if isinstance(study_started_ticks, bool) or not isinstance(
                         study_started_ticks, int
                     ):
                         raise CombatEngineError(
                             "feature replacement requires study_started_elapsed_ticks"
-                        )
-                    if (
-                        legacy_study_minutes is not None
-                        and study_started_ticks != legacy_study_minutes * TICKS_PER_MINUTE
-                    ):
-                        raise CombatEngineError(
-                            "legacy study_started_elapsed_minutes must match "
-                            "study_started_elapsed_ticks"
                         )
                     current_elapsed = dict(dict(campaign.state or {}).get("game_time") or {}).get(
                         "elapsed_ticks"
@@ -39509,7 +39423,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "grant_level",
                         "replace_existing",
                         "study_started_elapsed_ticks",
-                        "study_started_elapsed_minutes",
                     }
                 }
                 grant_record = {
@@ -39529,10 +39442,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         dict(dict(campaign.state or {}).get("game_time") or {})["elapsed_ticks"]
                     )
                     study_started_ticks = selection.get("study_started_elapsed_ticks")
-                    if study_started_ticks is None:
-                        study_started_ticks = (
-                            int(selection["study_started_elapsed_minutes"]) * TICKS_PER_MINUTE
-                        )
                     replacement_history.append(
                         {
                             "previous_spell_artifact_ids": list(
@@ -39653,7 +39562,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             rule_receipts=([content_receipt] if content_receipt is not None else None),
         )
 
-    @mcp.tool()
+    @internal_operation
     def character_rule_artifact_add(
         character_id: str,
         pack_id: str,
@@ -39716,7 +39625,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             },
         )
 
-    @mcp.tool()
+    @internal_operation
     def skill_list() -> list[dict[str, str]]:
         """List installed D&D DM, campaign-manager, and module-generator skill documents."""
         return [
@@ -39729,12 +39638,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             for item in catalog.list()
         ]
 
-    @mcp.tool()
+    @internal_operation
     def skill_read(skill_id: str) -> str:
         """Read one source-of-truth SKILL.md document."""
         return catalog.read(skill_id)
 
-    @mcp.tool()
+    @internal_operation
     def skill_asset_list(source: str | None = None) -> list[dict[str, str]]:
         """List bundled text references, templates, and data files."""
         return [
@@ -39748,7 +39657,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if source is None or asset.source == source
         ]
 
-    @mcp.tool()
+    @internal_operation
     def skill_asset_read(asset_id: str) -> str:
         """Read one text skill asset by the id returned from skill_asset_list."""
         return catalog.read_asset(asset_id)
@@ -39889,20 +39798,11 @@ Useful bounded guidance:
     # one tool per storage operation.  These facades call the mature, narrowly
     # validated operations above; they must not reimplement writes or weaken
     # revision, idempotency, access, or combat guards.
-    character_content_apply_legacy = character_content_apply
-    character_spell_prepare_legacy = character_spell_prepare
-    campaign_clock_set_legacy = campaign_clock_set
-    campaign_advance_effects_legacy = campaign_advance_effects
-    character_check_legacy = character_check
-    # These facade names intentionally replace same-named legacy tools.
-    for replaced_tool_name in (
-        "character_content_apply",
-        "character_spell_prepare",
-        "campaign_clock_set",
-        "campaign_advance_effects",
-        "character_check",
-    ):
-        mcp.remove_tool(replaced_tool_name)
+    character_content_apply_impl = character_content_apply
+    character_spell_prepare_impl = character_spell_prepare
+    campaign_clock_set_impl = campaign_clock_set
+    campaign_advance_effects_impl = campaign_advance_effects
+    character_check_impl = character_check
 
     def facade_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
         if payload is None:
@@ -39979,7 +39879,7 @@ Useful bounded guidance:
             structuredContent=metadata,
         )
 
-    @mcp.tool()
+    @public_tool()
     def character_check(
         campaign_id: str,
         action: Literal["check", "group", "contest", "reroll"] = "check",
@@ -40119,7 +40019,7 @@ Useful bounded guidance:
             raise ValueError(
                 "character_check(check).payload.kind must be ability, check, save, or death_save"
             )
-        result = character_check_legacy(
+        result = character_check_impl(
             campaign_id,
             data["actor_id"],
             data["kind"],
@@ -40137,7 +40037,7 @@ Useful bounded guidance:
         )
         return result
 
-    @mcp.tool()
+    @public_tool()
     def chase(
         campaign_id: str,
         action: Literal["start", "query", "take_turn", "end"],
@@ -40271,7 +40171,7 @@ Useful bounded guidance:
             )
         return facade_result(action, result)
 
-    @mcp.tool()
+    @public_tool()
     def import_query(
         campaign_id: str,
         view: Literal["get", "list"] = "list",
@@ -40287,7 +40187,7 @@ Useful bounded guidance:
             )
         return facade_result(view, import_job_list(campaign_id, kind, principal_id))
 
-    @mcp.tool()
+    @public_tool()
     def rule_import(
         campaign_id: Annotated[str, Field(title="Campaign")],
         action: Literal[
@@ -40799,7 +40699,7 @@ Useful bounded guidance:
             ),
         )
 
-    @mcp.tool()
+    @public_tool()
     def module_import(
         campaign_id: str,
         action: Literal[
@@ -41013,7 +40913,7 @@ Useful bounded guidance:
             ),
         )
 
-    @mcp.tool()
+    @public_tool()
     def module_review(
         campaign_id: str,
         action: Literal[
@@ -41246,7 +41146,7 @@ Useful bounded guidance:
             ),
         )
 
-    @mcp.tool()
+    @public_tool()
     def module_query(
         campaign_id: str,
         view: Literal[
@@ -41422,7 +41322,7 @@ Useful bounded guidance:
             )
         return facade_result(view, result)
 
-    @mcp.tool()
+    @public_tool()
     def rule_pack_compile(
         action: Literal["draft", "from_source"],
         payload: dict[str, Any],
@@ -41446,7 +41346,7 @@ Useful bounded guidance:
             )
         return facade_result(action, result)
 
-    @mcp.tool()
+    @public_tool()
     def rule_pack_query(
         view: Literal[
             "list",
@@ -42497,7 +42397,7 @@ Useful bounded guidance:
             result = chunks[offset : offset + limit]
         return facade_result(view, result)
 
-    @mcp.tool()
+    @public_tool()
     def rule_pack_change(
         action: Literal["install", "remove"],
         pack_id: str,
@@ -42511,7 +42411,7 @@ Useful bounded guidance:
         )
         return facade_result(action, result)
 
-    @mcp.tool()
+    @public_tool()
     def campaign_rules(
         campaign_id: str,
         action: Literal[
@@ -42662,7 +42562,7 @@ Useful bounded guidance:
             )
         return facade_result(action, result)
 
-    @mcp.tool()
+    @public_tool()
     @_agent_ruling_boundary
     def character_query(
         view: Literal[
@@ -43100,7 +43000,7 @@ Useful bounded guidance:
             raise ValueError("casting_slot_level is not accepted by this template")
         return values, selected_class_name or None
 
-    @mcp.tool()
+    @public_tool()
     def addon_actor_instantiate(
         campaign_id: str,
         artifact_id: str,
@@ -43252,7 +43152,7 @@ Useful bounded guidance:
             "next": ("combat_join" if authoritative_phase(campaign_id) == PROFILE_COMBAT else None),
         }
 
-    @mcp.tool()
+    @public_tool()
     def character_create_from(
         mode: Literal[
             "direct",
@@ -44194,7 +44094,7 @@ Useful bounded guidance:
             }
         return facade_result(mode, result)
 
-    @mcp.tool()
+    @public_tool()
     def character_metadata_update(
         character_id: str,
         payload: dict[str, Any],
@@ -44224,7 +44124,7 @@ Useful bounded guidance:
         )
         return facade_result("metadata", result)
 
-    @mcp.tool()
+    @public_tool()
     def character_content_apply(
         character_id: str,
         artifact_id: str,
@@ -44236,7 +44136,7 @@ Useful bounded guidance:
         """Apply a selection-ready class, background, feat, spell, or feature artifact."""
         return facade_result(
             "apply",
-            character_content_apply_legacy(
+            character_content_apply_impl(
                 character_id,
                 artifact_id,
                 selection,
@@ -44246,7 +44146,7 @@ Useful bounded guidance:
             ),
         )
 
-    @mcp.tool()
+    @public_tool()
     def inventory_change(
         owner: Literal["character", "party"],
         action: Literal[
@@ -44350,7 +44250,7 @@ Useful bounded guidance:
             )
         return facade_result(action, result)
 
-    @mcp.tool()
+    @public_tool()
     def inventory_transfer(
         mode: Literal["character_to_character", "party_to_character", "character_to_party"],
         payload: dict[str, Any],
@@ -44386,7 +44286,7 @@ Useful bounded guidance:
             )
         return facade_result(mode, result)
 
-    @mcp.tool()
+    @public_tool()
     def wallet_change(
         owner: Literal["character", "party"],
         action: Literal["adjust", "transfer_to_character", "transfer_from_character"],
@@ -44427,7 +44327,7 @@ Useful bounded guidance:
             )
         return facade_result(action, result)
 
-    @mcp.tool()
+    @public_tool()
     def character_state_change(
         character_id: str,
         action: Literal[
@@ -44592,7 +44492,7 @@ Useful bounded guidance:
             raise ValueError(f"unsupported character state action: {action}")
         return facade_result(action, result)
 
-    @mcp.tool()
+    @public_tool()
     def character_action(
         character_id: str,
         action: Literal["cast_spell", "use_activity", "attack_source_object"],
@@ -44644,7 +44544,7 @@ Useful bounded guidance:
             )
         return facade_result(action, result)
 
-    @mcp.tool()
+    @public_tool()
     def character_spell_prepare(
         character_id: str,
         mode: Literal["set", "replace_all"],
@@ -44656,7 +44556,7 @@ Useful bounded guidance:
         """Set one prepared spell or replace the validated prepared-spell list."""
         data = facade_payload(payload)
         if mode == "set":
-            result = character_spell_prepare_legacy(
+            result = character_spell_prepare_impl(
                 character_id,
                 required(data, "spell_id"),
                 required(data, "prepared"),
@@ -44675,7 +44575,7 @@ Useful bounded guidance:
             )
         return facade_result(mode, result)
 
-    @mcp.tool()
+    @public_tool()
     def campaign_query(
         view: Literal["list", "get", "party", "resume", "binding"] = "list",
         payload: dict[str, Any] | None = None,
@@ -44774,7 +44674,7 @@ Useful bounded guidance:
             result = campaign_list(data.get("status"), principal_id)
         return facade_result(view, result)
 
-    @mcp.tool()
+    @public_tool()
     def campaign_change(
         campaign_id: str,
         payload: dict[str, Any],
@@ -44813,7 +44713,6 @@ Useful bounded guidance:
                     "period",
                     "count",
                     "expected_elapsed_ticks",
-                    "expected_world_time",
                 },
                 ("period",),
             ),
@@ -44879,7 +44778,7 @@ Useful bounded guidance:
             required_names=required_fields,
         )
         if action == "clock_set":
-            result = campaign_clock_set_legacy(
+            result = campaign_clock_set_impl(
                 campaign_id,
                 required(data, "day"),
                 data.get("hour", 0),
@@ -44891,7 +44790,7 @@ Useful bounded guidance:
                 idempotency_key,
             )
         elif action == "clock_advance":
-            result = campaign_advance_effects_legacy(
+            result = campaign_advance_effects_impl(
                 campaign_id,
                 required(data, "period"),
                 data.get("count", 1),
@@ -44899,7 +44798,6 @@ Useful bounded guidance:
                 expected_revision,
                 branch_id,
                 idempotency_key,
-                data.get("expected_world_time"),
                 data.get("expected_elapsed_ticks"),
             )
         elif action == "party_rest":
@@ -45278,7 +45176,7 @@ Useful bounded guidance:
         )
         return results
 
-    @mcp.tool()
+    @public_tool()
     def playthrough_manifest(
         campaign_id: str,
         action: Literal[
@@ -45432,7 +45330,7 @@ Useful bounded guidance:
         )
         return response
 
-    @mcp.tool()
+    @public_tool()
     def access_grant(
         scope: Literal["campaign", "actor"],
         campaign_id: str,
@@ -45457,7 +45355,7 @@ Useful bounded guidance:
             )
         return facade_result(scope, result)
 
-    @mcp.tool()
+    @public_tool()
     def campaign_event(
         campaign_id: str,
         action: Literal["add", "list"],
@@ -45492,7 +45390,7 @@ Useful bounded guidance:
             )
         return facade_result(action, result)
 
-    @mcp.tool()
+    @public_tool()
     def memory_query(
         campaign_id: str,
         view: Literal["list", "search", "diagnostics"] = "list",
@@ -45541,7 +45439,7 @@ Useful bounded guidance:
         )
         return facade_result(view, result)
 
-    @mcp.tool()
+    @public_tool()
     def memory_change(
         campaign_id: str,
         action: Literal["add", "upsert", "revise", "supersede", "commit"] = "add",
@@ -45726,7 +45624,7 @@ Useful bounded guidance:
             )
         return facade_result(action, asdict(result))
 
-    @mcp.tool()
+    @public_tool()
     def actor_knowledge_query(
         campaign_id: str,
         actor_id: str,
@@ -45750,7 +45648,7 @@ Useful bounded guidance:
         )
         return facade_result(view, result)
 
-    @mcp.tool()
+    @public_tool()
     def actor_knowledge_change(
         action: Literal["add", "revise"],
         payload: dict[str, Any],
@@ -45791,7 +45689,7 @@ Useful bounded guidance:
             )
         return facade_result(action, result)
 
-    @mcp.tool()
+    @public_tool()
     def branch_query(
         campaign_id: str,
         view: Literal["list", "compare"] = "list",
@@ -45812,7 +45710,7 @@ Useful bounded guidance:
         )
         return facade_result(view, result)
 
-    @mcp.tool()
+    @public_tool()
     def branch_change(
         campaign_id: str,
         action: Literal["create", "checkout", "create_core_upgrade"],
@@ -45859,7 +45757,7 @@ Useful bounded guidance:
             )
         return facade_result(action, result)
 
-    @mcp.tool()
+    @public_tool()
     def snapshot_query(
         campaign_id: str,
         view: Literal["list", "verify", "lineage", "recap", "core"] = "list",
@@ -45880,7 +45778,7 @@ Useful bounded guidance:
             result = snapshot_core_lock(campaign_id, required(data, "slot"), principal_id)
         return facade_result(view, result)
 
-    @mcp.tool()
+    @public_tool()
     def state_revision(
         campaign_id: str,
         action: Literal["history", "receipt", "undo", "redo"],
@@ -45912,7 +45810,7 @@ Useful bounded guidance:
             )
         return facade_result(action, result)
 
-    @mcp.tool()
+    @public_tool()
     def combat_query(
         campaign_id: str,
         view: Literal[
@@ -45952,7 +45850,7 @@ Useful bounded guidance:
             )
         return facade_result(view, result)
 
-    @mcp.tool()
+    @public_tool()
     def combat_movement(
         campaign_id: str,
         actor_id: str,
@@ -45986,7 +45884,7 @@ Useful bounded guidance:
         )
         return facade_result(action, result)
 
-    @mcp.tool()
+    @public_tool()
     def combat_hp_change(
         campaign_id: str,
         target_id: str,
@@ -46097,7 +45995,7 @@ Useful bounded guidance:
             )
         return facade_result(action, result)
 
-    @mcp.tool()
+    @public_tool()
     def content_solution(
         campaign_id: str,
         action: Literal["query", "compile"],
@@ -46247,7 +46145,7 @@ Useful bounded guidance:
         )
         return facade_result(action, response)
 
-    @mcp.tool()
+    @public_tool()
     def combat_choice(
         campaign_id: str,
         action: Literal[
@@ -46378,7 +46276,7 @@ Useful bounded guidance:
             )
         return facade_result(action, result)
 
-    @mcp.tool()
+    @public_tool()
     def combat_ready(
         campaign_id: str,
         action: Literal[
@@ -46451,7 +46349,7 @@ Useful bounded guidance:
             )
         return facade_result(action, result)
 
-    @mcp.tool()
+    @public_tool()
     def skill_query(
         kind: Literal["skill", "asset"],
         action: Literal["plan", "list", "read", "outline", "section", "search"],
@@ -46523,7 +46421,7 @@ Useful bounded guidance:
                 response["skill_read_receipt"] = read_receipt
         return response
 
-    @mcp.tool()
+    @public_tool()
     def game_phase(
         campaign_id: str,
         action: Literal["get", "set"] = "get",
@@ -46553,7 +46451,7 @@ Useful bounded guidance:
         )
         return response
 
-    @mcp.tool()
+    @public_tool()
     def exposure_open(
         campaign_id: str | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
@@ -46589,7 +46487,7 @@ Useful bounded guidance:
             ),
         }
 
-    @mcp.tool()
+    @public_tool()
     def exposure_status(exposure_id: str) -> dict[str, Any]:
         """Return the current phase, loaded groups, and visible tools for one exposure."""
         request = mcp._request_session()
@@ -46604,14 +46502,14 @@ Useful bounded guidance:
             ),
         }
 
-    @mcp.tool()
+    @public_tool()
     def exposure_search(
         query: str, phase: Literal["lobby", "play", "combat"] | None = None
     ) -> dict[str, Any]:
         """Search server capability groups before loading their full tool schemas."""
         return {"groups": exposures.search(query, phase), "catalog_version": "2026-07"}
 
-    @mcp.tool()
+    @public_tool()
     def exposure_inspect(
         group_id: str,
         tool_id: str | None = None,
@@ -46670,11 +46568,10 @@ Useful bounded guidance:
             "skill_plan_delta": plan_delta,
         }
 
-    @mcp.tool()
+    @public_tool()
     async def exposure_load(
         exposure_id: str,
         group_id: str,
-        ttl_calls: int | None = None,
     ) -> dict[str, Any]:
         """Expose one phase-compatible tool group to this MCP session."""
         request = mcp._request_session()
@@ -46697,7 +46594,7 @@ Useful bounded guidance:
         async with mcp._exposure_lock(exposure.id):
             if exposure.campaign_id:
                 exposures.refresh_phase(exposure, authoritative_phase(exposure.campaign_id))
-            exposures.load(exposure, group_id, ttl_calls)
+            exposures.load(exposure, group_id)
         return {
             **exposures.status(exposure),
             "skill_plan_delta": skill_plan_context(
@@ -46707,7 +46604,7 @@ Useful bounded guidance:
             ),
         }
 
-    @mcp.tool()
+    @public_tool()
     async def exposure_unload(exposure_id: str, group_id: str) -> dict[str, Any]:
         """Remove a previously loaded tool group from this MCP session."""
         request = mcp._request_session()
@@ -46725,33 +46622,13 @@ Useful bounded guidance:
             },
         }
 
-    retired_tool_replacements = {
-        "chase_start": "chase(action='start')",
-        "chase_query": "chase(action='query')",
-        "chase_take_turn": "chase(action='take_turn')",
-        "chase_end": "chase(action='end')",
-        "character_contest": "character_check(action='contest')",
-        "campaign_core_relock": "campaign_rules(action='core_relock')",
-        "rule_document_page_render": "rule_import(action='render_page')",
-        "module_page_render": "module_review(action='render_page')",
-        "module_content_review": "module_review(action='submit_content')",
-        "continuity_commit": "memory_change(action='commit')",
-        "continuity_diagnostics": "memory_query(view='diagnostics')",
-        "combat_on_hit_ruling": "combat_choice(action='on_hit_ruling')",
-        "character_rest": "campaign_change(action='party_rest')",
-        "character_memory_add": "actor_knowledge_change(action='add')",
-        "character_memory_resolve": "actor_knowledge_change(action='revise')",
-    }
-
-    @mcp.tool()
+    @public_tool()
     async def exposure_call(
         exposure_id: str,
         tool_id: str,
         arguments: dict[str, Any] | None = None,
     ) -> Any:
         """Call an exposed tool when an MCP host cannot refresh native schemas."""
-        if replacement := retired_tool_replacements.get(tool_id):
-            raise ExposureError(f"Tool {tool_id!r} is retired; use {replacement}.")
         if tool_id in CORE_TOOLS or tool_id.startswith("exposure_"):
             raise ExposureError("exposure_call only dispatches a loaded domain tool.")
         request = mcp._request_session()
@@ -46791,13 +46668,10 @@ Useful bounded guidance:
                 result = list(called.content)
             else:
                 result = called
-            exposure_changed = exposures.consume_tool(exposure, tool_id)
         target_campaign_id = str(bound_arguments.get("campaign_id") or "") or None
         if target_campaign_id and tool_id in {"game_phase", "combat_start", "combat_end"}:
             if request is not None:
                 await mcp._refresh(request[0], target_campaign_id)
-        elif exposure_changed and request is not None:
-            await request[1].send_tool_list_changed()
         exposure_status = exposures.status(exposure)
         if (
             isinstance(result, (list, tuple))
@@ -46846,137 +46720,6 @@ Useful bounded guidance:
         if random_receipt is not None:
             response["random_stream_receipt"] = random_receipt
         return response
-
-    # No compatibility aliases: old tool names are removed before the server
-    # advertises its capability list.  The underlying functions remain local
-    # implementation seams so their validation is reused by the facades.
-    retired_tool_names = {
-        *retired_tool_replacements,
-        "campaign_list",
-        "campaign_get",
-        "campaign_member_grant",
-        "campaign_update",
-        "game_phase_get",
-        "game_phase_set",
-        "import_job_get",
-        "import_job_list",
-        "rule_import_job_create",
-        "rule_import_job_inspect",
-        "rule_import_job_ingest",
-        "rule_statblock_review",
-        "rule_content_candidates_extract",
-        "import_job_review_candidates",
-        "rule_import_job_compile",
-        "rule_import_job_install",
-        "rule_import_job_activate",
-        "rule_document_stage",
-        "rule_document_inspect",
-        "rule_document_import",
-        "rule_ingest",
-        "module_import_job_create",
-        "module_import_job_inspect",
-        "module_import_job_validate",
-        "module_import_job_import",
-        "module_import_job_activate",
-        "module_write",
-        "module_inspect",
-        "module_import_legacy",
-        "module_list",
-        "module_index",
-        "module_read_scene",
-        "module_current",
-        "rule_pack_draft",
-        "rule_pack_draft_from_source",
-        "rule_pack_install",
-        "rule_pack_list",
-        "rule_pack_inspect",
-        "rule_pack_test",
-        "rule_pack_remove",
-        "campaign_rule_profile_get",
-        "campaign_rule_profile_set",
-        "campaign_rule_pack_set",
-        "campaign_rule_pack_remove",
-        "campaign_rules_explain",
-        "campaign_rule_receipts",
-        "content_catalog_list",
-        "character_create",
-        "character_list",
-        "character_library_list",
-        "character_instantiate",
-        "character_build",
-        "character_get",
-        "character_update",
-        "character_rule_artifact_add",
-        "character_wallet_adjust",
-        "character_inventory_add",
-        "character_inventory_update",
-        "character_inventory_remove",
-        "character_inventory_equip",
-        "character_inventory_recharge",
-        "character_ammunition_consume",
-        "character_inventory_transfer",
-        "character_effect_add",
-        "character_effect_remove",
-        "character_exhaustion_set",
-        "character_rest",
-        "character_cast_spell",
-        "character_use_activity",
-        "character_source_object_attack",
-        "character_resource_set",
-        "character_spell_prepare_list",
-        "character_memory_add",
-        "character_memory_resolve",
-        "party_show",
-        "party_inventory_add",
-        "party_inventory_remove",
-        "party_inventory_transfer",
-        "party_wallet_adjust",
-        "party_wallet_transfer",
-        "memory_add",
-        "memory_list",
-        "memory_search",
-        "event_add",
-        "event_list",
-        "actor_grant",
-        "actor_knowledge_add",
-        "actor_knowledge_revise",
-        "actor_knowledge_list",
-        "actor_knowledge_search",
-        "branch_list",
-        "branch_compare",
-        "branch_create",
-        "branch_checkout",
-        "snapshot_list",
-        "snapshot_core_lock",
-        "snapshot_restore_core_upgrade",
-        "snapshot_verify",
-        "snapshot_lineage",
-        "snapshot_regenerate_recap",
-        "state_history",
-        "state_undo",
-        "state_redo",
-        "combat_status",
-        "combat_available_actions",
-        "combat_reactions",
-        "combat_move",
-        "combat_stand",
-        "combat_apply_damage",
-        "combat_heal",
-        "combat_choice_open",
-        "combat_choice_resolve",
-        "combat_ready_spell",
-        "combat_readied_spell_trigger",
-        "combat_readied_spell_resolve",
-        "combat_readied_action_trigger",
-        "combat_readied_action_resolve",
-        "skill_list",
-        "skill_read",
-        "skill_asset_list",
-        "skill_asset_read",
-    }
-    for retired_tool_name in retired_tool_names:
-        if mcp._tool_manager.get_tool(retired_tool_name) is not None:
-            mcp.remove_tool(retired_tool_name)
 
     registered_tools = mcp._tool_manager.list_tools()
     validate_profile_coverage(tool.name for tool in registered_tools)

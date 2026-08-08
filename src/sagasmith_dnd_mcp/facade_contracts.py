@@ -16,33 +16,16 @@ def _variant(
     required: tuple[str, ...] = (),
     *,
     when: str | None = None,
-    additional_properties: bool = False,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "allowed_fields": sorted(allowed),
         "required_fields": list(required),
         "optional_fields": sorted(set(allowed) - set(required)),
-        "additional_properties": additional_properties,
+        "additional_properties": False,
     }
     if when is not None:
         result["when"] = when
     return result
-
-
-def _guide(
-    allowed: tuple[str, ...],
-    required: tuple[str, ...] = (),
-    *,
-    when: str | None = None,
-) -> dict[str, Any]:
-    """Describe fields used by a legacy permissive facade without overstating strictness."""
-
-    return _variant(
-        allowed,
-        required,
-        when=when,
-        additional_properties=True,
-    )
 
 
 ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
@@ -68,39 +51,39 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
         ],
     },
     "module_query": {
-        "list": [_guide(())],
-        "index": [_guide(("module_id",))],
-        "scene": [_guide(("scene_id", "scope_id"), ("scene_id",))],
-        "current": [_guide(("scope_id",))],
-        "progress": [_guide(("module_id", "scope_id"))],
+        "list": [_variant(())],
+        "index": [_variant(("module_id",))],
+        "scene": [_variant(("scene_id", "scope_id"), ("scene_id",))],
+        "current": [_variant(("scope_id",))],
+        "progress": [_variant(("module_id", "scope_id"))],
         "readiness": [
-            _guide(
+            _variant(
                 ("participant_manifest", "scene_id"),
                 ("scene_id", "participant_manifest"),
             )
         ],
-        "assets": [_guide(("module_id",), ("module_id",))],
+        "assets": [_variant(("module_id",), ("module_id",))],
         "content": [
-            _guide(
+            _variant(
                 ("review_id",),
                 ("review_id",),
                 when="read one content review",
             ),
-            _guide(
+            _variant(
                 ("content_key", "content_kind", "module_id"),
                 ("module_id",),
                 when="list content reviews",
             ),
         ],
-        "candidates": [_guide(("module_id",), ("module_id",))],
+        "candidates": [_variant(("module_id",), ("module_id",))],
         "actors": [
-            _guide(
+            _variant(
                 ("binding_kind", "module_id", "scene_id"),
                 ("module_id",),
             )
         ],
         "package": [
-            _guide(
+            _variant(
                 (
                     "dependencies",
                     "include_package",
@@ -115,13 +98,13 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
     },
     "rule_pack_compile": {
         "draft": [
-            _guide(
+            _variant(
                 ("artifacts", "manifest", "mechanics", "provenance"),
                 ("manifest",),
             )
         ],
         "from_source": [
-            _guide(
+            _variant(
                 (
                     "artifacts",
                     "manifest",
@@ -134,24 +117,24 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
         ],
     },
     "rule_pack_query": {
-        "list": [_guide(("pack_id",))],
-        "inspect": [_guide(("pack_id", "version"), ("pack_id", "version"))],
-        "test": [_guide(("pack_id", "version"), ("pack_id", "version"))],
+        "list": [_variant(("pack_id",))],
+        "inspect": [_variant(("pack_id", "version"), ("pack_id", "version"))],
+        "test": [_variant(("pack_id", "version"), ("pack_id", "version"))],
         "content_catalog": [
-            _guide(
-                ("branch_id", "campaign_id", "kind", "query"),
+            _variant(
+                ("branch_id", "campaign_id", "include_context", "kind", "query"),
                 ("campaign_id",),
             )
         ],
-        "sources": [_guide(("edition", "system_id"))],
+        "sources": [_variant(("edition", "system_id"))],
         "source_chunks": [
-            _guide(
+            _variant(
                 ("limit", "page", "query", "source_id"),
                 ("source_id",),
             )
         ],
         "actor_presets": [
-            _guide(
+            _variant(
                 ("artifact_id", "edition", "include_package"),
                 ("edition",),
             )
@@ -194,7 +177,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
             )
         ],
         "package": [
-            _guide(
+            _variant(
                 (
                     "campaign_id",
                     "include_package",
@@ -206,7 +189,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
             )
         ],
         "release": [
-            _guide(
+            _variant(
                 (
                     "campaign_id",
                     "components",
@@ -220,20 +203,20 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
         ],
     },
     "campaign_rules": {
-        "get_profile": [_guide(())],
+        "get_profile": [_variant(())],
         "set_profile": [
-            _guide(
+            _variant(
                 ("edition", "locale", "options", "publications"),
                 ("edition",),
             )
         ],
         "set_pack": [
-            _guide(
+            _variant(
                 ("enabled", "options", "pack_id", "version"),
                 ("pack_id", "version"),
             )
         ],
-        "remove_pack": [_guide(("pack_id",), ("pack_id",))],
+        "remove_pack": [_variant(("pack_id",), ("pack_id",))],
         "set_addon": [
             _variant(
                 ("addon_id", "enabled", "options", "version"),
@@ -254,27 +237,27 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                 ),
             )
         ],
-        "explain": [_guide(("event",))],
-        "receipts": [_guide(("limit", "mechanic_id"))],
+        "explain": [_variant(("event",))],
+        "receipts": [_variant(("limit", "mechanic_id"))],
     },
     "character_query": {
-        "get": [_guide(("character_id",), ("character_id",))],
+        "get": [_variant(("character_id",), ("character_id",))],
         "batch": [
-            _guide(
+            _variant(
                 ("campaign_id", "character_ids"),
                 ("campaign_id", "character_ids"),
             )
         ],
-        "list": [_guide(("campaign_id",))],
-        "library": [_guide(("character_type",))],
+        "list": [_variant(("campaign_id",))],
+        "library": [_variant(("character_type",))],
         "document": [
-            _guide(
+            _variant(
                 ("campaign_id", "expected_checksum", "source_path"),
                 ("campaign_id", "source_path"),
             )
         ],
         "rest": [
-            _guide(
+            _variant(
                 (
                     "arcane_recovery",
                     "attune_item_id",
@@ -293,17 +276,18 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
             )
         ],
         "advancement": [
-            _guide(
+            _variant(
                 ("character_id", "class_name"),
                 ("character_id", "class_name"),
             )
         ],
         "portable_card": [
-            _guide(
+            _variant(
                 (
                     "bindings",
                     "character_id",
                     "dependencies",
+                    "image",
                     "metadata",
                     "portable_id",
                     "provenance",
@@ -315,7 +299,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
     },
     "character_create_from": {
         "direct": [
-            _guide(
+            _variant(
                 (
                     "campaign_id",
                     "character_type",
@@ -329,7 +313,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
             )
         ],
         "build": [
-            _guide(
+            _variant(
                 (
                     "campaign_id",
                     "name",
@@ -342,29 +326,31 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
             )
         ],
         "template": [
-            _guide(
+            _variant(
                 ("campaign_id", "name", "player_name", "template_id"),
                 ("template_id", "campaign_id"),
             )
         ],
         "statblock": [
-            _guide(
+            _variant(
                 (
                     "campaign_id",
                     "character_type",
                     "chunk_ids",
                     "name",
                     "notes",
+                    "replace_character_id",
                     "source_id",
                     "source_statblock_name",
                     "summary",
                     "variant",
+                    "expected_revision",
                 ),
                 ("campaign_id", "source_id"),
             )
         ],
         "reviewed_rule_statblock": [
-            _guide(
+            _variant(
                 (
                     "campaign_id",
                     "character_type",
@@ -379,7 +365,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
             )
         ],
         "module_statblock": [
-            _guide(
+            _variant(
                 (
                     "campaign_id",
                     "character_type",
@@ -393,7 +379,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
             )
         ],
         "narrative_npc": [
-            _guide(
+            _variant(
                 (
                     "campaign_id",
                     "identity_agent_ruling",
@@ -416,7 +402,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
             )
         ],
         "portable_card": [
-            _guide(
+            _variant(
                 (
                     "artifact",
                     "artifact_id",
@@ -430,18 +416,18 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
         ],
     },
     "inventory_change": {
-        "add": [_guide(("item",), ("item",))],
-        "update": [_guide(("item_id", "patch"), ("item_id", "patch"))],
-        "remove": [_guide(("item_id", "quantity"), ("item_id",))],
-        "equip": [_guide(("item_id", "slot"), ("item_id", "slot"))],
-        "recharge": [_guide(("item_id", "trigger"), ("item_id", "trigger"))],
+        "add": [_variant(("item",), ("item",))],
+        "update": [_variant(("item_id", "patch"), ("item_id", "patch"))],
+        "remove": [_variant(("item_id", "quantity"), ("item_id",))],
+        "equip": [_variant(("item_id", "slot"), ("item_id", "slot"))],
+        "recharge": [_variant(("item_id", "trigger"), ("item_id", "trigger"))],
         "consume_ammunition": [
-            _guide(("quantity", "weapon_id"), ("weapon_id",))
+            _variant(("quantity", "weapon_id"), ("weapon_id",))
         ],
     },
     "inventory_transfer": {
         "character_to_character": [
-            _guide(
+            _variant(
                 (
                     "expected_campaign_revision",
                     "expected_source_revision",
@@ -462,7 +448,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
             )
         ],
         "party_to_character": [
-            _guide(
+            _variant(
                 (
                     "campaign_id",
                     "character_id",
@@ -481,7 +467,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
             )
         ],
         "character_to_party": [
-            _guide(
+            _variant(
                 (
                     "campaign_id",
                     "character_id",
@@ -501,9 +487,9 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
         ],
     },
     "wallet_change": {
-        "adjust": [_guide(())],
+        "adjust": [_variant(())],
         "transfer_to_character": [
-            _guide(
+            _variant(
                 (
                     "character_id",
                     "expected_campaign_revision",
@@ -517,7 +503,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
             )
         ],
         "transfer_from_character": [
-            _guide(
+            _variant(
                 (
                     "character_id",
                     "expected_campaign_revision",
@@ -532,20 +518,20 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
         ],
     },
     "character_state_change": {
-        "effect_add": [_guide(("effect",), ("effect",))],
-        "effect_remove": [_guide(("effect_id",), ("effect_id",))],
+        "effect_add": [_variant(("effect",), ("effect",))],
+        "effect_remove": [_variant(("effect_id",), ("effect_id",))],
         "resource_set": [
-            _guide(("resource", "value"), ("resource", "value"))
+            _variant(("resource", "value"), ("resource", "value"))
         ],
-        "exhaustion_set": [_guide(("value",), ("value",))],
+        "exhaustion_set": [_variant(("value",), ("value",))],
         "damage": [
-            _guide(
+            _variant(
                 ("critical", "knock_out", "melee", "parts"),
                 ("parts",),
             )
         ],
         "heal": [
-            _guide(
+            _variant(
                 (
                     "amount",
                     "source_actor_id",
@@ -582,17 +568,17 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
         ],
         "resource_sync": [_variant(("reason",), ("reason",))],
         "source_state": [
-            _guide(
+            _variant(
                 ("reason", "source_ref", "state"),
                 ("state", "source_ref", "reason"),
             )
         ],
-        "stand": [_guide(())],
-        "knock_prone": [_guide(())],
+        "stand": [_variant(())],
+        "knock_prone": [_variant(())],
     },
     "character_action": {
         "cast_spell": [
-            _guide(
+            _variant(
                 (
                     "cast_level",
                     "component_ruling",
@@ -607,10 +593,10 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
             )
         ],
         "use_activity": [
-            _guide(("activity_id", "declaration"), ("activity_id",))
+            _variant(("activity_id", "declaration"), ("activity_id",))
         ],
         "attack_source_object": [
-            _guide(
+            _variant(
                 (
                     "advantage",
                     "disadvantage",
@@ -632,25 +618,25 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
     },
     "character_spell_prepare": {
         "set": [
-            _guide(("prepared", "spell_id"), ("spell_id", "prepared"))
+            _variant(("prepared", "spell_id"), ("spell_id", "prepared"))
         ],
         "replace_all": [
-            _guide(("event", "spell_ids"), ("spell_ids",))
+            _variant(("event", "spell_ids"), ("spell_ids",))
         ],
     },
     "playthrough_manifest": {
-        "get": [_guide(())],
-        "initialize": [_guide(("manifest",), ("manifest",))],
-        "replace": [_guide(("manifest",), ("manifest",))],
-        "extend_modules": [_guide(("manifest",), ("manifest",))],
-        "sync": [_guide(())],
+        "get": [_variant(())],
+        "initialize": [_variant(("manifest",), ("manifest",))],
+        "replace": [_variant(("manifest",), ("manifest",))],
+        "extend_modules": [_variant(("manifest",), ("manifest",))],
+        "sync": [_variant(())],
         "verify_ending": [
-            _guide(("condition_id",), ("condition_id",))
+            _variant(("condition_id",), ("condition_id",))
         ],
     },
     "campaign_event": {
         "add": [
-            _guide(
+            _variant(
                 (
                     "audience_scope",
                     "branch_id",
@@ -665,12 +651,12 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                 ("summary",),
             )
         ],
-        "list": [_guide(("actor_id", "branch_id", "limit"))],
+        "list": [_variant(("actor_id", "branch_id", "limit"))],
     },
     "memory_query": {
-        "list": [_guide(("branch_id", "include_inactive", "kind"))],
+        "list": [_variant(("branch_id", "include_inactive", "kind"))],
         "search": [
-            _guide(
+            _variant(
                 ("branch_id", "include_inactive", "limit", "query"),
                 ("query",),
             )
@@ -679,7 +665,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
     },
     "memory_change": {
         "add": [
-            _guide(
+            _variant(
                 (
                     "branch_id",
                     "content",
@@ -700,7 +686,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
             )
         ],
         "upsert": [
-            _guide(
+            _variant(
                 (
                     "branch_id",
                     "content",
@@ -722,7 +708,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
             )
         ],
         "revise": [
-            _guide(
+            _variant(
                 (
                     "branch_id",
                     "content",
@@ -740,7 +726,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
             )
         ],
         "supersede": [
-            _guide(
+            _variant(
                 (
                     "branch_id",
                     "content",
@@ -764,6 +750,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                     "context_receipt",
                     "event",
                     "facts",
+                    "npc_turn",
                     "snapshot",
                 ),
                 ("event",),
@@ -771,14 +758,14 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
         ],
     },
     "actor_knowledge_query": {
-        "list": [_guide(("branch_id",))],
+        "list": [_variant(("branch_id",))],
         "search": [
-            _guide(("branch_id", "limit", "query"), ("query",))
+            _variant(("branch_id", "limit", "query"), ("query",))
         ],
     },
     "actor_knowledge_change": {
         "add": [
-            _guide(
+            _variant(
                 (
                     "actor_id",
                     "branch_id",
@@ -801,7 +788,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
             )
         ],
         "revise": [
-            _guide(
+            _variant(
                 (
                     "branch_id",
                     "cause",
@@ -822,9 +809,9 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
         ],
     },
     "branch_query": {
-        "list": [_guide(())],
+        "list": [_variant(())],
         "compare": [
-            _guide(
+            _variant(
                 ("left_branch_id", "right_branch_id"),
                 ("left_branch_id", "right_branch_id"),
             )
@@ -832,11 +819,11 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
     },
     "branch_change": {
         "create": [
-            _guide(("checkout", "from_snapshot_id", "name"), ("name",))
+            _variant(("checkout", "from_snapshot_id", "name"), ("name",))
         ],
-        "checkout": [_guide(("branch_id",), ("branch_id",))],
+        "checkout": [_variant(("branch_id",), ("branch_id",))],
         "create_core_upgrade": [
-            _guide(
+            _variant(
                 (
                     "expected_runtime_core_fingerprint",
                     "expected_snapshot_core_fingerprint",
@@ -855,26 +842,26 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
         ],
     },
     "snapshot_query": {
-        "list": [_guide(())],
-        "verify": [_guide(("slot",), ("slot",))],
-        "lineage": [_guide(("slot",))],
-        "recap": [_guide(("slot",), ("slot",))],
-        "core": [_guide(("slot",), ("slot",))],
+        "list": [_variant(())],
+        "verify": [_variant(("slot",), ("slot",))],
+        "lineage": [_variant(("slot",))],
+        "recap": [_variant(("slot",), ("slot",))],
+        "core": [_variant(("slot",), ("slot",))],
     },
     "state_revision": {
-        "history": [_guide(("limit",))],
+        "history": [_variant(("limit",))],
         "receipt": [
-            _guide(
+            _variant(
                 ("branch_id", "idempotency_key"),
                 ("idempotency_key",),
             )
         ],
-        "undo": [_guide(("expected_history_sequence",))],
-        "redo": [_guide(("expected_history_sequence",))],
+        "undo": [_variant(("expected_history_sequence",))],
+        "redo": [_variant(("expected_history_sequence",))],
     },
     "combat_common_action": {
         **{
-            action: [_guide(())]
+            action: [_variant(())]
             for action in (
                 "dash",
                 "disengage",
@@ -892,7 +879,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
             )
         },
         "improvise": [
-            _guide(("agent_ruling_commitment", "procedure_id"))
+            _variant(("agent_ruling_commitment", "procedure_id"))
         ],
         "interact_object": [
             _variant(
@@ -929,12 +916,12 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
         ],
     },
     "combat_query": {
-        "status": [_guide(())],
-        "available_actions": [_guide(())],
-        "reactions": [_guide(())],
-        "transaction_history": [_guide(("limit",))],
+        "status": [_variant(())],
+        "available_actions": [_variant(())],
+        "reactions": [_variant(())],
+        "transaction_history": [_variant(("limit",))],
         "transaction_receipt": [
-            _guide(
+            _variant(
                 ("branch_id", "idempotency_key"),
                 ("idempotency_key",),
             )
@@ -942,7 +929,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
     },
     "combat_movement": {
         "move": [
-            _guide(
+            _variant(
                 (
                     "crawl",
                     "destination",
@@ -953,17 +940,17 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                 ("distance",),
             )
         ],
-        "stand": [_guide(())],
+        "stand": [_variant(())],
     },
     "combat_hp_change": {
         "damage": [
-            _guide(
+            _variant(
                 ("critical", "knock_out", "melee", "parts"),
                 ("parts",),
             )
         ],
         "heal": [
-            _guide(
+            _variant(
                 (
                     "amount",
                     "source_actor_id",
@@ -974,7 +961,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
             )
         ],
         "stabilize": [
-            _guide(("source_excerpt",), ("source_excerpt",))
+            _variant(("source_excerpt",), ("source_excerpt",))
         ],
         "save_damage": [
             _variant(
@@ -1010,25 +997,25 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
     },
     "combat_ready": {
         "ready_spell": [
-            _guide(
+            _variant(
                 ("actor_id", "cast_level", "declaration", "spell_id", "trigger"),
                 ("actor_id", "spell_id", "trigger"),
             )
         ],
         "trigger_spell": [
-            _guide(("event", "readied_id"), ("readied_id", "event"))
+            _variant(("event", "readied_id"), ("readied_id", "event"))
         ],
         "resolve_spell": [
-            _guide(
+            _variant(
                 ("actor_id", "choice_id", "declaration", "release"),
                 ("actor_id", "choice_id", "release"),
             )
         ],
         "trigger_action": [
-            _guide(("event", "readied_id"), ("readied_id", "event"))
+            _variant(("event", "readied_id"), ("readied_id", "event"))
         ],
         "resolve_action": [
-            _guide(
+            _variant(
                 ("actor_id", "choice_id", "declaration", "release"),
                 ("actor_id", "choice_id", "release"),
             )
@@ -1195,7 +1182,16 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
         ],
         "recover_statblock": [
             _variant(
-                ("agent_fill", "job_id", "name", "page_number"),
+                (
+                    "agent_fill",
+                    "correction_evidence_basis",
+                    "job_id",
+                    "name",
+                    "ocr_corrections",
+                    "page_number",
+                    "rendered_image_checksum",
+                    "statblock_slot",
+                ),
                 ("job_id", "name"),
             )
         ],
@@ -1409,7 +1405,6 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                 (
                     "count",
                     "expected_elapsed_ticks",
-                    "expected_world_time",
                     "period",
                 ),
                 ("period",),
@@ -1515,6 +1510,54 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
 }
 
 
+def validate_action_payload(
+    *,
+    tool_id: str,
+    selector: str | None,
+    payload: Any,
+) -> None:
+    """Enforce the published exact payload variants before facade dispatch."""
+
+    if selector is None:
+        return
+    variants = ACTION_PAYLOAD_CONTRACTS.get(tool_id, {}).get(selector)
+    if variants is None:
+        return
+    if payload is None:
+        data: dict[str, Any] = {}
+    elif isinstance(payload, dict):
+        data = payload
+    else:
+        raise ValueError("payload must be an object")
+    fields = set(data)
+    if any(
+        set(variant["required_fields"]) <= fields
+        and fields <= set(variant["allowed_fields"])
+        for variant in variants
+    ):
+        return
+    allowed_fields = {
+        field for variant in variants for field in variant["allowed_fields"]
+    }
+    unknown = sorted(fields - allowed_fields)
+    if unknown:
+        raise ValueError(
+            f"unsupported {tool_id}({selector}) payload fields: " + ", ".join(unknown)
+        )
+    descriptions = [
+        {
+            "required": variant["required_fields"],
+            "allowed": variant["allowed_fields"],
+            **({"when": variant["when"]} if "when" in variant else {}),
+        }
+        for variant in variants
+    ]
+    raise ValueError(
+        f"payload for {tool_id}({selector}) does not match an exact variant: "
+        f"{descriptions}"
+    )
+
+
 def action_payload_contract(
     *,
     tool_id: str,
@@ -1548,14 +1591,7 @@ def action_payload_contract(
         variants = exact.get(value)
         actions[value] = (
             {
-                "contract_kind": (
-                    "exact_field_contract"
-                    if all(
-                        not variant["additional_properties"]
-                        for variant in variants
-                    )
-                    else "runtime_field_guide"
-                ),
+                "contract_kind": "exact_field_contract",
                 "payload_variants": variants,
             }
             if variants is not None

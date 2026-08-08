@@ -14,11 +14,7 @@ async def _call(server, name: str, arguments: dict):
 
 def _item(character: dict, item_id: str) -> dict | None:
     return next(
-        (
-            item
-            for item in character["sheet"]["inventory"]["items"]
-            if item["id"] == item_id
-        ),
+        (item for item in character["sheet"]["inventory"]["items"] if item["id"] == item_id),
         None,
     )
 
@@ -43,19 +39,21 @@ def test_inventory_transfer_facade_is_authorized_atomic_and_directional(tmp_path
         )
         source = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Source",
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Source"},
+                "principal_id": "system:local",
                 "idempotency_key": "source",
             },
         )
         target = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Target",
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Target"},
+                "principal_id": "system:local",
                 "idempotency_key": "target",
             },
         )
@@ -260,9 +258,7 @@ def test_inventory_transfer_facade_is_authorized_atomic_and_directional(tmp_path
         )
         withdrawn_item = _item(withdrew["character"], "party-torch")
         assert withdrawn_item["quantity"] == 1
-        assert withdrawn_item["ruling_requirements"][0]["policy_ref"] == (
-            "actor_card.import.v1"
-        )
+        assert withdrawn_item["ruling_requirements"][0]["policy_ref"] == ("actor_card.import.v1")
         assert all(item["id"] != "party-torch" for item in withdrew["party"]["inventory"]["items"])
 
         campaign = await _call(
@@ -314,19 +310,21 @@ def test_inventory_transfer_detaches_ammunition_links_missing_at_destination(
         )
         source = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Source",
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Source"},
+                "principal_id": "system:local",
                 "idempotency_key": "source",
             },
         )
         target = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Target",
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Target"},
+                "principal_id": "system:local",
                 "idempotency_key": "target",
             },
         )
@@ -407,9 +405,7 @@ def test_inventory_transfer_detaches_ammunition_links_missing_at_destination(
         assert _item(deposited["character"], "arrows") is not None
         assert _item(deposited["character"], "party-bow") is None
         party_bow = next(
-            item
-            for item in deposited["party"]["inventory"]["items"]
-            if item["id"] == "party-bow"
+            item for item in deposited["party"]["inventory"]["items"] if item["id"] == "party-bow"
         )
         assert party_bow["mechanics"]["ammunition_item_id"] is None
         assert deposited["item"]["mechanics"]["ammunition_item_id"] is None
@@ -442,9 +438,7 @@ def test_inventory_transfer_detaches_ammunition_links_missing_at_destination(
             },
         )
         assert _item(transferred["source"], "arrows") is not None
-        assert _item(transferred["target"], "target-bow")["mechanics"][
-            "ammunition_item_id"
-        ] is None
+        assert _item(transferred["target"], "target-bow")["mechanics"]["ammunition_item_id"] is None
         assert transferred["item"]["mechanics"]["ammunition_item_id"] is None
 
     asyncio.run(exercise())

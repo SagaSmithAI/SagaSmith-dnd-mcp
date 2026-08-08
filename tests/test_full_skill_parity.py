@@ -8,6 +8,55 @@ from sagasmith_dnd_mcp.parity import required_tool_names
 from sagasmith_dnd_mcp.server import create_server
 
 
+async def _import_module(call, server, campaign_id: str, source_path: Path, key: str):
+    staged = await call(
+        server,
+        "module_import",
+        {
+            "campaign_id": campaign_id,
+            "action": "stage",
+            "payload": {
+                "source_path": str(source_path),
+                "source_key": key,
+                "title": source_path.stem,
+            },
+            "idempotency_key": f"{key}:stage",
+        },
+    )
+    job_id = staged["job"]["id"]
+    for action in ("inspect", "validate", "ingest"):
+        await call(
+            server,
+            "module_import",
+            {
+                "campaign_id": campaign_id,
+                "action": action,
+                "payload": {"job_id": job_id},
+                "idempotency_key": f"{key}:{action}",
+            },
+        )
+    campaign = await call(
+        server,
+        "campaign_query",
+        {
+            "view": "get",
+            "payload": {"campaign_id": campaign_id},
+            "principal_id": "system:local",
+        },
+    )
+    return await call(
+        server,
+        "module_import",
+        {
+            "campaign_id": campaign_id,
+            "action": "activate",
+            "payload": {"job_id": job_id},
+            "expected_revision": campaign["revision"],
+            "idempotency_key": f"{key}:activate",
+        },
+    )
+
+
 def test_server_covers_full_skill_tool_contract(tmp_path: Path) -> None:
     config = McpConfig(
         home=tmp_path / "home",
@@ -28,6 +77,11 @@ def test_server_covers_full_skill_tool_contract(tmp_path: Path) -> None:
 def test_module_scene_reads_do_not_cross_player_scope_or_leak_keeper_structure(
     tmp_path: Path,
 ) -> None:
+    source = tmp_path / "private.md"
+    source.write_text(
+        "# Secret\n## Hidden Vault\n#### A1. Reliquary\nThe crown is cursed.",
+        encoding="utf-8",
+    )
     config = McpConfig(
         home=tmp_path / "home",
         database_url=None,
@@ -35,6 +89,7 @@ def test_module_scene_reads_do_not_cross_player_scope_or_leak_keeper_structure(
         chroma_path_override=None,
         dnd_skills_dir=tmp_path / "dnd",
         modulegen_skills_dir=tmp_path / "modulegen",
+        module_import_roots=(tmp_path,),
     )
 
     async def call(server, name: str, arguments: dict):
@@ -50,48 +105,49 @@ def test_module_scene_reads_do_not_cross_player_scope_or_leak_keeper_structure(
         )
         alice = await call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Alice",
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Alice"},
+                "principal_id": "system:local",
                 "idempotency_key": "private-alice",
             },
         )
         for principal, actor_id in (("player:alice", alice["id"]), ("player:bob", None)):
             await call(
                 server,
-                "campaign_member_grant",
-                {"campaign_id": campaign["id"], "principal_id": principal, "role": "player"},
+                "access_grant",
+                {
+                    "scope": "campaign",
+                    "campaign_id": campaign["id"],
+                    "principal_id": principal,
+                    "payload": {"role": "player"},
+                },
             )
             if actor_id:
                 await call(
                     server,
-                    "actor_grant",
+                    "access_grant",
                     {
+                        "scope": "actor",
                         "campaign_id": campaign["id"],
                         "principal_id": principal,
-                        "actor_id": actor_id,
-                        "can_view_private": True,
+                        "payload": {"actor_id": actor_id, "can_view_private": True},
                     },
                 )
-        artifact = await call(
-            server,
-            "module_write",
-            {
-                "name": "private.md",
-                "content": "# Secret\n## Hidden Vault\n#### A1. Reliquary\nThe crown is cursed.",
-            },
-        )
-        await call(
-            server,
-            "module_import",
-            {
-                "campaign_id": campaign["id"],
-                "artifact": artifact["artifact"],
-                "idempotency_key": "private-module-import",
-            },
-        )
-        scene = (await call(server, "module_index", {"campaign_id": campaign["id"]}))[0]
+        await _import_module(call, server, campaign["id"], source, "private-module")
+        scene = (
+            await call(
+                server,
+                "module_query",
+                {
+                    "campaign_id": campaign["id"],
+                    "view": "index",
+                    "payload": {},
+                    "principal_id": "system:local",
+                },
+            )
+        )[0]
         await call(
             server,
             "module_set_progress",
@@ -107,10 +163,11 @@ def test_module_scene_reads_do_not_cross_player_scope_or_leak_keeper_structure(
         with pytest.raises(Exception, match="owned player scene scope"):
             await call(
                 server,
-                "module_current",
+                "module_query",
                 {
                     "campaign_id": campaign["id"],
-                    "scope_id": f"player:{alice['id']}",
+                    "view": "current",
+                    "payload": {"scope_id": f"player:{alice['id']}"},
                     "principal_id": "player:bob",
                 },
             )
@@ -140,10 +197,11 @@ def test_module_scene_reads_do_not_cross_player_scope_or_leak_keeper_structure(
         assert "The crown is cursed" not in str(player_context["scoped_scene"])
         redacted = await call(
             server,
-            "module_read_scene",
+            "module_query",
             {
                 "campaign_id": campaign["id"],
-                "scene_id": scene["scene_id"],
+                "view": "scene",
+                "payload": {"scene_id": scene["scene_id"]},
                 "principal_id": "player:bob",
             },
         )
@@ -153,6 +211,8 @@ def test_module_scene_reads_do_not_cross_player_scope_or_leak_keeper_structure(
 
 
 def test_mcp_first_full_workflow(tmp_path: Path) -> None:
+    source = tmp_path / "parity.md"
+    source.write_text("# Parity\n## Gate\nThe sealed gate.", encoding="utf-8")
     config = McpConfig(
         home=tmp_path / "home",
         database_url=None,
@@ -160,6 +220,7 @@ def test_mcp_first_full_workflow(tmp_path: Path) -> None:
         chroma_path_override=None,
         dnd_skills_dir=tmp_path / "dnd",
         modulegen_skills_dir=tmp_path / "modulegen",
+        module_import_roots=(tmp_path,),
     )
 
     async def call(server, name: str, arguments: dict):
@@ -175,56 +236,52 @@ def test_mcp_first_full_workflow(tmp_path: Path) -> None:
         )
         actor = await call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "name": "Aria",
-                "campaign_id": campaign["id"],
+                "mode": "direct",
+                "payload": {"name": "Aria", "campaign_id": campaign["id"]},
+                "principal_id": "system:local",
                 "idempotency_key": "create-aria",
             },
         )
         await call(
             server,
-            "actor_knowledge_add",
+            "actor_knowledge_change",
             {
-                "campaign_id": campaign["id"],
-                "actor_id": actor["id"],
-                "knowledge_key": "gate",
-                "proposition": "The gate is sealed.",
+                "action": "add",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "actor_id": actor["id"],
+                    "knowledge_key": "gate",
+                    "proposition": "The gate is sealed.",
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "knowledge-gate",
             },
         )
         assert await call(
             server,
-            "actor_knowledge_search",
-            {"campaign_id": campaign["id"], "actor_id": actor["id"], "query": "gate"},
-        )
-        artifact = await call(
-            server,
-            "module_write",
-            {"name": "parity.md", "content": "# Parity\n## Gate\nThe sealed gate."},
-        )
-        inspection = await call(server, "module_inspect", {"artifact": artifact["artifact"]})
-        assert inspection["parser_profile"] == "dnd5e"
-        imported = await call(
-            server,
-            "module_import",
+            "actor_knowledge_query",
             {
                 "campaign_id": campaign["id"],
-                "artifact": artifact["artifact"],
-                "idempotency_key": "parity-module-import",
+                "actor_id": actor["id"],
+                "view": "search",
+                "payload": {"query": "gate"},
+                "principal_id": "system:local",
             },
         )
-        replayed = await call(
+        imported = await _import_module(call, server, campaign["id"], source, "parity-module")
+        assert imported["job"]["state"] == "activated"
+        scenes = await call(
             server,
-            "module_import",
+            "module_query",
             {
                 "campaign_id": campaign["id"],
-                "artifact": artifact["artifact"],
-                "idempotency_key": "parity-module-import",
+                "view": "index",
+                "payload": {},
+                "principal_id": "system:local",
             },
         )
-        assert replayed == imported
-        scenes = await call(server, "module_index", {"campaign_id": campaign["id"]})
         await call(
             server,
             "module_set_progress",
@@ -236,17 +293,38 @@ def test_mcp_first_full_workflow(tmp_path: Path) -> None:
                 "idempotency_key": "parity-scene-progress",
             },
         )
-        assert (await call(server, "module_current", {"campaign_id": campaign["id"]}))["progress"][
-            "percent"
-        ] == 25
-        campaign = await call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        assert (
+            await call(
+                server,
+                "module_query",
+                {
+                    "campaign_id": campaign["id"],
+                    "view": "current",
+                    "payload": {},
+                    "principal_id": "system:local",
+                },
+            )
+        )["progress"]["percent"] == 25
+        campaign = await call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
+        )
         wallet = await call(
             server,
-            "party_wallet_adjust",
+            "wallet_change",
             {
-                "campaign_id": campaign["id"],
+                "owner": "party",
+                "action": "adjust",
+                "owner_id": campaign["id"],
                 "denomination": "gp",
                 "amount": 10,
+                "payload": {},
+                "principal_id": "system:local",
                 "expected_revision": campaign["revision"],
                 "idempotency_key": "parity-wallet",
             },
@@ -264,10 +342,24 @@ def test_mcp_first_full_workflow(tmp_path: Path) -> None:
         )
         verified = await call(
             server,
-            "snapshot_verify",
-            {"campaign_id": campaign["id"], "slot": snapshot["slot"]},
+            "snapshot_query",
+            {
+                "campaign_id": campaign["id"],
+                "view": "verify",
+                "payload": {"slot": snapshot["slot"]},
+                "principal_id": "system:local",
+            },
         )
         assert verified["valid"]
-        assert await call(server, "state_history", {"campaign_id": campaign["id"]})
+        assert await call(
+            server,
+            "state_revision",
+            {
+                "campaign_id": campaign["id"],
+                "action": "history",
+                "payload": {},
+                "principal_id": "system:local",
+            },
+        )
 
     asyncio.run(exercise_workflow())

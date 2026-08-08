@@ -83,16 +83,20 @@ async def _campaign_with_combat(
         actors.append(
             await _call(
                 server,
-                "character_create",
+                "character_create_from",
                 {
-                    "campaign_id": campaign["id"],
-                    "name": name,
-                    "sheet": sheet,
+                    "mode": "direct",
+                    "payload": {"campaign_id": campaign["id"], "name": name, "sheet": sheet},
+                    "principal_id": "system:local",
                     "idempotency_key": f"mm-actor-{index}",
                 },
             )
         )
-    campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+    campaign = await _call(
+        server,
+        "campaign_query",
+        {"view": "get", "payload": {"campaign_id": campaign["id"]}, "principal_id": "system:local"},
+    )
     phase = await _call(
         server,
         "game_phase",
@@ -173,7 +177,13 @@ def test_hidden_perceivable_cast_requires_dm_observer_matrix(tmp_path: Path) -> 
         assert pending["committed"] is False
         assert pending["missing"] == ["spell_casting_perception"]
         unchanged = await _call(
-            server, "character_get", {"character_id": actors[0]["id"]}
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": actors[0]["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert unchanged["sheet"]["spellcasting"]["spell_slots"]["1"]["value"] == 1
 
@@ -206,10 +216,7 @@ def test_hidden_perceivable_cast_requires_dm_observer_matrix(tmp_path: Path) -> 
         )
         assert caster["hidden"] is False
         assert caster["visible_to_actor_ids"] is None
-        assert any(
-            item["type"] == "spell_casting_perception"
-            for item in cast["combat"]["log"]
-        )
+        assert any(item["type"] == "spell_casting_perception" for item in cast["combat"]["log"])
 
     asyncio.run(exercise())
 
@@ -263,7 +270,15 @@ def test_magic_missile_targeting_opens_real_shield_reaction(tmp_path: Path, monk
         assert cast["status"] == "pending_reaction"
         choice = cast["choices"][0]
         assert choice["trigger"] == "magic_missile_targeted"
-        before = await _call(server, "character_get", {"character_id": actors[1]["id"]})
+        before = await _call(
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": actors[1]["id"]},
+                "principal_id": "system:local",
+            },
+        )
         assert before["sheet"]["combat"]["hp"]["value"] == 20
 
         resolved = await _raw(
@@ -284,7 +299,15 @@ def test_magic_missile_targeting_opens_real_shield_reaction(tmp_path: Path, monk
         resolved = resolved["result"]
         assert resolved["status"] == "committed"
         assert resolved["result"]["targets"][0]["shielded"] is True
-        after = await _call(server, "character_get", {"character_id": actors[1]["id"]})
+        after = await _call(
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": actors[1]["id"]},
+                "principal_id": "system:local",
+            },
+        )
         assert after["sheet"]["combat"]["hp"]["value"] == 20
         assert after["sheet"]["spellcasting"]["spell_slots"]["1"]["value"] == 0
         combatant = next(
@@ -335,7 +358,15 @@ def test_magic_missile_applies_each_dart_as_separate_damage(tmp_path: Path, monk
         assert cast["status"] == "committed"
         dart_results = cast["result"]["targets"][0]["dart_results"]
         assert [item["roll"]["total"] for item in dart_results] == [5, 5, 5]
-        target = await _call(server, "character_get", {"character_id": actors[1]["id"]})
+        target = await _call(
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": actors[1]["id"]},
+                "principal_id": "system:local",
+            },
+        )
         assert target["sheet"]["combat"]["hp"]["value"] == 0
         assert target["sheet"]["combat"]["death_saves"]["failures"] == 1
 
@@ -418,9 +449,7 @@ def test_magic_missile_creates_per_dart_concentration_saves_and_prunes_after_fai
             },
         )
         windows = [
-            item
-            for item in cast["combat"]["pending"]
-            if item.get("kind") == "concentration"
+            item for item in cast["combat"]["pending"] if item.get("kind") == "concentration"
         ]
         assert len(windows) == 3
         assert {item["dc"] for item in windows} == {10}
@@ -506,9 +535,25 @@ def test_combat_cast_accepts_numbered_bonus_action_from_imported_spell_card(
         )
         assert combatant["turn_budget"]["bonus_action"] == 0
         assert combatant["turn_budget"]["main_action"] == 1
-        caster = await _call(server, "character_get", {"character_id": actors[0]["id"]})
+        caster = await _call(
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": actors[0]["id"]},
+                "principal_id": "system:local",
+            },
+        )
         assert caster["sheet"]["spellcasting"]["spell_slots"]["1"]["value"] == 0
-        target = await _call(server, "character_get", {"character_id": actors[1]["id"]})
+        target = await _call(
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": actors[1]["id"]},
+                "principal_id": "system:local",
+            },
+        )
         assert target["sheet"]["combat"]["hp"]["value"] > 1
 
     asyncio.run(exercise())

@@ -84,35 +84,55 @@ def test_preserve_life_is_a_combat_transaction_with_engine_measured_range(
         )
         cleric = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Cleric",
-                "sheet": _cleric_sheet(),
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Cleric",
+                    "sheet": _cleric_sheet(),
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "cleric",
             },
         )
         near = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Near Undead",
-                "sheet": _wounded_undead_sheet(),
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Near Undead",
+                    "sheet": _wounded_undead_sheet(),
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "near",
             },
         )
         far = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Far Undead",
-                "sheet": _wounded_undead_sheet(),
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Far Undead",
+                    "sheet": _wounded_undead_sheet(),
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "far",
             },
         )
-        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        campaign = await _call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
+        )
         phase = await _call(
             server,
             "game_phase",
@@ -163,15 +183,21 @@ def test_preserve_life_is_a_combat_transaction_with_engine_measured_range(
                     "campaign_id": campaign["id"],
                     "actor_id": cleric["id"],
                     "activity_id": PRESERVE_LIFE_ID,
-                    "declaration": {
-                        "allocations": [{"target_id": far["id"], "amount": 9}]
-                    },
+                    "declaration": {"allocations": [{"target_id": far["id"], "amount": 9}]},
                     "expected_revision": started["campaign_revision"],
                     "idempotency_key": "far-invalid",
                 },
             )
 
-        unchanged = await _call(server, "character_get", {"character_id": cleric["id"]})
+        unchanged = await _call(
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": cleric["id"]},
+                "principal_id": "system:local",
+            },
+        )
         assert unchanged["sheet"]["resources"]["channel_divinity"]["value"] == 2
         current = started["combat"]["combatants"][started["combat"]["turn_index"]]
         assert current["turn_budget"]["main_action"] == 1
@@ -183,9 +209,7 @@ def test_preserve_life_is_a_combat_transaction_with_engine_measured_range(
                 "campaign_id": campaign["id"],
                 "actor_id": cleric["id"],
                 "activity_id": PRESERVE_LIFE_ID,
-                "declaration": {
-                    "allocations": [{"target_id": near["id"], "amount": 9}]
-                },
+                "declaration": {"allocations": [{"target_id": near["id"], "amount": 9}]},
                 "expected_revision": started["campaign_revision"],
                 "idempotency_key": "near-valid",
             },
@@ -204,8 +228,24 @@ def test_preserve_life_is_a_combat_transaction_with_engine_measured_range(
         )
         current = resolved["combat"]["combatants"][resolved["combat"]["turn_index"]]
         assert current["turn_budget"]["main_action"] == 0
-        cleric_after = await _call(server, "character_get", {"character_id": cleric["id"]})
-        near_after = await _call(server, "character_get", {"character_id": near["id"]})
+        cleric_after = await _call(
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": cleric["id"]},
+                "principal_id": "system:local",
+            },
+        )
+        near_after = await _call(
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": near["id"]},
+                "principal_id": "system:local",
+            },
+        )
         assert cleric_after["sheet"]["resources"]["channel_divinity"]["value"] == 1
         assert near_after["sheet"]["combat"]["hp"]["value"] == 10
 

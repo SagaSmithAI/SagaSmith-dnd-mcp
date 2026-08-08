@@ -139,15 +139,15 @@ def test_unknown_ruling_kind_defaults_to_agent_adjudication() -> None:
         raise_for_pending_ruling(
             {
                 "status": "pending_ruling",
-                "ruling_kind": "legacy_manual_dm_review",
-                "reason": "an old caller did not use the typed ruling enum",
+                "ruling_kind": "unclassified_manual_review",
+                "reason": "the caller did not use the typed ruling enum",
             },
-            operation="legacy_review",
+            operation="unclassified_review",
         )
     except RegressionRulingRequiredError as error:
         fields = ruling_failure_fields(error)
     else:
-        raise AssertionError("legacy ruling did not stop the driver")
+        raise AssertionError("unclassified ruling did not stop the driver")
 
     ruling = fields["ruling_requirements"][0]["ruling"]
     assert ruling["default_resolver"] == "agent"
@@ -221,9 +221,7 @@ def test_party_driver_writes_structured_agent_handoff(
     report = regression_party.json.loads(output.read_text(encoding="utf-8"))
     assert report["status"] == "pending_ruling"
     assert report["default_resolver"] == "agent"
-    assert report["ruling_requirements"][0]["operation"] == (
-        "character_content_apply.party"
-    )
+    assert report["ruling_requirements"][0]["operation"] == ("character_content_apply.party")
 
 
 def test_playthrough_driver_writes_structured_external_handoff(

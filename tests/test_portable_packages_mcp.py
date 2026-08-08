@@ -560,12 +560,10 @@ def test_character_card_export_and_import_uses_fresh_identity(tmp_path: Path) ->
                     "portable_id": "example.portable-scout",
                     "image": {
                         "media_type": "image/png",
-                        "data_base64": base64.b64encode(
-                            b"\x89PNG\r\n\x1a\nportable-scout"
-                        ).decode("ascii"),
-                        "checksum": hashlib.sha256(
-                            b"\x89PNG\r\n\x1a\nportable-scout"
-                        ).hexdigest(),
+                        "data_base64": base64.b64encode(b"\x89PNG\r\n\x1a\nportable-scout").decode(
+                            "ascii"
+                        ),
+                        "checksum": hashlib.sha256(b"\x89PNG\r\n\x1a\nportable-scout").hexdigest(),
                         "size": 22,
                         "alt": "Portable Scout portrait",
                         "license": "CC0-1.0",
@@ -1324,11 +1322,15 @@ def test_extension_rule_pack_export_import_rebinds_sources_and_stays_inactive(
         assert listed_addons[0]["activation"]["enabled"] is True
         statblock_catalog = await _call(
             addon_server,
-            "content_catalog_list",
+            "rule_pack_query",
             {
-                "campaign_id": addon_campaign["id"],
-                "kind": "statblock",
-                "query": "Luminous Sentinel",
+                "view": "content_catalog",
+                "payload": {
+                    "campaign_id": addon_campaign["id"],
+                    "kind": "statblock",
+                    "query": "Luminous Sentinel",
+                },
+                "principal_id": "system:local",
             },
         )
         assert len(statblock_catalog) == 1

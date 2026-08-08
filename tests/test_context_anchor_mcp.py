@@ -109,9 +109,7 @@ async def _import_ironslag_context(server, campaign_id: str) -> dict:
         "page_start": expanded["page_start"],
         "page_end": expanded["page_end"],
         "heading_path": expanded["heading_path"],
-        "content_sha256": hashlib.sha256(
-            expanded["content"].encode("utf-8")
-        ).hexdigest(),
+        "content_sha256": hashlib.sha256(expanded["content"].encode("utf-8")).hexdigest(),
     }
 
 
@@ -132,9 +130,7 @@ def test_public_context_anchor_pins_exact_dm_evidence_without_a_narrative_dsl(
             server,
             campaign["id"],
         )
-        source_excerpt = (
-            "Zaltember is a bully and coward. If wounded, he flees to area 31."
-        )
+        source_excerpt = "Zaltember is a bully and coward. If wounded, he flees to area 31."
         anchor = await _call(
             server,
             "memory_change",
@@ -218,15 +214,11 @@ def test_public_context_anchor_pins_exact_dm_evidence_without_a_narrative_dsl(
         assert replay == anchor
         assert anchor["metadata"]["related_refs"][0] == "actor:zaltember"
         assert context["facts"] == []
-        assert context["module_evidence"][0]["context_role"] == (
-            "non_executable_module_evidence"
-        )
+        assert context["module_evidence"][0]["context_role"] == ("non_executable_module_evidence")
         assert context["module_evidence"][0]["source_ref"] == source_ref
         assert context["module_evidence"][0]["source_excerpt"] == source_excerpt
         assert context["retrieval"]["pinned_module_evidence_count"] == 1
-        assert context["retrieval"]["strategy"] == (
-            "lexical_structured_pinned_module_evidence_v3"
-        )
+        assert context["retrieval"]["strategy"] == ("lexical_structured_pinned_module_evidence_v3")
         assert context["context_receipt"]["campaign_id"] == campaign["id"]
         assert "principal_id" not in context["context_receipt"]
         assert len(context["context_receipt"]["principal_fingerprint"]) == 64
@@ -243,12 +235,8 @@ def test_public_context_anchor_pins_exact_dm_evidence_without_a_narrative_dsl(
             },
         )
         assert interpretation_bundle["purpose"] == "source_interpretation"
-        assert interpretation_bundle["context"]["source_evidence"][0][
-            "context_role"
-        ] == "evidence"
-        source_basis = interpretation_bundle["context"]["source_evidence"][0][
-            "basis_ref"
-        ]
+        assert interpretation_bundle["context"]["source_evidence"][0]["context_role"] == "evidence"
+        source_basis = interpretation_bundle["context"]["source_evidence"][0]["basis_ref"]
         interpretation = {
             "schema_version": 1,
             "bundle_id": interpretation_bundle["bundle_id"],
@@ -302,9 +290,7 @@ def test_public_context_anchor_pins_exact_dm_evidence_without_a_narrative_dsl(
                 "related_refs": ["actor:zaltember"],
             },
         )
-        ruling_source_basis = ruling_bundle["context"]["source_evidence"][0][
-            "basis_ref"
-        ]
+        ruling_source_basis = ruling_bundle["context"]["source_evidence"][0]["basis_ref"]
         ruling = {
             "schema_version": 1,
             "bundle_id": ruling_bundle["bundle_id"],
@@ -437,12 +423,16 @@ def test_named_npc_state_changes_request_generic_agent_narrative_followup(
         sheet["combat"]["hp"] = {"value": 5, "max": 5, "temp": 0}
         npc = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Zaltember",
-                "character_type": "npc",
-                "sheet": sheet,
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Zaltember",
+                    "character_type": "npc",
+                    "sheet": sheet,
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "zaltember",
             },
         )
@@ -520,9 +510,7 @@ def test_named_npc_state_changes_request_generic_agent_narrative_followup(
                 "idempotency_key": "give-zaltember-token",
             },
         )
-        assert inventory_changed["narrative_followup"]["reasons"] == [
-            "named_npc_inventory_changed"
-        ]
+        assert inventory_changed["narrative_followup"]["reasons"] == ["named_npc_inventory_changed"]
 
     asyncio.run(exercise())
 
@@ -563,9 +551,7 @@ def test_public_context_anchor_rejects_a_nonverbatim_source_excerpt(
                             "source_bindings": [
                                 {
                                     "source_ref": source_ref,
-                                    "source_excerpt": (
-                                        "Zaltember teleports directly to area 31."
-                                    ),
+                                    "source_excerpt": ("Zaltember teleports directly to area 31."),
                                 }
                             ],
                         },

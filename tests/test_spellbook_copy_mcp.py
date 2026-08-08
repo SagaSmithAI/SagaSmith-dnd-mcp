@@ -46,18 +46,28 @@ def test_discovered_spellbook_copy_is_source_bound_paid_timed_and_atomic(
         )
         await call(
             server,
-            "campaign_rule_profile_set",
+            "campaign_rules",
             {
                 "campaign_id": created["id"],
-                "edition": "2014",
+                "action": "set_profile",
+                "payload": {"edition": "2014"},
+                "principal_id": "system:local",
                 "expected_revision": created["revision"],
                 "idempotency_key": "profile",
             },
         )
         spells = await call(
             server,
-            "content_catalog_list",
-            {"campaign_id": created["id"], "kind": "spell", "query": "Burning Hands"},
+            "rule_pack_query",
+            {
+                "view": "content_catalog",
+                "payload": {
+                    "campaign_id": created["id"],
+                    "kind": "spell",
+                    "query": "Burning Hands",
+                },
+                "principal_id": "system:local",
+            },
         )
         burning_hands = next(item for item in spells if item["name"] == "Burning Hands")
 
@@ -76,11 +86,11 @@ def test_discovered_spellbook_copy_is_source_bound_paid_timed_and_atomic(
         sheet["inventory"]["wallet"]["gp"] = 50
         wizard = await call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": created["id"],
-                "name": "Copying Wizard",
-                "sheet": sheet,
+                "mode": "direct",
+                "payload": {"campaign_id": created["id"], "name": "Copying Wizard", "sheet": sheet},
+                "principal_id": "system:local",
                 "idempotency_key": "wizard",
             },
         )
@@ -99,20 +109,21 @@ def test_discovered_spellbook_copy_is_source_bound_paid_timed_and_atomic(
         savant_sheet["inventory"]["wallet"]["gp"] = 25
         savant_sheet["content"]["features"].append(
             {
-                "id": (
-                    "dnd5e.content.srd2014.feature."
-                    "school-of-evocation-evocation-savant"
-                ),
+                "id": ("dnd5e.content.srd2014.feature.school-of-evocation-evocation-savant"),
                 "name": "Evocation Savant",
             }
         )
         savant = await call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": created["id"],
-                "name": "Evocation Savant",
-                "sheet": savant_sheet,
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": created["id"],
+                    "name": "Evocation Savant",
+                    "sheet": savant_sheet,
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "savant",
             },
         )
@@ -208,9 +219,7 @@ def test_discovered_spellbook_copy_is_source_bound_paid_timed_and_atomic(
 
         assert copied == replay
         assert copied["sheet"]["inventory"]["wallet"]["gp"] == 0
-        assert burning_hands["id"] in copied["sheet"]["spellcasting"]["spellbook"][
-            "spell_ids"
-        ]
+        assert burning_hands["id"] in copied["sheet"]["spellcasting"]["spellbook"]["spell_ids"]
         assert copied["spellbook_copy"]["cost_cp"] == 5000
         assert copied["spellbook_copy"]["deciphered_during_copy"] is True
         assert copied["spellbook_copy"]["hours"] == 2
@@ -228,9 +237,7 @@ def test_discovered_spellbook_copy_is_source_bound_paid_timed_and_atomic(
         )
         assert receipt["response"] == copied
         after = await campaign(server, created["id"])
-        assert after["state"]["party"]["inventory"]["items"][0]["id"] == (
-            "d11-red-spellbook"
-        )
+        assert after["state"]["party"]["inventory"]["items"][0]["id"] == ("d11-red-spellbook")
         assert after["state"]["game_time"]["elapsed_ticks"] == 1200
         assert "world_time" not in after["state"]
         clock = await call(
@@ -275,8 +282,7 @@ def test_discovered_spellbook_copy_is_source_bound_paid_timed_and_atomic(
         assert discounted["spellbook_copy"]["hours"] == 1
         assert discounted["spellbook_copy"]["world_time"]["hour"] == 13
         assert {
-            receipt["mechanic_id"]
-            for receipt in discounted["spellbook_copy"]["rule_receipts"]
+            receipt["mechanic_id"] for receipt in discounted["spellbook_copy"]["rule_receipts"]
         } >= {
             "dnd5e.core.spell.spellbook_copy",
             "dnd5e.core.spell.evocation_savant",

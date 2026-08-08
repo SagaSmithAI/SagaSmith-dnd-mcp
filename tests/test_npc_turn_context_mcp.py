@@ -39,21 +39,26 @@ async def _campaign_with_npc(server):
     )
     npc = await _call(
         server,
-        "character_create",
+        "character_create_from",
         {
-            "campaign_id": campaign["id"],
-            "name": "Zaltember",
-            "character_type": "npc",
-            "summary": "A wary fire giant child who values survival and family.",
+            "mode": "direct",
+            "payload": {
+                "campaign_id": campaign["id"],
+                "name": "Zaltember",
+                "character_type": "npc",
+                "summary": "A wary fire giant child who values survival and family.",
+            },
+            "principal_id": "system:local",
             "idempotency_key": "npc",
         },
     )
     pc = await _call(
         server,
-        "character_create",
+        "character_create_from",
         {
-            "campaign_id": campaign["id"],
-            "name": "Envoy",
+            "mode": "direct",
+            "payload": {"campaign_id": campaign["id"], "name": "Envoy"},
+            "principal_id": "system:local",
             "idempotency_key": "pc",
         },
     )
@@ -158,17 +163,13 @@ def test_npc_turn_bundle_is_actor_scoped_and_commits_only_accepted_deltas(
         identity_ref = f"actor:{npc['id']}:identity"
         assert identity_ref in bundle["constraints"]["allowed_basis_refs"]
         relationship_ref = (
-            f"fact:{bundle['relationships'][0]['id']}:"
-            f"{bundle['relationships'][0]['revision_id']}"
+            f"fact:{bundle['relationships'][0]['id']}:{bundle['relationships'][0]['revision_id']}"
         )
         assert relationship_ref in bundle["constraints"]["allowed_basis_refs"]
-        assert bundle["perception"][0]["basis_ref"] in bundle["constraints"][
-            "allowed_basis_refs"
-        ]
+        assert bundle["perception"][0]["basis_ref"] in bundle["constraints"]["allowed_basis_refs"]
         assert bundle["common_context"]
         assert not {
-            f"fact:{item['id']}:{item['revision_id']}"
-            for item in bundle["common_context"]
+            f"fact:{item['id']}:{item['revision_id']}" for item in bundle["common_context"]
         } & set(bundle["constraints"]["allowed_basis_refs"])
 
         proposal = {
@@ -292,15 +293,18 @@ def test_npc_turn_bundle_rejects_privilege_leaks_tampering_and_stale_commits(
             "portrayal": {"emotion": "guarded", "visible_cues": []},
             "decision_summary": "He refuses.",
         }
-        tampered = {**base_proposal, "speech_acts": [
-            {
-                "kind": "assert",
-                "content": "An unsupported secret.",
-                "truth_posture": "believes_true",
-                "basis_refs": ["knowledge:someone-else:secret"],
-                "targets": [pc["id"]],
-            }
-        ]}
+        tampered = {
+            **base_proposal,
+            "speech_acts": [
+                {
+                    "kind": "assert",
+                    "content": "An unsupported secret.",
+                    "truth_posture": "believes_true",
+                    "basis_refs": ["knowledge:someone-else:secret"],
+                    "targets": [pc["id"]],
+                }
+            ],
+        }
         with pytest.raises(Exception, match="outside its bundle"):
             await _call(
                 server,
@@ -481,13 +485,11 @@ def test_npc_turn_is_live_phase_only_and_contract_schemas_ship(tmp_path: Path) -
         .read_text(encoding="utf-8")
     )
     assert bundle_schema["properties"]["purpose"]["const"] == "npc_turn"
-    assert bundle_schema["properties"]["constraints"]["properties"][
-        "may_call_tools"
-    ]["const"] is False
+    assert (
+        bundle_schema["properties"]["constraints"]["properties"]["may_call_tools"]["const"] is False
+    )
     assert proposal_schema["additionalProperties"] is False
-    assert proposal_schema["properties"]["proposed_action"]["properties"]["kind"][
-        "enum"
-    ] == [
+    assert proposal_schema["properties"]["proposed_action"]["properties"]["kind"]["enum"] == [
         "none",
         "gesture",
         "offer",
@@ -512,11 +514,15 @@ def test_npc_turn_is_live_phase_only_and_contract_schemas_ship(tmp_path: Path) -
         )
         npc = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Waiting NPC",
-                "character_type": "npc",
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Waiting NPC",
+                    "character_type": "npc",
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "npc",
             },
         )

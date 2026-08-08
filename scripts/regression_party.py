@@ -121,15 +121,6 @@ def _arguments() -> argparse.Namespace:
         default="",
         help="Phase to expose after construction; defaults to the entry phase",
     )
-    parser.add_argument(
-        "--repair-existing-party-report",
-        type=Path,
-        help=(
-            "Replace legacy opaque starting-equipment packs and repair audited "
-            "item weights and spell class lists for actors in an existing public "
-            "party or single-profile replacement report"
-        ),
-    )
     return parser.parse_args()
 
 
@@ -1669,234 +1660,6 @@ def _mutation_actor(value: Any) -> dict[str, Any]:
     return dict(normalized.get("character") or normalized)
 
 
-async def _repair_existing_party_equipment(
-    client: ExposureClient,
-    *,
-    campaign_id: str,
-    run_id: str,
-    profiles: list[dict[str, Any]],
-    catalog: list[dict[str, Any]],
-    report_path: Path,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    source_report = json.loads(
-        report_path.expanduser().resolve().read_text(encoding="utf-8")
-    )
-    if str(source_report.get("campaign_id") or "") != campaign_id:
-        raise ValueError("existing party report belongs to a different campaign")
-    reported_by_name = {
-        str(item["name"]): dict(item)
-        for item in source_report.get("characters", [])
-    }
-    if set(reported_by_name) != {str(profile["name"]) for profile in profiles}:
-        raise ValueError(
-            "existing party report actors do not exactly match the audited profiles"
-        )
-
-    repaired: list[dict[str, Any]] = []
-    all_changes: list[dict[str, Any]] = []
-    for profile in profiles:
-        report_actor = reported_by_name[str(profile["name"])]
-        actor_id = str(report_actor["actor_id"])
-        actor = dict(
-            _facade_value(
-                await client.domain(
-                    "character_query",
-                    {"view": "get", "payload": {"character_id": actor_id}},
-                )
-            )
-        )
-        if (
-            str(actor.get("campaign_id") or "") != campaign_id
-            or str(actor.get("name") or "") != str(profile["name"])
-        ):
-            raise ValueError(f"reported actor identity mismatch for {profile['name']}")
-
-        desired_items = _source_linked_starting_items(profile, catalog)
-        desired_by_id = {str(item["id"]): item for item in desired_items}
-        pack_name = _class_pack_name(profile)
-        pack_items = _pack_contents(profile, pack_name)
-        pack_item_ids = {str(item["id"]) for item in pack_items}
-        prefix = _profile_item_prefix(profile)
-        legacy_pack_slug = ascii_slug(pack_name.replace("'", ""))
-        legacy_pack_id = f"{prefix}-{legacy_pack_slug}"
-        inventory = list(actor["sheet"]["inventory"]["items"])
-        legacy_pack = next(
-            (
-                item
-                for item in inventory
-                if str(item.get("id") or "") == legacy_pack_id
-                or str(item.get("name") or "").casefold() == pack_name.casefold()
-            ),
-            None,
-        )
-        had_pack_evidence = legacy_pack is not None or any(
-            str(item.get("id") or "") in pack_item_ids for item in inventory
-        )
-        actor_changes: list[dict[str, Any]] = []
-        if profile.get("spellcasting"):
-            expected_class_lists = [str(profile["class"]).casefold()]
-            current_class_lists = list(
-                dict(actor["sheet"].get("spellcasting") or {}).get("class_lists") or []
-            )
-            if current_class_lists != expected_class_lists:
-                repaired_sheet = deepcopy(actor["sheet"])
-                repaired_sheet["spellcasting"]["class_lists"] = expected_class_lists
-                actor = dict(
-                    _facade_value(
-                        await client.domain(
-                            "character_sheet_replace",
-                            {
-                                "character_id": actor_id,
-                                "sheet": repaired_sheet,
-                                "expected_revision": actor["revision"],
-                                "idempotency_key": (
-                                    f"full-party-spell-class-list-v1-"
-                                    f"{_token(actor_id)}-{_token(str(profile['class']))}"
-                                ),
-                            },
-                        )
-                    )
-                )
-                actor_changes.append(
-                    {
-                        "action": "repair_spell_class_lists",
-                        "class_lists": expected_class_lists,
-                    }
-                )
-        if legacy_pack is not None:
-            removed = await client.domain(
-                "inventory_change",
-                {
-                    "owner": "character",
-                    "action": "remove",
-                    "owner_id": actor_id,
-                    "payload": {"item_id": str(legacy_pack["id"])},
-                    "expected_revision": actor["revision"],
-                    "idempotency_key": (
-                        f"full-party-equipment-v2-remove-{_token(actor_id)}-"
-                        f"{_token(str(legacy_pack['id']))}"
-                    ),
-                },
-            )
-            actor = _mutation_actor(removed)
-            actor_changes.append(
-                {
-                    "action": "remove_opaque_pack",
-                    "item_id": str(legacy_pack["id"]),
-                    "name": str(legacy_pack["name"]),
-                }
-            )
-
-        existing_by_id = {
-            str(item["id"]): item
-            for item in actor["sheet"]["inventory"]["items"]
-        }
-        for item_id, desired in desired_by_id.items():
-            existing = existing_by_id.get(item_id)
-            if existing is None:
-                if item_id not in pack_item_ids or not had_pack_evidence:
-                    continue
-                added = await client.domain(
-                    "inventory_change",
-                    {
-                        "owner": "character",
-                        "action": "add",
-                        "owner_id": actor_id,
-                        "payload": {"item": desired},
-                        "expected_revision": actor["revision"],
-                        "idempotency_key": (
-                            f"full-party-equipment-v2-add-{_token(actor_id)}-"
-                            f"{_token(item_id)}"
-                        ),
-                    },
-                )
-                actor = _mutation_actor(added)
-                existing_by_id = {
-                    str(entry["id"]): entry
-                    for entry in actor["sheet"]["inventory"]["items"]
-                }
-                actor_changes.append(
-                    {
-                        "action": "add_pack_content",
-                        "item_id": item_id,
-                        "name": str(desired["name"]),
-                        "quantity": int(desired["quantity"]),
-                    }
-                )
-                continue
-
-            patch: dict[str, Any] = {}
-            if existing.get("weight_oz") != desired.get("weight_oz"):
-                patch["weight_oz"] = desired["weight_oz"]
-            if item_id in pack_item_ids:
-                for field in ("description", "mechanics", "source_key"):
-                    if existing.get(field) != desired.get(field):
-                        patch[field] = deepcopy(desired[field])
-            if not patch:
-                continue
-            updated = await client.domain(
-                "inventory_change",
-                {
-                    "owner": "character",
-                    "action": "update",
-                    "owner_id": actor_id,
-                    "payload": {"item_id": item_id, "patch": patch},
-                    "expected_revision": actor["revision"],
-                    "idempotency_key": (
-                        f"full-party-equipment-v2-update-{_token(actor_id)}-"
-                        f"{_token(item_id)}-{_token(json.dumps(patch, sort_keys=True))}"
-                    ),
-                },
-            )
-            actor = _mutation_actor(updated)
-            existing_by_id = {
-                str(entry["id"]): entry
-                for entry in actor["sheet"]["inventory"]["items"]
-            }
-            actor_changes.append(
-                {
-                    "action": "repair_item",
-                    "item_id": item_id,
-                    "name": str(desired["name"]),
-                    "patch": patch,
-                }
-            )
-
-        final_items = list(actor["sheet"]["inventory"]["items"])
-        if any(
-            str(item.get("id") or "") == legacy_pack_id
-            or str(item.get("name") or "").casefold() == pack_name.casefold()
-            for item in final_items
-        ):
-            raise RuntimeError(f"opaque pack remained for {profile['name']}")
-        if had_pack_evidence and not pack_item_ids <= {
-            str(item["id"]) for item in final_items
-        }:
-            raise RuntimeError(f"pack expansion is incomplete for {profile['name']}")
-
-        derived_inventory = dict(actor["derived"]["inventory"])
-        repaired.append(
-            {
-                "actor_id": actor_id,
-                "name": str(actor["name"]),
-                "revision": int(actor["revision"]),
-                "inventory_item_ids": [str(item["id"]) for item in final_items],
-                "total_weight_oz": derived_inventory["total_weight_oz"],
-                "encumbrance": deepcopy(derived_inventory["encumbrance"]),
-            }
-        )
-        all_changes.append(
-            {
-                "actor_id": actor_id,
-                "name": str(actor["name"]),
-                "legacy_pack_id": legacy_pack_id,
-                "pack_name": pack_name,
-                "changes": actor_changes,
-            }
-        )
-    return repaired, all_changes
-
-
 async def _apply_artifact(
     client: ExposureClient,
     *,
@@ -2305,11 +2068,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 )
             if entry_phase == "combat":
                 raise RuntimeError("party construction cannot run during active combat")
-            if (
-                len(profiles) > 1
-                and entry_phase != "lobby"
-                and args.repair_existing_party_report is None
-            ):
+            if len(profiles) > 1 and entry_phase != "lobby":
                 raise RuntimeError("full party construction requires the public Lobby profile")
             return_phase = args.return_phase or entry_phase
             if return_phase not in CAMPAIGN_GAME_PHASES:
@@ -2334,30 +2093,17 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 current_phase = "lobby"
             try:
                 catalog = await _catalog(client, args.campaign_id)
-                repair_changes: list[dict[str, Any]] = []
-                if args.repair_existing_party_report is not None:
-                    characters, repair_changes = (
-                        await _repair_existing_party_equipment(
-                            client,
-                            campaign_id=args.campaign_id,
-                            run_id=args.run_id,
-                            profiles=profiles,
-                            catalog=catalog,
-                            report_path=args.repair_existing_party_report,
-                        )
+                characters = [
+                    await _build_character(
+                        client,
+                        campaign_id=args.campaign_id,
+                        run_id=args.run_id,
+                        campaign_line_id=args.party,
+                        profile=profile,
+                        catalog=catalog,
                     )
-                else:
-                    characters = [
-                        await _build_character(
-                            client,
-                            campaign_id=args.campaign_id,
-                            run_id=args.run_id,
-                            campaign_line_id=args.party,
-                            profile=profile,
-                            catalog=catalog,
-                        )
-                        for profile in profiles
-                    ]
+                    for profile in profiles
+                ]
             except Exception:
                 if entry_phase == "play" and current_phase == "lobby":
                     await _switch_phase(
@@ -2381,11 +2127,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 if changed is not None:
                     phase_changes.append(changed)
             return {
-                "action": (
-                    "repair-campaign-party-equipment"
-                    if args.repair_existing_party_report is not None
-                    else "build-campaign-party"
-                ),
+                "action": "build-campaign-party",
                 "transport": "stdio",
                 "campaign_id": args.campaign_id,
                 "campaign_line_id": args.party,
@@ -2394,26 +2136,16 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 "entry_phase": entry_phase,
                 "return_phase": return_phase,
                 "phase_changes": phase_changes,
-                "equipment_repairs": repair_changes,
                 "manifest_members": [
-                    (
-                        {
-                            "actor_id": character["actor_id"],
-                            "source": "generated",
-                            "source_asset_path": "",
-                            "status": "active",
-                        }
-                        if args.repair_existing_party_report is not None
-                        else {
-                            key: character[key]
-                            for key in (
-                                "actor_id",
-                                "source",
-                                "source_asset_path",
-                                "status",
-                            )
-                        }
-                    )
+                    {
+                        key: character[key]
+                        for key in (
+                            "actor_id",
+                            "source",
+                            "source_asset_path",
+                            "status",
+                        )
+                    }
                     for character in characters
                 ],
             }
@@ -2426,11 +2158,7 @@ def main() -> int:
     except Exception as error:
 
         report = {
-            "action": (
-                "repair-campaign-party-equipment"
-                if args.repair_existing_party_report is not None
-                else "build-campaign-party"
-            ),
+            "action": "build-campaign-party",
             "campaign_id": args.campaign_id,
             "run_id": args.run_id,
             "campaign_line_id": args.party,

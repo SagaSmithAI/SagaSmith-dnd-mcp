@@ -30,9 +30,7 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
 ) -> None:
     module_root = tmp_path / "modules"
     module_root.mkdir()
-    encounter_excerpt = (
-        "The prism beast releases its pulse when both heroes enter the chamber."
-    )
+    encounter_excerpt = "The prism beast releases its pulse when both heroes enter the chamber."
     mechanic_excerpt = (
         "Prismatic Pulse. Each chosen creature must make a DC 14 Wisdom saving "
         "throw, taking 3d8 radiant damage on a failed save, or no damage on a "
@@ -146,11 +144,15 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
             actors.append(
                 await _call(
                     server,
-                    "character_create",
+                    "character_create_from",
                     {
-                        "campaign_id": campaign["id"],
-                        "name": name,
-                        "character_type": character_type,
+                        "mode": "direct",
+                        "payload": {
+                            "campaign_id": campaign["id"],
+                            "name": name,
+                            "character_type": character_type,
+                        },
+                        "principal_id": "system:local",
                         "idempotency_key": key,
                     },
                 )
@@ -166,11 +168,9 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
                 "description": mechanic_excerpt,
                 "activation": {"type": "action", "cost": 1},
                 "uses": {"value": 0, "max": 0, "unlimited": True},
-                "choices": {
-                    "resolution_plan": {"id": plan_id, "fingerprint": "compiled"}
-                },
+                "choices": {"resolution_plan": {"id": plan_id, "fingerprint": "compiled"}},
                 "resolution_plan": {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "id": plan_id,
                     "source_card_id": "prismatic-pulse",
                     "source_card_kind": "monster_action",
@@ -184,12 +184,10 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
                         "targets": {
                             "kind": "actor_ids",
                             "owner": "agent",
-                            "description": (
-                                "Creatures selected inside the reviewed pulse area."
-                            ),
+                            "description": ("Creatures selected inside the reviewed pulse area."),
                             "minimum_items": 1,
                             "maximum_items": 2,
-                        }
+                        },
                     },
                     "steps": [
                         {
@@ -223,9 +221,7 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
                                 "expression": "3d8",
                                 "damage_type": "radiant",
                                 "source": "Prismatic Pulse",
-                                "reduction": {
-                                    "$result": "save.damage_reduction_by_actor_id"
-                                },
+                                "reduction": {"$result": "save.damage_reduction_by_actor_id"},
                             },
                         },
                     ],
@@ -264,7 +260,7 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
                     "effect": spell_excerpt,
                 },
                 "resolution_plan": {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "id": spell_plan_id,
                     "source_card_id": "chromatic-spark",
                     "source_card_kind": "spell",
@@ -281,7 +277,7 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
                             "description": "One visible creature selected for the spark.",
                             "minimum_items": 1,
                             "maximum_items": 1,
-                        }
+                        },
                     },
                     "steps": [
                         {
@@ -401,9 +397,7 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
                     },
                 ],
                 "scene_id": expanded["scene"]["id"],
-                "battle_map": {
-                    "bounds": {"width_cells": 12, "height_cells": 12}
-                },
+                "battle_map": {"bounds": {"width_cells": 12, "height_cells": 12}},
                 "ruleset": "2014",
                 "expected_revision": play["campaign_revision"],
                 "idempotency_key": "start",
@@ -477,9 +471,7 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
             },
         )
         assert paid["status"] == "pending_ruling"
-        normalized_commitment = paid["result"]["declaration"][
-            "agent_resolution_commitment"
-        ]
+        normalized_commitment = paid["result"]["declaration"]["agent_resolution_commitment"]
         assert normalized_commitment["bound_plan_fingerprint"]
         changed = deepcopy(normalized_commitment)
         changed["bindings"]["targets"] = [hero_one["id"]]
@@ -527,24 +519,21 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
         damage = settled["result"]["results"]["damage"]
         assert damage["roll"]["total"] > 0
         save_targets = {
-            item["target_id"]: item
-            for item in settled["result"]["results"]["save"]["targets"]
+            item["target_id"]: item for item in settled["result"]["results"]["save"]["targets"]
         }
-        damage_targets = {
-            item["target_id"]: item for item in damage["targets"]
-        }
+        damage_targets = {item["target_id"]: item for item in damage["targets"]}
         for actor in (hero_one, hero_two):
             target_id = actor["id"]
             after = await _call(
                 server,
-                "character_get",
-                {"character_id": target_id},
+                "character_query",
+                {
+                    "view": "get",
+                    "payload": {"character_id": target_id},
+                    "principal_id": "system:local",
+                },
             )
-            expected_damage = (
-                0
-                if save_targets[target_id]["success"]
-                else damage["base_amount"]
-            )
+            expected_damage = 0 if save_targets[target_id]["success"] else damage["base_amount"]
             assert damage_targets[target_id]["applied_amount"] == expected_damage
             assert after["sheet"]["combat"]["hp"]["value"] == 40 - expected_damage
         replayed = await _call(
@@ -619,13 +608,15 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
                 "idempotency_key": "spell-pay",
             },
         )
-        paid_spell_commitment = spell_paid["result"]["semantic_plan"][
-            "commitment"
-        ]
+        paid_spell_commitment = spell_paid["result"]["semantic_plan"]["commitment"]
         before_spell = await _call(
             server,
-            "character_get",
-            {"character_id": hero_one["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": hero_one["id"]},
+                "principal_id": "system:local",
+            },
         )
         spell_settled = await _call(
             server,
@@ -641,26 +632,27 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
         )
         after_spell = await _call(
             server,
-            "character_get",
-            {"character_id": hero_one["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": hero_one["id"]},
+                "principal_id": "system:local",
+            },
         )
-        applied_spell_damage = spell_settled["result"]["results"]["damage"][
-            "targets"
-        ][0]["applied_amount"]
+        applied_spell_damage = spell_settled["result"]["results"]["damage"]["targets"][0][
+            "applied_amount"
+        ]
         assert applied_spell_damage > 0
         assert (
             after_spell["sheet"]["combat"]["hp"]["value"]
-            == before_spell["sheet"]["combat"]["hp"]["value"]
-            - applied_spell_damage
+            == before_spell["sheet"]["combat"]["hp"]["value"] - applied_spell_damage
         )
         assert "frightened" in after_spell["sheet"]["conditions"]
         frightened_result = spell_settled["result"]["results"]["frightened"]
         frightened_effect_id = frightened_result["targets"][0]["effect_id"]
         assert frightened_effect_id
         active_effect = next(
-            item
-            for item in after_spell["sheet"]["effects"]
-            if item["id"] == frightened_effect_id
+            item for item in after_spell["sheet"]["effects"] if item["id"] == frightened_effect_id
         )
         assert active_effect["source"] == beast["id"]
         assert active_effect["duration"] == {
@@ -683,14 +675,16 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
             revision = ended["campaign_revision"]
         after_expiry = await _call(
             server,
-            "character_get",
-            {"character_id": hero_one["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": hero_one["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert "frightened" not in after_expiry["sheet"]["conditions"]
         expired_effect = next(
-            item
-            for item in after_expiry["sheet"]["effects"]
-            if item["id"] == frightened_effect_id
+            item for item in after_expiry["sheet"]["effects"] if item["id"] == frightened_effect_id
         )
         assert expired_effect["active"] is False
 
@@ -702,9 +696,7 @@ def test_content_solution_accepts_only_exact_active_rule_chunk_evidence(
 ) -> None:
     import_root = tmp_path / "rules"
     import_root.mkdir()
-    effect = (
-        "Moon Ribbon marks one creature until the start of the caster's next turn."
-    )
+    effect = "Moon Ribbon marks one creature until the start of the caster's next turn."
     source = import_root / "moon-lore.md"
     source.write_text(
         f"# Moon Lore\n\n## Moon Ribbon\n\n{effect}\n",
@@ -734,22 +726,38 @@ def test_content_solution_accepts_only_exact_active_rule_chunk_evidence(
         )
         staged = await _call(
             server,
-            "rule_document_stage",
+            "rule_import",
             {
                 "campaign_id": campaign["id"],
-                "source_path": str(source),
+                "action": "stage",
+                "payload": {
+                    "source_path": str(source),
+                    "source_key": "moon-lore",
+                    "title": "Moon Lore",
+                    "edition": "2014",
+                },
+                "idempotency_key": "moon-rule:stage",
+            },
+        )
+        job_id = staged["job"]["id"]
+        await _call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "inspect",
+                "payload": {"job_id": job_id},
+                "idempotency_key": "moon-rule:inspect",
             },
         )
         await _call(
             server,
-            "rule_document_import",
+            "rule_import",
             {
                 "campaign_id": campaign["id"],
-                "artifact": staged["artifact"],
-                "source_key": "moon-lore",
-                "title": "Moon Lore",
-                "edition": "2014",
-                "idempotency_key": "import",
+                "action": "ingest",
+                "payload": {"job_id": job_id},
+                "idempotency_key": "moon-rule:ingest",
             },
         )
         hits = await _call(
@@ -779,11 +787,11 @@ def test_content_solution_accepts_only_exact_active_rule_chunk_evidence(
         ]
         actor = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Moon Keeper",
-                "sheet": sheet,
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Moon Keeper", "sheet": sheet},
+                "principal_id": "system:local",
                 "idempotency_key": "actor",
             },
         )
@@ -841,9 +849,7 @@ def test_content_solution_accepts_only_exact_active_rule_chunk_evidence(
         standard_arguments = deepcopy(arguments)
         standard_arguments.update(
             {
-                "source_card_id": (
-                    "dnd5e.content.srd2014.feature.fighter-action-surge"
-                ),
+                "source_card_id": ("dnd5e.content.srd2014.feature.fighter-action-surge"),
                 "idempotency_key": "reject-standard",
             }
         )
@@ -913,13 +919,9 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
 ) -> None:
     module_root = tmp_path / "modules"
     module_root.mkdir()
-    encounter_excerpt = (
-        "The binding blade restrains the creature it strikes in the warded room."
-    )
+    encounter_excerpt = "The binding blade restrains the creature it strikes in the warded room."
     mechanic_excerpt = "On a hit, the binding blade restrains the target."
-    feature_excerpt = (
-        "The ward lore can mark a creature chosen by the blade's keeper."
-    )
+    feature_excerpt = "The ward lore can mark a creature chosen by the blade's keeper."
     source = module_root / "binding-blade.md"
     source.write_text(
         "# Warded Room\n\n## Encounter\n\n"
@@ -1021,21 +1023,29 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
         )
         wielder = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Blade Wielder",
-                "character_type": "npc",
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Blade Wielder",
+                    "character_type": "npc",
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "wielder",
             },
         )
         target = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Target",
-                "character_type": "monster",
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Target",
+                    "character_type": "monster",
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "target",
             },
         )
@@ -1075,16 +1085,12 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
                         "source_actor": {
                             "kind": "actor_id",
                             "owner": "agent",
-                            "description": (
-                                "The wielder that made the triggering attack."
-                            ),
+                            "description": ("The wielder that made the triggering attack."),
                         },
                         "target": {
                             "kind": "actor_id",
                             "owner": "agent",
-                            "description": (
-                                "The creature hit by the triggering attack."
-                            ),
+                            "description": ("The creature hit by the triggering attack."),
                         },
                     },
                     "steps": [
@@ -1092,9 +1098,7 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
                             "id": "targets",
                             "op": "target.validate",
                             "args": {
-                                "source_actor_id": {
-                                    "$slot": "source_actor"
-                                },
+                                "source_actor_id": {"$slot": "source_actor"},
                                 "target_ids": [{"$slot": "target"}],
                                 "exclude_self": True,
                                 "maximum_range_ft": 5,
@@ -1122,12 +1126,8 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
                 },
             }
         ]
-        wielder_sheet["inventory"]["equipment_slots"]["main_hand"] = (
-            "binding-blade"
-        )
-        item_plan = deepcopy(
-            wielder_sheet["inventory"]["items"][0].pop("resolution_plan")
-        )
+        wielder_sheet["inventory"]["equipment_slots"]["main_hand"] = "binding-blade"
+        item_plan = deepcopy(wielder_sheet["inventory"]["items"][0].pop("resolution_plan"))
         wielder_sheet["content"]["features"] = [
             {
                 "id": "ward-lore",
@@ -1158,8 +1158,12 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
             )
         wielder_current = await _call(
             server,
-            "character_get",
-            {"character_id": wielder["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": wielder["id"]},
+                "principal_id": "system:local",
+            },
         )
         feature_plan = {
             "schema_version": 2,
@@ -1205,12 +1209,8 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
                 "agent_ruling": {
                     "default_resolver": "agent",
                     "ruling_kind": "module_specific_procedure",
-                    "decision": (
-                        "Store the quoted mark as a reusable feature solution."
-                    ),
-                    "reason": (
-                        "The exact feature text identifies the chosen creature."
-                    ),
+                    "decision": ("Store the quoted mark as a reusable feature solution."),
+                    "reason": ("The exact feature text identifies the chosen creature."),
                 },
             },
             "expected_revision": wielder_current["revision"],
@@ -1222,11 +1222,14 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
             feature_compile_arguments,
         )
         assert feature_compiled["status"] == "compiled"
-        assert await _call(
-            server,
-            "content_solution",
-            feature_compile_arguments,
-        ) == feature_compiled
+        assert (
+            await _call(
+                server,
+                "content_solution",
+                feature_compile_arguments,
+            )
+            == feature_compiled
+        )
         feature_query = await _call(
             server,
             "content_solution",
@@ -1277,9 +1280,7 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
                     },
                 ],
                 "scene_id": expanded["scene"]["id"],
-                "battle_map": {
-                    "bounds": {"width_cells": 8, "height_cells": 8}
-                },
+                "battle_map": {"bounds": {"width_cells": 8, "height_cells": 8}},
                 "ruleset": "2014",
                 "expected_revision": play["campaign_revision"],
                 "idempotency_key": "start",
@@ -1307,8 +1308,12 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
         assert semantic["application_id"]
         wielder_at_first_use = await _call(
             server,
-            "character_get",
-            {"character_id": wielder["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": wielder["id"]},
+                "principal_id": "system:local",
+            },
         )
         compiled_item = await _call(
             server,
@@ -1341,8 +1346,7 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
             "ruling_kind": "source_or_scene_fact",
             "decision": "The reviewed blade hit this adjacent target.",
             "reason": (
-                "The server-recorded attack and current positions satisfy the "
-                "source trigger."
+                "The server-recorded attack and current positions satisfy the source trigger."
             ),
             "source_ref": deepcopy(expanded["source_ref"]),
             "source_excerpt": encounter_excerpt,
@@ -1390,23 +1394,29 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
         )
         target_after = await _call(
             server,
-            "character_get",
-            {"character_id": target["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": target["id"]},
+                "principal_id": "system:local",
+            },
         )
 
         assert settled["status"] == "committed"
         assert "restrained" in target_after["sheet"]["conditions"]
         wielder_after = await _call(
             server,
-            "character_get",
-            {"character_id": wielder["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": wielder["id"]},
+                "principal_id": "system:local",
+            },
         )
         stored_item = wielder_after["sheet"]["inventory"]["items"][0]
-        assert stored_item["resolution_plan"]["fingerprint"] == (
-            contract["plan_fingerprint"]
-        )
-        assert stored_item["resolution_solution"]["plan_fingerprint"] == (
-            contract["plan_fingerprint"]
+        assert stored_item["resolution_plan"]["fingerprint"] == (contract["plan_fingerprint"])
+        assert (
+            stored_item["resolution_solution"]["plan_fingerprint"] == (contract["plan_fingerprint"])
         )
         assert all(
             item.get("id") != semantic["application_id"]
@@ -1440,9 +1450,7 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
                 "idempotency_key": "second-attack",
             },
         )
-        assert reused["result"]["semantic_plan"]["status"] == (
-            "payment_recorded"
-        )
+        assert reused["result"]["semantic_plan"]["status"] == ("payment_recorded")
         assert "semantic_solution" not in reused["result"]
 
     asyncio.run(exercise())

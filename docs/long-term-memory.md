@@ -14,14 +14,13 @@ also require the current `expected_revision_id`.
 
 Use `memory_change` only for administrative fact maintenance:
 
-- `add` creates a fact; generated legacy keys are supported for compatibility.
+- `add` creates a fact and assigns a canonical stable key when one is omitted.
 - `upsert` targets `fact_key`; revising an existing fact requires
   `expected_revision_id` and preserves omitted revision fields.
 - `revise` targets `memory_id` and creates a new immutable revision.
 - `supersede` keeps history while removing the fact from default retrieval.
 
-Character-sheet `notes.memories` is a deprecated import source, not an
-authoritative campaign-memory store. Public
+Character-sheet notes never contain actor knowledge or campaign facts. Public
 `character_state_change` deliberately has no `memory_add` or `memory_resolve`
 action; use stable-keyed `actor_knowledge_change(add/revise)` for subjective
 knowledge and `memory_change` for objective facts or an atomic continuity event.

@@ -51,11 +51,15 @@ def test_public_magic_item_update_hydrates_new_spellcasting_mechanics(
         )
         caster = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Caster",
-                "sheet": default_character_sheet(),
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Caster",
+                    "sheet": default_character_sheet(),
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "caster",
             },
         )
@@ -164,11 +168,11 @@ def test_public_magic_item_spell_cast_hydrates_card_and_pays_action_and_charges(
         sheet["spellcasting"]["class_lists"] = ["wizard"]
         caster = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Caster",
-                "sheet": sheet,
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Caster", "sheet": sheet},
+                "principal_id": "system:local",
                 "idempotency_key": "caster",
             },
         )
@@ -470,9 +474,7 @@ def test_public_magic_item_spell_cast_hydrates_card_and_pays_action_and_charges(
         )
         assert final_staff["charges"]["value"] == 0
         assert (final_staff["condition"] == "destroyed") is last_charge["destroyed"]
-        assert final_caster["derived"]["armor_class"] == (
-            15 if last_charge["destroyed"] else 16
-        )
+        assert final_caster["derived"]["armor_class"] == (15 if last_charge["destroyed"] else 16)
         assert ended["outcome"]["status"] == "interrupted"
         assert reduced["revision"] == after_end_caster["revision"] + 1
 

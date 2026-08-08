@@ -123,21 +123,25 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
         )
         ruffian = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Ruffian",
-                "character_type": "monster",
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Ruffian",
+                    "character_type": "monster",
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "ruffian",
             },
         )
         hero = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Hero",
-                "character_type": "pc",
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Hero", "character_type": "pc"},
+                "principal_id": "system:local",
                 "idempotency_key": "hero",
             },
         )
@@ -155,11 +159,15 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
         )
         late_ruffian = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Late Ruffian",
-                "character_type": "monster",
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Late Ruffian",
+                    "character_type": "monster",
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "late-ruffian",
             },
         )
@@ -251,18 +259,18 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
 
         started = await _call(server, "combat_start", start_arguments)
         ruffian_combatant = next(
-            item
-            for item in started["combat"]["combatants"]
-            if item["actor_id"] == ruffian["id"]
+            item for item in started["combat"]["combatants"] if item["actor_id"] == ruffian["id"]
         )
         assert set(ruffian_combatant["conditions"]) == {"blinded", "poisoned"}
-        assert started["combat"]["source_conditions"][0]["source_ref"] == (
-            expanded["source_ref"]
-        )
+        assert started["combat"]["source_conditions"][0]["source_ref"] == (expanded["source_ref"])
         during = await _call(
             server,
-            "character_get",
-            {"character_id": ruffian["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": ruffian["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert set(during["sheet"]["conditions"]) == {"blinded", "poisoned"}
         interacted = await _call(
@@ -296,9 +304,7 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
             },
         )
         interacted_combatant = next(
-            item
-            for item in interacted["combat"]["combatants"]
-            if item["actor_id"] == ruffian["id"]
+            item for item in interacted["combat"]["combatants"] if item["actor_id"] == ruffian["id"]
         )
         assert interacted["condition_resolution"]["removed"] is True
         assert interacted_combatant["turn_budget"]["object_interaction"] == 0
@@ -312,8 +318,12 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
         assert ended_source_condition["ended_reason"] == "agent_object_interaction"
         after_interaction = await _call(
             server,
-            "character_get",
-            {"character_id": ruffian["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": ruffian["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert after_interaction["sheet"]["conditions"] == ["poisoned"]
         uncovered = await _call(
@@ -329,20 +339,16 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
                 },
             },
         )
-        cover_excerpt = (
-            "The overturned table grants the hero half cover against the ruffians."
-        )
+        cover_excerpt = "The overturned table grants the hero half cover against the ruffians."
         cover_ruling = {
             "application_id": "common-room-table-cover",
             "default_resolver": "agent",
             "ruling_kind": "source_or_scene_fact",
             "decision": (
-                "The hero remains behind the overturned table relative to this "
-                "ruffian's attack."
+                "The hero remains behind the overturned table relative to this ruffian's attack."
             ),
             "reason": (
-                "The active scene explicitly grants the hero half cover against "
-                "the ruffians."
+                "The active scene explicitly grants the hero half cover against the ruffians."
             ),
             "source_ref": expanded["source_ref"],
             "source_excerpt": cover_excerpt,
@@ -410,13 +416,18 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
             },
         )
         assert joined["queued"]["conditions"] == ["poisoned"]
-        assert {
-            item["actor_id"] for item in joined["combat"]["source_conditions"]
-        } == {ruffian["id"], late_ruffian["id"]}
+        assert {item["actor_id"] for item in joined["combat"]["source_conditions"]} == {
+            ruffian["id"],
+            late_ruffian["id"],
+        }
         late_during = await _call(
             server,
-            "character_get",
-            {"character_id": late_ruffian["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": late_ruffian["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert late_during["sheet"]["conditions"] == ["poisoned"]
         preflight = await _call(
@@ -478,15 +489,23 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
         )
         after = await _call(
             server,
-            "character_get",
-            {"character_id": ruffian["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": ruffian["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert ended["ended"] is True
         assert after["sheet"]["conditions"] == []
         late_after = await _call(
             server,
-            "character_get",
-            {"character_id": late_ruffian["id"]},
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": late_ruffian["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert late_after["sheet"]["conditions"] == []
 

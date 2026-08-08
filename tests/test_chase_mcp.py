@@ -57,9 +57,7 @@ def test_public_chase_uses_exact_module_source_and_no_combat_map(
         "chase. The kenku drags a heavy sack and suffers a 10-foot reduction to "
         "its speed, and when the characters are close, the kenku ducks into an old tower."
     )
-    speed_excerpt = (
-        "The kenku drags a heavy sack and suffers a 10-foot reduction to its speed"
-    )
+    speed_excerpt = "The kenku drags a heavy sack and suffers a 10-foot reduction to its speed"
     source = import_root / "chase.md"
     source.write_text(
         "# Chapter Four\n\n"
@@ -113,7 +111,15 @@ def test_public_chase_uses_exact_module_source_and_no_combat_map(
                     "idempotency_key": action,
                 },
             )
-        current_campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        current_campaign = await _call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
+        )
         await _call(
             server,
             "module_import",
@@ -166,26 +172,38 @@ def test_public_chase_uses_exact_module_source_and_no_combat_map(
         actor_sheet["combat"]["hp"] = {"value": 20, "max": 20, "temp": 0}
         pursuer = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Pursuer",
-                "sheet": actor_sheet,
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Pursuer", "sheet": actor_sheet},
+                "principal_id": "system:local",
                 "idempotency_key": "pursuer",
             },
         )
         quarry = await _call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "campaign_id": campaign["id"],
-                "name": "Kenku",
-                "character_type": "npc",
-                "sheet": actor_sheet,
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Kenku",
+                    "character_type": "npc",
+                    "sheet": actor_sheet,
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "quarry",
             },
         )
-        current_campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        current_campaign = await _call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
+        )
         phase = await _call(
             server,
             "game_phase",
@@ -265,9 +283,7 @@ def test_public_chase_uses_exact_module_source_and_no_combat_map(
             == transition_expanded["chunk_id"]
         )
         quarry_state = next(
-            item
-            for item in started["chase"]["participants"]
-            if item["actor_id"] == quarry["id"]
+            item for item in started["chase"]["participants"] if item["actor_id"] == quarry["id"]
         )
         assert quarry_state["base_speed_ft"] == 30
         assert quarry_state["speed_adjustment_ft"] == -10
@@ -279,8 +295,16 @@ def test_public_chase_uses_exact_module_source_and_no_combat_map(
             for receipt in started["rule_receipts"]
         )
 
-        current_pursuer = await _call(server, "character_get", {"character_id": pursuer["id"]})
-        with pytest.raises(Exception, match="is required"):
+        current_pursuer = await _call(
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": pursuer["id"]},
+                "principal_id": "system:local",
+            },
+        )
+        with pytest.raises(Exception, match="required"):
             await _call(
                 server,
                 "chase",

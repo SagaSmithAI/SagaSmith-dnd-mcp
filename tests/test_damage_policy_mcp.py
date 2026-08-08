@@ -28,7 +28,7 @@ def test_generic_damage_uses_encounter_death_save_policy_and_skips_dead_turn(
 
     async def call_raw(server, name: str, arguments: dict):
         _, result = await server.call_tool(name, arguments)
-        return result
+        return result.get("result", result) if isinstance(result, dict) else result
 
     async def exercise() -> None:
         server = create_server(config)
@@ -39,31 +39,43 @@ def test_generic_damage_uses_encounter_death_save_policy_and_skips_dead_turn(
         )
         acting = await call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "name": "Acting PC",
-                "campaign_id": campaign["id"],
-                "character_type": "pc",
+                "mode": "direct",
+                "payload": {
+                    "name": "Acting PC",
+                    "campaign_id": campaign["id"],
+                    "character_type": "pc",
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "acting",
             },
         )
         target = await call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "name": "No-death-save target",
-                "campaign_id": campaign["id"],
-                "character_type": "pc",
+                "mode": "direct",
+                "payload": {
+                    "name": "No-death-save target",
+                    "campaign_id": campaign["id"],
+                    "character_type": "pc",
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "target",
             },
         )
         outsider = await call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "name": "Outside encounter",
-                "campaign_id": campaign["id"],
-                "character_type": "pc",
+                "mode": "direct",
+                "payload": {
+                    "name": "Outside encounter",
+                    "campaign_id": campaign["id"],
+                    "character_type": "pc",
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "outsider",
             },
         )
@@ -79,7 +91,15 @@ def test_generic_damage_uses_encounter_death_save_policy_and_skips_dead_turn(
                 "idempotency_key": "target-sheet",
             },
         )
-        campaign = await call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        campaign = await call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
+        )
         started = await call_raw(
             server,
             "combat_start",
@@ -97,11 +117,13 @@ def test_generic_damage_uses_encounter_death_save_policy_and_skips_dead_turn(
         with pytest.raises(Exception, match="healing target is not a combatant"):
             await call_raw(
                 server,
-                "combat_heal",
+                "combat_hp_change",
                 {
                     "campaign_id": campaign["id"],
                     "target_id": outsider["id"],
-                    "amount": 1,
+                    "action": "heal",
+                    "payload": {"amount": 1},
+                    "principal_id": "system:local",
                     "expected_revision": started["campaign_revision"],
                     "idempotency_key": "heal-outsider",
                 },
@@ -109,12 +131,13 @@ def test_generic_damage_uses_encounter_death_save_policy_and_skips_dead_turn(
         with pytest.raises(Exception, match="healing source is not a combatant"):
             await call_raw(
                 server,
-                "combat_heal",
+                "combat_hp_change",
                 {
                     "campaign_id": campaign["id"],
                     "target_id": acting["id"],
-                    "source_actor_id": outsider["id"],
-                    "amount": 1,
+                    "action": "heal",
+                    "payload": {"source_actor_id": outsider["id"], "amount": 1},
+                    "principal_id": "system:local",
                     "expected_revision": started["campaign_revision"],
                     "idempotency_key": "heal-from-outsider",
                 },
@@ -135,17 +158,25 @@ def test_generic_damage_uses_encounter_death_save_policy_and_skips_dead_turn(
             )
         damaged = await call_raw(
             server,
-            "combat_apply_damage",
+            "combat_hp_change",
             {
                 "campaign_id": campaign["id"],
                 "target_id": target["id"],
-                "parts": [{"amount": 5, "damage_type": "radiant"}],
+                "action": "damage",
+                "payload": {"parts": [{"amount": 5, "damage_type": "radiant"}]},
+                "principal_id": "system:local",
                 "expected_revision": started["campaign_revision"],
                 "idempotency_key": "damage",
             },
         )
         target_after = await call(
-            server, "character_get", {"character_id": target["id"]}
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": target["id"]},
+                "principal_id": "system:local",
+            },
         )
         assert {"dead", "prone"} <= set(target_after["sheet"]["conditions"])
         assert "unconscious" not in target_after["sheet"]["conditions"]
@@ -163,8 +194,7 @@ def test_generic_damage_uses_encounter_death_save_policy_and_skips_dead_turn(
         current = advanced["combat"]["combatants"][advanced["combat"]["turn_index"]]
         assert current["actor_id"] == acting["id"]
         assert any(
-            item.get("type") == "turn_skipped"
-            and item.get("actor_id") == target["id"]
+            item.get("type") == "turn_skipped" and item.get("actor_id") == target["id"]
             for item in advanced["combat"]["log"]
         )
 

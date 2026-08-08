@@ -34,12 +34,15 @@ COMMONER = """### Commoner
 """
 
 
-REACTIVE_COMMONER = COMMONER + """
+REACTIVE_COMMONER = (
+    COMMONER
+    + """
 
 ###### Reactions
 
 ***Parry***. The commoner adds 2 to its AC against one melee attack that would hit it.
 """
+)
 
 
 BROKEN_SPELLCASTER = COMMONER.replace(
@@ -183,10 +186,7 @@ At will: animal friendship (snakes only)
 
 async def _call(server, name: str, arguments: dict):
     _, result = await server.call_tool(name, arguments)
-    value = result.get("result", result) if isinstance(result, dict) else result
-    if isinstance(value, dict) and "action" in value and "result" in value:
-        return value["result"]
-    return value
+    return result.get("result", result) if isinstance(result, dict) else result
 
 
 def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path) -> None:
@@ -269,8 +269,7 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
         )
         assert chunks
         assert any(
-            "commoner"
-            in "\n".join([*item["heading_path"], item["content"]]).casefold()
+            "commoner" in "\n".join([*item["heading_path"], item["content"]]).casefold()
             for item in chunks
         )
         arguments = {
@@ -309,11 +308,13 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
         assert club["attack_bonus"] == 2
         assert club["damage_expression"] == "1d4"
         assert "rule-source:srd/commoner" in actor["notes"]["profile"]["dm_notes"]
-        assert "Normalization notes: Club: trailing creature prose excluded" in (
-            actor["notes"]["profile"]["dm_notes"]
+        assert (
+            "Normalization notes: Club: trailing creature prose excluded"
+            in (actor["notes"]["profile"]["dm_notes"])
         )
-        assert "Manual rulings: Club: trailing creature prose excluded" not in (
-            actor["notes"]["profile"]["dm_notes"]
+        assert (
+            "Manual rulings: Club: trailing creature prose excluded"
+            not in (actor["notes"]["profile"]["dm_notes"])
         )
 
         replacement_arguments = {
@@ -347,12 +348,7 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
         assert replaced["character"]["revision"] == actor["revision"] + 1
         assert replaced["character"]["sheet"]["combat"]["hp"]["value"] == 1
         assert replaced["character"]["summary"].startswith("A tavern patron")
-        assert (
-            replaced["character"]["notes"]["profile"]["dm_notes"].count(
-                "Statblock import:"
-            )
-            == 2
-        )
+        assert replaced["character"]["notes"]["profile"]["dm_notes"].count("Statblock import:") == 2
 
         variant = await _call(
             server,
@@ -366,9 +362,7 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
                     "character_type": "npc",
                     "variant": {
                         "source_ref": f"rule-chunk:{created['source']['chunk_ids'][0]}",
-                        "source_refs": [
-                            f"rule-chunk:{created['source']['chunk_ids'][1]}"
-                        ],
+                        "source_refs": [f"rule-chunk:{created['source']['chunk_ids'][1]}"],
                         "challenge_rating": "1/8",
                         "experience_points": 25,
                         "creature_type": "undead",
@@ -440,58 +434,68 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
         assert variant_actor["derived"]["inventory"]["weapon_attacks"][0]["item_id"] == (
             "gauntlet-slam"
         )
-        assert variant_actor["derived"]["inventory"]["weapon_attacks"][0][
-            "additional_damage"
-        ][0] == {
+        assert variant_actor["derived"]["inventory"]["weapon_attacks"][0]["additional_damage"][
+            0
+        ] == {
             "damage_formula": "1d6",
             "damage_bonus": 0,
             "damage_type": "fire",
             "damage_expression": "1d6",
         }
-        assert "Variant source: rule-chunk:" in (
-            variant_actor["notes"]["profile"]["dm_notes"]
-        )
+        assert "Variant source: rule-chunk:" in (variant_actor["notes"]["profile"]["dm_notes"])
         assert variant["variant_evidence"]["kind"] == "multiple"
         assert len(variant["variant_evidence"]["sources"]) == 2
-        assert {
-            item["source_id"] for item in variant["variant_evidence"]["sources"]
-        } == {ingested["source_id"]}
+        assert {item["source_id"] for item in variant["variant_evidence"]["sources"]} == {
+            ingested["source_id"]
+        }
         current_campaign = await _call(
             server,
-            "campaign_get",
-            {"campaign_id": campaign["id"]},
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
         )
         immune = await _call(
             server,
-            "combat_apply_damage",
+            "combat_hp_change",
             {
                 "campaign_id": campaign["id"],
                 "target_id": variant_actor["id"],
-                "parts": [{"amount": 1, "damage_type": "cold"}],
+                "action": "damage",
+                "payload": {"parts": [{"amount": 1, "damage_type": "cold"}]},
+                "principal_id": "system:local",
                 "expected_revision": current_campaign["revision"],
                 "idempotency_key": "variant-cold-immunity",
             },
         )
-        assert immune["after_hp"] == 1
-        assert immune["applied_amount"] == 0
+        assert immune["result"]["after_hp"] == 1
+        assert immune["result"]["applied_amount"] == 0
 
         current_campaign = await _call(
             server,
-            "campaign_get",
-            {"campaign_id": campaign["id"]},
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
         )
         downed_by_damage = await _call(
             server,
-            "combat_apply_damage",
+            "combat_hp_change",
             {
                 "campaign_id": campaign["id"],
                 "target_id": variant_actor["id"],
-                "parts": [{"amount": 1, "damage_type": "force"}],
+                "action": "damage",
+                "payload": {"parts": [{"amount": 1, "damage_type": "force"}]},
+                "principal_id": "system:local",
                 "expected_revision": current_campaign["revision"],
                 "idempotency_key": "variant-force-damage",
             },
         )
-        assert downed_by_damage["after_hp"] == 0
+        assert downed_by_damage["result"]["after_hp"] == 0
 
         downed = await _call(
             server,
@@ -658,8 +662,7 @@ def test_rule_statblock_recovers_split_text_layout_without_images(tmp_path: Path
         assert created["source"]["chunk_ids"] == recovery["chunk_ids"]
         assert len(recovery["chunk_ids"]) == 8
         assert all(
-            "KNIGHT"
-            not in next(item for item in chunks if item["id"] == chunk_id)["heading_path"]
+            "KNIGHT" not in next(item for item in chunks if item["id"] == chunk_id)["heading_path"]
             for chunk_id in recovery["chunk_ids"]
         )
         assert created["statblock"]["challenge_rating"] == "1/8"
@@ -668,9 +671,10 @@ def test_rule_statblock_recovers_split_text_layout_without_images(tmp_path: Path
         assert spear["item_id"] == "spear"
         assert spear["attack_bonus"] == 3
         assert spear["range_ft"] == {"normal": 20, "long": 60}
-        assert "Text-layout recovery: deterministic-text-layout-v1" in created[
-            "character"
-        ]["notes"]["profile"]["dm_notes"]
+        assert (
+            "Text-layout recovery: deterministic-text-layout-v1"
+            in created["character"]["notes"]["profile"]["dm_notes"]
+        )
         with pytest.raises(ToolError, match="no creature core headed 'Archmage'"):
             await _call(
                 server,
@@ -874,7 +878,7 @@ def test_standard_statblock_prefills_source_specific_weapon_rider_ruling(
     asyncio.run(exercise())
 
 
-def test_standard_statblock_prefills_open_multiattack_as_direct_agent_ruling(
+def test_standard_statblock_keeps_open_multiattack_as_source_bound_agent_ruling(
     tmp_path: Path,
 ) -> None:
     import_root = tmp_path / "rules"
@@ -965,20 +969,19 @@ def test_standard_statblock_prefills_open_multiattack_as_direct_agent_ruling(
             },
         )
         multiattack = next(
-            item
-            for item in created["character"]["sheet"]["content"]["activities"]
-            if item["name"] == "Multiattack"
+            activity
+            for activity in created["character"]["sheet"]["content"]["activities"]
+            if activity["name"] == "Multiattack"
         )
+        assert multiattack["mechanic_refs"] == []
         assert multiattack["choices"]["manual_ruling"] == {
-            "kind": "descriptive_activity",
+            "kind": "multiattack_composition",
             "default_resolver": "agent",
             "source_excerpt": (
                 "The commoner makes two attacks and can ring its alarm bell "
                 "before, between, or after them."
             ),
         }
-        assert multiattack["mechanic_refs"] == []
-        assert created["statblock"]["settlement"] == "mixed"
 
     asyncio.run(exercise())
 
@@ -1085,9 +1088,7 @@ def test_statblock_spellcasting_binds_slots_and_active_content(tmp_path: Path) -
         spells = {item["name"]: item for item in actor["sheet"]["content"]["spells"]}
         assert spells["Chill Touch"]["id"] == "dnd5e.content.srd2014.spell.chill-touch"
         assert spells["Shield"]["id"] == "dnd5e.content.srd2014.spell.shield"
-        assert spells["Scorching Ray"]["id"] == (
-            "dnd5e.content.srd2014.spell.scorching-ray"
-        )
+        assert spells["Scorching Ray"]["id"] == ("dnd5e.content.srd2014.spell.scorching-ray")
         assert spells["Ray of Sickness"]["id"] == (
             "rule-source:module/master-of-souls.spell.ray-of-sickness"
         )
@@ -1096,19 +1097,13 @@ def test_statblock_spellcasting_binds_slots_and_active_content(tmp_path: Path) -
             "component_details": "not_repeated_in_statblock",
         }
         assert spells["Scorching Ray"]["resolution"]["attack"]["count"]["base"] == 3
-        assert spells["Scorching Ray"]["resolution"]["attack"][
-            "attack_bonus_override"
-        ] == 6
-        assert spells["Scorching Ray"]["resolution"]["attack"][
-            "range_ft_override"
-        ] == 60
+        assert spells["Scorching Ray"]["resolution"]["attack"]["attack_bonus_override"] == 6
+        assert spells["Scorching Ray"]["resolution"]["attack"]["range_ft_override"] == 60
         assert spells["Scorching Ray"]["definition"]["range"]["normal_ft"] == 60
         assert spells["Scorching Ray"]["definition"]["range"]["long_ft"] == 0
         assert "range 60 ft." in spells["Scorching Ray"]["definition"]["effect"]
         assert "Statblock action overrides" in spells["Scorching Ray"]["notes"]
-        assert spells["Ray of Sickness"]["resolution"]["attack"][
-            "attack_bonus_override"
-        ] == 6
+        assert spells["Ray of Sickness"]["resolution"]["attack"]["attack_bonus_override"] == 6
         assert spells["Ray of Sickness"]["definition"]["range"]["normal_ft"] == 60
         assert spells["Ray of Sickness"]["definition"]["range"]["long_ft"] == 0
         assert spells["Ray of Sickness"]["mechanic_refs"] == [
@@ -1133,12 +1128,8 @@ def test_statblock_spellcasting_binds_slots_and_active_content(tmp_path: Path) -
                         "current_hit_points": 31,
                         "spell_replacements": [
                             {
-                                "remove_spell_id": (
-                                    "dnd5e.content.srd2014.spell.shield"
-                                ),
-                                "add_spell_id": (
-                                    "dnd5e.content.srd2014.spell.magic-missile"
-                                ),
+                                "remove_spell_id": ("dnd5e.content.srd2014.spell.shield"),
+                                "add_spell_id": ("dnd5e.content.srd2014.spell.magic-missile"),
                             }
                         ],
                         "expend_all_spell_slots": True,
@@ -1169,35 +1160,33 @@ def test_statblock_spellcasting_binds_slots_and_active_content(tmp_path: Path) -
             slot["value"] == 0
             for slot in variant_actor["sheet"]["spellcasting"]["spell_slots"].values()
         )
-        variant_spell_ids = {
-            item["id"] for item in variant_actor["sheet"]["content"]["spells"]
-        }
+        variant_spell_ids = {item["id"] for item in variant_actor["sheet"]["content"]["spells"]}
         assert "dnd5e.content.srd2014.spell.shield" not in variant_spell_ids
         assert "dnd5e.content.srd2014.spell.magic-missile" in variant_spell_ids
-        assert "dnd5e.content.srd2014.spell.magic-missile" in (
-            variant_actor["derived"]["spellcasting"]["prepared_spell_ids"]
+        assert (
+            "dnd5e.content.srd2014.spell.magic-missile"
+            in (variant_actor["derived"]["spellcasting"]["prepared_spell_ids"])
         )
         assert any(
-            item["id"] == "variant-brave"
-            for item in variant_actor["sheet"]["content"]["features"]
+            item["id"] == "variant-brave" for item in variant_actor["sheet"]["content"]["features"]
         )
         assert variant["variant_evidence"]["id"] == source_chunk_id
         ray_id = spells["Ray of Sickness"]["id"]
         pending_components = await _call(
             server,
-            "character_cast_spell",
+            "character_action",
             {
                 "character_id": actor["id"],
-                "spell_id": ray_id,
+                "action": "cast_spell",
+                "payload": {"spell_id": ray_id},
+                "principal_id": "system:local",
                 "expected_revision": actor["revision"],
                 "idempotency_key": "cast-without-component-ruling",
             },
         )
         assert pending_components["status"] == "pending_ruling"
         assert pending_components["default_resolver"] == "external_input"
-        assert pending_components["ruling_kind"] == (
-            "missing_or_conflicting_source_review"
-        )
+        assert pending_components["ruling_kind"] == ("missing_or_conflicting_source_review")
         assert pending_components["committed"] is False
         assert pending_components["missing"] == ["source_components"]
         after_pending = await _call(
@@ -1208,22 +1197,29 @@ def test_statblock_spellcasting_binds_slots_and_active_content(tmp_path: Path) -
         assert after_pending["state"]["game_time"]["elapsed_ticks"] == 0
         cast = await _call(
             server,
-            "character_cast_spell",
+            "character_action",
             {
                 "character_id": actor["id"],
-                "spell_id": ray_id,
-                "component_ruling": {"source_components_confirmed": True},
+                "action": "cast_spell",
+                "payload": {
+                    "spell_id": ray_id,
+                    "component_ruling": {"source_components_confirmed": True},
+                },
+                "principal_id": "system:local",
                 "expected_revision": actor["revision"],
                 "idempotency_key": "cast-with-component-ruling",
             },
         )
-        assert cast["status"] == "committed"
-        assert cast["payment"] == {
+        assert cast["status"] == "pending_ruling"
+        assert cast["default_resolver"] == "agent"
+        assert cast["ruling_kind"] == "generic_spell_effect"
+        assert cast["result"]["status"] == "committed"
+        assert cast["result"]["payment"] == {
             "economy": "slots",
             "level": 1,
             "ritual": False,
         }
-        assert "source_components" in cast["ruling_required"]
+        assert "source_components" in cast["result"]["ruling_required"]
         after_cast = await _call(
             server,
             "campaign_query",
@@ -1236,9 +1232,9 @@ def test_statblock_spellcasting_binds_slots_and_active_content(tmp_path: Path) -
             {"view": "get", "payload": {"character_id": actor["id"]}},
         )
         assert updated_actor["sheet"]["spellcasting"]["spell_slots"]["1"]["value"] == 3
-        assert [
-            item["item_id"] for item in actor["derived"]["inventory"]["weapon_attacks"]
-        ] == ["silvered-skull-flail"]
+        assert [item["item_id"] for item in actor["derived"]["inventory"]["weapon_attacks"]] == [
+            "silvered-skull-flail"
+        ]
         flail = actor["derived"]["inventory"]["weapon_attacks"][0]
         assert flail["additional_damage"] == [
             {
@@ -1266,8 +1262,7 @@ def test_statblock_spellcasting_binds_slots_and_active_content(tmp_path: Path) -
             "Ray of Sickness: source-bound statblock spell requires component ruling",
         ]
         assert {
-            item["default_resolver"]
-            for item in created["statblock"]["ruling_requirements"]
+            item["default_resolver"] for item in created["statblock"]["ruling_requirements"]
         } == {"agent"}
 
     asyncio.run(exercise())
@@ -1355,16 +1350,12 @@ def test_innate_statblock_spellcasting_binds_daily_uses_and_qualifiers(
         )
 
         actor = created["character"]
-        spells = {
-            item["name"]: item for item in actor["sheet"]["content"]["spells"]
-        }
+        spells = {item["name"]: item for item in actor["sheet"]["content"]["spells"]}
         animal_friendship = spells["Animal Friendship"]
         suggestion = spells["Suggestion"]
         assert animal_friendship["grant"]["method"] == "innate"
         assert animal_friendship["access"]["at_will"] is True
-        assert animal_friendship["custom_definition"][
-            "statblock_source_qualifier"
-        ] == "snakes only"
+        assert animal_friendship["custom_definition"]["statblock_source_qualifier"] == "snakes only"
         assert suggestion["grant"]["method"] == "innate"
         assert suggestion["access"]["at_will"] is False
         resource_key = suggestion["custom_definition"]["innate_resource_key"]

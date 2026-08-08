@@ -142,12 +142,16 @@ def test_public_character_action_attacks_and_persists_a_source_object(
         sheet["inventory"]["equipment_slots"]["off_hand"] = "magic-mace"
         actor = await call(
             server,
-            "character_create",
+            "character_create_from",
             {
-                "name": "Breaker",
-                "campaign_id": campaign["id"],
-                "character_type": "pc",
-                "sheet": sheet,
+                "mode": "direct",
+                "payload": {
+                    "name": "Breaker",
+                    "campaign_id": campaign["id"],
+                    "character_type": "pc",
+                    "sheet": sheet,
+                },
+                "principal_id": "system:local",
                 "idempotency_key": "actor",
             },
         )
@@ -159,9 +163,7 @@ def test_public_character_action_attacks_and_persists_a_source_object(
             "page_start": expanded["page_start"],
             "page_end": expanded["page_end"],
             "heading_path": expanded["heading_path"],
-            "content_sha256": hashlib.sha256(
-                expanded["content"].encode("utf-8")
-            ).hexdigest(),
+            "content_sha256": hashlib.sha256(expanded["content"].encode("utf-8")).hexdigest(),
         }
         source_object = {
             "id": "fresco-section",
@@ -237,10 +239,7 @@ def test_public_character_action_attacks_and_persists_a_source_object(
         assert mundane_result["object"]["hit_points"] == 5
         assert mundane_result["object"]["destroyed"] is False
         assert mundane_result["object"]["last_attack"]["weapon_traits"] == []
-        assert (
-            mundane_result["object"]["last_attack"]["weapon_trait_requirement_met"]
-            is False
-        )
+        assert mundane_result["object"]["last_attack"]["weapon_trait_requirement_met"] is False
 
         result = None
         for index in range(100):
