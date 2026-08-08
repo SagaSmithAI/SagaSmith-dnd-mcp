@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 from sagasmith_core.portable import build_rule_pack
 from sagasmith_dnd.content_readiness import (
     build_catalog_review,
@@ -722,7 +723,7 @@ def test_module_package_round_trip_recreates_cast_bindings(tmp_path: Path) -> No
             "campaign_create",
             {"name": "Package target", "edition": "2014", "idempotency_key": "target"},
         )
-        with pytest.raises(ValueError, match="payload.activate must be a boolean"):
+        with pytest.raises(ToolError, match="payload.activate must be a boolean"):
             await _call(
                 server,
                 "module_import",
@@ -733,7 +734,7 @@ def test_module_package_round_trip_recreates_cast_bindings(tmp_path: Path) -> No
                     "idempotency_key": "invalid-activation-type",
                 },
             )
-        with pytest.raises(ValueError, match="only playable or complete"):
+        with pytest.raises(ToolError, match="only playable or complete"):
             await _call(
                 server,
                 "module_import",
