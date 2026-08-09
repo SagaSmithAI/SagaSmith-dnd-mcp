@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import copy
 import hashlib
 from pathlib import Path
@@ -570,7 +569,7 @@ def _config(
     )
 
 
-def test_character_card_export_and_import_uses_fresh_identity(tmp_path: Path) -> None:
+def test_character_query_does_not_export_ad_hoc_actor_packages(tmp_path: Path) -> None:
     async def exercise() -> None:
         server = create_server(_config(tmp_path))
         campaign = await _call(
@@ -611,56 +610,18 @@ def test_character_card_export_and_import_uses_fresh_identity(tmp_path: Path) ->
                 "idempotency_key": "actor",
             },
         )
-        exported = await _call(
-            server,
-            "character_query",
-            {
-                "view": "content_package",
-                "payload": {
-                    "character_id": actor["id"],
-                    "portable_id": "example.portable-scout",
-                    "image": {
-                        "media_type": "image/png",
-                        "data_base64": base64.b64encode(b"\x89PNG\r\n\x1a\nportable-scout").decode(
-                            "ascii"
-                        ),
-                        "checksum": hashlib.sha256(b"\x89PNG\r\n\x1a\nportable-scout").hexdigest(),
-                        "size": 22,
-                        "alt": "Portable Scout portrait",
-                        "license": "CC0-1.0",
-                        "attribution": "Test fixture",
-                        "source_ref": "fixture:portable-scout.png",
+        with pytest.raises(ToolError, match="Input should be"):
+            await _call(
+                server,
+                "character_query",
+                {
+                    "view": "content_package",
+                    "payload": {
+                        "character_id": actor["id"],
+                        "portable_id": "example.portable-scout",
                     },
                 },
-            },
-        )
-        imported = await _call(
-            server,
-            "character_create_from",
-            {
-                "mode": "content_actor",
-                "payload": {
-                    "artifact": exported["artifact"]["artifact"],
-                    "artifact_id": exported["actor"]["id"],
-                },
-                "idempotency_key": "import",
-            },
-        )
-
-        assert imported["character"]["id"] != actor["id"]
-        assert imported["character"]["campaign_id"] is None
-        assert imported["content_actor"]["id"] == "example.portable-scout.actor"
-        assert imported["actor_knowledge_imported"] is False
-        assert imported["content_actor"]["image_retained_by_runtime"] is False
-        assert "image" not in imported["character"]
-        assert exported["artifact"]["artifact"].endswith(".sagasmith-pack")
-        assert "campaign_id" not in exported["actor"]
-        requirement = exported["actor"]["sheet"]["content"]["features"][0]["ruling_requirements"][0]
-        assert requirement["policy_ref"] == "actor_card.import.v1"
-        assert requirement["default_resolver"] == "agent"
-        assert imported["character"]["sheet"]["content"]["features"][0]["ruling_requirements"] == [
-            requirement
-        ]
+            )
 
     asyncio.run(exercise())
 
@@ -750,7 +711,7 @@ def test_module_package_round_trip_recreates_cast_bindings(tmp_path: Path) -> No
                     "module_id": module_id,
                     "scene_id": scene_index[0]["scene_id"],
                     "character_id": actor["id"],
-                    "portable_actor_id": "example.keep.guard",
+                    "actor_card_id": "example.keep.guard",
                     "binding_kind": "cast",
                     "role": "gate guard",
                 },
@@ -837,37 +798,31 @@ def test_bundled_srd_monster_presets_are_catalog_imports(tmp_path: Path) -> None
                 "idempotency_key": "campaign",
             },
         )
-        catalog = await _call(
-            server,
-            "content_pack",
-            {
-                "action": "list",
-                "payload": {
-                    "campaign_id": campaign["id"],
-                    "kind": "catalog",
-                    "content_kind": "actor_card",
-                },
-            },
-        )
-        frog = next(item for item in catalog if item["name"] == "Frog")
         shared = await _call(
             server,
             "content_pack",
             {
                 "action": "list",
                 "payload": {
-                    "kind": "actor_preset",
+                    "campaign_id": campaign["id"],
+                    "kind": "preset",
                     "edition": "2014",
                     "include_package": True,
                 },
             },
         )
+        catalog = shared["content_package"]["actors"]
+        frog = next(item for item in catalog if item["name"] == "Frog")
         imported = await _call(
             server,
             "character_create_from",
             {
                 "mode": "content_actor",
-                "payload": {"campaign_id": campaign["id"], "artifact_id": frog["id"]},
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "artifact": shared["artifact"]["artifact"],
+                    "artifact_id": frog["id"],
+                },
                 "idempotency_key": "frog",
             },
         )
