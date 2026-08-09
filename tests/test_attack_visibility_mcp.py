@@ -144,4 +144,73 @@ def test_hidden_attack_reveals_attacker_to_its_target(tmp_path: Path) -> None:
         assert counterattack["target_can_see_attacker"] is True
         assert counterattack["disadvantage"] is False
 
+        closed = await raw(
+            "combat_end",
+            {
+                "campaign_id": campaign["id"],
+                "outcome": {
+                    "status": "victory",
+                    "summary": "The grid-mode visibility check is complete.",
+                },
+                "expected_revision": ended["campaign_revision"],
+                "idempotency_key": "end-grid",
+            },
+        )
+        agent_started = await raw(
+            "combat_start",
+            {
+                "positioning_mode": "agent",
+                "campaign_id": campaign["id"],
+                "participant_ids": [attacker["id"], target["id"]],
+                "participant_config": [
+                    {"actor_id": attacker["id"], "initiative": 20},
+                    {"actor_id": target["id"], "initiative": 10},
+                ],
+                "expected_revision": closed["campaign_revision"],
+                "idempotency_key": "start-agent",
+            },
+        )
+        pending = await call(
+            "combat_preflight_attack",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": attacker["id"],
+                "target_id": target["id"],
+                "action": {"weapon_id": "unarmed-strike", "attack_mode": "melee"},
+            },
+        )
+        assert agent_started["combat"]["positioning_mode"] == "agent"
+        assert pending["status"] == "pending_ruling"
+        assert pending["missing"] == ["attack.spatial_facts"]
+
+        spatial_facts = {
+            "decision_id": "spatial:agent-preflight",
+            "reason": "The target is beside the attacker and nothing blocks the strike.",
+            "targetable": True,
+            "in_range": True,
+            "long_range": False,
+            "cover_degree": "none",
+            "attacker_can_see_target": True,
+            "target_can_see_attacker": True,
+            "target_within_5_ft": True,
+            "close_threat_actor_ids": [],
+            "helper_actor_ids": [],
+            "target_adjacent_ally_actor_ids": [],
+        }
+        agent_plan = await call(
+            "combat_preflight_attack",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": attacker["id"],
+                "target_id": target["id"],
+                "action": {
+                    "weapon_id": "unarmed-strike",
+                    "attack_mode": "melee",
+                    "context": {"spatial_facts": spatial_facts},
+                },
+            },
+        )
+        assert agent_plan["status"] == "ready"
+        assert agent_plan["spatial_ruling"]["decision_id"] == "spatial:agent-preflight"
+
     asyncio.run(exercise())

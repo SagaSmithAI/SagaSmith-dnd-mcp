@@ -9038,13 +9038,104 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         *,
         encounter: dict[str, Any],
     ) -> None:
-        """Bind Agent-supplied tactical facts to exact active-scene evidence."""
+        """Validate source rulings on a grid or dynamic spatial facts in Agent mode."""
 
         context = action.get("context")
         if context is None:
             return
         if not isinstance(context, dict):
             raise CombatEngineError("attack context must be an object")
+        positioning_mode = str(encounter.get("positioning_mode") or "grid")
+        raw_spatial_facts = context.get("spatial_facts")
+        if positioning_mode == "agent":
+            if not isinstance(raw_spatial_facts, dict):
+                raise NeedsRulingError(
+                    "agent-positioned attacks require an Agent spatial decision",
+                    missing=("attack.spatial_facts",),
+                    ruling_kind="agent_dm_adjudication",
+                )
+            allowed_spatial_fields = {
+                "decision_id",
+                "reason",
+                "targetable",
+                "in_range",
+                "long_range",
+                "cover_degree",
+                "attacker_can_see_target",
+                "target_can_see_attacker",
+                "target_within_5_ft",
+                "close_threat_actor_ids",
+                "helper_actor_ids",
+                "target_adjacent_ally_actor_ids",
+                "cleave_secondary_eligible",
+            }
+            required_spatial_fields = allowed_spatial_fields - {"cleave_secondary_eligible"}
+            unknown = set(raw_spatial_facts) - allowed_spatial_fields
+            missing = required_spatial_fields - set(raw_spatial_facts)
+            decision_id = str(raw_spatial_facts.get("decision_id") or "").strip()
+            reason = " ".join(str(raw_spatial_facts.get("reason") or "").split())
+            if unknown or missing or not decision_id or not reason:
+                raise CombatEngineError(
+                    "Agent spatial facts require one decision_id, reason, and the complete "
+                    "attack fact set"
+                )
+            for field in {
+                "targetable",
+                "in_range",
+                "long_range",
+                "attacker_can_see_target",
+                "target_can_see_attacker",
+                "target_within_5_ft",
+            }:
+                if not isinstance(raw_spatial_facts.get(field), bool):
+                    raise CombatEngineError(f"Agent spatial fact {field} must be boolean")
+            if "cleave_secondary_eligible" in raw_spatial_facts and not isinstance(
+                raw_spatial_facts["cleave_secondary_eligible"], bool
+            ):
+                raise CombatEngineError(
+                    "Agent spatial fact cleave_secondary_eligible must be boolean"
+                )
+            cover_degree = (
+                str(raw_spatial_facts.get("cover_degree") or "")
+                .strip()
+                .casefold()
+                .replace("-", "_")
+            )
+            if cover_degree not in {"none", "half", "three_quarters", "total"}:
+                raise CombatEngineError(
+                    "Agent spatial fact cover_degree must be none, half, three_quarters, or total"
+                )
+            participant_ids = {
+                str(item.get("actor_id") or "") for item in encounter.get("combatants", [])
+            }
+            normalized_lists: dict[str, list[str]] = {}
+            for field in {
+                "close_threat_actor_ids",
+                "helper_actor_ids",
+                "target_adjacent_ally_actor_ids",
+            }:
+                raw_ids = raw_spatial_facts.get(field)
+                if (
+                    not isinstance(raw_ids, list)
+                    or any(not isinstance(item, str) for item in raw_ids)
+                    or len(set(raw_ids)) != len(raw_ids)
+                    or set(raw_ids) - participant_ids
+                ):
+                    raise CombatEngineError(
+                        f"Agent spatial fact {field} must contain unique current combatant IDs"
+                    )
+                normalized_lists[field] = list(raw_ids)
+            context["spatial_facts"] = {
+                **dict(raw_spatial_facts),
+                **normalized_lists,
+                "decision_id": decision_id,
+                "reason": reason,
+                "cover_degree": cover_degree,
+            }
+            action["context"] = context
+            return
+        if raw_spatial_facts is not None:
+            raise CombatEngineError("grid attacks derive spatial facts from encounter coordinates")
         cover = context.get("cover")
         if cover is not None:
             if not isinstance(cover, dict) or set(cover) != {"degree"}:
