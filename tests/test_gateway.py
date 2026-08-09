@@ -5,6 +5,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.gateway import GATEWAY_KEY, GatewayConfig, create_app
+from tests.authoring_helpers import finalize_and_activate_module
 
 
 def config(tmp_path: Path) -> McpConfig:
@@ -70,10 +71,10 @@ def test_gateway_projects_mcp_data_and_enforces_origin(tmp_path: Path) -> None:
             assert detail_payload["meta"]["branch_id"]
 
             staged = await gateway.call(
-                "module_import",
+                "module_draft",
                 {
                     "campaign_id": campaign["id"],
-                    "action": "stage",
+                    "action": "start",
                     "payload": {
                         "name": "gateway-map.md",
                         "title": "Gateway map",
@@ -83,33 +84,15 @@ def test_gateway_projects_mcp_data_and_enforces_origin(tmp_path: Path) -> None:
                     "idempotency_key": "gateway-module-stage",
                 },
             )
-            job_id = staged["job"]["id"]
-            for action in ("inspect", "validate", "ingest"):
-                await gateway.call(
-                    "module_import",
-                    {
-                        "campaign_id": campaign["id"],
-                        "action": action,
-                        "payload": {"job_id": job_id},
-                        "idempotency_key": f"gateway-module-{action}",
-                    },
-                )
-            current_campaign = await gateway.call(
-                "campaign_query",
-                {
-                    "view": "get",
-                    "payload": {"campaign_id": campaign["id"]},
-                },
-            )
-            await gateway.call(
-                "module_import",
-                {
-                    "campaign_id": campaign["id"],
-                    "action": "activate",
-                    "payload": {"job_id": job_id},
-                    "expected_revision": current_campaign["revision"],
-                    "idempotency_key": "gateway-module-activate",
-                },
+            await finalize_and_activate_module(
+                lambda _server, name, arguments: gateway.call(name, arguments),
+                gateway,
+                campaign["id"],
+                staged,
+                source_key="gateway-map",
+                title="Gateway map",
+                portable_id="dnd5e.module.gateway-map",
+                edition="2024",
             )
             scene_response = await client.get(
                 f"/api/campaigns/{campaign['id']}/scenes"

@@ -6,6 +6,7 @@ import pytest
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
+from tests.authoring_helpers import finalize_and_activate_module
 
 
 async def _call(server, name: str, arguments: dict):
@@ -13,7 +14,7 @@ async def _call(server, name: str, arguments: dict):
     return result.get("result", result) if isinstance(result, dict) else result
 
 
-def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) -> None:
+def test_scene_preflight_blocks_only_missing_or_invalid_combatants(tmp_path: Path) -> None:
     config = McpConfig(
         home=tmp_path / "home",
         database_url=None,
@@ -44,14 +45,14 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
         campaign = await _call(
             server,
             "campaign_create",
-            {"name": "Participant readiness", "idempotency_key": "campaign"},
+            {"name": "Participant preflight", "idempotency_key": "campaign"},
         )
         staged = await _call(
             server,
-            "module_import",
+            "module_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "stage",
+                "action": "start",
                 "payload": {
                     "source_path": str(source),
                     "source_key": "ambush",
@@ -60,37 +61,14 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
                 "idempotency_key": "module:stage",
             },
         )
-        job_id = staged["job"]["id"]
-        for action in ("inspect", "validate", "ingest"):
-            await _call(
-                server,
-                "module_import",
-                {
-                    "campaign_id": campaign["id"],
-                    "action": action,
-                    "payload": {"job_id": job_id},
-                    "idempotency_key": f"module:{action}",
-                },
-            )
-        current_campaign = await _call(
+        await finalize_and_activate_module(
+            _call,
             server,
-            "campaign_query",
-            {
-                "view": "get",
-                "payload": {"campaign_id": campaign["id"]},
-                "principal_id": "system:local",
-            },
-        )
-        await _call(
-            server,
-            "module_import",
-            {
-                "campaign_id": campaign["id"],
-                "action": "activate",
-                "payload": {"job_id": job_id},
-                "expected_revision": current_campaign["revision"],
-                "idempotency_key": "module:activate",
-            },
+            campaign["id"],
+            staged,
+            source_key="ambush",
+            title="Ambush",
+            portable_id="dnd5e.module.ambush-test",
         )
         scene = next(
             item
@@ -197,7 +175,7 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
             "module_query",
             {
                 "campaign_id": campaign["id"],
-                "view": "readiness",
+                "view": "preflight",
                 "payload": {
                     "scene_id": scene["scene_id"],
                     "participant_manifest": manifest([actors["bandit1"]["id"]]),
@@ -231,7 +209,7 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
             "module_query",
             {
                 "campaign_id": campaign["id"],
-                "view": "readiness",
+                "view": "preflight",
                 "payload": {
                     "scene_id": scene["scene_id"],
                     "participant_manifest": manifest(
@@ -243,13 +221,13 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
         unusable_bandits = next(
             item for item in unusable["groups"] if item["key"] == "rusk-bandits"
         )
-        assert unusable["ready"] is False
+        assert unusable["ready"] is True
         assert unusable_bandits["missing_count"] == 0
-        assert unusable_bandits["unready_actor_ids"] == [actors["bandit2"]["id"]]
-        assert unusable_bandits["actors"][1]["combat_card"]["blocking_reasons"] == [
-            "dead",
-            "zero_hit_points",
-        ]
+        assert unusable_bandits["invalid_actor_ids"] == []
+        dead_card = unusable_bandits["actors"][1]["combat_card"]
+        assert dead_card["card_valid"] is True
+        assert dead_card["state_flags"] == ["dead", "zero_hit_points"]
+        assert dead_card["can_take_turn"] is False
         actors["bandit2"] = await _call(
             server,
             "character_sheet_replace",
@@ -329,14 +307,14 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
             "module_query",
             {
                 "campaign_id": campaign["id"],
-                "view": "readiness",
+                "view": "preflight",
                 "payload": {
                     "scene_id": scene["scene_id"],
                     "participant_manifest": complete_manifest,
                 },
             },
         )
-        assert ready["ready"] is False
+        assert ready["ready"] is True
         captain_group = next(item for item in ready["groups"] if item["key"] == "captain-rusk")
         assert captain_group["actors"][0]["combat_card"]["settlement"] == "mixed"
         captain_card = captain_group["actors"][0]["combat_card"]
@@ -349,7 +327,7 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
         ]
         assert captain_card["default_dm_resolver"] == "agent"
         assert captain_card["agent_rulings"] == captain_card["manual_rulings"]
-        assert captain_card["external_input_requirements"] == []
+        assert captain_card["external_source_gaps"] == []
         assert {
             (item["reason"], item["default_resolver"], item["ruling_kind"])
             for item in captain_card["ruling_requirements"]
@@ -380,7 +358,17 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
             "Mystery Bow: ranged weapon range is missing",
             "Available spells require Agent effect settlement: module-spell",
         ]
-        assert mixed_card["blocking_reasons"] == ["missing_attack_range"]
+        assert mixed_card["hard_blockers"] == []
+        assert {
+            (item["id"], item["kind"], item["reason"])
+            for item in mixed_card["disabled_capabilities"]
+        } == {
+            (
+                "mystery-bow",
+                "attack",
+                "Mystery Bow: ranged weapon range is missing",
+            )
+        }
         assert [
             (item["default_resolver"], item["ruling_kind"])
             for item in mixed_card["ruling_requirements"]
@@ -391,7 +379,7 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
         assert mixed_card["agent_rulings"] == [
             "Available spells require Agent effect settlement: module-spell"
         ]
-        assert mixed_card["external_input_requirements"] == [
+        assert mixed_card["external_source_gaps"] == [
             "Mystery Bow: ranged weapon range is missing"
         ]
         assert ready["initial_actor_ids"] == [
@@ -423,7 +411,7 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
             "module_query",
             {
                 "campaign_id": campaign["id"],
-                "view": "readiness",
+                "view": "preflight",
                 "payload": {
                     "scene_id": scene["scene_id"],
                     "participant_manifest": complete_manifest,
@@ -497,7 +485,7 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
             "module_query",
             {
                 "campaign_id": campaign["id"],
-                "view": "readiness",
+                "view": "preflight",
                 "payload": {
                     "scene_id": scene["scene_id"],
                     "participant_manifest": complete_manifest,
@@ -508,12 +496,12 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
             "actors"
         ][0]["combat_card"]
         assert ready["ready"] is True
-        assert positional_card["blocking_reasons"] == []
+        assert positional_card["hard_blockers"] == []
         assert positional_card["manual_rulings"] == [
             "Dropped Rock: source-defined positional targeting requires a DM ruling"
         ]
         assert positional_card["agent_rulings"] == positional_card["manual_rulings"]
-        assert positional_card["external_input_requirements"] == []
+        assert positional_card["external_source_gaps"] == []
 
         long_manifest = deepcopy(complete_manifest)
         long_manifest["groups"][0]["source_excerpt"] = long_evidence.strip()
@@ -522,7 +510,7 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
             "module_query",
             {
                 "campaign_id": campaign["id"],
-                "view": "readiness",
+                "view": "preflight",
                 "payload": {
                     "scene_id": scene["scene_id"],
                     "participant_manifest": long_manifest,
@@ -554,7 +542,7 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
             "module_query",
             {
                 "campaign_id": campaign["id"],
-                "view": "readiness",
+                "view": "preflight",
                 "payload": {
                     "scene_id": scene["scene_id"],
                     "participant_manifest": complete_manifest,
@@ -564,11 +552,21 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
         incomplete_bandits = next(
             item for item in incomplete["groups"] if item["key"] == "rusk-bandits"
         )
-        assert incomplete["ready"] is False
-        assert incomplete_bandits["unready_actor_ids"] == [actors["bandit1"]["id"]]
-        assert incomplete_bandits["actors"][0]["combat_card"]["blocking_reasons"] == [
-            "incomplete_statblock_spell_hydration"
-        ]
+        assert incomplete["ready"] is True
+        assert incomplete_bandits["invalid_actor_ids"] == []
+        assert incomplete_bandits["actors"][0]["combat_card"]["hard_blockers"] == []
+        assert {
+            (item["id"], item["kind"], item["reason"])
+            for item in incomplete_bandits["actors"][0]["combat_card"][
+                "disabled_capabilities"
+            ]
+        } == {
+            (
+                "spellcasting",
+                "spellcasting",
+                "incomplete_statblock_spell_hydration",
+            )
+        }
         actors["bandit1"] = await _call(
             server,
             "character_sheet_replace",

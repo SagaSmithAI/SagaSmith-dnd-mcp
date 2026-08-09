@@ -22,16 +22,49 @@ SOURCE = WORKSPACE / "reference" / "DnD-Books" / "5e" / "Books" / BOOK
 OCR_CACHE = ROOT / "tmp" / "books-normalized-v25" / "ocr-page-cache"
 
 SKILLS = [
-    "Acrobatics", "Animal Handling", "Arcana", "Athletics", "Deception",
-    "History", "Insight", "Intimidation", "Investigation", "Medicine",
-    "Nature", "Perception", "Performance", "Persuasion", "Religion",
-    "Sleight of Hand", "Stealth", "Survival",
+    "Acrobatics",
+    "Animal Handling",
+    "Arcana",
+    "Athletics",
+    "Deception",
+    "History",
+    "Insight",
+    "Intimidation",
+    "Investigation",
+    "Medicine",
+    "Nature",
+    "Perception",
+    "Performance",
+    "Persuasion",
+    "Religion",
+    "Sleight of Hand",
+    "Stealth",
+    "Survival",
 ]
 MARTIAL_WEAPONS = [
-    "Battleaxe", "Flail", "Glaive", "Greataxe", "Greatsword", "Halberd",
-    "Lance", "Longsword", "Maul", "Morningstar", "Pike", "Rapier",
-    "Scimitar", "Shortsword", "Trident", "War Pick", "Warhammer", "Whip",
-    "Blowgun", "Hand Crossbow", "Heavy Crossbow", "Longbow", "Net",
+    "Battleaxe",
+    "Flail",
+    "Glaive",
+    "Greataxe",
+    "Greatsword",
+    "Halberd",
+    "Lance",
+    "Longsword",
+    "Maul",
+    "Morningstar",
+    "Pike",
+    "Rapier",
+    "Scimitar",
+    "Shortsword",
+    "Trident",
+    "War Pick",
+    "Warhammer",
+    "Whip",
+    "Blowgun",
+    "Hand Crossbow",
+    "Heavy Crossbow",
+    "Longbow",
+    "Net",
 ]
 
 STATBLOCK_NAMES = """Banderhobb
@@ -313,7 +346,9 @@ def _species_card(
     }
 
 
-def _aasimar(name: str, heading: str, page: int, abilities: dict[str, int], feature: dict[str, Any]) -> dict[str, Any]:
+def _aasimar(
+    name: str, heading: str, page: int, abilities: dict[str, int], feature: dict[str, Any]
+) -> dict[str, Any]:
     return _addition(
         "species",
         name,
@@ -328,12 +363,21 @@ def _aasimar(name: str, heading: str, page: int, abilities: dict[str, int], feat
             resistances=["necrotic", "radiant"],
             spell_grants=[_cantrip("Light", "charisma", eligible_class="Cleric")],
             resources=_resource("species:aasimar:healing_hands", "Healing Hands", "long_rest")
-            | _resource(f"species:aasimar:{name.casefold().split()[0]}_revelation", feature["name"], "long_rest"),
+            | _resource(
+                f"species:aasimar:{name.casefold().split()[0]}_revelation",
+                feature["name"],
+                "long_rest",
+            ),
             features=[
                 _feature("Darkvision", "Darkvision out to 60 feet."),
                 _feature("Celestial Resistance", "Resistance to necrotic and radiant damage."),
-                _feature("Healing Hands", "As an action once per long rest, touch a creature to restore hit points equal to character level."),
-                _feature("Light Bearer", "Know the Light cantrip; Charisma is the spellcasting ability."),
+                _feature(
+                    "Healing Hands",
+                    "As an action once per long rest, touch a creature to restore hit points equal to character level.",
+                ),
+                _feature(
+                    "Light Bearer", "Know the Light cantrip; Charisma is the spellcasting ability."
+                ),
                 feature,
             ],
         ),
@@ -343,206 +387,470 @@ def _aasimar(name: str, heading: str, page: int, abilities: dict[str, int], feat
 def _species_additions() -> list[dict[str, Any]]:
     return [
         _aasimar(
-            "Protector Aasimar", "PROTECTOR AASIMAR", 106,
+            "Protector Aasimar",
+            "PROTECTOR AASIMAR",
+            106,
             {"charisma": 2, "wisdom": 1},
-            _feature("Radiant Soul", "From 3rd level, use an action once per long rest to transform for 1 minute: gain a 30-foot flying speed and once on each turn deal extra radiant damage equal to character level to one damaged target.", minimum_level=3),
+            _feature(
+                "Radiant Soul",
+                "From 3rd level, use an action once per long rest to transform for 1 minute: gain a 30-foot flying speed and once on each turn deal extra radiant damage equal to character level to one damaged target.",
+                minimum_level=3,
+            ),
         ),
         _aasimar(
-            "Scourge Aasimar", "SCOURGE AASIMAR", 106,
+            "Scourge Aasimar",
+            "SCOURGE AASIMAR",
+            106,
             {"charisma": 2, "constitution": 1},
-            _feature("Radiant Consumption", "From 3rd level, use an action once per long rest to radiate for 1 minute. At each turn end, the character and creatures within 10 feet take the source radiant damage; once on each turn one damaged target takes extra radiant damage equal to character level.", minimum_level=3),
+            _feature(
+                "Radiant Consumption",
+                "From 3rd level, use an action once per long rest to radiate for 1 minute. At each turn end, the character and creatures within 10 feet take the source radiant damage; once on each turn one damaged target takes extra radiant damage equal to character level.",
+                minimum_level=3,
+            ),
         ),
         _aasimar(
-            "Fallen Aasimar", "FALLEN AASIMAR", 106,
+            "Fallen Aasimar",
+            "FALLEN AASIMAR",
+            106,
             {"charisma": 2, "strength": 1},
-            _feature("Necrotic Shroud", "From 3rd level, use an action once per long rest to transform for 1 minute. Nearby creatures make the source Charisma save against fright, and once on each turn one damaged target takes extra necrotic damage equal to character level.", minimum_level=3),
+            _feature(
+                "Necrotic Shroud",
+                "From 3rd level, use an action once per long rest to transform for 1 minute. Nearby creatures make the source Charisma save against fright, and once on each turn one damaged target takes extra necrotic damage equal to character level.",
+                minimum_level=3,
+            ),
         ),
         _addition(
-            "species", "Firbolg", [_selector("FIRBOLG TRAITS", 108, match_all=True)],
+            "species",
+            "Firbolg",
+            [_selector("FIRBOLG TRAITS", 108, match_all=True)],
             _species_card(
-                base_species="Firbolg", abilities={"wisdom": 2, "strength": 1},
-                size="medium", speed=30, languages=["Common", "Elvish", "Giant"],
+                base_species="Firbolg",
+                abilities={"wisdom": 2, "strength": 1},
+                size="medium",
+                speed=30,
+                languages=["Common", "Elvish", "Giant"],
                 spell_grants=[
-                    _spell_grant("Detect Magic", 1, "wisdom", eligible_class="Wizard", recovers_on="short_rest", resource_group="Firbolg Magic"),
-                    _spell_grant("Disguise Self", 1, "wisdom", eligible_class="Wizard", recovers_on="short_rest", resource_group="Firbolg Magic"),
+                    _spell_grant(
+                        "Detect Magic",
+                        1,
+                        "wisdom",
+                        eligible_class="Wizard",
+                        recovers_on="short_rest",
+                        resource_group="Firbolg Magic",
+                    ),
+                    _spell_grant(
+                        "Disguise Self",
+                        1,
+                        "wisdom",
+                        eligible_class="Wizard",
+                        recovers_on="short_rest",
+                        resource_group="Firbolg Magic",
+                    ),
                 ],
                 resources=_resource("species:firbolg:hidden_step", "Hidden Step", "short_rest"),
                 features=[
-                    _feature("Firbolg Magic", "Cast Detect Magic or Disguise Self without material components; the shared trait use recovers after a short or long rest. Disguise Self can make the firbolg appear up to 3 feet shorter."),
-                    _feature("Hidden Step", "As a bonus action once per short or long rest, turn invisible until the start of the next turn or until attacking, dealing damage, or forcing a save."),
-                    _feature("Powerful Build", "Count as one size larger for carrying capacity and push, drag, or lift limits."),
-                    _feature("Speech of Beast and Leaf", "Communicate in a limited manner with beasts and plants and gain advantage on Charisma checks to influence them."),
+                    _feature(
+                        "Firbolg Magic",
+                        "Cast Detect Magic or Disguise Self without material components; the shared trait use recovers after a short or long rest. Disguise Self can make the firbolg appear up to 3 feet shorter.",
+                    ),
+                    _feature(
+                        "Hidden Step",
+                        "As a bonus action once per short or long rest, turn invisible until the start of the next turn or until attacking, dealing damage, or forcing a save.",
+                    ),
+                    _feature(
+                        "Powerful Build",
+                        "Count as one size larger for carrying capacity and push, drag, or lift limits.",
+                    ),
+                    _feature(
+                        "Speech of Beast and Leaf",
+                        "Communicate in a limited manner with beasts and plants and gain advantage on Charisma checks to influence them.",
+                    ),
                 ],
             ),
         ),
         _addition(
-            "species", "Goliath", [_selector("GOLIATH TRAITS", 110)],
+            "species",
+            "Goliath",
+            [_selector("GOLIATH TRAITS", 110)],
             _species_card(
-                base_species="Goliath", abilities={"strength": 2, "constitution": 1},
-                size="medium", speed=30, languages=["Common", "Giant"],
+                base_species="Goliath",
+                abilities={"strength": 2, "constitution": 1},
+                size="medium",
+                speed=30,
+                languages=["Common", "Giant"],
                 skill_proficiencies=["Athletics"],
-                resources=_resource("species:goliath:stone_endurance", "Stone's Endurance", "short_rest"),
+                resources=_resource(
+                    "species:goliath:stone_endurance", "Stone's Endurance", "short_rest"
+                ),
                 features=[
                     _feature("Natural Athlete", "Proficiency in Athletics."),
-                    _feature("Stone's Endurance", "As a reaction once per short or long rest when taking damage, reduce it by 1d12 plus Constitution modifier."),
-                    _feature("Powerful Build", "Count as one size larger for carrying capacity and push, drag, or lift limits."),
-                    _feature("Mountain Born", "Acclimated to high altitude and naturally adapted to cold climates as described by the source."),
+                    _feature(
+                        "Stone's Endurance",
+                        "As a reaction once per short or long rest when taking damage, reduce it by 1d12 plus Constitution modifier.",
+                    ),
+                    _feature(
+                        "Powerful Build",
+                        "Count as one size larger for carrying capacity and push, drag, or lift limits.",
+                    ),
+                    _feature(
+                        "Mountain Born",
+                        "Acclimated to high altitude and naturally adapted to cold climates as described by the source.",
+                    ),
                 ],
             ),
         ),
         _addition(
-            "species", "Kenku", [_selector("KENKU TRAITS", 112)],
+            "species",
+            "Kenku",
+            [_selector("KENKU TRAITS", 112)],
             _species_card(
-                base_species="Kenku", abilities={"dexterity": 2, "wisdom": 1},
-                size="medium", speed=30, languages=["Common", "Auran"],
+                base_species="Kenku",
+                abilities={"dexterity": 2, "wisdom": 1},
+                size="medium",
+                speed=30,
+                languages=["Common", "Auran"],
                 skill_choice_count=2,
                 skill_options=["Acrobatics", "Deception", "Stealth", "Sleight of Hand"],
                 features=[
-                    _feature("Expert Forgery", "Advantage on checks to produce forgeries or duplicates of existing handwriting and craftwork."),
+                    _feature(
+                        "Expert Forgery",
+                        "Advantage on checks to produce forgeries or duplicates of existing handwriting and craftwork.",
+                    ),
                     _feature("Kenku Training", "Choose two source-listed skill proficiencies."),
-                    _feature("Mimicry", "Mimic heard sounds and voices; Insight opposed by Charisma (Deception) can identify an imitation."),
-                    _feature("Languages", "Read and write Common and Auran, but speak only by using Mimicry."),
+                    _feature(
+                        "Mimicry",
+                        "Mimic heard sounds and voices; Insight opposed by Charisma (Deception) can identify an imitation.",
+                    ),
+                    _feature(
+                        "Languages",
+                        "Read and write Common and Auran, but speak only by using Mimicry.",
+                    ),
                 ],
             ),
         ),
         _addition(
-            "species", "Lizardfolk", [_selector("IZARDFOLK TRAITS", 114, match_all=True)],
+            "species",
+            "Lizardfolk",
+            [_selector("IZARDFOLK TRAITS", 114, match_all=True)],
             _species_card(
-                base_species="Lizardfolk", abilities={"constitution": 2, "wisdom": 1},
-                size="medium", speed=30, swim_speed=30, natural_armor_base=13,
-                languages=["Common", "Draconic"], skill_choice_count=2,
+                base_species="Lizardfolk",
+                abilities={"constitution": 2, "wisdom": 1},
+                size="medium",
+                speed=30,
+                swim_speed=30,
+                natural_armor_base=13,
+                languages=["Common", "Draconic"],
+                skill_choice_count=2,
                 skill_options=["Animal Handling", "Nature", "Perception", "Stealth", "Survival"],
+                natural_weapons=[
+                    {
+                        "name": "Bite",
+                        "attack_ability": "strength",
+                        "damage_formula": "1d6",
+                        "damage_type": "piercing",
+                        "reach_ft": 5,
+                        "description": "A reviewed natural weapon usable for an unarmed strike.",
+                    }
+                ],
                 resources=_resource("species:lizardfolk:hungry_jaws", "Hungry Jaws", "short_rest"),
                 features=[
-                    _feature("Bite", "Natural weapon: an unarmed strike deals 1d6 + Strength modifier piercing damage."),
-                    _feature("Cunning Artisan", "During a short rest, harvest a suitable Small-or-larger corpse with a blade or tools to make the exact source-listed shield, club, javelin, darts, or blowgun needles."),
+                    _feature(
+                        "Bite",
+                        "Natural weapon: an unarmed strike deals 1d6 + Strength modifier piercing damage.",
+                    ),
+                    _feature(
+                        "Cunning Artisan",
+                        "During a short rest, harvest a suitable Small-or-larger corpse with a blade or tools to make the exact source-listed shield, club, javelin, darts, or blowgun needles.",
+                    ),
                     _feature("Hold Breath", "Hold breath for up to 15 minutes."),
                     _feature("Hunter's Lore", "Choose two source-listed skill proficiencies."),
-                    _feature("Natural Armor", "While not wearing armor, AC is 13 + Dexterity modifier; a shield applies and this formula can replace worse worn armor."),
-                    _feature("Hungry Jaws", "As a bonus action once per short or long rest, make a bite attack and on a hit gain temporary hit points equal to Constitution modifier, minimum 1."),
+                    _feature(
+                        "Natural Armor",
+                        "While not wearing armor, AC is 13 + Dexterity modifier; a shield applies and this formula can replace worse worn armor.",
+                    ),
+                    _feature(
+                        "Hungry Jaws",
+                        "As a bonus action once per short or long rest, make a bite attack and on a hit gain temporary hit points equal to Constitution modifier, minimum 1.",
+                    ),
                 ],
             ),
         ),
         _addition(
-            "species", "Tabaxi", [_selector("ABAXI TRAITS", 116, match_all=True)],
+            "species",
+            "Tabaxi",
+            [_selector("ABAXI TRAITS", 116, match_all=True)],
             _species_card(
-                base_species="Tabaxi", abilities={"dexterity": 2, "charisma": 1},
-                size="medium", speed=30, darkvision_ft=60, languages=["Common"],
-                language_choice_count=1, language_options=[], allow_any_language=True,
+                base_species="Tabaxi",
+                abilities={"dexterity": 2, "charisma": 1},
+                size="medium",
+                speed=30,
+                darkvision_ft=60,
+                languages=["Common"],
+                language_choice_count=1,
+                language_options=[],
+                allow_any_language=True,
                 skill_proficiencies=["Perception", "Stealth"],
+                natural_weapons=[
+                    {
+                        "name": "Claws",
+                        "attack_ability": "strength",
+                        "damage_formula": "1d4",
+                        "damage_type": "slashing",
+                        "reach_ft": 5,
+                        "description": "A reviewed natural weapon usable for an unarmed strike.",
+                    }
+                ],
                 features=[
-                    _feature("Feline Agility", "When moving on a turn in combat, double speed until turn end; regain the trait after moving 0 feet on one turn."),
-                    _feature("Cat's Claws", "Climb speed 20 feet; claws are natural weapons whose unarmed strikes deal 1d4 + Strength modifier slashing damage."),
+                    _feature(
+                        "Feline Agility",
+                        "When moving on a turn in combat, double speed until turn end; regain the trait after moving 0 feet on one turn.",
+                    ),
+                    _feature(
+                        "Cat's Claws",
+                        "Climb speed 20 feet; claws are natural weapons whose unarmed strikes deal 1d4 + Strength modifier slashing damage.",
+                    ),
                     _feature("Cat's Talent", "Proficiency in Perception and Stealth."),
                 ],
             ),
         ),
         _addition(
-            "species", "Triton", [_selector("TRITON TRAITS", 118)],
+            "species",
+            "Triton",
+            [_selector("TRITON TRAITS", 118)],
             _species_card(
-                base_species="Triton", abilities={"strength": 1, "constitution": 1, "charisma": 1},
-                size="medium", speed=30, swim_speed=30, languages=["Common", "Primordial"],
+                base_species="Triton",
+                abilities={"strength": 1, "constitution": 1, "charisma": 1},
+                size="medium",
+                speed=30,
+                swim_speed=30,
+                languages=["Common", "Primordial"],
                 resistances=["cold"],
                 spell_grants=[
-                    _spell_grant("Fog Cloud", 1, "charisma", eligible_class="Druid", resource_group="Control Air and Water"),
-                    _spell_grant("Gust of Wind", 2, "charisma", eligible_class="Druid", minimum_level=3, resource_group="Control Air and Water"),
-                    _spell_grant("Wall of Water", 3, "charisma", eligible_class="Druid", minimum_level=5, resource_group="Control Air and Water"),
+                    _spell_grant(
+                        "Fog Cloud",
+                        1,
+                        "charisma",
+                        eligible_class="Druid",
+                        resource_group="Control Air and Water",
+                    ),
+                    _spell_grant(
+                        "Gust of Wind",
+                        2,
+                        "charisma",
+                        eligible_class="Druid",
+                        minimum_level=3,
+                        resource_group="Control Air and Water",
+                    ),
+                    _spell_grant(
+                        "Wall of Water",
+                        3,
+                        "charisma",
+                        eligible_class="Druid",
+                        minimum_level=5,
+                        resource_group="Control Air and Water",
+                    ),
                 ],
                 features=[
                     _feature("Amphibious", "Breathe air and water."),
-                    _feature("Control Air and Water", "The three level-gated spells share one use that recovers after a long rest; Charisma is the spellcasting ability."),
-                    _feature("Emissary of the Sea", "Communicate simple ideas to beasts that can breathe water; this does not grant reciprocal understanding."),
-                    _feature("Guardians of the Depths", "Resistance to cold damage and ignore source-defined drawbacks of deep underwater environments."),
+                    _feature(
+                        "Control Air and Water",
+                        "The three level-gated spells share one use that recovers after a long rest; Charisma is the spellcasting ability.",
+                    ),
+                    _feature(
+                        "Emissary of the Sea",
+                        "Communicate simple ideas to beasts that can breathe water; this does not grant reciprocal understanding.",
+                    ),
+                    _feature(
+                        "Guardians of the Depths",
+                        "Resistance to cold damage and ignore source-defined drawbacks of deep underwater environments.",
+                    ),
                 ],
             ),
         ),
         _addition(
-            "species", "Bugbear", [_selector("BUGBEAR TRAITS", 120)],
+            "species",
+            "Bugbear",
+            [_selector("BUGBEAR TRAITS", 120)],
             _species_card(
-                base_species="Bugbear", abilities={"strength": 2, "dexterity": 1},
-                size="medium", speed=30, darkvision_ft=60, languages=["Common", "Goblin"],
+                base_species="Bugbear",
+                abilities={"strength": 2, "dexterity": 1},
+                size="medium",
+                speed=30,
+                darkvision_ft=60,
+                languages=["Common", "Goblin"],
                 skill_proficiencies=["Stealth"],
                 features=[
-                    _feature("Long-Limbed", "Melee attack reach is 5 feet greater when making the attack on the bugbear's turn."),
-                    _feature("Powerful Build", "Count as one size larger for carrying capacity and push, drag, or lift limits."),
+                    _feature(
+                        "Long-Limbed",
+                        "Melee attack reach is 5 feet greater when making the attack on the bugbear's turn.",
+                    ),
+                    _feature(
+                        "Powerful Build",
+                        "Count as one size larger for carrying capacity and push, drag, or lift limits.",
+                    ),
                     _feature("Sneaky", "Proficiency in Stealth."),
-                    _feature("Surprise Attack", "Once per combat, a hit against a surprised creature on the bugbear's first turn deals an extra 2d6 damage."),
+                    _feature(
+                        "Surprise Attack",
+                        "Once per combat, a hit against a surprised creature on the bugbear's first turn deals an extra 2d6 damage.",
+                    ),
                 ],
             ),
         ),
         _addition(
-            "species", "Goblin", [_selector("GOBLIN TRAITS", 120, exact=True)],
+            "species",
+            "Goblin",
+            [_selector("GOBLIN TRAITS", 120, exact=True)],
             _species_card(
-                base_species="Goblin", abilities={"dexterity": 2, "constitution": 1},
-                size="small", speed=30, darkvision_ft=60, languages=["Common", "Goblin"],
-                resources=_resource("species:goblin:fury_of_the_small", "Fury of the Small", "short_rest"),
+                base_species="Goblin",
+                abilities={"dexterity": 2, "constitution": 1},
+                size="small",
+                speed=30,
+                darkvision_ft=60,
+                languages=["Common", "Goblin"],
+                resources=_resource(
+                    "species:goblin:fury_of_the_small", "Fury of the Small", "short_rest"
+                ),
                 features=[
-                    _feature("Fury of the Small", "Once per short or long rest when an attack or spell damages a creature larger than the goblin, deal extra damage equal to character level."),
-                    _feature("Nimble Escape", "Take the Disengage or Hide action as a bonus action on each turn."),
+                    _feature(
+                        "Fury of the Small",
+                        "Once per short or long rest when an attack or spell damages a creature larger than the goblin, deal extra damage equal to character level.",
+                    ),
+                    _feature(
+                        "Nimble Escape",
+                        "Take the Disengage or Hide action as a bonus action on each turn.",
+                    ),
                 ],
             ),
         ),
         _addition(
-            "species", "Hobgoblin", [_selector("HOBGOBLIN TRAITS", 120)],
+            "species",
+            "Hobgoblin",
+            [_selector("HOBGOBLIN TRAITS", 120)],
             _species_card(
-                base_species="Hobgoblin", abilities={"constitution": 2, "intelligence": 1},
-                size="medium", speed=30, darkvision_ft=60, languages=["Common", "Goblin"],
+                base_species="Hobgoblin",
+                abilities={"constitution": 2, "intelligence": 1},
+                size="medium",
+                speed=30,
+                darkvision_ft=60,
+                languages=["Common", "Goblin"],
                 armor_proficiencies=["Light Armor"],
-                proficiency_choice_groups=[{
-                    "id": "martial_training", "count": 2,
-                    "options": [{"kind": "weapon", "name": name} for name in MARTIAL_WEAPONS],
-                }],
+                proficiency_choice_groups=[
+                    {
+                        "id": "martial_training",
+                        "count": 2,
+                        "options": [{"kind": "weapon", "name": name} for name in MARTIAL_WEAPONS],
+                    }
+                ],
                 resources=_resource("species:hobgoblin:saving_face", "Saving Face", "short_rest"),
                 features=[
-                    _feature("Martial Training", "Choose proficiency with two martial weapons and gain light armor proficiency."),
-                    _feature("Saving Face", "Once per short or long rest after missing an attack or failing a check or save, add the number of visible allies within 30 feet, maximum +5."),
+                    _feature(
+                        "Martial Training",
+                        "Choose proficiency with two martial weapons and gain light armor proficiency.",
+                    ),
+                    _feature(
+                        "Saving Face",
+                        "Once per short or long rest after missing an attack or failing a check or save, add the number of visible allies within 30 feet, maximum +5.",
+                    ),
                 ],
             ),
         ),
         _addition(
-            "species", "Kobold", [_selector("KOBOLD TRAITS", 120)],
+            "species",
+            "Kobold",
+            [_selector("KOBOLD TRAITS", 120)],
             _species_card(
-                base_species="Kobold", abilities={"dexterity": 2},
+                base_species="Kobold",
+                abilities={"dexterity": 2},
                 ability_score_decreases={"strength": 2},
-                size="small", speed=30, darkvision_ft=60, languages=["Common", "Draconic"],
-                resources=_resource("species:kobold:grovel", "Grovel, Cower, and Beg", "short_rest"),
+                size="small",
+                speed=30,
+                darkvision_ft=60,
+                languages=["Common", "Draconic"],
+                resources=_resource(
+                    "species:kobold:grovel", "Grovel, Cower, and Beg", "short_rest"
+                ),
                 features=[
-                    _feature("Grovel, Cower, and Beg", "As an action once per short or long rest, allies gain advantage until the end of the kobold's next turn against enemies within 10 feet that can see the kobold."),
-                    _feature("Pack Tactics", "Advantage on an attack when a non-incapacitated ally is within 5 feet of the target."),
-                    _feature("Sunlight Sensitivity", "Disadvantage on attacks and sight-based Perception checks in the exact direct-sunlight circumstances given by the source."),
+                    _feature(
+                        "Grovel, Cower, and Beg",
+                        "As an action once per short or long rest, allies gain advantage until the end of the kobold's next turn against enemies within 10 feet that can see the kobold.",
+                    ),
+                    _feature(
+                        "Pack Tactics",
+                        "Advantage on an attack when a non-incapacitated ally is within 5 feet of the target.",
+                    ),
+                    _feature(
+                        "Sunlight Sensitivity",
+                        "Disadvantage on attacks and sight-based Perception checks in the exact direct-sunlight circumstances given by the source.",
+                    ),
                 ],
             ),
         ),
         _addition(
-            "species", "Orc", [_selector("0RC TRAITS", 121)],
+            "species",
+            "Orc",
+            [_selector("0RC TRAITS", 121)],
             _species_card(
-                base_species="Orc", abilities={"strength": 2, "constitution": 1},
+                base_species="Orc",
+                abilities={"strength": 2, "constitution": 1},
                 ability_score_decreases={"intelligence": 2},
-                size="medium", speed=30, darkvision_ft=60, languages=["Common", "Orc"],
+                size="medium",
+                speed=30,
+                darkvision_ft=60,
+                languages=["Common", "Orc"],
                 skill_proficiencies=["Intimidation"],
                 features=[
-                    _feature("Aggressive", "As a bonus action, move up to speed toward a visible or audible enemy and finish closer than the starting position."),
+                    _feature(
+                        "Aggressive",
+                        "As a bonus action, move up to speed toward a visible or audible enemy and finish closer than the starting position.",
+                    ),
                     _feature("Menacing", "Proficiency in Intimidation."),
-                    _feature("Powerful Build", "Count as one size larger for carrying capacity and push, drag, or lift limits."),
+                    _feature(
+                        "Powerful Build",
+                        "Count as one size larger for carrying capacity and push, drag, or lift limits.",
+                    ),
                 ],
             ),
         ),
         _addition(
-            "species", "Yuan-ti Pureblood", [_selector("PUREBLOOD TRAITS", 121)],
+            "species",
+            "Yuan-ti Pureblood",
+            [_selector("PUREBLOOD TRAITS", 121)],
             _species_card(
-                base_species="Yuan-ti Pureblood", abilities={"charisma": 2, "intelligence": 1},
-                size="medium", speed=30, darkvision_ft=60,
+                base_species="Yuan-ti Pureblood",
+                abilities={"charisma": 2, "intelligence": 1},
+                size="medium",
+                speed=30,
+                darkvision_ft=60,
                 languages=["Common", "Abyssal", "Draconic"],
-                immunities=["poison"], condition_immunities=["poisoned"],
+                immunities=["poison"],
+                condition_immunities=["poisoned"],
                 spell_grants=[
                     _cantrip("Poison Spray", "charisma", eligible_class="Sorcerer"),
-                    _spell_grant("Animal Friendship", 1, "charisma", eligible_class="Druid", method="at_will", free_casts=0, recovers_on=None),
-                    _spell_grant("Suggestion", 2, "charisma", eligible_class="Sorcerer", minimum_level=3),
+                    _spell_grant(
+                        "Animal Friendship",
+                        1,
+                        "charisma",
+                        eligible_class="Druid",
+                        method="at_will",
+                        free_casts=0,
+                        recovers_on=None,
+                    ),
+                    _spell_grant(
+                        "Suggestion", 2, "charisma", eligible_class="Sorcerer", minimum_level=3
+                    ),
                 ],
                 features=[
-                    _feature("Innate Spellcasting", "Poison Spray is known; Animal Friendship is at will but can target only snakes; Suggestion is available from 3rd level once per long rest. Charisma is the spellcasting ability."),
-                    _feature("Magic Resistance", "Advantage on saving throws against spells and other magical effects."),
-                    _feature("Poison Immunity", "Immune to poison damage and the poisoned condition."),
+                    _feature(
+                        "Innate Spellcasting",
+                        "Poison Spray is known; Animal Friendship is at will but can target only snakes; Suggestion is available from 3rd level once per long rest. Charisma is the spellcasting ability.",
+                    ),
+                    _feature(
+                        "Magic Resistance",
+                        "Advantage on saving throws against spells and other magical effects.",
+                    ),
+                    _feature(
+                        "Poison Immunity", "Immune to poison damage and the poisoned condition."
+                    ),
                 ],
             ),
         ),
@@ -560,11 +868,19 @@ def _wall_of_water() -> dict[str, Any]:
             "definition": {
                 "school": "evocation",
                 "casting_time": "1 action",
-                "range": {"kind": "distance", "normal_ft": 120, "long_ft": 0, "area": "source wall or ring"},
+                "range": {
+                    "kind": "distance",
+                    "normal_ft": 120,
+                    "long_ft": 0,
+                    "area": "source wall or ring",
+                },
                 "duration": {"kind": "timed", "value": 10, "unit": "minute", "concentration": True},
                 "components": {
-                    "verbal": True, "somatic": True, "material": True,
-                    "material_description": "a drop of water", "material_cost_cp": 0,
+                    "verbal": True,
+                    "somatic": True,
+                    "material": True,
+                    "material_description": "a drop of water",
+                    "material_cost_cp": 0,
                     "consumed": False,
                 },
                 "effect": "Create the source-sized wall or ring of water. Its space is difficult terrain, ranged weapon attacks through it have disadvantage, fire damage passing through it is halved, and cold damage freezes a struck 5-foot section with the source AC and hit points until destroyed.",
@@ -695,11 +1011,7 @@ def _cow_source(
     extra_traits: list[str] | None = None,
 ) -> str:
     senses = (f"darkvision {darkvision} ft., " if darkvision else "") + "passive Perception 10"
-    defenses = (
-        f"**Damage Resistances** {', '.join(resistances)}\n"
-        if resistances
-        else ""
-    )
+    defenses = f"**Damage Resistances** {', '.join(resistances)}\n" if resistances else ""
     traits = [
         "***Charge.*** If the creature moves at least 20 feet straight toward a target and then hits it with a gore attack on the same turn, the target takes an extra 7 (2d6) piercing damage.",
         *(extra_traits or []),
@@ -736,23 +1048,33 @@ def _cow_variants() -> list[dict[str, str]]:
             "name": "Ox",
             "normalized_content": _cow_source(
                 "Ox",
-                extra_traits=["***Beast of Burden.*** The ox is considered Huge for determining its carrying capacity."],
+                extra_traits=[
+                    "***Beast of Burden.*** The ox is considered Huge for determining its carrying capacity."
+                ],
             ),
         },
         {"name": "Rothé", "normalized_content": _cow_source("Rothé", darkvision=30)},
         {
             "name": "Deep Rothé",
             "normalized_content": _cow_source(
-                "Deep Rothé", size="Medium", hp="13 (2d8 + 4)", darkvision=60,
-                extra_traits=["***Innate Spellcasting.*** Charisma is the spellcasting ability. The deep rothé can cast Dancing Lights at will, requiring no components."],
+                "Deep Rothé",
+                size="Medium",
+                hp="13 (2d8 + 4)",
+                darkvision=60,
+                extra_traits=[
+                    "***Innate Spellcasting.*** Charisma is the spellcasting ability. The deep rothé can cast Dancing Lights at will, requiring no components."
+                ],
             ),
         },
         {
             "name": "Stench Kow",
             "normalized_content": _cow_source(
-                "Stench Kow", darkvision=60,
+                "Stench Kow",
+                darkvision=60,
                 resistances=["cold", "fire", "poison"],
-                extra_traits=["***Stench.*** A creature other than a stench kow that starts its turn within 5 feet must succeed on a DC 12 Constitution saving throw or be poisoned until the start of its next turn. On a success, it is immune to all stench kows' Stench for 1 hour."],
+                extra_traits=[
+                    "***Stench.*** A creature other than a stench kow that starts its turn within 5 feet must succeed on a DC 12 Constitution saving throw or be poisoned until the start of its next turn. On a success, it is immune to all stench kows' Stench for 1 hour."
+                ],
             ),
         },
     ]
@@ -796,8 +1118,12 @@ def _recover_ocr_statblocks() -> dict[str, str]:
             actual_scores = [
                 int(parsed.sheet["abilities"][ability]["score"])
                 for ability in (
-                    "strength", "dexterity", "constitution",
-                    "intelligence", "wisdom", "charisma",
+                    "strength",
+                    "dexterity",
+                    "constitution",
+                    "intelligence",
+                    "wisdom",
+                    "charisma",
                 )
             ]
             actual = (
@@ -852,49 +1178,70 @@ def _runtime_probes() -> list[dict[str, Any]]:
     return [
         {
             "name": "volo-lizardfolk-complete-physical-grants",
-            "steps": [{
-                "kind": "species", "name": "Lizardfolk",
-                "selection": {"skills": ["Nature", "Survival"]},
-                "expect": [
-                    {"path": "sheet.abilities.constitution.score", "equals": 12},
-                    {"path": "sheet.combat.speed.swim", "equals": 30},
-                    {"path": "sheet.skills.nature.proficiency", "equals": "proficient"},
-                    {"path": "sheet.effects", "contains_names": ["Lizardfolk Natural Armor"]},
-                ],
-            }],
+            "steps": [
+                {
+                    "kind": "species",
+                    "name": "Lizardfolk",
+                    "selection": {"skills": ["Nature", "Survival"]},
+                    "expect": [
+                        {"path": "sheet.abilities.constitution.score", "equals": 12},
+                        {"path": "sheet.combat.speed.swim", "equals": 30},
+                        {"path": "sheet.skills.nature.proficiency", "equals": "proficient"},
+                        {"path": "sheet.traits.proficiencies.weapons", "length": 0},
+                        {"path": "sheet.inventory.items", "contains_names": ["Bite"]},
+                        {"path": "sheet.effects", "contains_names": ["Lizardfolk Natural Armor"]},
+                    ],
+                }
+            ],
         },
         {
             "name": "volo-hobgoblin-reviewed-martial-choices",
-            "steps": [{
-                "kind": "species", "name": "Hobgoblin",
-                "selection": {"proficiency_choices": {"martial_training": [
-                    {"kind": "weapon", "name": "Longsword"},
-                    {"kind": "weapon", "name": "Longbow"},
-                ]}},
-                "expect": [
-                    {"path": "sheet.traits.proficiencies.armor", "contains": "Light Armor"},
-                    {"path": "sheet.traits.proficiencies.weapons", "contains": "Longbow"},
-                ],
-            }],
+            "steps": [
+                {
+                    "kind": "species",
+                    "name": "Hobgoblin",
+                    "selection": {
+                        "proficiency_choices": {
+                            "martial_training": [
+                                {"kind": "weapon", "name": "Longsword"},
+                                {"kind": "weapon", "name": "Longbow"},
+                            ]
+                        }
+                    },
+                    "expect": [
+                        {"path": "sheet.traits.proficiencies.armor", "contains": "Light Armor"},
+                        {"path": "sheet.traits.proficiencies.weapons", "contains": "Longbow"},
+                    ],
+                }
+            ],
         },
         {
             "name": "volo-shared-innate-spell-resources",
             "level": 5,
-            "steps": [{
-                "kind": "species", "name": "Triton", "selection": {},
-                "expect": [
-                    {"path": "sheet.content.spells", "contains_names": ["Fog Cloud", "Gust of Wind", "Wall of Water"]},
-                    {"path": "sheet.resources", "length": 1},
-                    {"path": "sheet.traits.resistances", "contains": "cold"},
-                ],
-            }],
+            "steps": [
+                {
+                    "kind": "species",
+                    "name": "Triton",
+                    "selection": {},
+                    "expect": [
+                        {
+                            "path": "sheet.content.spells",
+                            "contains_names": ["Fog Cloud", "Gust of Wind", "Wall of Water"],
+                        },
+                        {"path": "sheet.resources", "length": 1},
+                        {"path": "sheet.traits.resistances", "contains": "cold"},
+                    ],
+                }
+            ],
         },
         {
             "name": "volo-legacy-decrease-and-poison-immunity",
             "level": 3,
             "steps": [
                 {
-                    "kind": "species", "name": "Kobold", "selection": {},
+                    "kind": "species",
+                    "name": "Kobold",
+                    "selection": {},
                     "expect": [
                         {"path": "sheet.abilities.dexterity.score", "equals": 12},
                         {"path": "sheet.abilities.strength.score", "equals": 8},
@@ -905,14 +1252,21 @@ def _runtime_probes() -> list[dict[str, Any]]:
         {
             "name": "volo-yuan-ti-fixed-spell-and-defense-model",
             "level": 3,
-            "steps": [{
-                "kind": "species", "name": "Yuan-ti Pureblood", "selection": {},
-                "expect": [
-                    {"path": "sheet.traits.immunities", "contains": "poison"},
-                    {"path": "sheet.traits.condition_immunities", "contains": "poisoned"},
-                    {"path": "sheet.content.spells", "contains_names": ["Poison Spray", "Animal Friendship", "Suggestion"]},
-                ],
-            }],
+            "steps": [
+                {
+                    "kind": "species",
+                    "name": "Yuan-ti Pureblood",
+                    "selection": {},
+                    "expect": [
+                        {"path": "sheet.traits.immunities", "contains": "poison"},
+                        {"path": "sheet.traits.condition_immunities", "contains": "poisoned"},
+                        {
+                            "path": "sheet.content.spells",
+                            "contains_names": ["Poison Spray", "Animal Friendship", "Suggestion"],
+                        },
+                    ],
+                }
+            ],
         },
     ]
 
@@ -927,7 +1281,10 @@ def main() -> None:
     ]
     actor_names = [
         *STATBLOCK_NAMES,
-        "Ox", "Rothé", "Deep Rothé", "Stench Kow",
+        "Ox",
+        "Rothé",
+        "Deep Rothé",
+        "Stench Kow",
     ]
     document = {
         "complete_review": True,

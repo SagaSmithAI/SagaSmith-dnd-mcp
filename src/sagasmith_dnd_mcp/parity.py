@@ -45,8 +45,7 @@ FULL_SKILL_CAPABILITIES: dict[str, frozenset[str]] = {
     "modules": frozenset(
         {
             "module_expand",
-            "module_import",
-            "module_review",
+            "module_draft",
             "module_query",
             "module_search",
             "module_set_progress",
@@ -58,7 +57,7 @@ FULL_SKILL_CAPABILITIES: dict[str, frozenset[str]] = {
             "dnd_check",
             "dnd_dice_roll",
             "rule_expand",
-            "rule_import",
+            "rulebook_draft",
             "rule_search",
             "rule_seed_status",
             "rule_seed_bundled",

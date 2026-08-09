@@ -662,7 +662,7 @@ def test_real_skill_plan_manifest_is_valid_and_within_budgets() -> None:
     assert plans.available is True, plans.load_error
     assert plans.summary()["group_count"] == 38
     assert plans.summary()["tool_group_count"] == 23
-    assert plans.summary()["operation_binding_count"] == 25
+    assert plans.summary()["operation_binding_count"] == 23
     assert len(skills.read("dnd.full.skills.dnd-dm")) < 12_000
     assert len(
         skills.read_asset(
@@ -678,7 +678,7 @@ def test_real_skill_plan_manifest_is_valid_and_within_budgets() -> None:
     )
     assert player_plan["unavailable_skill_groups"] == ["modules.import"]
     assert not any(
-        item["operation"].startswith("module_review:")
+        item["operation"].startswith("module_draft:")
         for item in player_plan["conditional"]
     )
     combat_plan = plans.plan(
@@ -767,7 +767,7 @@ def test_stdio_cold_start_uses_real_phase_skill_plan(tmp_path: Path) -> None:
                 assert summary["available"] is True
                 assert summary["group_count"] == 38
                 assert summary["tool_group_count"] == 23
-                assert summary["operation_binding_count"] == 25
+                assert summary["operation_binding_count"] == 23
 
                 planned = await session.call_tool(
                     "skill_query",

@@ -11,30 +11,90 @@ from sagasmith_dnd_mcp.server import create_server
 async def _import_module(call, server, campaign_id: str, source_path: Path, key: str):
     staged = await call(
         server,
-        "module_import",
+        "module_draft",
         {
             "campaign_id": campaign_id,
-            "action": "stage",
+            "action": "start",
             "payload": {
                 "source_path": str(source_path),
                 "source_key": key,
                 "title": source_path.stem,
             },
-            "idempotency_key": f"{key}:stage",
+            "idempotency_key": f"{key}:start",
         },
     )
     job_id = staged["job"]["id"]
-    for action in ("inspect", "validate", "ingest"):
-        await call(
-            server,
-            "module_import",
-            {
-                "campaign_id": campaign_id,
-                "action": action,
-                "payload": {"job_id": job_id},
-                "idempotency_key": f"{key}:{action}",
+    chunks = await call(
+        server,
+        "module_draft",
+        {
+            "campaign_id": campaign_id,
+            "action": "evidence",
+            "payload": {"job_id": job_id, "kind": "chunks", "limit": 1},
+        },
+    )
+    assert chunks
+    source_ref = {
+        "source_key": key,
+        "page": None,
+        "chunk_hash": chunks[0]["content_hash"],
+        "note": "Reviewed test fixture source.",
+    }
+    finalized = await call(
+        server,
+        "module_draft",
+        {
+            "campaign_id": campaign_id,
+            "action": "finalize",
+            "payload": {
+                "job_id": job_id,
+                "portable_id": f"dnd5e.module.{key}",
+                "version": "1.0.0",
+                "manifest": {
+                    "title": source_path.stem,
+                    "classification": "adventure",
+                    "compatibility": {
+                        "editions": ["2024"],
+                        "required_capabilities": ["module_pack_v2"],
+                    },
+                    "play_profile": {
+                        "party_size": {
+                            "minimum": 3,
+                            "maximum": 5,
+                            "source_refs": [source_ref],
+                        },
+                        "starting_level": {"value": 1, "source_refs": [source_ref]},
+                        "expected_end_level": {"value": 1, "source_refs": [source_ref]},
+                        "advancement": {
+                            "modes": ["milestone"],
+                            "recommended": "milestone",
+                            "source_refs": [source_ref],
+                        },
+                        "pregenerated_characters": {
+                            "available": False,
+                            "applicability": "Reviewed; none are included.",
+                            "source_refs": [source_ref],
+                        },
+                    },
+                    "continuity": {
+                        "series_id": None,
+                        "order": None,
+                        "continues_from": None,
+                        "state_policy": {},
+                    },
+                    "activation": {"mode": "campaign_attach", "default_active": False},
+                    "content_summary": {},
+                },
+                "confirmation": {
+                    "confirmed": True,
+                    "note": (
+                        "Agent reviewed the module package and confirmed it is ready to finalize."
+                    ),
+                },
             },
-        )
+            "idempotency_key": f"{key}:finalize",
+        },
+    )
     campaign = await call(
         server,
         "campaign_query",
@@ -46,11 +106,14 @@ async def _import_module(call, server, campaign_id: str, source_path: Path, key:
     )
     return await call(
         server,
-        "module_import",
+        "content_pack",
         {
-            "campaign_id": campaign_id,
             "action": "activate",
-            "payload": {"job_id": job_id},
+            "payload": {
+                "campaign_id": campaign_id,
+                "kind": "module",
+                "artifact": finalized["artifact"],
+            },
             "expected_revision": campaign["revision"],
             "idempotency_key": f"{key}:activate",
         },
@@ -271,7 +334,7 @@ def test_mcp_first_full_workflow(tmp_path: Path) -> None:
             },
         )
         imported = await _import_module(call, server, campaign["id"], source, "parity-module")
-        assert imported["job"]["state"] == "activated"
+        assert imported["activated"] is True
         scenes = await call(
             server,
             "module_query",

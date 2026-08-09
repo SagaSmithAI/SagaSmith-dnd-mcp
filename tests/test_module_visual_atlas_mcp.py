@@ -11,6 +11,7 @@ from sagasmith_core import OcrPageLayout, OcrTextBlock, RapidOcrProvider
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
+from tests.authoring_helpers import finalize_and_activate_module
 
 NECROMITE = """# Necromite of Myrkul
 
@@ -131,10 +132,10 @@ def test_pdf_page_review_becomes_snapshot_managed_scene_atlas(
         )
         staged = await _call(
             server,
-            "module_import",
+            "module_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "stage",
+                "action": "start",
                 "payload": {
                     "source_path": str(source),
                     "source_key": "visual-dungeon",
@@ -143,33 +144,7 @@ def test_pdf_page_review_becomes_snapshot_managed_scene_atlas(
                 "idempotency_key": "stage",
             },
         )
-        job_id = staged["job"]["id"]
-        for action in ("inspect", "validate", "ingest"):
-            ingested = await _call(
-                server,
-                "module_import",
-                {
-                    "campaign_id": campaign["id"],
-                    "action": action,
-                    "payload": {"job_id": job_id},
-                    "idempotency_key": action,
-                },
-            )
-        campaign = await _call(
-            server, "campaign_query", {"view": "get", "payload": {"campaign_id": campaign["id"]}}
-        )
-        await _call(
-            server,
-            "module_import",
-            {
-                "campaign_id": campaign["id"],
-                "action": "activate",
-                "payload": {"job_id": job_id},
-                "expected_revision": campaign["revision"],
-                "idempotency_key": "activate",
-            },
-        )
-        module_id = ingested["module_id"]
+        module_id = staged["module_id"]
         assets = await _call(
             server,
             "module_query",
@@ -182,19 +157,19 @@ def test_pdf_page_review_becomes_snapshot_managed_scene_atlas(
         source_asset = next(item for item in assets if item["media_type"] == "application/pdf")
         rendered = await _call(
             server,
-            "module_review",
+            "module_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "render_page",
-                "payload": {"module_id": module_id, "page_number": 1},
+                "action": "evidence",
+                "payload": {"kind": "page", "module_id": module_id, "page_number": 1},
             },
         )
         assert isinstance(rendered.content[0], TextContent)
         assert isinstance(rendered.content[1], ImageContent)
         render_metadata = json.loads(rendered.content[0].text)
-        assert render_metadata["asset"]["metadata"]["source_page"] == 1
-        assert render_metadata["ocr"]["text"] == "D5. Entry"
-        assert render_metadata["ocr"]["model"] == "medium"
+        assert render_metadata["page_number"] == 1
+        assert render_metadata["transcription"]["ocr"]["text"] == "D5. Entry"
+        assert render_metadata["transcription"]["ocr"]["model"] == "medium"
         assert rendered.structuredContent == render_metadata
         assert rendered.content[1].mimeType == "image/png"
 
@@ -212,11 +187,15 @@ def test_pdf_page_review_becomes_snapshot_managed_scene_atlas(
             "exposure_call",
             {
                 "exposure_id": opened["exposure_id"],
-                "tool_id": "module_review",
+                "tool_id": "module_draft",
                 "arguments": {
                     "campaign_id": campaign["id"],
-                    "action": "render_page",
-                    "payload": {"module_id": module_id, "page_number": 1},
+                    "action": "evidence",
+                    "payload": {
+                        "kind": "page",
+                        "module_id": module_id,
+                        "page_number": 1,
+                    },
                 },
             },
         )
@@ -224,9 +203,12 @@ def test_pdf_page_review_becomes_snapshot_managed_scene_atlas(
         assert isinstance(fallback.content[0], TextContent)
         assert isinstance(fallback.content[1], ImageContent)
         fallback_envelope = json.loads(fallback.content[0].text)
-        assert fallback_envelope["tool_id"] == "module_review"
-        assert fallback_envelope["result"]["asset"]["metadata"]["source_page"] == 1
-        assert fallback_envelope["result"]["ocr"] == render_metadata["ocr"]
+        assert fallback_envelope["tool_id"] == "module_draft"
+        assert fallback_envelope["result"]["page_number"] == 1
+        assert (
+            fallback_envelope["result"]["transcription"]["ocr"]
+            == render_metadata["transcription"]["ocr"]
+        )
         assert fallback.structuredContent == fallback_envelope
         assert fallback.content[1].mimeType == "image/png"
 
@@ -241,51 +223,14 @@ def test_pdf_page_review_becomes_snapshot_managed_scene_atlas(
         )
         located_scenes = [item for item in index if item["spatial"].get("locations")]
         scene = located_scenes[0]
-        keys = [
-            located_scenes[0]["spatial"]["locations"][0]["key"],
-            located_scenes[1]["spatial"]["locations"][0]["key"],
-        ]
-        progress = await _call(
-            server,
-            "module_set_progress",
-            {
-                "campaign_id": campaign["id"],
-                "scene_id": scene["scene_id"],
-                "current_location_key": keys[0],
-                "expected_state_version": 0,
-                "idempotency_key": "review-map",
-                "spatial_review": {
-                    "source_asset_id": source_asset["id"],
-                    "page_number": 1,
-                    "connections": [
-                        {
-                            "from": keys[0],
-                            "to": keys[1],
-                            "kind": "passage",
-                            "observation": "The reviewed page visibly joins these rooms.",
-                        }
-                    ],
-                },
-            },
-        )
-        assert progress["state_version"] == 1
-        current = await _call(
-            server,
-            "module_query",
-            {"campaign_id": campaign["id"], "view": "current"},
-        )
-        connection = current["spatial"]["connections"][0]
-        assert connection["confidence"] == "reviewed_image"
-        assert connection["evidence"]["asset_id"] == source_asset["id"]
-        assert connection["evidence"]["branch_id"]
-
         reviewed = await _call(
             server,
-            "module_review",
+            "module_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "submit_content",
+                "action": "edit",
                 "payload": {
+                    "operation": "content",
                     "module_id": module_id,
                     "scene_id": scene["scene_id"],
                     "content_key": "necromite-of-myrkul",
@@ -332,6 +277,71 @@ def test_pdf_page_review_becomes_snapshot_managed_scene_atlas(
         assert attacks["Claws of the Grave"]["attack_bonus"] == 5
         assert attacks["Claws of the Grave"]["damage_expression"] == "2d4 + 3"
         assert created["statblock"]["settlement"] == "automatic"
+        await finalize_and_activate_module(
+            _call,
+            server,
+            campaign["id"],
+            staged,
+            source_key="visual-dungeon",
+            title="Visual Dungeon",
+            portable_id="dnd5e.module.visual-dungeon-test",
+        )
+        active_index = await _call(
+            server,
+            "module_query",
+            {"campaign_id": campaign["id"], "view": "index"},
+        )
+        active_scenes = [item for item in active_index if item["spatial"].get("locations")]
+        active_scene = active_scenes[0]
+        active_keys = [
+            active_scenes[0]["spatial"]["locations"][0]["key"],
+            active_scenes[1]["spatial"]["locations"][0]["key"],
+        ]
+        active_assets = await _call(
+            server,
+            "module_query",
+            {
+                "campaign_id": campaign["id"],
+                "view": "assets",
+                "payload": {"module_id": active_scene["module_id"]},
+            },
+        )
+        active_source_asset = next(
+            item for item in active_assets if item["media_type"] == "application/pdf"
+        )
+        progress = await _call(
+            server,
+            "module_set_progress",
+            {
+                "campaign_id": campaign["id"],
+                "scene_id": active_scene["scene_id"],
+                "current_location_key": active_keys[0],
+                "expected_state_version": 0,
+                "idempotency_key": "review-map",
+                "spatial_review": {
+                    "source_asset_id": active_source_asset["id"],
+                    "page_number": 1,
+                    "connections": [
+                        {
+                            "from": active_keys[0],
+                            "to": active_keys[1],
+                            "kind": "passage",
+                            "observation": "The reviewed page visibly joins these rooms.",
+                        }
+                    ],
+                },
+            },
+        )
+        assert progress["state_version"] == 1
+        current = await _call(
+            server,
+            "module_query",
+            {"campaign_id": campaign["id"], "view": "current"},
+        )
+        connection = current["spatial"]["connections"][0]
+        assert connection["confidence"] == "reviewed_image"
+        assert connection["evidence"]["asset_id"] == active_source_asset["id"]
+        assert connection["evidence"]["branch_id"]
 
     asyncio.run(exercise())
 
@@ -462,10 +472,10 @@ def test_module_statblock_ocr_recovery_supports_text_only_agent(
         )
         staged = await _call(
             server,
-            "module_import",
+            "module_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "stage",
+                "action": "start",
                 "payload": {
                     "source_path": str(source),
                     "source_key": "module-ocr",
@@ -474,35 +484,7 @@ def test_module_statblock_ocr_recovery_supports_text_only_agent(
                 "idempotency_key": "stage",
             },
         )
-        job_id = staged["job"]["id"]
-        for action in ("inspect", "validate", "ingest"):
-            ingested = await _call(
-                server,
-                "module_import",
-                {
-                    "campaign_id": campaign["id"],
-                    "action": action,
-                    "payload": {"job_id": job_id},
-                    "idempotency_key": action,
-                },
-            )
-        current = await _call(
-            server,
-            "campaign_query",
-            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
-        )
-        await _call(
-            server,
-            "module_import",
-            {
-                "campaign_id": campaign["id"],
-                "action": "activate",
-                "payload": {"job_id": job_id},
-                "expected_revision": current["revision"],
-                "idempotency_key": "activate",
-            },
-        )
-        module_id = ingested["module_id"]
+        module_id = staged["module_id"]
         scene_id = (
             await _call(
                 server,
@@ -516,8 +498,9 @@ def test_module_statblock_ocr_recovery_supports_text_only_agent(
         )[0]["scene_id"]
         arguments = {
             "campaign_id": campaign["id"],
-            "action": "recover_statblock",
+            "action": "edit",
             "payload": {
+                "operation": "statblock",
                 "module_id": module_id,
                 "scene_id": scene_id,
                 "content_key": "commoner",
@@ -526,8 +509,8 @@ def test_module_statblock_ocr_recovery_supports_text_only_agent(
             },
             "idempotency_key": "recover-commoner",
         }
-        recovered = await _call(server, "module_review", arguments)
-        replayed = await _call(server, "module_review", arguments)
+        recovered = await _call(server, "module_draft", arguments)
+        replayed = await _call(server, "module_draft", arguments)
 
         assert replayed == recovered
         assert ocr_calls == 1
@@ -558,8 +541,8 @@ def test_module_statblock_ocr_recovery_supports_text_only_agent(
             },
             "idempotency_key": "recover-commoner-multiattack-preview",
         }
-        preview = await _call(server, "module_review", preview_arguments)
-        replayed_preview = await _call(server, "module_review", preview_arguments)
+        preview = await _call(server, "module_draft", preview_arguments)
+        replayed_preview = await _call(server, "module_draft", preview_arguments)
         assert replayed_preview == preview
         assert preview["review"] is None
         assert preview["requires_agent_fill"] is True
@@ -600,7 +583,7 @@ def test_module_statblock_ocr_recovery_supports_text_only_agent(
             },
             "idempotency_key": "recover-commoner-multiattack-filled",
         }
-        filled = await _call(server, "module_review", filled_arguments)
+        filled = await _call(server, "module_draft", filled_arguments)
         assert filled["requires_agent_fill"] is False
         assert filled["review"]["id"]
         assert filled["validation"]["agent_fill"]["multiattack_options"][0]["options"] == [
@@ -616,5 +599,14 @@ def test_module_statblock_ocr_recovery_supports_text_only_agent(
             }
         ]
         assert ocr_calls == 2
+        await finalize_and_activate_module(
+            _call,
+            server,
+            campaign["id"],
+            staged,
+            source_key="module-ocr",
+            title="Module OCR",
+            portable_id="dnd5e.module.module-ocr-test",
+        )
 
     asyncio.run(exercise())

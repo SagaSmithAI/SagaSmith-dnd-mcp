@@ -12,10 +12,10 @@
       },
       "rationale": "Agent reviewed every player option, item, and creature against the indexed Rising from the Last War pages. Automatic setting prose is rejected; every recovered card is bound to exact source chunks, has bounded choices, and preserves descriptive semantics as Agent-as-DM context instead of inventing one-off engine rules.",
       "expected_counts": {
-        "background": 13,
+        "background": 14,
         "class": 1,
         "feat": 2,
-        "feature": 42,
+        "feature": 44,
         "item": 26,
         "species": 24,
         "spell": 1,
@@ -61,6 +61,10 @@
         "Shifter",
         "Tarkanan Assassin",
         "Warforged Soldier"
+      ],
+      "expected_dependent_actor_names": [
+        "Homunculus Servant",
+        "Steel Defender"
       ],
       "runtime_probes": [
         {
@@ -320,6 +324,7 @@
           "name": "STEEL DEFENDER",
           "artifact_patch": {
             "card": {
+              "name": "Steel Defender",
               "owner_class_name": "Artificer"
             }
           }
@@ -329,6 +334,7 @@
           "name": "HOMUNCULUS SERVANT",
           "artifact_patch": {
             "card": {
+              "name": "Homunculus Servant",
               "owner_class_name": "Artificer"
             }
           }
@@ -348,6 +354,77 @@
           "artifact_patch": {
             "card": {
               "name": "Lady Illmarrow"
+            }
+          }
+        },
+        {
+          "kind": "statblock",
+          "name": "RAK TuLKHESH",
+          "source_heading_exact": "RAK TuLKHESH",
+          "artifact_patch": {
+            "card": {
+              "name": "Rak Tulkhesh"
+            }
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "REMARKABLE H E ROES",
+          "status": "accepted",
+          "artifact_patch": {
+            "card": {
+              "name": "Remarkable Heroes"
+            }
+          }
+        },
+        {
+          "kind": "species",
+          "name": "C HANGELING",
+          "status": "accepted",
+          "artifact_patch": {
+            "card": {
+              "name": "Changeling"
+            }
+          }
+        },
+        {
+          "kind": "background",
+          "name": "HOUS E AGENT",
+          "status": "accepted",
+          "artifact_patch": {
+            "card": {
+              "name": "House Agent"
+            }
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "M AGIC ITEM SAVANT",
+          "status": "accepted",
+          "artifact_patch": {
+            "card": {
+              "name": "Magic Item Savant"
+            }
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "S OU L OF ARTI FICE",
+          "status": "accepted",
+          "artifact_patch": {
+            "card": {
+              "name": "Soul of Artifice"
+            }
+          }
+        },
+        {
+          "kind": "feature",
+          "name": "ARTIFIC E R SPEC IALI STS",
+          "source_heading_exact": "ARTIFIC E R SPEC IALI STS",
+          "status": "accepted",
+          "artifact_patch": {
+            "card": {
+              "name": "Artificer Specialists"
             }
           }
         }

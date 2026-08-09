@@ -1141,65 +1141,65 @@ def _primary_hostile_source_excerpt(args: argparse.Namespace) -> str:
     )
 
 
-async def _require_encounter_readiness(
+async def _require_encounter_preflight(
     client: ExposureClient,
     *,
     campaign_id: str,
     scene_id: str,
     participant_manifest: dict[str, Any],
 ) -> dict[str, Any]:
-    """Fail before any encounter mutation when source participants are not ready."""
+    """Fail before mutation when required participants are missing or invalid."""
 
-    readiness = await client.domain(
+    preflight = await client.domain(
         "module_query",
         {
             "campaign_id": campaign_id,
-            "view": "readiness",
+            "view": "preflight",
             "payload": {
                 "scene_id": scene_id,
                 "participant_manifest": participant_manifest,
             },
         },
     )
-    if not isinstance(readiness, dict):
-        raise TypeError("module_query(view='readiness') must return an object")
-    if readiness.get("ready") is not True:
+    if not isinstance(preflight, dict):
+        raise TypeError("module_query(view='preflight') must return an object")
+    if preflight.get("ready") is not True:
         failed_groups = [
             {
                 "key": str(group.get("key") or ""),
                 "missing_count": int(group.get("missing_count", 0) or 0),
-                "unready_count": int(group.get("unready_count", 0) or 0),
-                "unready_actor_ids": [
-                    str(item) for item in group.get("unready_actor_ids") or []
+                "invalid_count": int(group.get("invalid_count", 0) or 0),
+                "invalid_actor_ids": [
+                    str(item) for item in group.get("invalid_actor_ids") or []
                 ],
-                "blocking_reasons": {
+                "hard_blockers": {
                     str(actor.get("id") or ""): list(
                         dict(actor.get("combat_card") or {}).get(
-                            "blocking_reasons"
+                            "hard_blockers"
                         )
                         or []
                     )
                     for actor in group.get("actors") or []
                     if isinstance(actor, dict)
                     and dict(actor.get("combat_card") or {}).get(
-                        "blocking_reasons"
+                        "hard_blockers"
                     )
                 },
                 "issues": list(group.get("issues") or []),
             }
-            for group in readiness.get("groups", [])
+            for group in preflight.get("groups", [])
             if isinstance(group, dict)
             and (
                 int(group.get("missing_count", 0) or 0) > 0
-                or int(group.get("unready_count", 0) or 0) > 0
+                or int(group.get("invalid_count", 0) or 0) > 0
                 or bool(group.get("issues"))
             )
         ]
         raise RuntimeError(
-            "encounter participant readiness failed before mutation "
+            "encounter participant preflight failed before mutation "
             f"(groups={failed_groups})"
         )
-    return readiness
+    return preflight
 
 
 def _source_departure_patch(
@@ -4463,7 +4463,7 @@ async def _start(
             getattr(args, "reinforcement_ally_source_excerpt", "") or ""
         ),
     )
-    encounter_readiness = await _require_encounter_readiness(
+    encounter_preflight = await _require_encounter_preflight(
         client,
         campaign_id=args.campaign_id,
         scene_id=args.scene_id,
@@ -4740,7 +4740,7 @@ async def _start(
     start_request["idempotency_key"] = _encounter_start_operation_token(start_request)
     started = await client.domain("combat_start", start_request)
     _require_committed_encounter_start(started)
-    started["participant_readiness"] = encounter_readiness
+    started["participant_preflight"] = encounter_preflight
     opened_combat = await client.open(args.campaign_id)
     await client.load(
         "combat.observe",

@@ -7,6 +7,7 @@ import pytest
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
+from tests.authoring_helpers import finalize_and_activate_module
 
 NARRATIVE_MODULE = """# Part 2: Phandalin
 
@@ -52,10 +53,10 @@ async def _campaign_with_narrative_module(tmp_path: Path):
     )
     staged = await _call(
         server,
-        "module_import",
+        "module_draft",
         {
             "campaign_id": campaign["id"],
-            "action": "stage",
+            "action": "start",
             "payload": {
                 "name": "phandalin.md",
                 "content": NARRATIVE_MODULE,
@@ -65,35 +66,16 @@ async def _campaign_with_narrative_module(tmp_path: Path):
             "idempotency_key": "stage",
         },
     )
-    job_id = staged["job"]["id"]
-    ingested = None
-    for action in ("inspect", "validate", "ingest"):
-        ingested = await _call(
-            server,
-            "module_import",
-            {
-                "campaign_id": campaign["id"],
-                "action": action,
-                "payload": {"job_id": job_id},
-                "idempotency_key": action,
-            },
-        )
-    campaign = await _call(
+    activation = await finalize_and_activate_module(
+        _call,
         server,
-        "campaign_query",
-        {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        campaign["id"],
+        staged,
+        source_key="phandalin",
+        title="Phandalin",
+        portable_id="dnd5e.module.phandalin-test",
     )
-    await _call(
-        server,
-        "module_import",
-        {
-            "campaign_id": campaign["id"],
-            "action": "activate",
-            "payload": {"job_id": job_id},
-            "expected_revision": campaign["revision"],
-            "idempotency_key": "activate",
-        },
-    )
+    module_id = activation["activated"]["activation"]["module_id"]
     hits = await _call(
         server,
         "module_search",
@@ -105,7 +87,7 @@ async def _campaign_with_narrative_module(tmp_path: Path):
     )
     expanded = await _call(server, "module_expand", {"chunk_id": hits[0]["id"]})
     source_ref = {
-        "module_id": ingested["module_id"],
+        "module_id": module_id,
         "scene_id": expanded["scene"]["id"],
         "chunk_id": expanded["chunk_id"],
         "page_start": expanded["page_start"],
@@ -344,8 +326,7 @@ def test_narrative_npc_accepts_agent_named_source_instance(
                 "their independent knowledge remains addressable."
             ),
             "reason": (
-                "The source establishes two anonymous townsfolk but supplies no "
-                "individual names."
+                "The source establishes two anonymous townsfolk but supplies no individual names."
             ),
             "assigned_name": "Caldan Voss",
             "source_identity": "Townsfolk",

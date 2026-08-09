@@ -219,6 +219,10 @@
         "statblock": 1,
         "subclass": 2
       },
+      "expected_actor_names": [],
+      "expected_dependent_actor_names": [
+        "Alchemical Homunculus"
+      ],
       "additions": [
         {
           "kind": "subclass",
@@ -1299,6 +1303,10 @@
         "statblock": 1,
         "subclass": 3
       },
+      "expected_actor_names": [],
+      "expected_dependent_actor_names": [
+        "Wildfire Spirit"
+      ],
       "additions": [
         {
           "kind": "subclass",
@@ -1992,7 +2000,179 @@
         "species": 1,
         "statblock": 5
       },
-      "decisions": []
+      "expected_actor_names": [
+        "Decapus",
+        "Geonid",
+        "Topi",
+        "Tortle",
+        "Tortle Druid"
+      ],
+      "runtime_probes": [
+        {
+          "name": "tortle-fixed-shell-ac-and-natural-claws",
+          "ability_scores": {
+            "dexterity": 18
+          },
+          "steps": [
+            {
+              "kind": "species",
+              "name": "Tortle",
+              "selection": {},
+              "expect": [
+                {
+                  "path": "derived.armor_class",
+                  "equals": 17
+                },
+                {
+                  "path": "derived.armor_class_breakdown.dexterity_bonus",
+                  "equals": 0
+                },
+                {
+                  "path": "sheet.skills.survival.proficiency",
+                  "equals": "proficient"
+                },
+                {
+                  "path": "sheet.inventory.items",
+                  "contains_names": [
+                    "Claws"
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "decisions": [
+        {
+          "kind": "species",
+          "name": "TORTLE",
+          "status": "accepted",
+          "artifact_patch": {
+            "card": {
+              "name": "Tortle",
+              "base_species": "Tortle",
+              "grants": {
+                "ability_score_increases": {
+                  "strength": 2,
+                  "wisdom": 1
+                },
+                "ability_choice": {
+                  "count": 0,
+                  "amount": 0,
+                  "exclude": [],
+                  "options": []
+                },
+                "size": "medium",
+                "size_options": [],
+                "walk_speed": 30,
+                "swim_speed": 0,
+                "darkvision_ft": 0,
+                "languages": [
+                  "Aquan",
+                  "Common"
+                ],
+                "language_choice_count": 0,
+                "language_options": [],
+                "allow_any_language": false,
+                "skill_proficiencies": [
+                  "survival"
+                ],
+                "skill_choice_count": 0,
+                "skill_options": [],
+                "allow_any_skill": false,
+                "armor_proficiencies": [],
+                "weapon_proficiencies": [],
+                "tool_proficiencies": [],
+                "natural_armor_base": 17,
+                "natural_armor_includes_dexterity": false,
+                "natural_weapons": [
+                  {
+                    "name": "Claws",
+                    "attack_ability": "strength",
+                    "damage_formula": "1d4",
+                    "damage_type": "slashing",
+                    "reach_ft": 5,
+                    "description": "A natural weapon usable for an unarmed strike under the cited Tortle trait."
+                  }
+                ],
+                "resistances": [],
+                "features": [
+                  {
+                    "name": "Hold Breath",
+                    "description": "Can hold breath for up to 1 hour."
+                  },
+                  {
+                    "name": "Natural Armor",
+                    "description": "Fixed AC 17 without Dexterity; a shield applies normally."
+                  },
+                  {
+                    "name": "Shell Defense",
+                    "description": "Source-bound action: withdraw or emerge and apply the cited AC, save, speed, prone, reaction, and action restrictions."
+                  },
+                  {
+                    "name": "Survival Instinct",
+                    "description": "Grants Survival proficiency."
+                  }
+                ],
+                "spell_grants": [],
+                "unresolved": []
+              }
+            }
+          },
+          "note": "Agent reviewed the complete Tortle species mechanics; fixed shell AC and claws use generic engine grants while Shell Defense remains source-bound Agent adjudication."
+        },
+        {
+          "kind": "statblock",
+          "name": "DECAPUS",
+          "status": "accepted",
+          "artifact_patch": {
+            "card": {
+              "name": "Decapus"
+            }
+          }
+        },
+        {
+          "kind": "statblock",
+          "name": "GEONID",
+          "status": "accepted",
+          "artifact_patch": {
+            "card": {
+              "name": "Geonid"
+            }
+          }
+        },
+        {
+          "kind": "statblock",
+          "name": "TOPI",
+          "status": "accepted",
+          "artifact_patch": {
+            "card": {
+              "name": "Topi"
+            }
+          }
+        },
+        {
+          "kind": "statblock",
+          "name": "TORTLE",
+          "candidate_origin": "extracted",
+          "status": "accepted",
+          "artifact_patch": {
+            "card": {
+              "name": "Tortle"
+            }
+          }
+        },
+        {
+          "kind": "statblock",
+          "name": "TORTLE DRUID",
+          "status": "accepted",
+          "artifact_patch": {
+            "card": {
+              "name": "Tortle Druid"
+            }
+          }
+        }
+      ]
     },
     "D&D 5E - Guildmasters' Guide to Ravnica.pdf": {
       "complete_review": true,
@@ -2000,7 +2180,7 @@
       "rationale": "Agent reviewed all character options, backgrounds, spells, treasure entries, and indexed creature cards. Split headings and fused item boundaries are restored from exact source spans; bounded choices replace OCR-derived counts.",
       "expected_counts": {
         "background": 10,
-        "feature": 186,
+        "feature": 185,
         "item": 16,
         "species": 6,
         "spell": 2,
@@ -2552,6 +2732,12 @@
         }
       ],
       "decisions": [
+        {
+          "kind": "feature",
+          "name": "10 (+O) 10 (+O) 13 (+1) 18 (+4) 20 (+5) 17",
+          "status": "rejected",
+          "note": "Agent rejected an OCR ability-score row fused with the Obzedat Ghost statblock; the reviewed creature card owns this source boundary."
+        },
         {
           "kind": "species",
           "name": "CENTAUR",
@@ -3667,6 +3853,15 @@
         },
         {
           "kind": "statblock",
+          "name": "W U RM",
+          "artifact_patch": {
+            "card": {
+              "name": "Wurm"
+            }
+          }
+        },
+        {
+          "kind": "statblock",
           "name": "SERVITOR TuRU LL",
           "artifact_patch": {
             "card": {
@@ -3684,13 +3879,26 @@
           }
         },
         {
-          "kind": "statblock",
-          "name": "WURM",
+          "kind": "background",
+          "name": "l ZZET ENGINEER",
+          "source_heading_exact": "BACKGROUND: IZZET ENGINEER",
           "artifact_patch": {
             "card": {
-              "name": "Wurm"
+              "name": "Izzet Engineer"
             }
           }
+        },
+        {
+          "kind": "feature",
+          "name": "Source fragment: DEX (p. 168)",
+          "status": "rejected",
+          "note": "Agent rejected a statblock ability-column coverage fragment; the creature card owns this source text."
+        },
+        {
+          "kind": "feature",
+          "name": "Source fragment: ACTIO NS (p. 168)",
+          "status": "rejected",
+          "note": "Agent rejected a statblock actions-heading coverage fragment; the creature card owns this source text."
         }
       ]
     },
@@ -5666,7 +5874,17 @@
                   "description": "Count as one size larger for carrying, pushing, dragging, and lifting."
                 }
               ],
-              "unresolved": []
+              "unresolved": [],
+              "natural_weapons": [
+                {
+                  "name": "Iron Fists",
+                  "attack_ability": "strength",
+                  "damage_formula": "1d4",
+                  "damage_type": "bludgeoning",
+                  "reach_ft": 5,
+                  "description": "A reviewed natural weapon usable for an unarmed strike."
+                }
+              ]
             }
           }
         },

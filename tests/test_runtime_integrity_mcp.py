@@ -12,6 +12,7 @@ from sagasmith_dnd.character_schema import default_character_sheet
 import sagasmith_dnd_mcp.server as server_module
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
+from tests.authoring_helpers import finalize_and_activate_module
 
 
 def test_response_receipt_failure_rolls_back_the_state_write(
@@ -1732,10 +1733,10 @@ def test_module_scene_creates_a_temporary_battle_map(tmp_path: Path) -> None:
         )
         staged = await call(
             server,
-            "module_import",
+            "module_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "stage",
+                "action": "start",
                 "payload": {
                     "source_path": str(source),
                     "source_key": "keep",
@@ -1744,37 +1745,14 @@ def test_module_scene_creates_a_temporary_battle_map(tmp_path: Path) -> None:
                 "idempotency_key": "map-module:stage",
             },
         )
-        job_id = staged["job"]["id"]
-        for action in ("inspect", "validate", "ingest"):
-            await call(
-                server,
-                "module_import",
-                {
-                    "campaign_id": campaign["id"],
-                    "action": action,
-                    "payload": {"job_id": job_id},
-                    "idempotency_key": f"map-module:{action}",
-                },
-            )
-        current_campaign = await call(
+        await finalize_and_activate_module(
+            call,
             server,
-            "campaign_query",
-            {
-                "view": "get",
-                "payload": {"campaign_id": campaign["id"]},
-                "principal_id": "system:local",
-            },
-        )
-        await call(
-            server,
-            "module_import",
-            {
-                "campaign_id": campaign["id"],
-                "action": "activate",
-                "payload": {"job_id": job_id},
-                "expected_revision": current_campaign["revision"],
-                "idempotency_key": "map-module:activate",
-            },
+            campaign["id"],
+            staged,
+            source_key="keep",
+            title="Keep",
+            portable_id="dnd5e.module.keep-test",
         )
         scenes = await call(
             server,

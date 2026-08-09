@@ -29,6 +29,404 @@ def _variant(
 
 
 ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
+    "rulebook_draft": {
+        "start": [
+            _variant(
+                (
+                    "acknowledge_warnings",
+                    "authority",
+                    "edition",
+                    "locale",
+                    "publication_id",
+                    "source_key",
+                    "source_path",
+                    "title",
+                    "version",
+                ),
+                ("source_path", "source_key", "title", "edition"),
+            )
+        ],
+        "get": [_variant(("job_id",))],
+        "evidence": [
+            _variant(
+                ("include_ocr_text", "job_id", "kind", "page_number", "scale"),
+                ("job_id", "kind", "page_number"),
+                when="kind=page",
+            ),
+            _variant(
+                ("job_id", "kind", "limit", "offset", "page_number", "query"),
+                ("job_id", "kind"),
+                when="kind=chunks",
+            ),
+        ],
+        "edit": [
+            _variant(
+                ("decisions", "job_id", "operation"),
+                ("job_id", "operation", "decisions"),
+                when="operation=candidates",
+            ),
+            _variant(
+                ("additions", "job_id", "operation", "rationale"),
+                ("job_id", "operation", "additions", "rationale"),
+                when="operation=catalog",
+            ),
+            _variant(
+                (
+                    "base_text_sha256",
+                    "evidence_basis",
+                    "job_id",
+                    "operation",
+                    "page_number",
+                    "rationale",
+                    "rendered_image_checksum",
+                    "replacements",
+                    "review_method",
+                ),
+                (
+                    "operation",
+                    "page_number",
+                    "base_text_sha256",
+                    "replacements",
+                    "rationale",
+                    "evidence_basis",
+                ),
+                when="operation=source_text",
+            ),
+            _variant(
+                (
+                    "agent_fill",
+                    "correction_evidence_basis",
+                    "job_id",
+                    "name",
+                    "ocr_corrections",
+                    "operation",
+                    "page_number",
+                    "page_numbers",
+                    "rendered_image_checksum",
+                    "statblock_slot",
+                ),
+                ("job_id", "operation"),
+                when="operation=statblock_recovery",
+            ),
+            _variant(
+                (
+                    "agent_fill",
+                    "base_review_id",
+                    "evidence_chunk_ids",
+                    "evidence_exclusions",
+                    "job_id",
+                    "normalized_content",
+                    "observation",
+                    "operation",
+                    "page_number",
+                    "review_mode",
+                ),
+                ("job_id", "operation", "observation"),
+                when="operation=statblock_review",
+            ),
+            _variant(
+                ("acknowledge_warnings", "job_id", "operation"),
+                ("job_id", "operation"),
+                when="operation=advance",
+            ),
+        ],
+        "finalize": [
+            _variant(
+                ("job_id", "manifest", "mechanics", "note", "provenance"),
+                ("job_id", "note", "manifest"),
+            )
+        ],
+    },
+    "module_draft": {
+        "start": [_variant(("content", "name", "source_key", "source_path", "title"))],
+        "get": [_variant(("job_id",))],
+        "evidence": [
+            _variant(
+                ("include_ocr_text", "job_id", "kind", "module_id", "page_number", "scale"),
+                ("job_id", "page_number"),
+                when="kind=page",
+            ),
+            _variant(
+                ("include_ocr_text", "job_id", "kind", "module_id", "page_number", "scale"),
+                ("module_id", "page_number"),
+                when="kind=page by module_id",
+            ),
+            _variant(
+                ("job_id", "kind", "limit", "module_id", "query", "scene_id"),
+                ("job_id",),
+                when="kind=chunks",
+            ),
+            _variant(
+                ("job_id", "kind", "limit", "module_id", "query", "scene_id"),
+                ("module_id",),
+                when="kind=chunks by module_id",
+            ),
+        ],
+        "edit": [
+            _variant(
+                (
+                    "base_text_sha256",
+                    "evidence_basis",
+                    "job_id",
+                    "operation",
+                    "page_number",
+                    "rationale",
+                    "rendered_image_checksum",
+                    "replacements",
+                    "review_method",
+                ),
+                (
+                    "operation",
+                    "job_id",
+                    "page_number",
+                    "base_text_sha256",
+                    "replacements",
+                    "rationale",
+                    "evidence_basis",
+                ),
+                when="operation=source_text",
+            ),
+            _variant(
+                (
+                    "agent_fill",
+                    "content_key",
+                    "content_kind",
+                    "job_id",
+                    "metadata",
+                    "module_id",
+                    "normalized_content",
+                    "observation",
+                    "operation",
+                    "page_number",
+                    "scene_id",
+                    "source_asset_id",
+                    "source_chunk_ids",
+                ),
+                (
+                    "operation",
+                    "scene_id",
+                    "content_key",
+                    "normalized_content",
+                    "observation",
+                ),
+                when="operation=content",
+            ),
+            _variant(
+                (
+                    "agent_fill",
+                    "content_key",
+                    "job_id",
+                    "module_id",
+                    "name",
+                    "operation",
+                    "page_number",
+                    "scene_id",
+                    "source_asset_id",
+                ),
+                ("operation", "scene_id", "content_key", "name", "page_number"),
+                when="operation=statblock",
+            ),
+            _variant(
+                (
+                    "asset_kind",
+                    "job_id",
+                    "location_key",
+                    "metadata",
+                    "module_id",
+                    "operation",
+                    "scene_id",
+                    "source_path",
+                    "title",
+                ),
+                ("operation", "source_path", "asset_kind"),
+                when="operation=asset",
+            ),
+            _variant(
+                (
+                    "binding_kind",
+                    "character_id",
+                    "job_id",
+                    "metadata",
+                    "module_id",
+                    "operation",
+                    "portable_actor_id",
+                    "role",
+                    "scene_id",
+                ),
+                ("operation", "character_id", "portable_actor_id", "binding_kind"),
+                when="operation=actor",
+            ),
+            _variant(
+                (
+                    "catalogs",
+                    "dependencies",
+                    "job_id",
+                    "manifest",
+                    "metadata",
+                    "narrative",
+                    "note",
+                    "operation",
+                    "version",
+                ),
+                ("job_id", "operation"),
+                when="operation=package",
+            ),
+            _variant(("job_id", "operation"), ("job_id", "operation"), when="operation=advance"),
+        ],
+        "finalize": [
+            _variant(
+                (
+                    "catalogs",
+                    "confirmation",
+                    "dependencies",
+                    "include_package",
+                    "job_id",
+                    "manifest",
+                    "metadata",
+                    "narrative",
+                    "portable_id",
+                    "version",
+                ),
+                ("job_id", "portable_id", "confirmation"),
+            )
+        ],
+    },
+    "content_pack": {
+        "list": [
+            _variant(
+                (
+                    "addon_id",
+                    "artifact_id",
+                    "branch_id",
+                    "campaign_id",
+                    "content_kind",
+                    "edition",
+                    "include_context",
+                    "include_package",
+                    "kind",
+                    "pack_id",
+                    "query",
+                    "system_id",
+                ),
+                ("kind",),
+            )
+        ],
+        "get": [
+            _variant(
+                (
+                    "addon_id",
+                    "artifact",
+                    "campaign_id",
+                    "include_package",
+                    "kind",
+                    "limit",
+                    "offset",
+                    "pack_id",
+                    "page",
+                    "query",
+                    "source_id",
+                    "source_path",
+                    "version",
+                ),
+                ("kind",),
+            ),
+            _variant(
+                ("kind", "limit", "offset", "page", "query", "source_id"),
+                ("kind", "source_id"),
+                when="source_id is present",
+            ),
+        ],
+        "test": [_variant(("kind", "pack_id", "version"), ("kind", "pack_id", "version"))],
+        "build": [
+            _variant(
+                (
+                    "allow_partial",
+                    "artifacts",
+                    "campaign_id",
+                    "catalog_review_decisions",
+                    "component_artifacts",
+                    "include_package",
+                    "kind",
+                    "manifest",
+                    "mechanics",
+                    "metadata",
+                    "pack_id",
+                    "portable_id",
+                    "provenance",
+                    "source_id",
+                    "version",
+                ),
+                ("kind",),
+            )
+        ],
+        "import": [
+            _variant(
+                (
+                    "activate",
+                    "artifact",
+                    "campaign_id",
+                    "kind",
+                    "progress_remaps",
+                    "source_path",
+                ),
+                ("campaign_id", "kind"),
+            )
+        ],
+        "export": [
+            _variant(
+                (
+                    "addon_id",
+                    "campaign_id",
+                    "catalogs",
+                    "dependencies",
+                    "include_package",
+                    "kind",
+                    "manifest",
+                    "metadata",
+                    "module_id",
+                    "narrative",
+                    "pack_id",
+                    "portable_id",
+                    "version",
+                ),
+                ("kind",),
+            )
+        ],
+        "install": [_variant(("kind", "pack_id", "version"), ("kind", "pack_id", "version"))],
+        "activate": [
+            _variant(
+                (
+                    "addon_id",
+                    "artifact",
+                    "branch_id",
+                    "campaign_id",
+                    "enabled",
+                    "kind",
+                    "options",
+                    "pack_id",
+                    "progress_remaps",
+                    "source_path",
+                    "version",
+                ),
+                ("campaign_id", "kind"),
+            )
+        ],
+        "deactivate": [
+            _variant(
+                (
+                    "addon_id",
+                    "branch_id",
+                    "campaign_id",
+                    "kind",
+                    "options",
+                    "pack_id",
+                    "version",
+                ),
+                ("campaign_id", "kind"),
+            )
+        ],
+        "remove": [_variant(("kind", "pack_id", "version"), ("kind", "pack_id", "version"))],
+    },
     "campaign_query": {
         "list": [_variant(("status",))],
         "get": [_variant(("campaign_id",), ("campaign_id",))],
@@ -56,7 +454,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
         "scene": [_variant(("scene_id", "scope_id"), ("scene_id",))],
         "current": [_variant(("scope_id",))],
         "progress": [_variant(("module_id", "scope_id"))],
-        "readiness": [
+        "preflight": [
             _variant(
                 ("participant_manifest", "scene_id"),
                 ("scene_id", "participant_manifest"),
@@ -85,120 +483,17 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
         "package": [
             _variant(
                 (
+                    "catalogs",
                     "dependencies",
                     "include_package",
+                    "manifest",
                     "metadata",
                     "module_id",
+                    "narrative",
                     "portable_id",
                     "version",
                 ),
                 ("module_id", "portable_id"),
-            )
-        ],
-    },
-    "rule_pack_compile": {
-        "draft": [
-            _variant(
-                ("artifacts", "manifest", "mechanics", "provenance"),
-                ("manifest",),
-            )
-        ],
-        "from_source": [
-            _variant(
-                (
-                    "artifacts",
-                    "manifest",
-                    "mechanics",
-                    "provenance",
-                    "source_id",
-                ),
-                ("source_id", "manifest"),
-            )
-        ],
-    },
-    "rule_pack_query": {
-        "list": [_variant(("pack_id",))],
-        "inspect": [_variant(("pack_id", "version"), ("pack_id", "version"))],
-        "test": [_variant(("pack_id", "version"), ("pack_id", "version"))],
-        "content_catalog": [
-            _variant(
-                ("branch_id", "campaign_id", "include_context", "kind", "query"),
-                ("campaign_id",),
-            )
-        ],
-        "sources": [_variant(("edition", "system_id"))],
-        "source_chunks": [
-            _variant(
-                ("limit", "page", "query", "source_id"),
-                ("source_id",),
-            )
-        ],
-        "actor_presets": [
-            _variant(
-                ("artifact_id", "edition", "include_package"),
-                ("edition",),
-            )
-        ],
-        "addons": [
-            _variant(("addon_id", "branch_id", "campaign_id"), ("campaign_id",))
-        ],
-        "addon": [
-            _variant(
-                ("addon_id", "campaign_id", "include_package", "version"),
-                ("campaign_id", "addon_id", "version"),
-            )
-        ],
-        "addon_package": [
-            _variant(
-                (
-                    "campaign_id",
-                    "components",
-                    "include_package",
-                    "manifest",
-                    "metadata",
-                    "portable_id",
-                    "version",
-                ),
-                ("campaign_id", "portable_id", "version", "manifest", "components"),
-            )
-        ],
-        "preset_package": [
-            _variant(
-                (
-                    "allow_partial",
-                    "campaign_id",
-                    "include_package",
-                    "metadata",
-                    "pack_id",
-                    "portable_id",
-                    "version",
-                ),
-                ("campaign_id", "pack_id", "version", "portable_id"),
-            )
-        ],
-        "package": [
-            _variant(
-                (
-                    "campaign_id",
-                    "include_package",
-                    "metadata",
-                    "pack_id",
-                    "version",
-                ),
-                ("campaign_id", "pack_id", "version"),
-            )
-        ],
-        "release": [
-            _variant(
-                (
-                    "campaign_id",
-                    "components",
-                    "include_manifest",
-                    "metadata",
-                    "portable_id",
-                    "version",
-                ),
-                ("campaign_id", "portable_id", "version", "components"),
             )
         ],
     },
@@ -208,19 +503,6 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
             _variant(
                 ("edition", "locale", "options", "publications"),
                 ("edition",),
-            )
-        ],
-        "set_pack": [
-            _variant(
-                ("enabled", "options", "pack_id", "version"),
-                ("pack_id", "version"),
-            )
-        ],
-        "remove_pack": [_variant(("pack_id",), ("pack_id",))],
-        "set_addon": [
-            _variant(
-                ("addon_id", "enabled", "options", "version"),
-                ("addon_id", "version"),
             )
         ],
         "core_relock": [
@@ -281,7 +563,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                 ("character_id", "class_name"),
             )
         ],
-        "portable_card": [
+        "content_package": [
             _variant(
                 (
                     "bindings",
@@ -401,13 +683,12 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                 ),
             )
         ],
-        "portable_card": [
+        "content_actor": [
             _variant(
                 (
                     "artifact",
                     "artifact_id",
                     "campaign_id",
-                    "card",
                     "name",
                     "player_name",
                     "source_path",
@@ -421,9 +702,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
         "remove": [_variant(("item_id", "quantity"), ("item_id",))],
         "equip": [_variant(("item_id", "slot"), ("item_id", "slot"))],
         "recharge": [_variant(("item_id", "trigger"), ("item_id", "trigger"))],
-        "consume_ammunition": [
-            _variant(("quantity", "weapon_id"), ("weapon_id",))
-        ],
+        "consume_ammunition": [_variant(("quantity", "weapon_id"), ("weapon_id",))],
     },
     "inventory_transfer": {
         "character_to_character": [
@@ -520,9 +799,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
     "character_state_change": {
         "effect_add": [_variant(("effect",), ("effect",))],
         "effect_remove": [_variant(("effect_id",), ("effect_id",))],
-        "resource_set": [
-            _variant(("resource", "value"), ("resource", "value"))
-        ],
+        "resource_set": [_variant(("resource", "value"), ("resource", "value"))],
         "exhaustion_set": [_variant(("value",), ("value",))],
         "damage": [
             _variant(
@@ -592,9 +869,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                 ("spell_id",),
             )
         ],
-        "use_activity": [
-            _variant(("activity_id", "declaration"), ("activity_id",))
-        ],
+        "use_activity": [_variant(("activity_id", "declaration"), ("activity_id",))],
         "attack_source_object": [
             _variant(
                 (
@@ -617,12 +892,8 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
         ],
     },
     "character_spell_prepare": {
-        "set": [
-            _variant(("prepared", "spell_id"), ("spell_id", "prepared"))
-        ],
-        "replace_all": [
-            _variant(("event", "spell_ids"), ("spell_ids",))
-        ],
+        "set": [_variant(("prepared", "spell_id"), ("spell_id", "prepared"))],
+        "replace_all": [_variant(("event", "spell_ids"), ("spell_ids",))],
     },
     "playthrough_manifest": {
         "get": [_variant(())],
@@ -630,9 +901,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
         "replace": [_variant(("manifest",), ("manifest",))],
         "extend_modules": [_variant(("manifest",), ("manifest",))],
         "sync": [_variant(())],
-        "verify_ending": [
-            _variant(("condition_id",), ("condition_id",))
-        ],
+        "verify_ending": [_variant(("condition_id",), ("condition_id",))],
     },
     "campaign_event": {
         "add": [
@@ -759,9 +1028,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
     },
     "actor_knowledge_query": {
         "list": [_variant(("branch_id",))],
-        "search": [
-            _variant(("branch_id", "limit", "query"), ("query",))
-        ],
+        "search": [_variant(("branch_id", "limit", "query"), ("query",))],
     },
     "actor_knowledge_change": {
         "add": [
@@ -818,9 +1085,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
         ],
     },
     "branch_change": {
-        "create": [
-            _variant(("checkout", "from_snapshot_id", "name"), ("name",))
-        ],
+        "create": [_variant(("checkout", "from_snapshot_id", "name"), ("name",))],
         "checkout": [_variant(("branch_id",), ("branch_id",))],
         "create_core_upgrade": [
             _variant(
@@ -878,9 +1143,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                 "utilize",
             )
         },
-        "improvise": [
-            _variant(("agent_ruling_commitment", "procedure_id"))
-        ],
+        "improvise": [_variant(("agent_ruling_commitment", "procedure_id"))],
         "interact_object": [
             _variant(
                 ("interaction", "object_description"),
@@ -960,9 +1223,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                 ("amount",),
             )
         ],
-        "stabilize": [
-            _variant(("source_excerpt",), ("source_excerpt",))
-        ],
+        "stabilize": [_variant(("source_excerpt",), ("source_excerpt",))],
         "save_damage": [
             _variant(
                 (
@@ -1002,18 +1263,14 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                 ("actor_id", "spell_id", "trigger"),
             )
         ],
-        "trigger_spell": [
-            _variant(("event", "readied_id"), ("readied_id", "event"))
-        ],
+        "trigger_spell": [_variant(("event", "readied_id"), ("readied_id", "event"))],
         "resolve_spell": [
             _variant(
                 ("actor_id", "choice_id", "declaration", "release"),
                 ("actor_id", "choice_id", "release"),
             )
         ],
-        "trigger_action": [
-            _variant(("event", "readied_id"), ("readied_id", "event"))
-        ],
+        "trigger_action": [_variant(("event", "readied_id"), ("readied_id", "event"))],
         "resolve_action": [
             _variant(
                 ("actor_id", "choice_id", "declaration", "release"),
@@ -1147,259 +1404,9 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
             )
         ],
     },
-    "rule_import": {
-        "discover": [_variant(())],
-        "import_addon": [
-            _variant(("addon", "artifact", "source_path"))
-        ],
-        "import_package": [
-            _variant(("artifact", "package", "source_path"))
-        ],
-        "inspect_release": [
-            _variant(("artifact", "release_manifest", "source_path"))
-        ],
-        "stage": [
-            _variant(
-                (
-                    "authority",
-                    "edition",
-                    "locale",
-                    "publication_id",
-                    "source_key",
-                    "source_path",
-                    "title",
-                    "version",
-                ),
-                ("source_path", "source_key", "title", "edition"),
-            )
-        ],
-        "inspect": [_variant(("job_id",), ("job_id",))],
-        "render_page": [
-            _variant(
-                ("include_ocr_text", "job_id", "page_number", "scale"),
-                ("job_id", "page_number"),
-            )
-        ],
-        "recover_statblock": [
-            _variant(
-                (
-                    "agent_fill",
-                    "correction_evidence_basis",
-                    "job_id",
-                    "name",
-                    "ocr_corrections",
-                    "page_number",
-                    "rendered_image_checksum",
-                    "statblock_slot",
-                ),
-                ("job_id", "name"),
-            )
-        ],
-        "recover_statblocks": [
-            _variant(("job_id", "page_numbers"), ("job_id",))
-        ],
-        "ingest": [
-            _variant(("acknowledge_warnings", "job_id"), ("job_id",))
-        ],
-        "review_text": [
-            _variant(
-                (
-                    "base_text_sha256",
-                    "evidence_basis",
-                    "job_id",
-                    "page_number",
-                    "rationale",
-                    "rendered_image_checksum",
-                    "replacements",
-                    "review_method",
-                ),
-                (
-                    "job_id",
-                    "page_number",
-                    "base_text_sha256",
-                    "replacements",
-                    "rationale",
-                    "evidence_basis",
-                ),
-            )
-        ],
-        "review_statblock": [
-            _variant(
-                (
-                    "agent_fill",
-                    "evidence_chunk_ids",
-                    "evidence_exclusions",
-                    "job_id",
-                    "normalized_content",
-                    "observation",
-                    "page_number",
-                    "review_mode",
-                ),
-                ("job_id", "page_number", "normalized_content", "observation"),
-                when="new review (base_review_id omitted)",
-            ),
-            _variant(
-                (
-                    "agent_fill",
-                    "base_review_id",
-                    "job_id",
-                    "observation",
-                ),
-                ("job_id", "base_review_id", "observation", "agent_fill"),
-                when="retry an existing review (base_review_id supplied)",
-            ),
-        ],
-        "extract_candidates": [_variant(("job_id",), ("job_id",))],
-        "augment_catalog": [
-            _variant(
-                ("additions", "job_id", "rationale"),
-                ("job_id", "additions", "rationale"),
-            )
-        ],
-        "review": [_variant(("decisions", "job_id"), ("job_id", "decisions"))],
-        "compile": [
-            _variant(
-                ("job_id", "manifest", "mechanics", "provenance"),
-                ("job_id", "manifest"),
-            )
-        ],
-        "install": [_variant(("job_id",), ("job_id",))],
-        "activate": [_variant(("job_id",), ("job_id",))],
-    },
-    "module_import": {
-        "stage": [
-            _variant(("content", "name", "source_key", "source_path", "title"))
-        ],
-        "attach_asset": [
-            _variant(
-                (
-                    "asset_kind",
-                    "location_key",
-                    "metadata",
-                    "module_id",
-                    "scene_id",
-                    "source_path",
-                    "title",
-                ),
-                ("module_id", "source_path", "asset_kind"),
-            )
-        ],
-        "inspect": [_variant(("job_id",), ("job_id",))],
-        "validate": [_variant(("job_id",), ("job_id",))],
-        "ingest": [_variant(("job_id",), ("job_id",))],
-        "activate": [
-            _variant(("job_id", "progress_remaps"), ("job_id",))
-        ],
-        "bind_actor": [
-            _variant(
-                (
-                    "binding_kind",
-                    "character_id",
-                    "metadata",
-                    "module_id",
-                    "portable_actor_id",
-                    "role",
-                    "scene_id",
-                ),
-                (
-                    "module_id",
-                    "character_id",
-                    "portable_actor_id",
-                    "binding_kind",
-                ),
-            )
-        ],
-        "import_package": [
-            _variant(("activate", "artifact", "package", "source_path"))
-        ],
-    },
-    "module_review": {
-        "render_page": [
-            _variant(
-                (
-                    "include_ocr_text",
-                    "module_id",
-                    "page_number",
-                    "scale",
-                    "source_asset_id",
-                ),
-                ("module_id", "page_number"),
-            )
-        ],
-        "render_transcript": [
-            _variant(
-                ("include_ocr_text", "job_id", "page_number", "scale"),
-                ("job_id", "page_number"),
-            )
-        ],
-        "recover_statblock": [
-            _variant(
-                (
-                    "agent_fill",
-                    "content_key",
-                    "module_id",
-                    "name",
-                    "page_number",
-                    "scene_id",
-                    "source_asset_id",
-                ),
-                ("module_id", "scene_id", "content_key", "name", "page_number"),
-            )
-        ],
-        "submit_content": [
-            _variant(
-                (
-                    "agent_fill",
-                    "content_key",
-                    "content_kind",
-                    "metadata",
-                    "module_id",
-                    "normalized_content",
-                    "observation",
-                    "page_number",
-                    "scene_id",
-                    "source_asset_id",
-                    "source_chunk_ids",
-                ),
-                (
-                    "module_id",
-                    "scene_id",
-                    "content_key",
-                    "normalized_content",
-                    "observation",
-                ),
-            )
-        ],
-        "submit_transcript": [
-            _variant(
-                (
-                    "base_text_sha256",
-                    "evidence_basis",
-                    "job_id",
-                    "page_number",
-                    "rationale",
-                    "rendered_image_checksum",
-                    "replacements",
-                    "review_method",
-                ),
-                (
-                    "job_id",
-                    "page_number",
-                    "base_text_sha256",
-                    "replacements",
-                    "rationale",
-                    "evidence_basis",
-                ),
-            )
-        ],
-    },
     "campaign_change": {
-        "update": [
-            _variant(("description", "name", "settings", "state", "status"))
-        ],
-        "clock_set": [
-            _variant(("day", "hour", "label", "minute"), ("day",))
-        ],
+        "update": [_variant(("description", "name", "settings", "state", "status"))],
+        "clock_set": [_variant(("day", "hour", "label", "minute"), ("day",))],
         "clock_advance": [
             _variant(
                 (
@@ -1416,13 +1423,9 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                 ("members",),
             )
         ],
-        "stable_recovery": [
-            _variant(("members", "resting_members"), ("members",))
-        ],
+        "stable_recovery": [_variant(("members", "resting_members"), ("members",))],
         "effect_add": [_variant(("effect",), ("effect",))],
-        "effect_remove": [
-            _variant(("effect_id", "reason"), ("effect_id",))
-        ],
+        "effect_remove": [_variant(("effect_id", "reason"), ("effect_id",))],
         "advancement_configure": [_variant(("mode",), ("mode",))],
         "experience_award": [
             _variant(
@@ -1491,21 +1494,11 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
         ],
     },
     "combat_choice": {
-        "open": [
-            _variant(("candidates", "event", "kind"), ("event",))
-        ],
-        "resolve": [
-            _variant(("choice_id", "selection"), ("choice_id", "selection"))
-        ],
-        "resolve_defense": [
-            _variant(("choice_id", "selection"), ("choice_id", "selection"))
-        ],
-        "on_hit_ruling": [
-            _variant(("choice_id", "selection"), ("choice_id", "selection"))
-        ],
-        "execute_plan": [
-            _variant(("commitment",), ("commitment",))
-        ],
+        "open": [_variant(("candidates", "event", "kind"), ("event",))],
+        "resolve": [_variant(("choice_id", "selection"), ("choice_id", "selection"))],
+        "resolve_defense": [_variant(("choice_id", "selection"), ("choice_id", "selection"))],
+        "on_hit_ruling": [_variant(("choice_id", "selection"), ("choice_id", "selection"))],
+        "execute_plan": [_variant(("commitment",), ("commitment",))],
     },
 }
 
@@ -1531,19 +1524,14 @@ def validate_action_payload(
         raise ValueError("payload must be an object")
     fields = set(data)
     if any(
-        set(variant["required_fields"]) <= fields
-        and fields <= set(variant["allowed_fields"])
+        set(variant["required_fields"]) <= fields and fields <= set(variant["allowed_fields"])
         for variant in variants
     ):
         return
-    allowed_fields = {
-        field for variant in variants for field in variant["allowed_fields"]
-    }
+    allowed_fields = {field for variant in variants for field in variant["allowed_fields"]}
     unknown = sorted(fields - allowed_fields)
     if unknown:
-        raise ValueError(
-            f"unsupported {tool_id}({selector}) payload fields: " + ", ".join(unknown)
-        )
+        raise ValueError(f"unsupported {tool_id}({selector}) payload fields: " + ", ".join(unknown))
     descriptions = [
         {
             "required": variant["required_fields"],
@@ -1553,8 +1541,7 @@ def validate_action_payload(
         for variant in variants
     ]
     raise ValueError(
-        f"payload for {tool_id}({selector}) does not match an exact variant: "
-        f"{descriptions}"
+        f"payload for {tool_id}({selector}) does not match an exact variant: {descriptions}"
     )
 
 
@@ -1571,14 +1558,11 @@ def action_payload_contract(
         (
             field
             for field in ("action", "view", "mode")
-            if isinstance(properties.get(field), dict)
-            and properties[field].get("enum")
+            if isinstance(properties.get(field), dict) and properties[field].get("enum")
         ),
         None,
     )
-    selector_values = (
-        list(properties[selector_field]["enum"]) if selector_field is not None else []
-    )
+    selector_values = list(properties[selector_field]["enum"]) if selector_field is not None else []
     exact = ACTION_PAYLOAD_CONTRACTS.get(tool_id, {})
     if selector is not None and selector_values and selector not in selector_values:
         raise ValueError(

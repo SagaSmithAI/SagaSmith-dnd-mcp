@@ -31,7 +31,7 @@
       "expected_actor_cards": [
         {
           "name": "Tiny Servant",
-          "source_text_sha256": "8a022272a4be6216d566fd3d0bff531faa39113afdb02dd45a1371434ad027a5",
+          "source_boundary_sha256": "8a022272a4be6216d566fd3d0bff531faa39113afdb02dd45a1371434ad027a5",
           "inventory_item_names": [
             "Slam"
           ],
@@ -248,7 +248,6 @@
             "name": "Path of the Ancestral Guardian",
             "class_name": "Barbarian",
             "minimum_level": 3,
-            "always_prepared_spells": [],
             "spell_list_expansion": [],
             "spell_grants": []
           },
@@ -268,7 +267,6 @@
             "name": "Path of the Storm Herald",
             "class_name": "Barbarian",
             "minimum_level": 3,
-            "always_prepared_spells": [],
             "spell_list_expansion": [],
             "spell_grants": []
           },
@@ -288,7 +286,6 @@
             "name": "Path of the Zealot",
             "class_name": "Barbarian",
             "minimum_level": 3,
-            "always_prepared_spells": [],
             "spell_list_expansion": [],
             "spell_grants": []
           },
@@ -308,7 +305,6 @@
             "name": "College of Glamour",
             "class_name": "Bard",
             "minimum_level": 3,
-            "always_prepared_spells": [],
             "spell_list_expansion": [],
             "spell_grants": []
           },
@@ -328,7 +324,6 @@
             "name": "College of Swords",
             "class_name": "Bard",
             "minimum_level": 3,
-            "always_prepared_spells": [],
             "spell_list_expansion": [],
             "spell_grants": []
           },
@@ -348,7 +343,6 @@
             "name": "College of Whispers",
             "class_name": "Bard",
             "minimum_level": 3,
-            "always_prepared_spells": [],
             "spell_list_expansion": [],
             "spell_grants": []
           },
@@ -368,50 +362,59 @@
             "name": "Forge Domain",
             "class_name": "Cleric",
             "minimum_level": 1,
-            "always_prepared_spells": [
+            "spell_list_expansion": [],
+            "spell_grants": [
               {
                 "name": "Identify",
-                "minimum_level": 1
+                "minimum_level": 1,
+                "method": "always_prepared"
               },
               {
                 "name": "Searing Smite",
-                "minimum_level": 1
+                "minimum_level": 1,
+                "method": "always_prepared"
               },
               {
                 "name": "Heat Metal",
-                "minimum_level": 3
+                "minimum_level": 3,
+                "method": "always_prepared"
               },
               {
                 "name": "Magic Weapon",
-                "minimum_level": 3
+                "minimum_level": 3,
+                "method": "always_prepared"
               },
               {
                 "name": "Elemental Weapon",
-                "minimum_level": 5
+                "minimum_level": 5,
+                "method": "always_prepared"
               },
               {
                 "name": "Protection from Energy",
-                "minimum_level": 5
+                "minimum_level": 5,
+                "method": "always_prepared"
               },
               {
                 "name": "Fabricate",
-                "minimum_level": 7
+                "minimum_level": 7,
+                "method": "always_prepared"
               },
               {
                 "name": "Wall of Fire",
-                "minimum_level": 7
+                "minimum_level": 7,
+                "method": "always_prepared"
               },
               {
                 "name": "Animate Objects",
-                "minimum_level": 9
+                "minimum_level": 9,
+                "method": "always_prepared"
               },
               {
                 "name": "Creation",
-                "minimum_level": 9
+                "minimum_level": 9,
+                "method": "always_prepared"
               }
-            ],
-            "spell_list_expansion": [],
-            "spell_grants": []
+            ]
           },
           "note": "Agent reviewed this exact source-bound player option and filled its portable card before release."
         },
@@ -429,50 +432,59 @@
             "name": "Grave Domain",
             "class_name": "Cleric",
             "minimum_level": 1,
-            "always_prepared_spells": [
+            "spell_list_expansion": [],
+            "spell_grants": [
               {
                 "name": "Bane",
-                "minimum_level": 1
+                "minimum_level": 1,
+                "method": "always_prepared"
               },
               {
                 "name": "False Life",
-                "minimum_level": 1
+                "minimum_level": 1,
+                "method": "always_prepared"
               },
               {
                 "name": "Gentle Repose",
-                "minimum_level": 3
+                "minimum_level": 3,
+                "method": "always_prepared"
               },
               {
                 "name": "Ray of Enfeeblement",
-                "minimum_level": 3
+                "minimum_level": 3,
+                "method": "always_prepared"
               },
               {
                 "name": "Revivify",
-                "minimum_level": 5
+                "minimum_level": 5,
+                "method": "always_prepared"
               },
               {
                 "name": "Vampiric Touch",
-                "minimum_level": 5
+                "minimum_level": 5,
+                "method": "always_prepared"
               },
               {
                 "name": "Blight",
-                "minimum_level": 7
+                "minimum_level": 7,
+                "method": "always_prepared"
               },
               {
                 "name": "Death Ward",
-                "minimum_level": 7
+                "minimum_level": 7,
+                "method": "always_prepared"
               },
               {
                 "name": "Antilife Shell",
-                "minimum_level": 9
+                "minimum_level": 9,
+                "method": "always_prepared"
               },
               {
                 "name": "Raise Dead",
-                "minimum_level": 9
+                "minimum_level": 9,
+                "method": "always_prepared"
               }
-            ],
-            "spell_list_expansion": [],
-            "spell_grants": []
+            ]
           },
           "note": "Agent reviewed this exact source-bound player option and filled its portable card before release."
         },
@@ -490,7 +502,6 @@
             "name": "Circle of Dreams",
             "class_name": "Druid",
             "minimum_level": 2,
-            "always_prepared_spells": [],
             "spell_list_expansion": [],
             "spell_grants": []
           },
@@ -510,7 +521,6 @@
             "name": "Circle of the Shepherd",
             "class_name": "Druid",
             "minimum_level": 2,
-            "always_prepared_spells": [],
             "spell_list_expansion": [],
             "spell_grants": []
           },
@@ -530,7 +540,6 @@
             "name": "Arcane Archer",
             "class_name": "Fighter",
             "minimum_level": 3,
-            "always_prepared_spells": [],
             "spell_list_expansion": [],
             "spell_grants": []
           },
@@ -550,7 +559,6 @@
             "name": "Cavalier",
             "class_name": "Fighter",
             "minimum_level": 3,
-            "always_prepared_spells": [],
             "spell_list_expansion": [],
             "spell_grants": []
           },
@@ -570,7 +578,6 @@
             "name": "Samurai",
             "class_name": "Fighter",
             "minimum_level": 3,
-            "always_prepared_spells": [],
             "spell_list_expansion": [],
             "spell_grants": []
           },
@@ -590,7 +597,6 @@
             "name": "Way of the Drunken Master",
             "class_name": "Monk",
             "minimum_level": 3,
-            "always_prepared_spells": [],
             "spell_list_expansion": [],
             "spell_grants": []
           },
@@ -610,7 +616,6 @@
             "name": "Way of the Kensei",
             "class_name": "Monk",
             "minimum_level": 3,
-            "always_prepared_spells": [],
             "spell_list_expansion": [],
             "spell_grants": []
           },
@@ -630,7 +635,6 @@
             "name": "Way of the Sun Soul",
             "class_name": "Monk",
             "minimum_level": 3,
-            "always_prepared_spells": [],
             "spell_list_expansion": [],
             "spell_grants": []
           },
@@ -650,50 +654,59 @@
             "name": "Oath of Conquest",
             "class_name": "Paladin",
             "minimum_level": 3,
-            "always_prepared_spells": [
+            "spell_list_expansion": [],
+            "spell_grants": [
               {
                 "name": "Armor of Agathys",
-                "minimum_level": 3
+                "minimum_level": 3,
+                "method": "always_prepared"
               },
               {
                 "name": "Command",
-                "minimum_level": 3
+                "minimum_level": 3,
+                "method": "always_prepared"
               },
               {
                 "name": "Hold Person",
-                "minimum_level": 5
+                "minimum_level": 5,
+                "method": "always_prepared"
               },
               {
                 "name": "Spiritual Weapon",
-                "minimum_level": 5
+                "minimum_level": 5,
+                "method": "always_prepared"
               },
               {
                 "name": "Bestow Curse",
-                "minimum_level": 9
+                "minimum_level": 9,
+                "method": "always_prepared"
               },
               {
                 "name": "Fear",
-                "minimum_level": 9
+                "minimum_level": 9,
+                "method": "always_prepared"
               },
               {
                 "name": "Dominate Beast",
-                "minimum_level": 13
+                "minimum_level": 13,
+                "method": "always_prepared"
               },
               {
                 "name": "Stoneskin",
-                "minimum_level": 13
+                "minimum_level": 13,
+                "method": "always_prepared"
               },
               {
                 "name": "Cloudkill",
-                "minimum_level": 17
+                "minimum_level": 17,
+                "method": "always_prepared"
               },
               {
                 "name": "Dominate Person",
-                "minimum_level": 17
+                "minimum_level": 17,
+                "method": "always_prepared"
               }
-            ],
-            "spell_list_expansion": [],
-            "spell_grants": []
+            ]
           },
           "note": "Agent reviewed this exact source-bound player option and filled its portable card before release."
         },
@@ -711,50 +724,59 @@
             "name": "Oath of Redemption",
             "class_name": "Paladin",
             "minimum_level": 3,
-            "always_prepared_spells": [
+            "spell_list_expansion": [],
+            "spell_grants": [
               {
                 "name": "Sanctuary",
-                "minimum_level": 3
+                "minimum_level": 3,
+                "method": "always_prepared"
               },
               {
                 "name": "Sleep",
-                "minimum_level": 3
+                "minimum_level": 3,
+                "method": "always_prepared"
               },
               {
                 "name": "Calm Emotions",
-                "minimum_level": 5
+                "minimum_level": 5,
+                "method": "always_prepared"
               },
               {
                 "name": "Hold Person",
-                "minimum_level": 5
+                "minimum_level": 5,
+                "method": "always_prepared"
               },
               {
                 "name": "Counterspell",
-                "minimum_level": 9
+                "minimum_level": 9,
+                "method": "always_prepared"
               },
               {
                 "name": "Hypnotic Pattern",
-                "minimum_level": 9
+                "minimum_level": 9,
+                "method": "always_prepared"
               },
               {
                 "name": "Otiluke's Resilient Sphere",
-                "minimum_level": 13
+                "minimum_level": 13,
+                "method": "always_prepared"
               },
               {
                 "name": "Stoneskin",
-                "minimum_level": 13
+                "minimum_level": 13,
+                "method": "always_prepared"
               },
               {
                 "name": "Hold Monster",
-                "minimum_level": 17
+                "minimum_level": 17,
+                "method": "always_prepared"
               },
               {
                 "name": "Wall of Force",
-                "minimum_level": 17
+                "minimum_level": 17,
+                "method": "always_prepared"
               }
-            ],
-            "spell_list_expansion": [],
-            "spell_grants": []
+            ]
           },
           "note": "Agent reviewed this exact source-bound player option and filled its portable card before release."
         },
@@ -772,7 +794,6 @@
             "name": "Gloom Stalker",
             "class_name": "Ranger",
             "minimum_level": 3,
-            "always_prepared_spells": [],
             "spell_list_expansion": [
               "Disguise Self",
               "Rope Trick",
@@ -798,7 +819,6 @@
             "name": "Horizon Walker",
             "class_name": "Ranger",
             "minimum_level": 3,
-            "always_prepared_spells": [],
             "spell_list_expansion": [
               "Protection from Evil and Good",
               "Misty Step",
@@ -824,7 +844,6 @@
             "name": "Monster Slayer",
             "class_name": "Ranger",
             "minimum_level": 3,
-            "always_prepared_spells": [],
             "spell_list_expansion": [
               "Protection from Evil and Good",
               "Zone of Truth",
@@ -850,7 +869,6 @@
             "name": "Inquisitive",
             "class_name": "Rogue",
             "minimum_level": 3,
-            "always_prepared_spells": [],
             "spell_list_expansion": [],
             "spell_grants": []
           },
@@ -870,7 +888,6 @@
             "name": "Mastermind",
             "class_name": "Rogue",
             "minimum_level": 3,
-            "always_prepared_spells": [],
             "spell_list_expansion": [],
             "spell_grants": []
           },
@@ -890,7 +907,6 @@
             "name": "Scout",
             "class_name": "Rogue",
             "minimum_level": 3,
-            "always_prepared_spells": [],
             "spell_list_expansion": [],
             "spell_grants": []
           },
@@ -910,7 +926,6 @@
             "name": "Swashbuckler",
             "class_name": "Rogue",
             "minimum_level": 3,
-            "always_prepared_spells": [],
             "spell_list_expansion": [],
             "spell_grants": []
           },
@@ -930,7 +945,6 @@
             "name": "Divine Soul",
             "class_name": "Sorcerer",
             "minimum_level": 1,
-            "always_prepared_spells": [],
             "spell_list_expansion": [],
             "spell_grants": []
           },
@@ -950,7 +964,6 @@
             "name": "Shadow Magic",
             "class_name": "Sorcerer",
             "minimum_level": 1,
-            "always_prepared_spells": [],
             "spell_list_expansion": [],
             "spell_grants": []
           },
@@ -970,7 +983,6 @@
             "name": "Storm Sorcery",
             "class_name": "Sorcerer",
             "minimum_level": 1,
-            "always_prepared_spells": [],
             "spell_list_expansion": [],
             "spell_grants": []
           },
@@ -990,7 +1002,6 @@
             "name": "The Celestial",
             "class_name": "Warlock",
             "minimum_level": 1,
-            "always_prepared_spells": [],
             "spell_list_expansion": [
               "Cure Wounds",
               "Guiding Bolt",
@@ -1021,7 +1032,6 @@
             "name": "The Hexblade",
             "class_name": "Warlock",
             "minimum_level": 1,
-            "always_prepared_spells": [],
             "spell_list_expansion": [
               "Shield",
               "Wrathful Smite",
@@ -1052,7 +1062,6 @@
             "name": "War Magic",
             "class_name": "Wizard",
             "minimum_level": 2,
-            "always_prepared_spells": [],
             "spell_list_expansion": [],
             "spell_grants": []
           },
@@ -6050,7 +6059,7 @@
               "page_start": 170
             },
             {
-              "heading_contains": "A CTIONS",
+              "heading_contains": "STR",
               "page_start": 170,
               "content_contains": "Range: 60 feet",
               "start_contains": "Range: 60 feet"

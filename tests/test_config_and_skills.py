@@ -10,6 +10,7 @@ from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.facade_contracts import ACTION_PAYLOAD_CONTRACTS
 from sagasmith_dnd_mcp.server import create_server
 from sagasmith_dnd_mcp.skills import SkillCatalog
+from sagasmith_dnd_mcp.storage import SagaSmithStorage
 from sagasmith_dnd_mcp.tool_budget import (
     BASELINE_INPUT_SCHEMA_BYTES,
     BASELINE_PUBLIC_TOOL_COUNT,
@@ -70,6 +71,32 @@ def test_config_can_share_only_content_addressed_document_cache(tmp_path: Path) 
     assert first.normalized_modules_dir == second.normalized_modules_dir
     assert first.database_path != second.database_path
     assert first.portable_packages_dir != second.portable_packages_dir
+
+
+def test_storage_accepts_only_the_unified_content_archive_extension(tmp_path: Path) -> None:
+    import_root = tmp_path / "imports"
+    import_root.mkdir()
+    retired = import_root / "retired.sagasmith-module"
+    retired.write_bytes(b"not a unified content archive")
+    storage = SagaSmithStorage(
+        McpConfig(
+            home=tmp_path / "home",
+            database_url=None,
+            chroma_url=None,
+            chroma_path_override=None,
+            dnd_skills_dir=tmp_path / "dnd",
+            modulegen_skills_dir=tmp_path / "modulegen",
+            rule_import_roots=(import_root,),
+            module_import_roots=(import_root,),
+        )
+    )
+
+    with pytest.raises(LookupError):
+        storage.read_content_archive(source_path=retired)
+    assert not hasattr(storage, "read_portable_package")
+    assert not hasattr(storage, "read_module_archive")
+    assert not hasattr(storage, "write_portable_package")
+    assert not hasattr(storage, "write_module_archive")
 
 
 def test_environment_config_has_separate_rule_and_module_import_roots(monkeypatch) -> None:
@@ -434,9 +461,13 @@ def test_server_tool_profiles_are_complete_and_attached_to_tool_metadata(tmp_pat
         tools = await server.list_tools()
         by_name = {tool.name: tool for tool in tools}
         assert set(by_name) == set().union(*map(set, profile_catalog().values()))
-        assert by_name["module_import"].meta["sagasmith_tool_profiles"] == ["lobby"]
-        assert by_name["module_import"].meta["sagasmith_tool_groups"] == ["lobby.modules"]
-        assert by_name["rule_import"].meta["sagasmith_tool_profiles"] == ["lobby"]
+        assert by_name["module_draft"].meta["sagasmith_tool_profiles"] == ["lobby", "play"]
+        assert by_name["module_draft"].meta["sagasmith_tool_groups"] == [
+            "lobby.modules",
+            "play.scene_control",
+        ]
+        assert by_name["rulebook_draft"].meta["sagasmith_tool_profiles"] == ["lobby"]
+        assert by_name["content_pack"].meta["sagasmith_tool_profiles"] == ["lobby"]
         assert by_name["character_check"].meta["sagasmith_tool_profiles"] == ["play"]
         assert by_name["combat_resolve_attack"].meta["sagasmith_tool_profiles"] == ["combat"]
         assert by_name["combat_start"].meta["sagasmith_tool_profiles"] == ["play"]
@@ -489,6 +520,9 @@ def test_machine_facade_contracts_reference_real_public_selectors(
                 for variant in variants:
                     assert set(variant["required_fields"]) <= set(variant["allowed_fields"])
                     assert isinstance(variant["additional_properties"], bool)
+        assert "offset" in ACTION_PAYLOAD_CONTRACTS["rulebook_draft"]["evidence"][1][
+            "allowed_fields"
+        ]
 
     asyncio.run(inspect_contracts())
 
@@ -529,12 +563,12 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
         assert BASELINE_PUBLIC_TOOL_COUNT == 92
         assert BASELINE_INPUT_SCHEMA_BYTES == 56_611
         assert len(CORE_TOOLS) == TARGET_CORE_TOOL_COUNT == 13
-        assert len(tools) == TARGET_PUBLIC_TOOL_COUNT == 85
+        assert len(tools) == TARGET_PUBLIC_TOOL_COUNT == 81
         assert (
             {phase: len(names) for phase, names in profile_catalog().items()}
             == PROFILE_TOOL_LIMITS
             == {
-                "lobby": 64,
+                "lobby": 60,
                 "play": 50,
                 "combat": 49,
             }
@@ -561,32 +595,31 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
             "memory_add",
             "memory_resolve",
         } & set(by_name["character_state_change"].inputSchema["properties"]["action"]["enum"])
-        assert by_name["rule_import"].inputSchema["properties"]["action"]["enum"] == [
-            "discover",
-            "import_addon",
-            "import_package",
-            "inspect_release",
-            "stage",
-            "inspect",
-            "render_page",
-            "recover_statblock",
-            "recover_statblocks",
-            "ingest",
-            "review_text",
-            "review_statblock",
-            "extract_candidates",
-            "augment_catalog",
-            "review",
-            "compile",
+        assert by_name["rulebook_draft"].inputSchema["properties"]["action"]["enum"] == [
+            "start",
+            "get",
+            "evidence",
+            "edit",
+            "finalize",
+        ]
+        assert by_name["module_draft"].inputSchema["properties"]["action"]["enum"] == [
+            "start",
+            "get",
+            "evidence",
+            "edit",
+            "finalize",
+        ]
+        assert by_name["content_pack"].inputSchema["properties"]["action"]["enum"] == [
+            "list",
+            "get",
+            "test",
+            "build",
+            "import",
+            "export",
             "install",
             "activate",
-        ]
-        assert by_name["module_review"].inputSchema["properties"]["action"]["enum"] == [
-            "render_page",
-            "render_transcript",
-            "recover_statblock",
-            "submit_content",
-            "submit_transcript",
+            "deactivate",
+            "remove",
         ]
         assert by_name["combat_choice"].inputSchema["properties"]["action"]["enum"] == [
             "open",
@@ -655,7 +688,10 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
         assert capabilities["features"]["structured_rulebook_import"] is True
         assert capabilities["features"]["source_bound_rule_packs"] is True
         assert capabilities["features"]["structured_content_selection_requirements"] is True
-        assert capabilities["features"]["module_import_idempotency"] is True
+        assert capabilities["features"]["editable_rulebook_drafts"] is True
+        assert capabilities["features"]["deterministic_candidate_revalidation"] is True
+        assert capabilities["features"]["explicit_rulebook_finalization"] is True
+        assert capabilities["features"]["module_draft_idempotency"] is True
         assert capabilities["features"]["managed_module_document_staging"] is True
         assert capabilities["features"]["core_pdf_module_normalization"] is True
         assert capabilities["features"]["module_document_cache"] is True
@@ -666,27 +702,27 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
         assert capabilities["features"]["lexical_pdf_damage_detection"] is True
         assert capabilities["features"]["agent_bounded_ocr_text_review"] is True
         assert capabilities["features"]["agent_rendered_empty_page_recovery"] is True
-        assert capabilities["module_import"]["stage_inputs"] == [
+        assert capabilities["module_draft"]["stage_inputs"] == [
             "source_path",
             "name+content",
             "module-scoped asset",
         ]
-        assert "module_import(attach_asset)" in capabilities["module_import"]["stages"]
-        assert capabilities["module_import"]["normalization_cache"] == "content-addressed"
-        assert capabilities["module_import"]["page_extraction_cache"] == "content-addressed"
-        assert capabilities["module_import"]["ocr_page_cache"] == (
+        assert "module_draft(edit)" in capabilities["module_draft"]["stages"]
+        assert capabilities["module_draft"]["normalization_cache"] == "content-addressed"
+        assert capabilities["module_draft"]["page_extraction_cache"] == "content-addressed"
+        assert capabilities["module_draft"]["ocr_page_cache"] == (
             "content-addressed-per-model-page"
         )
-        assert capabilities["module_import"]["ocr_selection"] == {
+        assert capabilities["module_draft"]["ocr_selection"] == {
             "scope": "per-page",
             "minimum_layout_confidence": 0.86,
             "lexical_damage_detection": True,
             "fallback_model": "small",
         }
-        assert capabilities["module_import"]["text_review"] == {
+        assert capabilities["module_draft"]["text_review"] == {
             "actions": [
-                "module_review(render_transcript)",
-                "module_review(submit_transcript)",
+                "module_draft(evidence)",
+                "module_draft(edit:source_text)",
             ],
             "evidence_bases": [
                 "cross_text",
@@ -713,8 +749,8 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
             },
             "printed_source_typo_policy": "preserve_source_text_author_structured_card",
         }
-        assert capabilities["module_import"]["normalizer"].startswith("sagasmith-core/pdf-layout-v")
-        assert capabilities["module_import"]["parser"] == (
+        assert capabilities["module_draft"]["normalizer"].startswith("sagasmith-core/pdf-layout-v")
+        assert capabilities["module_draft"]["parser"] == (
             f"{DndModuleProfile.name}-v{DndModuleProfile.version}"
         )
         assert capabilities["features"]["player_safe_scene_scopes"] is True
@@ -755,15 +791,20 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
                 "use_combat_choice_only_for_an_owned_window",
             ],
         }
-        assert capabilities["module_import"]["runtime_manifest_schema"] == 1
+        assert capabilities["module_draft"]["runtime_manifest_schema"] == 1
         assert capabilities["rulebook_import"]["settlement_tools"] == {
             "play": "character_check",
             "combat": "combat_check",
         }
-        assert "rule_pack_compile(from_source)" in capabilities["rulebook_import"]["stages"]
-        assert "rule_import(extract_candidates)" in capabilities["rulebook_import"]["stages"]
+        assert "rulebook_draft(start)" in capabilities["rulebook_import"]["stages"]
+        assert "rulebook_draft(edit)" in capabilities["rulebook_import"]["stages"]
+        assert "rulebook_draft(finalize)" in capabilities["rulebook_import"]["stages"]
+        assert "content_pack(install)" in capabilities["rulebook_import"]["stages"]
         assert capabilities["rulebook_import"]["text_review"] == {
-            "actions": ["rule_import(render_page)", "rule_import(review_text)"],
+            "actions": [
+                "rulebook_draft(evidence)",
+                "rulebook_draft(edit:source_text)",
+            ],
             "evidence_bases": [
                 "cross_text",
                 "agent_context",

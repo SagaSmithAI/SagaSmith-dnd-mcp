@@ -9,6 +9,7 @@ from sagasmith_dnd.character_schema import default_character_sheet
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
+from tests.authoring_helpers import finalize_and_activate_module
 
 
 def test_public_character_action_attacks_and_persists_a_source_object(
@@ -43,10 +44,10 @@ def test_public_character_action_attacks_and_persists_a_source_object(
         )
         staged = await call(
             server,
-            "module_import",
+            "module_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "stage",
+                "action": "start",
                 "payload": {
                     "name": "vault.md",
                     "content": (
@@ -60,34 +61,16 @@ def test_public_character_action_attacks_and_persists_a_source_object(
                 "idempotency_key": "stage-module",
             },
         )
-        imported = None
-        for action in ("inspect", "validate", "ingest"):
-            imported = await call(
-                server,
-                "module_import",
-                {
-                    "campaign_id": campaign["id"],
-                    "action": action,
-                    "payload": {"job_id": staged["job"]["id"]},
-                    "idempotency_key": f"{action}-module",
-                },
-            )
-        campaign = await call(
+        activation = await finalize_and_activate_module(
+            call,
             server,
-            "campaign_query",
-            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+            campaign["id"],
+            staged,
+            source_key="vault",
+            title="Vault",
+            portable_id="dnd5e.module.vault-test",
         )
-        await call(
-            server,
-            "module_import",
-            {
-                "campaign_id": campaign["id"],
-                "action": "activate",
-                "payload": {"job_id": staged["job"]["id"]},
-                "expected_revision": campaign["revision"],
-                "idempotency_key": "activate-module",
-            },
-        )
+        module_id = activation["activated"]["activation"]["module_id"]
         hits = await call(
             server,
             "module_search",
@@ -155,9 +138,8 @@ def test_public_character_action_attacks_and_persists_a_source_object(
                 "idempotency_key": "actor",
             },
         )
-        assert imported is not None
         source_ref = {
-            "module_id": imported["module_id"],
+            "module_id": module_id,
             "scene_id": expanded["scene"]["id"],
             "chunk_id": expanded["chunk_id"],
             "page_start": expanded["page_start"],

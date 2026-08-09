@@ -98,16 +98,10 @@ def _review_override_asset_id(
     assets: list[dict[str, Any]],
     requested_asset_id: str,
 ) -> str:
-    pdf_assets = [
-        item
-        for item in assets
-        if str(item.get("media_type") or "") == "application/pdf"
-    ]
+    pdf_assets = [item for item in assets if str(item.get("media_type") or "") == "application/pdf"]
     requested = requested_asset_id.strip()
     if requested:
-        matches = [
-            item for item in pdf_assets if str(item.get("id") or "") == requested
-        ]
+        matches = [item for item in pdf_assets if str(item.get("id") or "") == requested]
         if len(matches) != 1:
             raise RuntimeError(
                 "--source-asset-id must identify one PDF asset in the candidate module"
@@ -138,7 +132,7 @@ def _load_json_list(path: Path, label: str) -> tuple[list[Any], Path]:
 
 
 def _import_job_summary(job: dict[str, Any]) -> dict[str, Any]:
-    """Keep discovery reports bounded; use import_query(get) for full diagnostics."""
+    """Keep discovery reports bounded; use rulebook_draft(get) for full diagnostics."""
 
     return {
         key: job.get(key)
@@ -214,10 +208,7 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument(
         "--review-observation",
         default="",
-        help=(
-            "Review evidence for --review-override or "
-            "--agent-rule-statblock-review"
-        ),
+        help=("Review evidence for --review-override or --agent-rule-statblock-review"),
     )
     parser.add_argument(
         "--agent-rule-statblock-review",
@@ -708,9 +699,7 @@ def _character_summary(character: dict[str, Any]) -> dict[str, Any]:
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest(),
-        "narrative_source_preserved": (
-            "sagasmith:narrative-npc-source:" in provenance
-        ),
+        "narrative_source_preserved": ("sagasmith:narrative-npc-source:" in provenance),
         "statblock_source_preserved": any(
             marker in provenance
             for marker in (
@@ -2124,11 +2113,7 @@ async def _recover_exact_snapshot_checkpoint(
         )
     )
     head = next(
-        (
-            dict(item)
-            for item in snapshots
-            if str(item.get("id") or "") == head_snapshot_id
-        ),
+        (dict(item) for item in snapshots if str(item.get("id") or "") == head_snapshot_id),
         None,
     )
     if (
@@ -2165,7 +2150,7 @@ async def _recover_exact_snapshot_checkpoint(
                     },
                 },
             )
-    )
+        )
     committed = dict(receipt.get("response") or {})
     receipt_branch_id = str(receipt.get("branch_id") or "")
     if (
@@ -2188,8 +2173,7 @@ async def _recover_exact_snapshot_checkpoint(
         raise RuntimeError("pre-Core-relock checkpoint failed integrity verification")
     if int(verification.get("captured_campaign_revision") or -1) != campaign_revision:
         raise RuntimeError(
-            "campaign changed after the pre-Core-relock checkpoint; "
-            "refusing unsafe recovery"
+            "campaign changed after the pre-Core-relock checkpoint; refusing unsafe recovery"
         )
     return committed
 
@@ -2350,9 +2334,7 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                         f"candidate id must resolve exactly once; found {len(matches)}"
                     )
                 candidate = matches[0]
-                fill_requirements = dict(
-                    candidate.get("agent_fill_requirements") or {}
-                )
+                fill_requirements = dict(candidate.get("agent_fill_requirements") or {})
                 if fill_requirements.get("required") and agent_fill is None:
                     required_ids = ", ".join(
                         str(item.get("activity_id") or "")
@@ -2390,17 +2372,16 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                     )
                     recovered = _facade_value(
                         await client.domain(
-                            "module_review",
+                            "module_draft",
                             {
                                 "campaign_id": args.campaign_id,
-                                "action": "recover_statblock",
+                                "action": "edit",
                                 "payload": {
+                                    "operation": "statblock",
                                     "module_id": candidate["module_id"],
                                     "scene_id": candidate["scene_id"],
                                     "content_key": content_key,
-                                    "name": str(
-                                        args.source_statblock_name or candidate["name"]
-                                    ),
+                                    "name": str(args.source_statblock_name or candidate["name"]),
                                     "page_number": page_number,
                                     "source_asset_id": source_asset_id,
                                     "agent_fill": agent_fill,
@@ -2414,9 +2395,7 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                     )
                     if recovered.get("requires_agent_fill"):
                         requirements = dict(
-                            dict(recovered.get("validation") or {}).get(
-                                "agent_fill_requirements"
-                            )
+                            dict(recovered.get("validation") or {}).get("agent_fill_requirements")
                             or {}
                         )
                         raise RuntimeError(
@@ -2477,11 +2456,12 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                         }
                     reviewed = _facade_value(
                         await client.domain(
-                            "module_review",
+                            "module_draft",
                             {
                                 "campaign_id": args.campaign_id,
-                                "action": "submit_content",
+                                "action": "edit",
                                 "payload": {
+                                    "operation": "content",
                                     "module_id": candidate["module_id"],
                                     "scene_id": candidate["scene_id"],
                                     "content_key": content_key,
@@ -2519,9 +2499,7 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
             spell_cards_by_actor: dict[str, list[dict[str, Any]]] = {}
             for index in range(1, args.actor_count + 1):
                 actor_name = (
-                    args.actor_name
-                    if args.actor_count == 1
-                    else f"{args.actor_name} {index}"
+                    args.actor_name if args.actor_count == 1 else f"{args.actor_name} {index}"
                 )
                 creation_payload = {
                     "campaign_id": args.campaign_id,
@@ -2559,18 +2537,10 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 )
                 spell_cards = [
                     _spell_card_summary(card)
-                    for card in (
-                        actor.get("sheet", {}).get("content", {}).get("spells")
-                        or []
-                    )
+                    for card in (actor.get("sheet", {}).get("content", {}).get("spells") or [])
                 ]
-                if not all(
-                    item["display_settlement_range_consistent"]
-                    for item in spell_cards
-                ):
-                    raise RuntimeError(
-                        "source-bound spell display and settlement ranges disagree"
-                    )
+                if not all(item["display_settlement_range_consistent"] for item in spell_cards):
+                    raise RuntimeError("source-bound spell display and settlement ranges disagree")
                 created_results.append(dict(created))
                 actors.append(_character_summary(actor))
                 spell_cards_by_actor[actor_id] = spell_cards
@@ -2621,8 +2591,7 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                     f"Prepared source-bound actor: {args.actor_name}"
                     if args.actor_count == 1
                     else (
-                        "Prepared source-bound actor batch: "
-                        f"{args.actor_name} x{args.actor_count}"
+                        f"Prepared source-bound actor batch: {args.actor_name} x{args.actor_count}"
                     )
                 )
                 snapshots = _facade_value(
@@ -2751,9 +2720,7 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                         {"view": "list", "payload": {"campaign_id": args.campaign_id}},
                     )
                 )
-                source_actor_ids = {
-                    str(item.get("id")) for item in source_characters or []
-                }
+                source_actor_ids = {str(item.get("id")) for item in source_characters or []}
                 actors_absent = not set(actor_ids) & source_actor_ids
                 if not actors_absent:
                     raise RuntimeError("isolated reviewed actors leaked into the source branch")
@@ -2925,11 +2892,7 @@ async def _restore_statblock_preparation_context(
             )
         )
         working_branch = next(
-            (
-                item
-                for item in branches
-                if str(item.get("id") or "") == current["branch_id"]
-            ),
+            (item for item in branches if str(item.get("id") or "") == current["branch_id"]),
             None,
         )
         if working_branch is None:
@@ -2940,12 +2903,9 @@ async def _restore_statblock_preparation_context(
                 "campaign_id": campaign_id,
                 "label": "Failed statblock preparation recovery checkpoint",
                 "expected_revision": campaign["revision"],
-                "expected_head_snapshot_id": (
-                    working_branch.get("head_snapshot_id") or ""
-                ),
+                "expected_head_snapshot_id": (working_branch.get("head_snapshot_id") or ""),
                 "idempotency_key": (
-                    f"{token}-failure-checkpoint-"
-                    f"{_idempotency_token(current['branch_id']).lower()}"
+                    f"{token}-failure-checkpoint-{_idempotency_token(current['branch_id']).lower()}"
                 ),
             },
         )
@@ -3065,9 +3025,7 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
     source_statblock_name = str(
         getattr(args, "source_statblock_name", "") or args.actor_name
     ).strip()
-    requested_source_job_id = str(
-        getattr(args, "source_job_id", "") or ""
-    ).strip()
+    requested_source_job_id = str(getattr(args, "source_job_id", "") or "").strip()
     if not 2 <= len(source_statblock_name) <= 200:
         raise ValueError("--source-statblock-name must contain 2 to 200 characters")
     if source_page is not None and source_page < 1:
@@ -3081,9 +3039,7 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
     review_override_path = None
     review_mode = None
     agent_rule_review_path = getattr(args, "agent_rule_statblock_review", None)
-    base_rule_review_id = str(
-        getattr(args, "base_rule_review_id", "") or ""
-    ).strip()
+    base_rule_review_id = str(getattr(args, "base_rule_review_id", "") or "").strip()
     if base_rule_review_id:
         raise ValueError(
             "--base-rule-review-id is retired for standard rulebooks; "
@@ -3096,9 +3052,7 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
     if base_rule_review_id and (
         args.review_override is not None or agent_rule_review_path is not None
     ):
-        raise ValueError(
-            "--base-rule-review-id cannot be combined with a new statblock review"
-        )
+        raise ValueError("--base-rule-review-id cannot be combined with a new statblock review")
     if args.review_override is not None:
         reviewed_content, review_observation, review_override_path = _load_review_override(
             args.review_override,
@@ -3138,13 +3092,9 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 "base rule statblock review requires --source-id without --source-path"
             )
         if explicit_chunk_ids or source_query or source_page is not None:
-            raise ValueError(
-                "base rule statblock review cannot select new chunks or a source page"
-            )
+            raise ValueError("base rule statblock review cannot select new chunks or a source page")
         if not str(args.review_observation or "").strip():
-            raise ValueError(
-                "base rule statblock review requires --review-observation"
-            )
+            raise ValueError("base rule statblock review requires --review-observation")
     variant = None
     variant_path = None
     if args.statblock_variant is not None:
@@ -3166,9 +3116,7 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
     evidence_exclusions_argument = getattr(args, "agent_evidence_exclusions", None)
     if evidence_exclusions_argument is not None:
         if reviewed_content is None or review_mode != "agent_text":
-            raise ValueError(
-                "--agent-evidence-exclusions requires --agent-rule-statblock-review"
-            )
+            raise ValueError("--agent-evidence-exclusions requires --agent-rule-statblock-review")
         evidence_exclusions, evidence_exclusions_path = _load_json_list(
             evidence_exclusions_argument,
             "Agent evidence exclusions",
@@ -3254,10 +3202,10 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 source_key = f"regression/statblock/{_idempotency_token(source_path.stem).lower()}"
                 staged = _facade_value(
                     await client.domain(
-                        "rule_import",
+                        "rulebook_draft",
                         {
                             "campaign_id": args.campaign_id,
-                            "action": "stage",
+                            "action": "start",
                             "payload": {
                                 "source_path": str(source_path),
                                 "source_key": source_key,
@@ -3272,10 +3220,10 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 job_id = str(dict(staged.get("job") or staged)["id"])
                 inspected = _facade_value(
                     await client.domain(
-                        "rule_import",
+                        "rulebook_draft",
                         {
                             "campaign_id": args.campaign_id,
-                            "action": "inspect",
+                            "action": "get",
                             "payload": {"job_id": job_id},
                             "idempotency_key": f"{token}-inspect-rule-statblock",
                         },
@@ -3285,11 +3233,12 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 warnings = list(inspection.get("warnings") or [])
                 ingested = _facade_value(
                     await client.domain(
-                        "rule_import",
+                        "rulebook_draft",
                         {
                             "campaign_id": args.campaign_id,
-                            "action": "ingest",
+                            "action": "edit",
                             "payload": {
+                                "operation": "advance",
                                 "job_id": job_id,
                                 "acknowledge_warnings": bool(warnings),
                             },
@@ -3314,14 +3263,14 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 indexed_jobs = list(
                     _facade_value(
                         await client.domain(
-                            "import_query",
+                            "rulebook_draft",
                             {
                                 "campaign_id": args.campaign_id,
-                                "view": "list",
-                                "kind": "rulebook",
+                                "action": "get",
+                                "payload": {},
                             },
                         )
-                    )
+                    )["jobs"]
                 )
                 matching_source_jobs = [
                     dict(item)
@@ -3352,9 +3301,8 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                         )
                         for item in matching_source_jobs
                     }
-                    if (
-                        len(fingerprints) == 1
-                        and all(fingerprint for fingerprint in next(iter(fingerprints)))
+                    if len(fingerprints) == 1 and all(
+                        fingerprint for fingerprint in next(iter(fingerprints))
                     ):
                         matching_source_jobs.sort(key=lambda item: str(item["id"]))
                         source_import_job = matching_source_jobs[0]
@@ -3379,16 +3327,13 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
             review_job_id = (
                 str(import_report["job_id"])
                 if import_report is not None
-                else (
-                    str(source_import_job["id"])
-                    if source_import_job is not None
-                    else None
-                )
+                else (str(source_import_job["id"]) if source_import_job is not None else None)
             )
             if reviewed_content is not None:
                 if review_job_id is None:
                     raise RuntimeError("rule statblock review requires an import job")
                 review_payload: dict[str, Any] = {
+                    "operation": "statblock_review",
                     "job_id": review_job_id,
                     "page_number": source_page,
                     "normalized_content": reviewed_content,
@@ -3399,10 +3344,11 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                     page_chunks = list(
                         _facade_value(
                             await client.domain(
-                                "rule_pack_query",
+                                "content_pack",
                                 {
-                                    "view": "source_chunks",
+                                    "action": "get",
                                     "payload": {
+                                        "kind": "source",
                                         "source_id": source_id,
                                         "query": "",
                                         "page": source_page,
@@ -3412,14 +3358,9 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                             )
                         )
                     )
-                    chunks_by_id = {
-                        str(item["id"]): dict(item)
-                        for item in page_chunks
-                    }
+                    chunks_by_id = {str(item["id"]): dict(item) for item in page_chunks}
                     missing_evidence = [
-                        chunk_id
-                        for chunk_id in explicit_chunk_ids
-                        if chunk_id not in chunks_by_id
+                        chunk_id for chunk_id in explicit_chunk_ids if chunk_id not in chunks_by_id
                     ]
                     if missing_evidence:
                         raise RuntimeError(
@@ -3429,17 +3370,11 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                     review_evidence_chunks = [
                         chunks_by_id[chunk_id] for chunk_id in explicit_chunk_ids
                     ]
-                    ordinals = [
-                        int(item.get("ordinal", 0))
-                        for item in review_evidence_chunks
-                    ]
+                    ordinals = [int(item.get("ordinal", 0)) for item in review_evidence_chunks]
                     if (
                         any(value < 0 for value in ordinals)
                         or ordinals != sorted(ordinals)
-                        or any(
-                            right != left + 1
-                            for left, right in zip(ordinals, ordinals[1:])
-                        )
+                        or any(right != left + 1 for left, right in zip(ordinals, ordinals[1:]))
                     ):
                         raise RuntimeError(
                             "Agent rule statblock evidence chunks must be one "
@@ -3452,10 +3387,10 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                     review_payload["agent_fill"] = agent_fill
                 reviewed = _facade_value(
                     await client.domain(
-                        "rule_import",
+                        "rulebook_draft",
                         {
                             "campaign_id": args.campaign_id,
-                            "action": "review_statblock",
+                            "action": "edit",
                             "payload": review_payload,
                             "idempotency_key": f"{token}-review-rule-statblock",
                         },
@@ -3466,24 +3401,21 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 if review_job_id is None:
                     raise RuntimeError("base rule statblock review requires an import job")
                 if agent_fill is None:
-                    raise ValueError(
-                        "--base-rule-review-id requires --agent-statblock-fill"
-                    )
+                    raise ValueError("--base-rule-review-id requires --agent-statblock-fill")
                 reviewed = _facade_value(
                     await client.domain(
-                        "rule_import",
+                        "rulebook_draft",
                         {
                             "campaign_id": args.campaign_id,
-                            "action": "review_statblock",
+                            "action": "edit",
                             "payload": {
+                                "operation": "statblock_review",
                                 "job_id": review_job_id,
                                 "base_review_id": base_rule_review_id,
                                 "observation": args.review_observation,
                                 "agent_fill": agent_fill,
                             },
-                            "idempotency_key": (
-                                f"{token}-augment-rule-statblock-review"
-                            ),
+                            "idempotency_key": (f"{token}-augment-rule-statblock-review"),
                         },
                     )
                 )
@@ -3495,6 +3427,7 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 source_query or (source_page is not None and not explicit_chunk_ids)
             ):
                 chunk_query_payload: dict[str, Any] = {
+                    "kind": "source",
                     "source_id": source_id,
                     "query": source_query,
                     "limit": 200,
@@ -3504,9 +3437,9 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 selected_source_chunks = list(
                     _facade_value(
                         await client.domain(
-                            "rule_pack_query",
+                            "content_pack",
                             {
-                                "view": "source_chunks",
+                                "action": "get",
                                 "payload": chunk_query_payload,
                             },
                         )
@@ -3541,9 +3474,7 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 creation_mode = "statblock"
                 if rule_review is not None:
                     if review_job_id is None:
-                        raise RuntimeError(
-                            "reviewed rule statblock has no durable import job"
-                        )
+                        raise RuntimeError("reviewed rule statblock has no durable import job")
                     creation_mode = "reviewed_rule_statblock"
                     payload["job_id"] = review_job_id
                     payload["review_id"] = rule_review["id"]
@@ -3582,13 +3513,10 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                             "standard rule spell list requires source recovery",
                         )
                     )
-                    if (
-                        not recoverable
-                        or rule_review is not None
-                        or review_job_id is None
-                    ):
+                    if not recoverable or rule_review is not None or review_job_id is None:
                         raise
                     recovery_payload: dict[str, Any] = {
+                        "operation": "statblock_recovery",
                         "job_id": review_job_id,
                         "name": source_statblock_name,
                     }
@@ -3598,10 +3526,10 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                         recovery_payload["agent_fill"] = agent_fill
                     recovered = _facade_value(
                         await client.domain(
-                            "rule_import",
+                            "rulebook_draft",
                             {
                                 "campaign_id": args.campaign_id,
-                                "action": "recover_statblock",
+                                "action": "edit",
                                 "payload": recovery_payload,
                                 "idempotency_key": f"{token}-recover-rule-statblock",
                             },
@@ -3712,13 +3640,9 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 "review_override_path": (
                     str(review_override_path) if review_override_path is not None else None
                 ),
-                "agent_fill_path": (
-                    str(agent_fill_path) if agent_fill_path is not None else None
-                ),
+                "agent_fill_path": (str(agent_fill_path) if agent_fill_path is not None else None),
                 "evidence_exclusions_path": (
-                    str(evidence_exclusions_path)
-                    if evidence_exclusions_path is not None
-                    else None
+                    str(evidence_exclusions_path) if evidence_exclusions_path is not None else None
                 ),
                 "statblock": statblock_report,
                 "actors": actors,
@@ -3793,6 +3717,7 @@ async def _discover_rule_chunks(args: argparse.Namespace) -> dict[str, Any]:
             await client.open()
             await client.load("lobby.campaign", "lobby.rules")
             query_payload: dict[str, Any] = {
+                "kind": "source",
                 "source_id": str(args.source_id),
                 "query": source_query,
                 "limit": 200,
@@ -3802,8 +3727,8 @@ async def _discover_rule_chunks(args: argparse.Namespace) -> dict[str, Any]:
             chunks = list(
                 _facade_value(
                     await client.domain(
-                        "rule_pack_query",
-                        {"view": "source_chunks", "payload": query_payload},
+                        "content_pack",
+                        {"action": "get", "payload": query_payload},
                     )
                 )
             )
@@ -3901,31 +3826,29 @@ async def _discover_rule_sources(args: argparse.Namespace) -> dict[str, Any]:
                 )
             await client.open()
             await client.load("lobby.campaign", "lobby.rules")
-            query_payload = {"system_id": "dnd5e", "edition": "2014"}
+            query_payload = {"kind": "source", "system_id": "dnd5e", "edition": "2014"}
             sources = list(
                 _facade_value(
                     await client.domain(
-                        "rule_pack_query",
-                        {"view": "sources", "payload": query_payload},
+                        "content_pack",
+                        {"action": "list", "payload": query_payload},
                     )
                 )
             )
             import_jobs = list(
                 _facade_value(
                     await client.domain(
-                        "import_query",
+                        "rulebook_draft",
                         {
                             "campaign_id": args.campaign_id,
-                            "view": "list",
-                            "kind": "rulebook",
+                            "action": "get",
+                            "payload": {},
                         },
                     )
-                )
+                )["jobs"]
             )
             selected_import_job: dict[str, Any] | None = None
-            requested_source_job_id = str(
-                getattr(args, "source_job_id", "") or ""
-            ).strip()
+            requested_source_job_id = str(getattr(args, "source_job_id", "") or "").strip()
             if requested_source_job_id:
                 matching_jobs = [
                     item
@@ -3933,20 +3856,18 @@ async def _discover_rule_sources(args: argparse.Namespace) -> dict[str, Any]:
                     if str(item.get("id") or "") == requested_source_job_id
                 ]
                 if len(matching_jobs) != 1:
-                    raise RuntimeError(
-                        "--source-job-id is not one retained rulebook import job"
-                    )
+                    raise RuntimeError("--source-job-id is not one retained rulebook import job")
                 selected_import_job = dict(
                     _facade_value(
                         await client.domain(
-                            "import_query",
+                            "rulebook_draft",
                             {
                                 "campaign_id": args.campaign_id,
-                                "view": "get",
-                                "job_id": requested_source_job_id,
+                                "action": "get",
+                                "payload": {"job_id": requested_source_job_id},
                             },
                         )
-                    )
+                    )["job"]
                 )
             if initial_phase != "lobby":
                 campaign = _facade_value(
@@ -4166,12 +4087,13 @@ async def _prepare_core_wizard(args: argparse.Namespace) -> dict[str, Any]:
                 return list(
                     _facade_value(
                         await client.domain(
-                            "rule_pack_query",
+                            "content_pack",
                             {
-                                "view": "content_catalog",
+                                "action": "list",
                                 "payload": {
                                     "campaign_id": args.campaign_id,
-                                    "kind": kind,
+                                    "kind": "catalog",
+                                    "content_kind": kind,
                                     "query": query,
                                 },
                             },
@@ -5699,12 +5621,12 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
                     "party actors are additional participants."
                 ),
             }
-            readiness = _facade_value(
+            preflight = _facade_value(
                 await client.domain(
                     "module_query",
                     {
                         "campaign_id": args.campaign_id,
-                        "view": "readiness",
+                        "view": "preflight",
                         "payload": {
                             "scene_id": args.scene_id,
                             "participant_manifest": manifest,
@@ -5712,8 +5634,8 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
                     },
                 )
             )
-            if not readiness.get("ready"):
-                raise RuntimeError("source-grounded participant manifest is not combat-ready")
+            if not preflight.get("ready"):
+                raise RuntimeError("source-grounded participant manifest failed preflight")
 
             participant_ids = [args.caster_id, *hostile_ids]
             participant_config = [
@@ -6125,7 +6047,7 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
                 "source_branch_id": source_branch["id"],
                 "regression_branch_id": regression_branch_id,
                 "source_checkpoint": source_checkpoint,
-                "readiness": readiness,
+                "preflight": preflight,
                 "combat": {
                     "start": {
                         "campaign_revision": started.get("campaign_revision"),
@@ -6139,7 +6061,7 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
                     "visible_tool_count": len(combat_tools),
                     "lobby_tools_hidden": all(
                         item not in combat_tools
-                        for item in ("character_create_from", "module_import", "rule_import")
+                        for item in ("character_create_from", "module_draft", "rulebook_draft")
                     ),
                     "cast": cast.get("result"),
                     "attacks": attack_results,

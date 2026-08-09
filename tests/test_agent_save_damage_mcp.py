@@ -10,6 +10,7 @@ from sagasmith_dnd.character_schema import default_character_sheet
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
+from tests.authoring_helpers import finalize_and_activate_module
 
 
 async def _call(server, name: str, arguments: dict):
@@ -91,10 +92,10 @@ def test_agent_save_damage_requires_one_paid_immutable_action_and_replays(
         )
         staged = await _call(
             server,
-            "module_import",
+            "module_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "stage",
+                "action": "start",
                 "payload": {
                     "source_path": str(source),
                     "source_key": "dragon-tower",
@@ -103,43 +104,14 @@ def test_agent_save_damage_requires_one_paid_immutable_action_and_replays(
                 "idempotency_key": "stage",
             },
         )
-        job_id = staged["job"]["id"]
-        for action in ("inspect", "validate"):
-            await _call(
-                server,
-                "module_import",
-                {
-                    "campaign_id": campaign["id"],
-                    "action": action,
-                    "payload": {"job_id": job_id},
-                    "idempotency_key": action,
-                },
-            )
-        await _call(
+        await finalize_and_activate_module(
+            _call,
             server,
-            "module_import",
-            {
-                "campaign_id": campaign["id"],
-                "action": "ingest",
-                "payload": {"job_id": job_id},
-                "idempotency_key": "ingest",
-            },
-        )
-        current = await _call(
-            server,
-            "campaign_query",
-            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
-        )
-        await _call(
-            server,
-            "module_import",
-            {
-                "campaign_id": campaign["id"],
-                "action": "activate",
-                "payload": {"job_id": job_id},
-                "expected_revision": current["revision"],
-                "idempotency_key": "activate",
-            },
+            campaign["id"],
+            staged,
+            source_key="dragon-tower",
+            title="Dragon Tower",
+            portable_id="dnd5e.module.dragon-tower",
         )
         search = await _call(
             server,

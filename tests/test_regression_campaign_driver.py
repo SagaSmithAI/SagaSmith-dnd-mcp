@@ -419,15 +419,18 @@ class _RuleStatblockClient:
                     "head_snapshot_id": "snapshot-0",
                 }
             ]
-        if tool_id == "rule_import":
+        if tool_id == "rulebook_draft":
             action = arguments["action"]
-            if action == "stage":
+            if action == "start":
                 return {"job": {"id": "job-1"}, "artifact": "rulebook.pdf"}
-            if action == "inspect":
+            if action == "get" and arguments["payload"].get("job_id"):
                 return {"inspection": {"warnings": []}}
-            if action == "ingest":
+            if action == "get":
+                return {"jobs": []}
+            operation = arguments["payload"].get("operation")
+            if action == "edit" and operation == "advance":
                 return {"source": {"id": "source-1"}}
-            if action == "review_statblock":
+            if action == "edit" and operation in {"statblock_review", "statblock_recovery"}:
                 return {
                     "review": {
                         "id": "rule-statblock-review:kenku",
@@ -436,16 +439,10 @@ class _RuleStatblockClient:
                     }
                 }
             raise AssertionError(arguments)
-        if tool_id == "import_query":
-            assert arguments == {
-                "campaign_id": "campaign-1",
-                "view": "list",
-                "kind": "rulebook",
-            }
-            return []
-        if tool_id == "rule_pack_query":
-            if arguments["view"] == "sources":
+        if tool_id == "content_pack":
+            if arguments["action"] == "list":
                 assert arguments["payload"] == {
+                    "kind": "source",
                     "system_id": "dnd5e",
                     "edition": "2014",
                 }
@@ -457,7 +454,7 @@ class _RuleStatblockClient:
                         "title": "Commoner",
                     }
                 ]
-            assert arguments["view"] == "source_chunks"
+            assert arguments["action"] == "get"
             return [
                 {
                     "id": "kenku-chunk",
@@ -657,13 +654,16 @@ def test_prepare_module_statblock_honors_actor_count(
         "Kobold 2",
         "Kobold 3",
     ]
-    assert len(
-        [
-            arguments
-            for scope, tool_id, arguments in client.calls
-            if scope == "domain" and tool_id == "character_create_from"
-        ]
-    ) == 3
+    assert (
+        len(
+            [
+                arguments
+                for scope, tool_id, arguments in client.calls
+                if scope == "domain" and tool_id == "character_create_from"
+            ]
+        )
+        == 3
+    )
     assert report["created"]["character"]["id"] == "actor-1"
 
 
@@ -698,9 +698,10 @@ def test_prepare_blocked_module_statblock_uses_text_only_ocr(
                             "media_type": "application/pdf",
                         }
                     ]
-            if tool_id == "module_review":
+            if tool_id == "module_draft":
                 self.calls.append(("domain", tool_id, arguments))
-                assert arguments["action"] == "recover_statblock"
+                assert arguments["action"] == "edit"
+                assert arguments["payload"]["operation"] == "statblock"
                 return {
                     "review": {
                         "id": "review-1",
@@ -749,9 +750,10 @@ def test_prepare_blocked_module_statblock_uses_text_only_ocr(
     recovery_call = next(
         arguments
         for scope, tool_id, arguments in client.calls
-        if scope == "domain" and tool_id == "module_review"
+        if scope == "domain" and tool_id == "module_draft"
     )
     assert recovery_call["payload"] == {
+        "operation": "statblock",
         "module_id": "module-1",
         "scene_id": "scene-1",
         "content_key": "damaged-commoner-heading-blocked",
@@ -778,9 +780,7 @@ def test_prepare_rule_statblock_can_defer_scene_batch_checkpoint(
     _patch_rule_statblock_transport(monkeypatch, client)
 
     report = asyncio.run(
-        _prepare_rule_statblock(
-            _rule_statblock_args(tmp_path, defer_checkpoint=True)
-        )
+        _prepare_rule_statblock(_rule_statblock_args(tmp_path, defer_checkpoint=True))
     )
 
     assert report["snapshot"] is None
@@ -805,11 +805,7 @@ def test_prepare_rule_statblock_scopes_actor_idempotency_to_current_branch(
     for branch_id in ("branch-1", "branch-2"):
         client = _RuleStatblockClient(branch_id)
         _patch_rule_statblock_transport(monkeypatch, client)
-        asyncio.run(
-            _prepare_rule_statblock(
-                _rule_statblock_args(tmp_path, defer_checkpoint=True)
-            )
-        )
+        asyncio.run(_prepare_rule_statblock(_rule_statblock_args(tmp_path, defer_checkpoint=True)))
         keys.append(
             next(
                 arguments["idempotency_key"]
@@ -830,9 +826,7 @@ def test_prepare_rule_statblock_checkpoints_after_returning_to_play(
     _patch_rule_statblock_transport(monkeypatch, client)
 
     report = asyncio.run(
-        _prepare_rule_statblock(
-            _rule_statblock_args(tmp_path, defer_checkpoint=False)
-        )
+        _prepare_rule_statblock(_rule_statblock_args(tmp_path, defer_checkpoint=False))
     )
 
     assert report["snapshot"]["id"] == "snapshot-1"
@@ -927,9 +921,10 @@ def test_prepare_rule_statblock_discovers_chunks_by_source_page_and_text(
     query_call = next(
         arguments
         for scope, tool_id, arguments in client.calls
-        if scope == "domain" and tool_id == "rule_pack_query"
+        if scope == "domain" and tool_id == "content_pack"
     )
     assert query_call["payload"] == {
+        "kind": "source",
         "source_id": "source-1",
         "query": "Kenku",
         "page": 195,
@@ -957,6 +952,7 @@ def test_discover_rule_chunks_returns_boundaries_without_creating_an_actor(
     report = asyncio.run(_discover_rule_chunks(args))
 
     assert report["query"] == {
+        "kind": "source",
         "source_id": "source-1",
         "query": "Kenku",
         "page": 195,
@@ -1006,8 +1002,9 @@ def test_discover_rule_sources_uses_public_lobby_query(
     assert report["selected_import_job"] is None
     assert any(
         scope == "domain"
-        and tool_id == "rule_pack_query"
-        and arguments["view"] == "sources"
+        and tool_id == "content_pack"
+        and arguments["action"] == "list"
+        and arguments["payload"]["kind"] == "source"
         for scope, tool_id, arguments in client.calls
     )
 
@@ -1018,30 +1015,29 @@ def test_discover_rule_sources_can_inspect_one_retained_import_job(
 ) -> None:
     class ImportDetailClient(_RuleStatblockClient):
         async def domain(self, tool_id: str, arguments: dict):
-            if tool_id == "import_query":
+            if tool_id == "rulebook_draft":
                 self.calls.append(("domain", tool_id, arguments))
-                if arguments["view"] == "list":
-                    return [
-                        {
-                            "id": "existing-mm-job",
-                            "kind": "rulebook",
-                            "source_id": "source-1",
-                            "artifact": "monster-manual.pdf",
-                        }
-                    ]
+                if not arguments["payload"].get("job_id"):
+                    return {
+                        "jobs": [
+                            {
+                                "id": "existing-mm-job",
+                                "kind": "rulebook",
+                                "source_id": "source-1",
+                                "artifact": "monster-manual.pdf",
+                            }
+                        ]
+                    }
                 assert arguments == {
                     "campaign_id": "campaign-1",
-                    "view": "get",
-                    "job_id": "existing-mm-job",
+                    "action": "get",
+                    "payload": {"job_id": "existing-mm-job"},
                 }
                 return {
-                    "view": "get",
-                    "result": {
+                    "job": {
                         "id": "existing-mm-job",
                         "result": {
-                            "statblock_reviews": [
-                                {"id": "rule-statblock-review:lizardfolk"}
-                            ]
+                            "statblock_reviews": [{"id": "rule-statblock-review:lizardfolk"}]
                         },
                     },
                 }
@@ -1082,8 +1078,9 @@ def test_prepare_rule_statblock_uses_checksum_bound_visual_review(
         arguments
         for scope, tool_id, arguments in client.calls
         if scope == "domain"
-        and tool_id == "rule_import"
-        and arguments["action"] == "review_statblock"
+        and tool_id == "rulebook_draft"
+        and arguments["action"] == "edit"
+        and arguments["payload"].get("operation") == "statblock_review"
     )
     assert review_call["payload"]["page_number"] == 195
     assert review_call["payload"]["normalized_content"].startswith("# Kenku")
@@ -1112,9 +1109,7 @@ def test_prepare_rule_statblock_rejects_agent_semantic_fill(
         "multiattack_options": [
             {
                 "activity_id": "multiattack-action",
-                "source_excerpt": (
-                    "The peryton makes one gore attack and one talon attack."
-                ),
+                "source_excerpt": ("The peryton makes one gore attack and one talon attack."),
                 "reason": "The reviewed text explicitly names one attack with each weapon.",
                 "options": [
                     {
@@ -1157,17 +1152,19 @@ def test_prepare_rule_statblock_rejects_retained_review_semantic_fill(
 ) -> None:
     class RetainedReviewClient(_RuleStatblockClient):
         async def domain(self, tool_id: str, arguments: dict):
-            if tool_id == "import_query":
+            if tool_id == "rulebook_draft" and arguments["action"] == "get":
                 self.calls.append(("domain", tool_id, arguments))
-                return [
-                    {
-                        "id": "job-source-1",
-                        "kind": "rulebook",
-                        "source_id": "source-1",
-                        "artifact": "rules.pdf",
-                        "artifact_checksum": "same-checksum",
-                    }
-                ]
+                return {
+                    "jobs": [
+                        {
+                            "id": "job-source-1",
+                            "kind": "rulebook",
+                            "source_id": "source-1",
+                            "artifact": "rules.pdf",
+                            "artifact_checksum": "same-checksum",
+                        }
+                    ]
+                }
             return await super().domain(tool_id, arguments)
 
     client = RetainedReviewClient()
@@ -1194,22 +1191,21 @@ def test_prepare_rule_statblock_uses_contiguous_agent_text_evidence(
 ) -> None:
     class AgentTextClient(_RuleStatblockClient):
         async def domain(self, tool_id: str, arguments: dict):
-            if tool_id == "import_query":
+            if tool_id == "rulebook_draft" and arguments["action"] == "get":
                 self.calls.append(("domain", tool_id, arguments))
-                return [
-                    {
-                        "id": job_id,
-                        "kind": "rulebook",
-                        "source_id": "source-1",
-                        "artifact": "rules.pdf",
-                        "artifact_checksum": "same-checksum",
-                    }
-                    for job_id in ("job-source-2", "job-source-1")
-                ]
-            if (
-                tool_id == "rule_pack_query"
-                and arguments["view"] == "source_chunks"
-            ):
+                return {
+                    "jobs": [
+                        {
+                            "id": job_id,
+                            "kind": "rulebook",
+                            "source_id": "source-1",
+                            "artifact": "rules.pdf",
+                            "artifact_checksum": "same-checksum",
+                        }
+                        for job_id in ("job-source-2", "job-source-1")
+                    ]
+                }
+            if tool_id == "content_pack" and arguments["action"] == "get":
                 self.calls.append(("domain", tool_id, arguments))
                 return [
                     {
@@ -1249,9 +1245,7 @@ def test_prepare_rule_statblock_uses_contiguous_agent_text_evidence(
     args.chunk_id = ["evidence-0", "evidence-1", "evidence-2"]
     args.source_page = 1
     args.agent_rule_statblock_review = review
-    args.review_observation = (
-        "Agent normalized only exact contiguous indexed rule text on page 1."
-    )
+    args.review_observation = "Agent normalized only exact contiguous indexed rule text on page 1."
 
     report = asyncio.run(_prepare_rule_statblock(args))
 
@@ -1259,8 +1253,9 @@ def test_prepare_rule_statblock_uses_contiguous_agent_text_evidence(
         arguments
         for scope, tool_id, arguments in client.calls
         if scope == "domain"
-        and tool_id == "rule_import"
-        and arguments["action"] == "review_statblock"
+        and tool_id == "rulebook_draft"
+        and arguments["action"] == "edit"
+        and arguments["payload"].get("operation") == "statblock_review"
     )
     assert review_call["payload"]["review_mode"] == "agent_text"
     assert review_call["payload"]["job_id"] == "job-source-1"
@@ -1288,22 +1283,24 @@ def test_prepare_rule_statblock_rejects_ambiguous_agent_text_import_job(
 ) -> None:
     class AmbiguousImportClient(_RuleStatblockClient):
         async def domain(self, tool_id: str, arguments: dict):
-            if tool_id == "import_query":
+            if tool_id == "rulebook_draft" and arguments["action"] == "get":
                 self.calls.append(("domain", tool_id, arguments))
-                return [
-                    {
-                        "id": "job-1",
-                        "source_id": "source-1",
-                        "artifact": "first.pdf",
-                        "artifact_checksum": "first-checksum",
-                    },
-                    {
-                        "id": "job-2",
-                        "source_id": "source-1",
-                        "artifact": "second.pdf",
-                        "artifact_checksum": "second-checksum",
-                    },
-                ]
+                return {
+                    "jobs": [
+                        {
+                            "id": "job-1",
+                            "source_id": "source-1",
+                            "artifact": "first.pdf",
+                            "artifact_checksum": "first-checksum",
+                        },
+                        {
+                            "id": "job-2",
+                            "source_id": "source-1",
+                            "artifact": "second.pdf",
+                            "artifact_checksum": "second-checksum",
+                        },
+                    ]
+                }
             return await super().domain(tool_id, arguments)
 
     client = AmbiguousImportClient()
@@ -1320,8 +1317,9 @@ def test_prepare_rule_statblock_rejects_ambiguous_agent_text_import_job(
 
     assert not any(
         scope == "domain"
-        and tool_id == "rule_import"
-        and arguments["action"] == "review_statblock"
+        and tool_id == "rulebook_draft"
+        and arguments["action"] == "edit"
+        and arguments["payload"].get("operation") == "statblock_review"
         for scope, tool_id, arguments in client.calls
     )
 
@@ -1331,9 +1329,7 @@ def test_prepare_rule_statblock_rejects_ambiguous_agent_text_import_job(
     resolved_args.chunk_id = ["kenku-chunk"]
     resolved_args.source_page = 195
     resolved_args.agent_rule_statblock_review = review
-    resolved_args.review_observation = (
-        "Exact indexed text evidence was normalized by the Agent."
-    )
+    resolved_args.review_observation = "Exact indexed text evidence was normalized by the Agent."
     resolved_args.source_job_id = "job-2"
 
     report = asyncio.run(_prepare_rule_statblock(resolved_args))
@@ -1342,8 +1338,9 @@ def test_prepare_rule_statblock_rejects_ambiguous_agent_text_import_job(
         arguments
         for scope, tool_id, arguments in resolved_client.calls
         if scope == "domain"
-        and tool_id == "rule_import"
-        and arguments["action"] == "review_statblock"
+        and tool_id == "rulebook_draft"
+        and arguments["action"] == "edit"
+        and arguments["payload"].get("operation") == "statblock_review"
     )
     assert review_call["payload"]["job_id"] == "job-2"
     assert report["source_import_job"]["id"] == "job-2"
@@ -1355,13 +1352,10 @@ def test_prepare_rule_statblock_rejects_noncontiguous_agent_text_evidence(
 ) -> None:
     class GappedEvidenceClient(_RuleStatblockClient):
         async def domain(self, tool_id: str, arguments: dict):
-            if tool_id == "import_query":
+            if tool_id == "rulebook_draft" and arguments["action"] == "get":
                 self.calls.append(("domain", tool_id, arguments))
-                return [{"id": "job-1", "source_id": "source-1"}]
-            if (
-                tool_id == "rule_pack_query"
-                and arguments["view"] == "source_chunks"
-            ):
+                return {"jobs": [{"id": "job-1", "source_id": "source-1"}]}
+            if tool_id == "content_pack" and arguments["action"] == "get":
                 self.calls.append(("domain", tool_id, arguments))
                 return [
                     {
@@ -1391,8 +1385,9 @@ def test_prepare_rule_statblock_rejects_noncontiguous_agent_text_evidence(
 
     assert not any(
         scope == "domain"
-        and tool_id == "rule_import"
-        and arguments["action"] == "review_statblock"
+        and tool_id == "rulebook_draft"
+        and arguments["action"] == "edit"
+        and arguments["payload"].get("operation") == "statblock_review"
         for scope, tool_id, arguments in client.calls
     )
 
@@ -1418,8 +1413,9 @@ def test_prepare_rule_statblock_recovers_layout_ocr_without_image_model(
                     "character_create_from: statblock is missing size, type, and alignment"
                 )
             if (
-                tool_id == "rule_import"
-                and arguments["action"] == "recover_statblock"
+                tool_id == "rulebook_draft"
+                and arguments["action"] == "edit"
+                and arguments["payload"].get("operation") == "statblock_recovery"
             ):
                 self.calls.append(("domain", tool_id, arguments))
                 return {
@@ -1449,10 +1445,12 @@ def test_prepare_rule_statblock_recovers_layout_ocr_without_image_model(
         arguments
         for scope, tool_id, arguments in client.calls
         if scope == "domain"
-        and tool_id == "rule_import"
-        and arguments["action"] == "recover_statblock"
+        and tool_id == "rulebook_draft"
+        and arguments["action"] == "edit"
+        and arguments["payload"].get("operation") == "statblock_recovery"
     )
     assert recovery_call["payload"] == {
+        "operation": "statblock_recovery",
         "job_id": "job-1",
         "name": "Adult Blue Dragon",
     }
@@ -1465,10 +1463,7 @@ def test_prepare_rule_statblock_recovers_layout_ocr_without_image_model(
         "statblock",
         "reviewed_rule_statblock",
     ]
-    assert (
-        create_calls[1]["payload"]["review_id"]
-        == "rule-statblock-review:adult-blue-dragon"
-    )
+    assert create_calls[1]["payload"]["review_id"] == "rule-statblock-review:adult-blue-dragon"
     assert report["rule_review"]["page_number"] == 92
     assert report["source_statblock_name"] == "Adult Blue Dragon"
 
@@ -1491,16 +1486,6 @@ def test_prepare_rule_statblock_recovers_an_existing_indexed_source_by_job(
             self.failed_creation = False
 
         async def domain(self, tool_id: str, arguments: dict):
-            if tool_id == "import_query":
-                self.calls.append(("domain", tool_id, arguments))
-                return [
-                    {
-                        "id": "existing-mm-job",
-                        "kind": "rulebook",
-                        "source_id": "source-1",
-                        "artifact": "monster-manual.pdf",
-                    }
-                ]
             if (
                 tool_id == "character_create_from"
                 and arguments["mode"] == "statblock"
@@ -1510,8 +1495,9 @@ def test_prepare_rule_statblock_recovers_an_existing_indexed_source_by_job(
                 self.failed_creation = True
                 raise RuntimeError(failure_message)
             if (
-                tool_id == "rule_import"
-                and arguments["action"] == "recover_statblock"
+                tool_id == "rulebook_draft"
+                and arguments["action"] == "edit"
+                and arguments["payload"].get("operation") == "statblock_recovery"
             ):
                 self.calls.append(("domain", tool_id, arguments))
                 return {
@@ -1522,6 +1508,18 @@ def test_prepare_rule_statblock_recovers_an_existing_indexed_source_by_job(
                     },
                     "provider": "rapidocr",
                     "corroboration_mode": "embedded_text",
+                }
+            if tool_id == "rulebook_draft" and arguments["action"] == "get":
+                self.calls.append(("domain", tool_id, arguments))
+                return {
+                    "jobs": [
+                        {
+                            "id": "existing-mm-job",
+                            "kind": "rulebook",
+                            "source_id": "source-1",
+                            "artifact": "monster-manual.pdf",
+                        }
+                    ]
                 }
             return await super().domain(tool_id, arguments)
 
@@ -1538,10 +1536,12 @@ def test_prepare_rule_statblock_recovers_an_existing_indexed_source_by_job(
         arguments
         for scope, tool_id, arguments in client.calls
         if scope == "domain"
-        and tool_id == "rule_import"
-        and arguments["action"] == "recover_statblock"
+        and tool_id == "rulebook_draft"
+        and arguments["action"] == "edit"
+        and arguments["payload"].get("operation") == "statblock_recovery"
     )
     assert recovery_call["payload"] == {
+        "operation": "statblock_recovery",
         "job_id": "existing-mm-job",
         "name": "Ettercap",
         "page_number": 132,
@@ -1569,8 +1569,7 @@ def test_prepare_rule_statblock_rejects_automatic_ocr_agent_fill(
             {
                 "activity_id": "multiattack-activity",
                 "source_excerpt": (
-                    "The lizardfolk makes two melee attacks, each one with a "
-                    "different weapon."
+                    "The lizardfolk makes two melee attacks, each one with a different weapon."
                 ),
                 "reason": "The Agent maps the printed composition to legal attacks.",
                 "options": [
@@ -1598,7 +1597,7 @@ def test_prepare_rule_statblock_rejects_automatic_ocr_agent_fill(
             self.failed_creation = False
 
         async def domain(self, tool_id: str, arguments: dict):
-            if tool_id == "import_query":
+            if tool_id == "rulebook_draft":
                 self.calls.append(("domain", tool_id, arguments))
                 return [
                     {
@@ -1616,10 +1615,11 @@ def test_prepare_rule_statblock_rejects_automatic_ocr_agent_fill(
                 self.calls.append(("domain", tool_id, arguments))
                 self.failed_creation = True
                 raise RuntimeError("statblock INT score is ambiguous")
-            if tool_id == "rule_import":
+            if tool_id == "rulebook_draft":
                 self.calls.append(("domain", tool_id, arguments))
-                assert arguments["action"] == "recover_statblock"
+                assert arguments["action"] == "edit"
                 assert arguments["payload"] == {
+                    "operation": "statblock_recovery",
                     "job_id": "existing-mm-job",
                     "name": "Lizardfolk",
                     "page_number": 205,
@@ -1729,17 +1729,13 @@ def test_failed_statblock_preparation_restores_original_play_phase() -> None:
     )
 
     assert result["checkout"] is None
-    assert result["phase_changes"] == [
-        {"tool_profile": "play", "campaign_revision": 13}
-    ]
+    assert result["phase_changes"] == [{"tool_profile": "play", "campaign_revision": 13}]
     phase_set = next(
         arguments
         for tool_id, arguments in client.calls
         if tool_id == "game_phase" and arguments["action"] == "set"
     )
-    assert phase_set["idempotency_key"].startswith(
-        "prepare-token-failure-restore-play-"
-    )
+    assert phase_set["idempotency_key"].startswith("prepare-token-failure-restore-play-")
 
 
 def test_failed_isolated_statblock_preparation_checkpoints_before_checkout() -> None:
@@ -1814,9 +1810,7 @@ def test_failed_isolated_statblock_preparation_checkpoints_before_checkout() -> 
         "slot": 7,
     }
     assert result["checkout"] == {"id": "branch-1", "is_current": True}
-    assert result["phase_changes"] == [
-        {"tool_profile": "play", "campaign_revision": 15}
-    ]
+    assert result["phase_changes"] == [{"tool_profile": "play", "campaign_revision": 15}]
     mutation_order = [
         tool_id
         for tool_id, _arguments in client.calls
@@ -1855,11 +1849,7 @@ def test_character_summary_keeps_provenance_for_a_disarmed_module_npc() -> None:
                 "armor_class": 10,
                 "inventory": {"weapon_attacks": []},
             },
-            "notes": {
-                "profile": {
-                    "dm_notes": "Reviewed module statblock: module-review:sildar."
-                }
-            },
+            "notes": {"profile": {"dm_notes": "Reviewed module statblock: module-review:sildar."}},
         }
     )
 
@@ -2032,9 +2022,7 @@ def test_full_campaign_corpus_accounts_for_every_asset_and_uses_max_party_size()
     assert [module["sequence"] for module in tyranny["modules"]] == [1, 2]
     assert tyranny["play_requirements"]["continuity"]["preserve_party"] is True
     waterdeep = next(
-        line
-        for line in manifest["campaign_lines"]
-        if line["id"] == "waterdeep-dragon-heist"
+        line for line in manifest["campaign_lines"] if line["id"] == "waterdeep-dragon-heist"
     )
     reviewed_size = waterdeep["play_requirements"]["recommended_party_size"]
     assert reviewed_size["status"] == "dm_review_completed"

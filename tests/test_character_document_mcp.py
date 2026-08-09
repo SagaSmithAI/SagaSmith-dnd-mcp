@@ -120,10 +120,10 @@ def test_module_import_rejects_character_support_document(tmp_path: Path) -> Non
         )
         try:
             await server.call_tool(
-                "module_import",
+                "module_draft",
                 {
                     "campaign_id": campaign["id"],
-                    "action": "stage",
+                    "action": "start",
                     "payload": {"source_path": str(source)},
                     "idempotency_key": "stage",
                 },

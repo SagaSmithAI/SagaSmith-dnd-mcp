@@ -170,6 +170,16 @@
                   "equals": "proficient"
                 },
                 {
+                  "path": "sheet.traits.proficiencies.weapons",
+                  "length": 0
+                },
+                {
+                  "path": "sheet.inventory.items",
+                  "contains_names": [
+                    "Bite"
+                  ]
+                },
+                {
                   "path": "sheet.effects",
                   "contains_names": [
                     "Lizardfolk Natural Armor"
@@ -1020,6 +1030,16 @@
                 "Stealth",
                 "Survival"
               ],
+              "natural_weapons": [
+                {
+                  "name": "Bite",
+                  "attack_ability": "strength",
+                  "damage_formula": "1d6",
+                  "damage_type": "piercing",
+                  "reach_ft": 5,
+                  "description": "A reviewed natural weapon usable for an unarmed strike."
+                }
+              ],
               "resources": {
                 "species:lizardfolk:hungry_jaws": {
                   "label": "Hungry Jaws",
@@ -1080,6 +1100,16 @@
               "skill_proficiencies": [
                 "Perception",
                 "Stealth"
+              ],
+              "natural_weapons": [
+                {
+                  "name": "Claws",
+                  "attack_ability": "strength",
+                  "damage_formula": "1d4",
+                  "damage_type": "slashing",
+                  "reach_ft": 5,
+                  "description": "A reviewed natural weapon usable for an unarmed strike."
+                }
               ]
             }
           },

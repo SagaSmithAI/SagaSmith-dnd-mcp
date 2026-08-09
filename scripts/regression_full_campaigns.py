@@ -231,7 +231,7 @@ async def _attach_asset(
     if scene is not None:
         payload["scene_id"] = scene["scene_id"]
     attached = await client.domain(
-        "module_import",
+        "module_draft",
         {
             "campaign_id": campaign_id,
             "action": "attach_asset",

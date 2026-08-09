@@ -10,6 +10,7 @@ from sagasmith_dnd.playthrough import new_playthrough_manifest
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
+from tests.authoring_helpers import finalize_and_activate_module
 
 
 async def _call(server, name: str, arguments: dict):
@@ -51,10 +52,10 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
         campaign_id = campaign["id"]
         staged = await _call(
             server,
-            "module_import",
+            "module_draft",
             {
                 "campaign_id": campaign_id,
-                "action": "stage",
+                "action": "start",
                 "payload": {
                     "name": "Campaign.md",
                     "content": (
@@ -68,55 +69,16 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
                 "idempotency_key": "stage",
             },
         )
-        job_id = staged["job"]["id"]
-        await _call(
+        activation = await finalize_and_activate_module(
+            _call,
             server,
-            "module_import",
-            {
-                "campaign_id": campaign_id,
-                "action": "inspect",
-                "payload": {"job_id": job_id},
-                "idempotency_key": "inspect",
-            },
+            campaign_id,
+            staged,
+            source_key="campaign",
+            title="Campaign",
+            portable_id="dnd5e.module.playthrough-campaign",
         )
-        await _call(
-            server,
-            "module_import",
-            {
-                "campaign_id": campaign_id,
-                "action": "validate",
-                "payload": {"job_id": job_id},
-                "idempotency_key": "validate",
-            },
-        )
-        ingested = await _call(
-            server,
-            "module_import",
-            {
-                "campaign_id": campaign_id,
-                "action": "ingest",
-                "payload": {"job_id": job_id},
-                "idempotency_key": "ingest",
-            },
-        )
-        before_activate = await _call(
-            server,
-            "campaign_query",
-            {"view": "get", "payload": {"campaign_id": campaign_id}},
-        )
-        activated = await _call(
-            server,
-            "module_import",
-            {
-                "campaign_id": campaign_id,
-                "action": "activate",
-                "payload": {"job_id": job_id},
-                "expected_revision": before_activate["revision"],
-                "idempotency_key": "activate",
-            },
-        )
-        module_id = activated["activation"]["module_id"]
-        assert module_id == ingested["module_id"]
+        module_id = activation["activated"]["activation"]["module_id"]
         module_index = await _call(
             server,
             "module_query",
@@ -151,7 +113,7 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
             },
         )
         source_asset = next(
-            item for item in assets if Path(item["source_path"]).name == "Campaign.md"
+            item for item in assets if not str(item.get("asset_key") or "").endswith(".normalized")
         )
         source_ref = {
             "purpose": "campaign_setup",
@@ -287,10 +249,10 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
 
         revision_staged = await _call(
             server,
-            "module_import",
+            "module_draft",
             {
                 "campaign_id": campaign_id,
-                "action": "stage",
+                "action": "start",
                 "payload": {
                     "name": "Campaign-v2.md",
                     "content": (
@@ -305,35 +267,17 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
                 "idempotency_key": "revision-stage",
             },
         )
-        revision_job_id = revision_staged["job"]["id"]
-        for action in ("inspect", "validate", "ingest"):
-            await _call(
-                server,
-                "module_import",
-                {
-                    "campaign_id": campaign_id,
-                    "action": action,
-                    "payload": {"job_id": revision_job_id},
-                    "idempotency_key": f"revision-{action}",
-                },
-            )
-        before_revision_activate = await _call(
+        revision_activation = await finalize_and_activate_module(
+            _call,
             server,
-            "campaign_query",
-            {"view": "get", "payload": {"campaign_id": campaign_id}},
+            campaign_id,
+            revision_staged,
+            source_key="campaign",
+            title="Campaign v2",
+            portable_id="dnd5e.module.playthrough-campaign-v2",
+            request_key="campaign-v2",
         )
-        revision_activated = await _call(
-            server,
-            "module_import",
-            {
-                "campaign_id": campaign_id,
-                "action": "activate",
-                "payload": {"job_id": revision_job_id},
-                "expected_revision": before_revision_activate["revision"],
-                "idempotency_key": "revision-activate",
-            },
-        )
-        revision_module_id = revision_activated["activation"]["module_id"]
+        revision_module_id = revision_activation["activated"]["activation"]["module_id"]
         extended_manifest = deepcopy(initialized["manifest"])
         extended_manifest["module_ids"].append(revision_module_id)
         before_extend = await _call(

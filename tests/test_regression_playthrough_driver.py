@@ -4956,28 +4956,34 @@ def test_module_refresh_validates_ingested_scene_mapping_before_activation(
                 return indexes[module_id]
             if tool_id == "branch_query":
                 return [{"id": "branch-1", "is_current": True}]
-            if tool_id == "module_import":
+            if tool_id == "module_draft":
                 action = arguments["action"]
                 events.append(action)
                 return {
-                    "stage": {"job": {"id": "job-1"}},
-                    "inspect": {
-                        "preview": {
+                    "start": {
+                        "job": {"id": "job-1"},
+                        "module_id": "module-v2",
+                        "inspection": {
                             "valid": True,
                             "errors": [],
                             "warnings": [],
-                        }
+                        },
+                        "validation": {"valid": True, "ruling_requirements": []},
                     },
-                    "validate": {"validation": {"valid": True}},
-                    "ingest": {"module_id": "module-v2"},
-                    "activate": {
-                        "activation": {
-                            "module_id": "module-v2",
-                            "active": True,
-                            "replaced_module_ids": ["module-v1"],
-                        }
+                    "finalize": {
+                        "artifact": "module-v2.pack",
                     },
                 }[action]
+            if tool_id == "content_pack":
+                assert arguments["action"] == "activate"
+                events.append("activate")
+                return {
+                    "activation": {
+                        "module_id": "module-v2",
+                        "active": True,
+                        "replaced_module_ids": ["module-v1"],
+                    }
+                }
             raise AssertionError((tool_id, arguments))
 
     async def manifest_get(client, campaign_id: str):
@@ -5007,6 +5013,14 @@ def test_module_refresh_validates_ingested_scene_mapping_before_activation(
             source_path=source,
             source_key="module-key",
             title="Module",
+            finalization={
+                "portable_id": "dnd5e.module.module-key",
+                "manifest": {},
+                "confirmation": {
+                    "confirmed": True,
+                    "note": "The Agent reviewed the refresh fixture.",
+                },
+            },
             return_phase="lobby",
         )
     )
@@ -5058,6 +5072,14 @@ def test_module_refresh_rejects_changing_the_logical_source_key(
                 source_path=source,
                 source_key="versioned-key-v2",
                 title="Module",
+                finalization={
+                    "portable_id": "dnd5e.module.module-key",
+                    "manifest": {},
+                    "confirmation": {
+                        "confirmed": True,
+                        "note": "The Agent reviewed the refresh fixture.",
+                    },
+                },
                 return_phase="lobby",
             )
         )
@@ -5722,7 +5744,7 @@ def test_level_advancement_exhausts_public_follow_up_and_restores_play(
                         }
                     },
                 }
-            if tool_id == "rule_pack_query":
+            if tool_id == "content_pack":
                 kind = arguments["payload"]["kind"]
                 if kind == "feature":
                     return [
@@ -5951,8 +5973,8 @@ def test_resumed_level_skips_existing_class_prepared_spell_hydration() -> None:
                         }
                     },
                 }
-            if tool_id == "rule_pack_query":
-                if arguments["payload"]["kind"] == "feature":
+            if tool_id == "content_pack":
+                if arguments["payload"]["content_kind"] == "feature":
                     return []
                 return [
                     {
@@ -6056,8 +6078,12 @@ def test_level_preflight_rejects_missing_feature_choice_without_mutation() -> No
                         "maximum_spell_level": 0,
                     },
                 }
-            if tool_id == "rule_pack_query":
-                assert arguments["payload"]["kind"] == "feature"
+            if tool_id == "content_pack":
+                assert arguments["payload"] == {
+                    "campaign_id": "campaign-1",
+                    "kind": "catalog",
+                    "content_kind": "feature",
+                }
                 return [
                     {
                         "id": "feature-style",
@@ -6094,7 +6120,7 @@ def test_level_preflight_rejects_missing_feature_choice_without_mutation() -> No
 
     assert [tool for tool, _ in client.calls] == [
         "character_query",
-        "rule_pack_query",
+        "content_pack",
     ]
 
     with pytest.raises(
@@ -6193,8 +6219,8 @@ def test_level_preflight_rejects_duplicate_known_spell_before_mutation() -> None
                         "maximum_spell_level": 1,
                     },
                 }
-            if tool_id == "rule_pack_query":
-                if arguments["payload"]["kind"] == "feature":
+            if tool_id == "content_pack":
+                if arguments["payload"]["content_kind"] == "feature":
                     return []
                 return [
                     {

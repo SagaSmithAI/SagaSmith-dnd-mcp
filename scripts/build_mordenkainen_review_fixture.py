@@ -228,6 +228,7 @@ STATBLOCK_NAME_CORRECTIONS = {
     "ELDER0BLEX": "Elder Oblex",
     "FRAZ- URB'LUU": "Fraz-Urb'luu",
     "HELLFIRE ENGIN E": "Hellfire Engine",
+    "J UIBLEX": "Juiblex",
     "NAGP A": "Nagpa",
     "OGRE B ATT ERING R A M": "Ogre Battering Ram",
     "REDABISHAI": "Red Abishai",

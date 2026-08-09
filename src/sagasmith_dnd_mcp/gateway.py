@@ -221,10 +221,11 @@ class DndGateway:
 
     async def rule_sources(self, request: web.Request) -> web.Response:
         result = await self.call(
-            "rule_pack_query",
+            "content_pack",
             {
-                "view": "sources",
+                "action": "list",
                 "payload": {
+                    "kind": "source",
                     "system_id": request.query.get("system_id", DND5E.id),
                     "edition": request.query.get("edition"),
                 },

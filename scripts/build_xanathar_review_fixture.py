@@ -54,7 +54,10 @@ def _addition(
 
 
 def _prepared(values: list[tuple[str, int]]) -> list[dict[str, Any]]:
-    return [{"name": name, "minimum_level": level} for name, level in values]
+    return [
+        {"name": name, "minimum_level": level, "method": "always_prepared"}
+        for name, level in values
+    ]
 
 
 def _subclass(
@@ -74,9 +77,8 @@ def _subclass(
         {
             "class_name": class_name,
             "minimum_level": minimum_level,
-            "always_prepared_spells": _prepared(prepared or []),
             "spell_list_expansion": list(expansion or []),
-            "spell_grants": [],
+            "spell_grants": _prepared(prepared or []),
         },
         selectors=[_selector(heading or name, page, match_all=True)],
     )
@@ -718,7 +720,7 @@ def _split_toll_the_dead_spell() -> dict[str, Any]:
         selectors=[
             _selector("TOLL THE DEA D", 170),
             _selector(
-                "A CTIONS",
+                "STR",
                 170,
                 content_contains="Range: 60 feet",
                 start_contains="Range: 60 feet",
@@ -809,7 +811,7 @@ def main() -> None:
         "expected_actor_cards": [
             {
                 "name": "Tiny Servant",
-                "source_text_sha256": hashlib.sha256(
+                "source_boundary_sha256": hashlib.sha256(
                     TINY_SERVANT_STATBLOCK.encode("utf-8")
                 ).hexdigest(),
                 "inventory_item_names": ["Slam"],

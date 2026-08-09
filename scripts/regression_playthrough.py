@@ -255,6 +255,14 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--module-title", default="")
     parser.add_argument("--module-id", default="")
     parser.add_argument(
+        "--module-finalization-json",
+        type=json.loads,
+        help=(
+            "Agent-reviewed module finalization containing portable_id, manifest, "
+            "confirmation, and optional version/catalogs/dependencies/metadata/narrative"
+        ),
+    )
+    parser.add_argument(
         "--module-progress-remap-json",
         action="append",
         type=json.loads,
@@ -982,12 +990,10 @@ def _module_progress_remap_rulings(
                 "reason": "module revision validation returned a non-scene remap requirement",
                 "ruling_requirements": unexpected_requirements,
             },
-            operation="module_import.activate",
+            operation="content_pack.activate",
             retry_hint="Resolve the reported review requirement before retrying the refresh.",
         )
-    candidates_by_signature: dict[
-        tuple[str, str, int, int], list[dict[str, Any]]
-    ] = {}
+    candidates_by_signature: dict[tuple[str, str, int, int], list[dict[str, Any]]] = {}
     for scene in new_index:
         candidates_by_signature.setdefault(_scene_revision_signature(scene), []).append(scene)
     rulings: list[dict[str, str]] = []
@@ -1015,11 +1021,10 @@ def _module_progress_remap_rulings(
                     "source_scene": deepcopy(source_scene),
                     "candidate_scenes": [deepcopy(item) for item in matches],
                 },
-                operation="module_import.activate",
+                operation="content_pack.activate",
                 context={"from_scene_id": source_scene_id},
                 retry_hint=(
-                    "Inspect the candidate index and retry with "
-                    "--module-progress-remap-json."
+                    "Inspect the candidate index and retry with --module-progress-remap-json."
                 ),
             )
         target = matches[0]
@@ -1253,13 +1258,8 @@ async def _validate_source_ref(
     expanded_ref = expanded.get("source_ref")
     if not isinstance(expanded_ref, dict):
         raise RuntimeError("module_expand returned no exact source_ref")
-    cited = {
-        key: deepcopy(source_ref[key]) for key in EXACT_MODULE_SOURCE_FIELD_ORDER
-    }
-    resolved = {
-        key: deepcopy(expanded_ref.get(key))
-        for key in EXACT_MODULE_SOURCE_FIELD_ORDER
-    }
+    cited = {key: deepcopy(source_ref[key]) for key in EXACT_MODULE_SOURCE_FIELD_ORDER}
+    resolved = {key: deepcopy(expanded_ref.get(key)) for key in EXACT_MODULE_SOURCE_FIELD_ORDER}
     if resolved != cited:
         raise ValueError("source_ref does not match the cited chunk's exact source metadata")
     if str(expanded.get("chunk_id") or "") != str(source_ref["chunk_id"]):
@@ -2194,13 +2194,9 @@ def _manifest_recovery_inputs(
     if imported is None:
         raise ValueError("campaign import report does not identify this campaign and line")
     documents = [
-        deepcopy(item)
-        for item in imported.get("documents") or []
-        if isinstance(item, dict)
+        deepcopy(item) for item in imported.get("documents") or [] if isinstance(item, dict)
     ]
-    documents_by_path = {
-        str(item.get("relative_path") or ""): item for item in documents
-    }
+    documents_by_path = {str(item.get("relative_path") or ""): item for item in documents}
     if "" in documents_by_path or len(documents_by_path) != len(documents):
         raise ValueError("campaign import report document paths must be non-empty and unique")
 
@@ -2256,9 +2252,7 @@ async def _initialize_manifest_from_import_report(
     if not campaign_line_id.strip():
         raise ValueError("initialize-manifest requires --campaign-line-id")
     if corpus_root is None or import_report_path is None:
-        raise ValueError(
-            "initialize-manifest requires --corpus-root and --campaign-import-report"
-        )
+        raise ValueError("initialize-manifest requires --corpus-root and --campaign-import-report")
     resolved_root = corpus_root.expanduser().resolve()
     resolved_manifest = corpus_manifest_path.expanduser().resolve()
     resolved_report = import_report_path.expanduser().resolve()
@@ -2282,9 +2276,7 @@ async def _initialize_manifest_from_import_report(
     ):
         raise RuntimeError("module_query(list) returned an invalid collection")
     actual_module_ids = {str(item.get("id") or "") for item in active_modules}
-    expected_module_ids = {
-        str(item["module_id"]) for item in recovered["module_documents"]
-    }
+    expected_module_ids = {str(item["module_id"]) for item in recovered["module_documents"]}
     if actual_module_ids != expected_module_ids:
         raise RuntimeError(
             "active campaign modules differ from the verified import report: "
@@ -2301,9 +2293,7 @@ async def _initialize_manifest_from_import_report(
     return {
         "initialization": initialized,
         "campaign_line_id": campaign_line_id.strip(),
-        "module_ids": [
-            str(item["module_id"]) for item in recovered["module_documents"]
-        ],
+        "module_ids": [str(item["module_id"]) for item in recovered["module_documents"]],
         "review_blocks": deepcopy(recovered["review_blocks"]),
         "corpus_manifest": str(resolved_manifest),
         "campaign_import_report": str(resolved_report),
@@ -2924,9 +2914,7 @@ async def _advance_scene(
         "source_excerpt": source_excerpt,
         "source_ref": exact_ref,
         **(
-            {"agent_ruling": normalized_agent_ruling}
-            if normalized_agent_ruling is not None
-            else {}
+            {"agent_ruling": normalized_agent_ruling} if normalized_agent_ruling is not None else {}
         ),
     }
     existing_transition = transitions.get(scene_identity)
@@ -3009,8 +2997,7 @@ async def _advance_scene(
     if (
         not isinstance(current_runtime_scene, dict)
         or str(current_runtime_scene.get("scene_id") or "") != scene_id
-        or str(dict(current_runtime_scene.get("progress") or {}).get("status") or "")
-        != "current"
+        or str(dict(current_runtime_scene.get("progress") or {}).get("status") or "") != "current"
     ):
         raise RuntimeError(
             "module current-scene projection did not converge with the scene transition"
@@ -3390,14 +3377,9 @@ async def _branch_from_snapshot(
                 run_id=run_id,
                 label=(
                     checkpoint_label.strip()
-                    or (
-                        f"Branch {branch_name.strip()} restored from "
-                        f"snapshot slot {snapshot_slot}"
-                    )
+                    or (f"Branch {branch_name.strip()} restored from snapshot slot {snapshot_slot}")
                 ),
-                checkpoint_id=(
-                    f"branch-restored:{snapshot_slot}:{branch_name.strip()}"
-                ),
+                checkpoint_id=(f"branch-restored:{snapshot_slot}:{branch_name.strip()}"),
             )
         except Exception as error:
             if "campaign has no full-playthrough manifest" not in str(error):
@@ -3417,10 +3399,9 @@ async def _branch_from_snapshot(
         raise RuntimeError("campaign has no current branch")
     branch_identity = f"{snapshot_slot}:{branch_name.strip()}"
     branch_key = _mutation_key(run_id, "branch-from-snapshot", branch_identity)
-    if (
-        str(source_branch.get("name") or "") == branch_name.strip()
-        and str(source_branch.get("base_snapshot_id") or "") == str(target["id"])
-    ):
+    if str(source_branch.get("name") or "") == branch_name.strip() and str(
+        source_branch.get("base_snapshot_id") or ""
+    ) == str(target["id"]):
         receipt = await client.domain(
             "state_revision",
             {
@@ -3433,13 +3414,11 @@ async def _branch_from_snapshot(
         if (
             str(recovered_branch.get("id") or "") != str(source_branch["id"])
             or str(recovered_branch.get("name") or "") != branch_name.strip()
-            or str(recovered_branch.get("base_snapshot_id") or "")
-            != str(target["id"])
+            or str(recovered_branch.get("base_snapshot_id") or "") != str(target["id"])
             or not bool(recovered_branch.get("is_current"))
         ):
             raise RuntimeError(
-                "branch-from-snapshot recovery receipt does not match the "
-                "current restored branch"
+                "branch-from-snapshot recovery receipt does not match the current restored branch"
             )
         original_source_branch = next(
             (
@@ -3547,9 +3526,7 @@ async def _branch_from_snapshot(
             "payload": branch_payload,
             "expected_revision": campaign["revision"],
             "expected_branch_id": str(source_branch["id"]),
-            "idempotency_key": _mutation_key(
-                run_id, "branch-from-snapshot", branch_identity
-            ),
+            "idempotency_key": _mutation_key(run_id, "branch-from-snapshot", branch_identity),
         },
     )
     restored_campaign = await _campaign(client, campaign_id)
@@ -3863,16 +3840,10 @@ async def _resolve_group_check(
     defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
     group_identity = _occurrence_identity(occurrence_id, "resolve-group-check")
-    normalized_actor_ids = list(
-        dict.fromkeys(str(actor_id).strip() for actor_id in actor_ids)
-    )
+    normalized_actor_ids = list(dict.fromkeys(str(actor_id).strip() for actor_id in actor_ids))
     if not all((scene_id, location_key, source_excerpt, ability)):
-        raise ValueError(
-            "resolve-group-check requires scene, location, excerpt, and ability"
-        )
-    if len(normalized_actor_ids) < 2 or any(
-        not actor_id for actor_id in normalized_actor_ids
-    ):
+        raise ValueError("resolve-group-check requires scene, location, excerpt, and ability")
+    if len(normalized_actor_ids) < 2 or any(not actor_id for actor_id in normalized_actor_ids):
         raise ValueError(
             "resolve-group-check requires at least two non-empty --group-check-actor-id"
         )
@@ -3881,9 +3852,7 @@ async def _resolve_group_check(
     if dc is None or dc < 0:
         raise ValueError("resolve-group-check requires a non-negative --check-dc")
     if advantage and disadvantage:
-        raise ValueError(
-            "resolve-group-check cannot apply advantage and disadvantage together"
-        )
+        raise ValueError("resolve-group-check cannot apply advantage and disadvantage together")
     occurrence_scene = await client.domain(
         "module_query",
         {
@@ -3909,22 +3878,16 @@ async def _resolve_group_check(
         source_ref,
         excerpt=source_excerpt,
     )
-    location_keys = {
-        str(item.get("key") or "") for item in _scene_locations(occurrence_scene)
-    }
+    location_keys = {str(item.get("key") or "") for item in _scene_locations(occurrence_scene)}
     if location_key not in location_keys:
-        raise ValueError(
-            "resolve-group-check location is not present in the scene atlas"
-        )
+        raise ValueError("resolve-group-check location is not present in the scene atlas")
     actors = await _validate_campaign_actor_ids(
         client,
         campaign_id=campaign_id,
         actor_ids=normalized_actor_ids,
         operation="resolve-group-check participant",
     )
-    if proficient and any(
-        _actor_card_has_named_skill(actor, ability) for actor in actors
-    ):
+    if proficient and any(_actor_card_has_named_skill(actor, ability) for actor in actors):
         raise ValueError(
             "resolve-group-check named skills derive proficiency and expertise "
             "from each actor card; omit --check-proficient"
@@ -3938,14 +3901,10 @@ async def _resolve_group_check(
         None,
     )
     stored_group = dict(
-        dict((progress_before or {}).get("state") or {}).get(
-            "full_playthrough_group_check"
-        )
-        or {}
+        dict((progress_before or {}).get("state") or {}).get("full_playthrough_group_check") or {}
     )
     progress_matches = bool(
-        str((progress_before or {}).get("current_location_key") or "")
-        == location_key
+        str((progress_before or {}).get("current_location_key") or "") == location_key
         and stored_group.get("run_id") == run_id
         and stored_group.get("occurrence_id") == group_identity
         and stored_group.get("actor_ids") == normalized_actor_ids
@@ -3983,9 +3942,7 @@ async def _resolve_group_check(
                     },
                 },
                 "current_location_key": location_key,
-                "expected_state_version": int(
-                    (progress_before or {}).get("state_version", 0) or 0
-                ),
+                "expected_state_version": int((progress_before or {}).get("state_version", 0) or 0),
                 "idempotency_key": _mutation_key(
                     run_id,
                     "scene-progress",
@@ -4026,15 +3983,11 @@ async def _resolve_group_check(
     )
     check_result = _committed_check_result(settled)
     success = bool(check_result["success"])
-    proposition = (
-        success_knowledge.strip() if success else failure_knowledge.strip()
-    ) or (
+    proposition = (success_knowledge.strip() if success else failure_knowledge.strip()) or (
         f"The group {'succeeded' if success else 'failed'} on the DC {dc} "
         f"{ability.title()} group ability check."
     )
-    recipients = list(
-        dict.fromkeys([*normalized_actor_ids, *knowledge_actor_ids])
-    )
+    recipients = list(dict.fromkeys([*normalized_actor_ids, *knowledge_actor_ids]))
     campaign = await _campaign(client, campaign_id)
     continuity_payload = {
         "event": {
@@ -4065,8 +4018,7 @@ async def _resolve_group_check(
             {
                 "actor_id": recipient,
                 "knowledge_key": (
-                    f"playthrough.{_token(run_id)}.group-check."
-                    f"{_token(group_identity, length=32)}"
+                    f"playthrough.{_token(run_id)}.group-check.{_token(group_identity, length=32)}"
                 ),
                 "proposition": proposition,
                 "disclosure_scope": "owner",
@@ -4104,9 +4056,7 @@ async def _resolve_group_check(
             "location_key": location_key,
             "source_ref": exact_ref,
         },
-        "actors": [
-            {"id": actor["id"], "name": actor["name"]} for actor in actors
-        ],
+        "actors": [{"id": actor["id"], "name": actor["name"]} for actor in actors],
         "occurrence_id": group_identity,
         "progress": progress,
         "check": check_result,
@@ -4856,8 +4806,7 @@ async def _prepare_narrative_npc(
     actor = dict(created.get("character") or {})
     provenance = dict(created.get("narrative_npc") or {})
     canonical_source_ref = {
-        key: deepcopy(exact_ref[key])
-        for key in EXACT_MODULE_SOURCE_FIELD_ORDER
+        key: deepcopy(exact_ref[key]) for key in EXACT_MODULE_SOURCE_FIELD_ORDER
     }
     if (
         actor.get("campaign_id") != campaign_id
@@ -5414,8 +5363,7 @@ def _normalize_roll_modifiers(
             raise ValueError(f"duplicate roll modifier id: {modifier_id}")
         if state_key in state_keys:
             raise ValueError(
-                "independent roll modifiers must not share one state_key: "
-                f"{state_key}"
+                f"independent roll modifiers must not share one state_key: {state_key}"
             )
         modifier_ids.add(modifier_id)
         state_keys.add(state_key)
@@ -5767,12 +5715,8 @@ async def _apply_source_damage(
             },
         )
     )
-    exact_ref = await _validate_source_ref(
-        client, cited_scene, source_ref, excerpt=source_excerpt
-    )
-    location_keys = {
-        str(item.get("key") or "") for item in _scene_locations(current_scene)
-    }
+    exact_ref = await _validate_source_ref(client, cited_scene, source_ref, excerpt=source_excerpt)
+    location_keys = {str(item.get("key") or "") for item in _scene_locations(current_scene)}
     if location_key not in location_keys:
         raise ValueError("apply-damage location is not present in the scene atlas")
     actor = await client.domain(
@@ -6248,9 +6192,7 @@ async def _revive_character(
 ) -> dict[str, Any]:
     identity = _occurrence_identity(occurrence_id, "revive-character")
     if not all((scene_id, location_key, source_excerpt, actor_id, reason.strip())):
-        raise ValueError(
-            "revive-character requires scene, location, source, actor, and reason"
-        )
+        raise ValueError("revive-character requires scene, location, source, actor, and reason")
     current_scene = await client.domain(
         "module_query",
         {
@@ -6278,9 +6220,7 @@ async def _revive_character(
         source_ref,
         excerpt=source_excerpt,
     )
-    if location_key not in {
-        str(item.get("key") or "") for item in _scene_locations(current_scene)
-    }:
+    if location_key not in {str(item.get("key") or "") for item in _scene_locations(current_scene)}:
         raise ValueError("revival location is not present in the current scene atlas")
     actor = await client.domain(
         "character_query",
@@ -6984,9 +6924,7 @@ async def _cast_standard_spell(
         payload["component_ruling"] = deepcopy(component_ruling)
     if normalized_spell_id == CORE_INVISIBILITY_SPELL_ID:
         if not normalized_target_id:
-            raise ValueError(
-                "the engine-settled Invisibility spell requires a target"
-            )
+            raise ValueError("the engine-settled Invisibility spell requires a target")
         payload["target_character_ids"] = [normalized_target_id]
     elif normalized_spell_id == CORE_FLY_SPELL_ID:
         if not normalized_target_id:
@@ -7018,8 +6956,7 @@ async def _cast_standard_spell(
                 "spell_id": normalized_spell_id,
             },
             retry_hint=(
-                "Resolve the typed pre-commit ruling and retry at the current "
-                "character revision."
+                "Resolve the typed pre-commit ruling and retry at the current character revision."
             ),
         )
     if acted.get("status") not in {"committed", "pending_ruling"} or not payment:
@@ -7036,9 +6973,7 @@ async def _cast_standard_spell(
                 "a paid standard spell returned an unsupported post-commit ruling kind"
             )
         if normalized_agent_ruling is None:
-            raise ValueError(
-                "a paid descriptive standard spell requires --spell-agent-ruling-json"
-            )
+            raise ValueError("a paid descriptive standard spell requires --spell-agent-ruling-json")
     elif normalized_agent_ruling is not None:
         raise ValueError(
             "spell Agent ruling must be omitted when the engine fully commits the effect"
@@ -7084,8 +7019,7 @@ async def _cast_standard_spell(
             {
                 "actor_id": recipient,
                 "knowledge_key": (
-                    f"playthrough.{_token(run_id)}.{_token(scene_id)}."
-                    f"spell.{_token(cast_identity)}"
+                    f"playthrough.{_token(run_id)}.{_token(scene_id)}.spell.{_token(cast_identity)}"
                 ),
                 "proposition": normalized_reason,
                 "disclosure_scope": "owner",
@@ -7097,8 +7031,7 @@ async def _cast_standard_spell(
     if not defer_checkpoint:
         continuity_payload["snapshot"] = {
             "label": (
-                f"Full playthrough standard spell: {actor['name']} cast "
-                f"{normalized_spell_id}"
+                f"Full playthrough standard spell: {actor['name']} cast {normalized_spell_id}"
             )
         }
     committed = await client.domain(
@@ -8242,9 +8175,7 @@ async def _advance_time(
             raise RuntimeError("clock recovery current game time does not match the exact target")
         if (
             normalized_expected_after is not None
-            and {
-                key: current_clock.get(key) for key in CALENDAR_MINUTE_FIELDS
-            }
+            and {key: current_clock.get(key) for key in CALENDAR_MINUTE_FIELDS}
             != normalized_expected_after
         ):
             raise RuntimeError("clock recovery current calendar does not match the exact target")
@@ -8403,8 +8334,7 @@ async def _initialize_clock(
     requested_point = calendar_minute_point(day=day, hour=hour, minute=minute)
     if existing:
         if (
-            int(existing.get("elapsed_minutes", -1))
-            != requested_point["elapsed_minutes"]
+            int(existing.get("elapsed_minutes", -1)) != requested_point["elapsed_minutes"]
             or str(existing.get("label") or "") != label
         ):
             raise ValueError("campaign clock is already initialized to a different DM anchor")
@@ -8498,9 +8428,7 @@ async def _recover_stable_party(
     if len(resting_ids) != len(set(resting_ids)):
         raise ValueError("recover-stable concurrent rest actor ids must be unique")
     if set(member_ids) & set(resting_ids):
-        raise ValueError(
-            "recover-stable actors cannot also be concurrent short-rest members"
-        )
+        raise ValueError("recover-stable actors cannot also be concurrent short-rest members")
     actors = []
     for actor_id in [*member_ids, *resting_ids]:
         actor = await client.domain(
@@ -8530,11 +8458,7 @@ async def _recover_stable_party(
             {
                 "character_id": actor_id,
                 "expected_revision": actor_by_id[actor_id]["revision"],
-                **{
-                    key: deepcopy(value)
-                    for key, value in member.items()
-                    if key != "actor_id"
-                },
+                **{key: deepcopy(value) for key, value in member.items() if key != "actor_id"},
             }
         )
     recovered = await client.domain(
@@ -8562,9 +8486,7 @@ async def _recover_stable_party(
         raise RuntimeError("party stable recovery did not commit")
     if list(recovered.get("resting_member_ids") or []) != resting_ids:
         raise RuntimeError("party stable recovery omitted concurrent short-rest members")
-    recipients = list(
-        dict.fromkeys([*member_ids, *resting_ids, *knowledge_actor_ids])
-    )
+    recipients = list(dict.fromkeys([*member_ids, *resting_ids, *knowledge_actor_ids]))
     campaign = await _campaign(client, campaign_id)
     committed = await client.domain(
         "memory_change",
@@ -9659,9 +9581,7 @@ async def _apply_source_effect(
             "payload": {"scene_id": cited_scene_id},
         },
     )
-    exact_ref = await _validate_source_ref(
-        client, source_scene, source_ref, excerpt=source_excerpt
-    )
+    exact_ref = await _validate_source_ref(client, source_scene, source_ref, excerpt=source_excerpt)
     occurrence_scene = (
         source_scene
         if cited_scene_id == scene_id
@@ -9817,9 +9737,7 @@ async def _remove_source_effect(
             "payload": {"scene_id": cited_scene_id},
         },
     )
-    exact_ref = await _validate_source_ref(
-        client, source_scene, source_ref, excerpt=source_excerpt
-    )
+    exact_ref = await _validate_source_ref(client, source_scene, source_ref, excerpt=source_excerpt)
     occurrence_scene = (
         source_scene
         if cited_scene_id == scene_id
@@ -10736,11 +10654,7 @@ async def _spend_source_item(
                 "spend_id": normalized_spend_id,
                 "item_id": normalized_item_id,
                 "quantity": quantity,
-                **(
-                    {"character_id": normalized_character_id}
-                    if normalized_character_id
-                    else {}
-                ),
+                **({"character_id": normalized_character_id} if normalized_character_id else {}),
                 "removed": deepcopy(spent.get("removed") or {}),
                 "source_excerpt": source_excerpt.strip(),
                 "source_ref": exact_ref,
@@ -11433,24 +11347,20 @@ def _validate_level_feature_completion(
             allowed = [str(item) for item in requirements.get("options") or []]
             suffix = f"; allowed choices: {', '.join(allowed)}" if allowed else ""
             raise ValueError(
-                f"level feature {artifact_id} requires an explicit "
-                f"{choice_field} choice{suffix}"
+                f"level feature {artifact_id} requires an explicit {choice_field} choice{suffix}"
             )
         allowed = [str(item) for item in requirements.get("options") or []]
         if not choice_field or not allowed:
             continue
         selected = selection[choice_field]
         selected_values = (
-            [str(item) for item in selected]
-            if isinstance(selected, list)
-            else [str(selected)]
+            [str(item) for item in selected] if isinstance(selected, list) else [str(selected)]
         )
         invalid = [item for item in selected_values if item not in allowed]
         if invalid:
             raise ValueError(
                 f"level feature {artifact_id} has invalid {choice_field} "
-                f"choice(s): {', '.join(invalid)}; allowed choices: "
-                + ", ".join(allowed)
+                f"choice(s): {', '.join(invalid)}; allowed choices: " + ", ".join(allowed)
             )
         expected_count = int(requirements.get("count", 1) or 1)
         if len(selected_values) != expected_count:
@@ -11510,10 +11420,14 @@ async def _preflight_level_completion(
     feature_catalog = list(
         _facade_value(
             await client.domain(
-                "rule_pack_query",
+                "content_pack",
                 {
-                    "view": "content_catalog",
-                    "payload": {"campaign_id": campaign_id, "kind": "feature"},
+                    "action": "list",
+                    "payload": {
+                        "campaign_id": campaign_id,
+                        "kind": "catalog",
+                        "content_kind": "feature",
+                    },
                 },
             )
         )
@@ -11539,10 +11453,14 @@ async def _preflight_level_completion(
     spell_catalog = list(
         _facade_value(
             await client.domain(
-                "rule_pack_query",
+                "content_pack",
                 {
-                    "view": "content_catalog",
-                    "payload": {"campaign_id": campaign_id, "kind": "spell"},
+                    "action": "list",
+                    "payload": {
+                        "campaign_id": campaign_id,
+                        "kind": "catalog",
+                        "content_kind": "spell",
+                    },
                 },
             )
         )
@@ -11573,8 +11491,7 @@ async def _preflight_level_completion(
     if duplicate_new_spells:
         raise ValueError(
             "level known or spellbook selections must add new spells; "
-            "already present: "
-            + ", ".join(duplicate_new_spells)
+            "already present: " + ", ".join(duplicate_new_spells)
         )
     required_counts = (
         int(spell_choices.get("cantrips_to_add", 0) or 0),
@@ -11816,12 +11733,13 @@ async def _advance_level(
         else list(
             _facade_value(
                 await client.domain(
-                    "rule_pack_query",
+                    "content_pack",
                     {
-                        "view": "content_catalog",
+                        "action": "list",
                         "payload": {
                             "campaign_id": campaign_id,
-                            "kind": "feature",
+                            "kind": "catalog",
+                            "content_kind": "feature",
                         },
                     },
                 )
@@ -11895,12 +11813,13 @@ async def _advance_level(
         else list(
             _facade_value(
                 await client.domain(
-                    "rule_pack_query",
+                    "content_pack",
                     {
-                        "view": "content_catalog",
+                        "action": "list",
                         "payload": {
                             "campaign_id": campaign_id,
-                            "kind": "spell",
+                            "kind": "catalog",
+                            "content_kind": "spell",
                         },
                     },
                 )
@@ -12134,14 +12053,8 @@ async def _sync_character_resources(
     defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
     normalized_reason = reason.strip()
-    if (
-        not actor_id
-        or not normalized_reason
-        or return_phase not in CAMPAIGN_GAME_PHASES
-    ):
-        raise ValueError(
-            "sync-character-resources requires actor, reason, and return phase"
-        )
+    if not actor_id or not normalized_reason or return_phase not in CAMPAIGN_GAME_PHASES:
+        raise ValueError("sync-character-resources requires actor, reason, and return phase")
     if initial_phase == "combat":
         raise RuntimeError("sync-character-resources cannot run during active combat")
 
@@ -12176,10 +12089,7 @@ async def _sync_character_resources(
                         "idempotency_key": _mutation_key(
                             run_id,
                             "phase",
-                            (
-                                f"resource-sync-{actor_id}-enter-lobby-"
-                                f"r{campaign['revision']}"
-                            ),
+                            (f"resource-sync-{actor_id}-enter-lobby-r{campaign['revision']}"),
                         ),
                     },
                 )
@@ -12199,9 +12109,7 @@ async def _sync_character_resources(
                 "action": "resource_sync",
                 "payload": {"reason": normalized_reason},
                 "expected_revision": actor["revision"],
-                "idempotency_key": _mutation_key(
-                    run_id, "resource-sync", actor_id
-                ),
+                "idempotency_key": _mutation_key(run_id, "resource-sync", actor_id),
             },
         )
     )
@@ -12209,12 +12117,8 @@ async def _sync_character_resources(
         "character_query",
         {"view": "get", "payload": {"character_id": actor_id}},
     )
-    if dict(synchronized.get("character") or {}).get("revision") != verified_actor.get(
-        "revision"
-    ):
-        raise RuntimeError(
-            "sync-character-resources verification found a different actor revision"
-        )
+    if dict(synchronized.get("character") or {}).get("revision") != verified_actor.get("revision"):
+        raise RuntimeError("sync-character-resources verification found a different actor revision")
 
     if return_phase == "play":
         campaign = await _campaign(client, campaign_id)
@@ -12232,10 +12136,7 @@ async def _sync_character_resources(
                             "idempotency_key": _mutation_key(
                                 run_id,
                                 "phase",
-                                (
-                                    f"resource-sync-{actor_id}-return-play-"
-                                    f"r{campaign['revision']}"
-                                ),
+                                (f"resource-sync-{actor_id}-return-play-r{campaign['revision']}"),
                             ),
                         },
                     )
@@ -12338,10 +12239,7 @@ async def _relock_core(
         campaign_id=campaign_id,
         action="sync",
         run_id=run_id,
-        identity=(
-            f"core-relock-sync:{previous_fingerprint}:"
-            f"{branch['head_snapshot_id']}"
-        ),
+        identity=(f"core-relock-sync:{previous_fingerprint}:{branch['head_snapshot_id']}"),
     )
     return {
         "reason": normalized_reason,
@@ -12361,6 +12259,7 @@ async def _refresh_module(
     source_path: Path | None,
     source_key: str,
     title: str,
+    finalization: dict[str, Any] | None,
     return_phase: str = "",
     progress_remaps: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -12371,6 +12270,28 @@ async def _refresh_module(
         raise ValueError("refresh-module return phase must be lobby or play")
     if source_path is None:
         raise ValueError("refresh-module requires --module-source-path")
+    if not isinstance(finalization, dict):
+        raise ValueError("refresh-module requires --module-finalization-json")
+    allowed_finalization = {
+        "catalogs",
+        "confirmation",
+        "dependencies",
+        "manifest",
+        "metadata",
+        "narrative",
+        "portable_id",
+        "version",
+    }
+    unsupported_finalization = sorted(set(finalization) - allowed_finalization)
+    if unsupported_finalization:
+        raise ValueError(
+            "module-finalization-json has unsupported fields: "
+            + ", ".join(unsupported_finalization)
+        )
+    for required_field in ("portable_id", "manifest", "confirmation"):
+        value = finalization.get(required_field)
+        if value is None or value == "":
+            raise ValueError(f"module-finalization-json requires {required_field}")
     manifest_result = await _manifest_get(client, campaign_id)
     manifest = manifest_result["manifest"]
     old_module_id = str(manifest["current"].get("module_id") or "")
@@ -12457,10 +12378,10 @@ async def _refresh_module(
     await client.open(campaign_id)
     await client.load("lobby.campaign", "lobby.modules")
     staged = await client.domain(
-        "module_import",
+        "module_draft",
         {
             "campaign_id": campaign_id,
-            "action": "stage",
+            "action": "start",
             "payload": {
                 "source_path": str(resolved_source_path),
                 "source_key": source_key,
@@ -12470,43 +12391,68 @@ async def _refresh_module(
         },
     )
     job_id = str(staged["job"]["id"])
-    inspected = await client.domain(
-        "module_import",
-        {
-            "campaign_id": campaign_id,
-            "action": "inspect",
-            "payload": {"job_id": job_id},
-            "idempotency_key": _mutation_key(run_id, "module-refresh-inspect", job_id),
-        },
-    )
-    preview = dict(inspected["preview"])
+    preview = dict(staged["inspection"])
     if not preview.get("valid"):
         raise RuntimeError("; ".join(preview.get("errors") or ["module preview is invalid"]))
-    validated = await client.domain(
-        "module_import",
-        {
-            "campaign_id": campaign_id,
-            "action": "validate",
-            "payload": {"job_id": job_id},
-            "idempotency_key": _mutation_key(run_id, "module-refresh-validate", job_id),
-        },
-    )
-    if not validated["validation"]["valid"]:
+    validation = dict(staged["validation"])
+    if not validation.get("valid"):
         raise RuntimeError("module revision validation failed")
-    ingested = await client.domain(
-        "module_import",
+    draft_module_id = str(staged.get("module_id") or "")
+    if not draft_module_id:
+        raise RuntimeError("module revision ingestion returned no module id")
+    draft_index = await client.domain(
+        "module_query",
         {
             "campaign_id": campaign_id,
-            "action": "ingest",
-            "payload": {"job_id": job_id},
-            "idempotency_key": _mutation_key(run_id, "module-refresh-ingest", job_id),
+            "view": "index",
+            "payload": {"module_id": draft_module_id},
         },
     )
-    new_module_id = str(
-        ingested.get("module_id") or dict(ingested.get("module") or {}).get("id") or ""
+    progress_remap_rulings = _module_progress_remap_rulings(
+        validation,
+        old_index=old_index,
+        new_index=draft_index,
+        supplied=progress_remaps,
     )
-    if not new_module_id:
-        raise RuntimeError("module revision ingestion returned no module id")
+    draft_scene_keys = {
+        str(item["scene_id"]): str(item.get("stable_key") or "") for item in draft_index
+    }
+    activation_remaps = [
+        {
+            "from_scene_id": item["from_scene_id"],
+            "to_scene_key": draft_scene_keys[item["to_scene_id"]],
+            "reason": item["reason"],
+        }
+        for item in progress_remap_rulings
+    ]
+    finalized = await client.domain(
+        "module_draft",
+        {
+            "campaign_id": campaign_id,
+            "action": "finalize",
+            "payload": {
+                "job_id": job_id,
+                **deepcopy(finalization),
+            },
+            "idempotency_key": _mutation_key(run_id, "module-refresh-finalize", job_id),
+        },
+    )
+    campaign = await _campaign(client, campaign_id)
+    activated = await client.domain(
+        "content_pack",
+        {
+            "action": "activate",
+            "payload": {
+                "campaign_id": campaign_id,
+                "kind": "module",
+                "artifact": finalized["artifact"],
+                **({"progress_remaps": activation_remaps} if activation_remaps else {}),
+            },
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(run_id, "module-refresh-activate", job_id),
+        },
+    )
+    new_module_id = str(activated["activation"]["module_id"])
     new_index = await client.domain(
         "module_query",
         {
@@ -12515,14 +12461,14 @@ async def _refresh_module(
             "payload": {"module_id": new_module_id},
         },
     )
-    progress_remap_rulings = _module_progress_remap_rulings(
-        dict(validated["validation"]),
-        old_index=old_index,
-        new_index=new_index,
-        supplied=progress_remaps,
-    )
+    final_by_key = {
+        str(item.get("stable_key") or ""): str(item["scene_id"])
+        for item in new_index
+        if str(item.get("stable_key") or "")
+    }
     progress_remap_targets = {
-        item["from_scene_id"]: item["to_scene_id"] for item in progress_remap_rulings
+        item["from_scene_id"]: final_by_key[draft_scene_keys[item["to_scene_id"]]]
+        for item in progress_remap_rulings
     }
     refreshed_manifest = _extend_manifest_for_module_revision(
         manifest,
@@ -12539,26 +12485,6 @@ async def _refresh_module(
         new_module_id=new_module_id,
         source_asset_sha256=source_asset_sha256,
     )
-    campaign = await _campaign(client, campaign_id)
-    activated = await client.domain(
-        "module_import",
-        {
-            "campaign_id": campaign_id,
-            "action": "activate",
-            "payload": {
-                "job_id": job_id,
-                **(
-                    {"progress_remaps": progress_remap_rulings}
-                    if progress_remap_rulings
-                    else {}
-                ),
-            },
-            "expected_revision": campaign["revision"],
-            "idempotency_key": _mutation_key(run_id, "module-refresh-activate", job_id),
-        },
-    )
-    if str(activated["activation"]["module_id"]) != new_module_id:
-        raise RuntimeError("module activation returned a different ingested module id")
     extended = await _manifest_mutation(
         client,
         campaign_id=campaign_id,
@@ -12613,9 +12539,9 @@ async def _refresh_module(
             "warnings": list(preview.get("warnings") or []),
         },
         "ingested": {
-            "module_id": ingested.get("module_id"),
-            "chapter_count": ingested.get("chapter_count"),
-            "scene_count": ingested.get("scene_count"),
+            "module_id": draft_module_id,
+            "chapter_count": staged.get("chapter_count"),
+            "scene_count": staged.get("scene_count"),
         },
         "activation": activated["activation"],
         "progress_remap_rulings": progress_remap_rulings,
@@ -12851,6 +12777,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                         source_path=args.module_source_path,
                         source_key=args.module_source_key,
                         title=args.module_title,
+                        finalization=args.module_finalization_json,
                         return_phase=args.refresh_return_phase,
                         progress_remaps=args.module_progress_remap_json,
                     )
@@ -13753,7 +13680,6 @@ def main() -> int:
         with campaign_operation_lock(args.home, args.campaign_id):
             report = asyncio.run(_run(args))
     except Exception as error:
-
         report = {
             "action": args.action,
             "campaign_id": args.campaign_id,

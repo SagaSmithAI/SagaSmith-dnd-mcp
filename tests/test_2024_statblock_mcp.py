@@ -61,10 +61,10 @@ def test_module_review_and_actor_creation_use_the_2024_statblock_parser(
         )
         staged = await _call(
             server,
-            "module_import",
+            "module_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "stage",
+                "action": "start",
                 "payload": {
                     "name": "test-beast.md",
                     "content": f"# Test Bestiary\n\n## Test Beast\n\n{STATBLOCK_2024}",
@@ -75,17 +75,7 @@ def test_module_review_and_actor_creation_use_the_2024_statblock_parser(
             },
         )
         job_id = staged["job"]["id"]
-        for action in ("inspect", "validate", "ingest"):
-            ingested = await _call(
-                server,
-                "module_import",
-                {
-                    "campaign_id": campaign["id"],
-                    "action": action,
-                    "payload": {"job_id": job_id},
-                    "idempotency_key": action,
-                },
-            )
+        ingested = staged
         current = await _call(
             server,
             "campaign_query",
@@ -93,10 +83,10 @@ def test_module_review_and_actor_creation_use_the_2024_statblock_parser(
         )
         await _call(
             server,
-            "module_import",
+            "module_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "activate",
+                "action": "get",
                 "payload": {"job_id": job_id},
                 "expected_revision": current["revision"],
                 "idempotency_key": "activate",
@@ -126,28 +116,31 @@ def test_module_review_and_actor_creation_use_the_2024_statblock_parser(
         )
         hits = await _call(
             server,
-            "module_search",
+            "module_draft",
             {
                 "campaign_id": campaign["id"],
-                "query": "Passive Perception 10",
-                "module_ids": [ingested["module_id"]],
+                "action": "evidence",
+                "payload": {
+                    "module_id": ingested["module_id"],
+                    "kind": "chunks",
+                    "query": "Passive Perception 10",
+                },
             },
         )
         chunk_id = hits[0]["id"]
         scene = next(
             item
             for item in index
-            if item["scene_id"] == hits[0]["metadata"]["scene_id"]
+            if item["scene_id"] == hits[0]["scene_id"]
         )
 
         with pytest.raises(Exception, match="dnd5e_2024_statblock"):
             await _call(
                 server,
-                "module_review",
+                "module_draft",
                 {
                     "campaign_id": campaign["id"],
-                    "action": "submit_content",
-                    "payload": {
+                    "action": "edit", "payload": {"operation": "content",
                         "module_id": ingested["module_id"],
                         "scene_id": scene["scene_id"],
                         "content_key": "wrong-edition",
@@ -162,11 +155,10 @@ def test_module_review_and_actor_creation_use_the_2024_statblock_parser(
 
         reviewed = await _call(
             server,
-            "module_review",
+            "module_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "submit_content",
-                "payload": {
+                "action": "edit", "payload": {"operation": "content",
                     "module_id": ingested["module_id"],
                     "scene_id": scene["scene_id"],
                     "content_key": "test-beast",

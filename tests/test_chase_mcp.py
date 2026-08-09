@@ -11,6 +11,7 @@ import sagasmith_dnd_mcp.server as server_module
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
 from sagasmith_dnd_mcp.tool_profiles import GROUP_BY_ID
+from tests.authoring_helpers import finalize_and_activate_module
 
 
 class _SequenceRng:
@@ -87,10 +88,10 @@ def test_public_chase_uses_exact_module_source_and_no_combat_map(
         )
         staged = await _call(
             server,
-            "module_import",
+            "module_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "stage",
+                "action": "start",
                 "payload": {
                     "source_path": str(source),
                     "source_key": "chase-module",
@@ -99,37 +100,14 @@ def test_public_chase_uses_exact_module_source_and_no_combat_map(
                 "idempotency_key": "stage",
             },
         )
-        job_id = staged["job"]["id"]
-        for action in ("inspect", "validate", "ingest"):
-            await _call(
-                server,
-                "module_import",
-                {
-                    "campaign_id": campaign["id"],
-                    "action": action,
-                    "payload": {"job_id": job_id},
-                    "idempotency_key": action,
-                },
-            )
-        current_campaign = await _call(
+        await finalize_and_activate_module(
+            _call,
             server,
-            "campaign_query",
-            {
-                "view": "get",
-                "payload": {"campaign_id": campaign["id"]},
-                "principal_id": "system:local",
-            },
-        )
-        await _call(
-            server,
-            "module_import",
-            {
-                "campaign_id": campaign["id"],
-                "action": "activate",
-                "payload": {"job_id": job_id},
-                "expected_revision": current_campaign["revision"],
-                "idempotency_key": "activate",
-            },
+            campaign["id"],
+            staged,
+            source_key="chase-module",
+            title="Chase Module",
+            portable_id="dnd5e.module.chase-module",
         )
         hits = await _call(
             server,

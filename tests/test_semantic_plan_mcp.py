@@ -10,6 +10,7 @@ from sagasmith_dnd.character_schema import default_character_sheet
 from sagasmith_dnd_mcp import server as server_module
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
+from tests.authoring_helpers import finalize_and_activate_module
 
 
 async def _call(server, name: str, arguments: dict):
@@ -81,10 +82,10 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
         )
         staged = await _call(
             server,
-            "module_import",
+            "module_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "stage",
+                "action": "start",
                 "payload": {
                     "source_path": str(source),
                     "source_key": "prism-chamber",
@@ -93,33 +94,14 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
                 "idempotency_key": "stage",
             },
         )
-        job_id = staged["job"]["id"]
-        for action in ("inspect", "validate", "ingest"):
-            await _call(
-                server,
-                "module_import",
-                {
-                    "campaign_id": campaign["id"],
-                    "action": action,
-                    "payload": {"job_id": job_id},
-                    "idempotency_key": action,
-                },
-            )
-        current = await _call(
+        await finalize_and_activate_module(
+            _call,
             server,
-            "campaign_query",
-            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
-        )
-        await _call(
-            server,
-            "module_import",
-            {
-                "campaign_id": campaign["id"],
-                "action": "activate",
-                "payload": {"job_id": job_id},
-                "expected_revision": current["revision"],
-                "idempotency_key": "activate",
-            },
+            campaign["id"],
+            staged,
+            source_key="prism-chamber",
+            title="Prism Chamber",
+            portable_id="dnd5e.module.prism-chamber-test",
         )
         search = await _call(
             server,
@@ -726,10 +708,10 @@ def test_content_solution_accepts_only_exact_active_rule_chunk_evidence(
         )
         staged = await _call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "stage",
+                "action": "start",
                 "payload": {
                     "source_path": str(source),
                     "source_key": "moon-lore",
@@ -742,21 +724,21 @@ def test_content_solution_accepts_only_exact_active_rule_chunk_evidence(
         job_id = staged["job"]["id"]
         await _call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "inspect",
+                "action": "get",
                 "payload": {"job_id": job_id},
                 "idempotency_key": "moon-rule:inspect",
             },
         )
         await _call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "ingest",
-                "payload": {"job_id": job_id},
+                "action": "edit",
+                "payload": {"operation": "advance", "job_id": job_id},
                 "idempotency_key": "moon-rule:ingest",
             },
         )
@@ -967,10 +949,10 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
         )
         staged = await _call(
             server,
-            "module_import",
+            "module_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "stage",
+                "action": "start",
                 "payload": {
                     "source_path": str(source),
                     "source_key": "binding-blade-room",
@@ -979,33 +961,14 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
                 "idempotency_key": "stage",
             },
         )
-        job_id = staged["job"]["id"]
-        for action in ("inspect", "validate", "ingest"):
-            await _call(
-                server,
-                "module_import",
-                {
-                    "campaign_id": campaign["id"],
-                    "action": action,
-                    "payload": {"job_id": job_id},
-                    "idempotency_key": action,
-                },
-            )
-        current = await _call(
+        await finalize_and_activate_module(
+            _call,
             server,
-            "campaign_query",
-            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
-        )
-        await _call(
-            server,
-            "module_import",
-            {
-                "campaign_id": campaign["id"],
-                "action": "activate",
-                "payload": {"job_id": job_id},
-                "expected_revision": current["revision"],
-                "idempotency_key": "activate",
-            },
+            campaign["id"],
+            staged,
+            source_key="binding-blade-room",
+            title="Warded Room",
+            portable_id="dnd5e.module.binding-blade-test",
         )
         search = await _call(
             server,

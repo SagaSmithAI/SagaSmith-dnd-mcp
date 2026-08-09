@@ -40,8 +40,7 @@ def main() -> None:
     for item in decisions:
         item["name"] = decision_updates.get((item["kind"], item["name"]), item["name"])
     if not any(
-        item["kind"] == "species" and item["name"] == "KALASHTAR QUIRKS"
-        for item in decisions
+        item["kind"] == "species" and item["name"] == "KALASHTAR QUIRKS" for item in decisions
     ):
         decisions.append(
             {
@@ -56,9 +55,7 @@ def main() -> None:
         )
     review["expected_counts"]["item"] = 16
 
-    additions = {
-        (item["kind"], item["name"]): item for item in review["additions"]
-    }
+    additions = {(item["kind"], item["name"]): item for item in review["additions"]}
     house_agents = [
         item
         for (kind, name), item in additions.items()
@@ -85,6 +82,16 @@ def main() -> None:
     ):
         item = additions[("species", name)]
         item["source_selectors"][0] = _page(68)[0]
+    additions[("species", "Warforged (Juggernaut)")]["card"]["grants"]["natural_weapons"] = [
+        {
+            "name": "Iron Fists",
+            "attack_ability": "strength",
+            "damage_formula": "1d4",
+            "damage_type": "bludgeoning",
+            "reach_ft": 5,
+            "description": "A reviewed natural weapon usable for an unarmed strike.",
+        }
+    ]
 
     mark_pages = {
         "Mark of Detection": 96,

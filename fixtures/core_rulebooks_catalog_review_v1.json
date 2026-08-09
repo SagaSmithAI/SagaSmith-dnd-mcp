@@ -10,12 +10,83 @@
         "background": 18,
         "class": 12,
         "feat": 42,
-        "feature": 248,
+        "feature": 249,
         "species": 19,
         "spell": 361,
         "statblock": 31,
         "subclass": 40
       },
+      "expected_actor_names": [
+        "Bat",
+        "Black Bear",
+        "Boar",
+        "Brown Bear",
+        "Cat",
+        "Constrictor Snake",
+        "Crocodile",
+        "Dire Wolf",
+        "Frog",
+        "Giant Eagle",
+        "Giant Spider",
+        "Hawk (Falcon)",
+        "Imp",
+        "Lion",
+        "Mastiff",
+        "Mule",
+        "Owl",
+        "Panther",
+        "Poisonous Snake",
+        "Pseudodragon",
+        "Quasit",
+        "Rat",
+        "Raven",
+        "Reef Shark",
+        "Riding Horse",
+        "Skeleton",
+        "Sprite",
+        "Tiger",
+        "Warhorse",
+        "Wolf",
+        "Zombie"
+      ],
+      "decisions": [
+        {
+          "kind": "statblock",
+          "name": "BLACKBEAR",
+          "artifact_patch": {
+            "card": {
+              "name": "Black Bear"
+            }
+          }
+        },
+        {
+          "kind": "statblock",
+          "name": "BROWNBEAR",
+          "artifact_patch": {
+            "card": {
+              "name": "Brown Bear"
+            }
+          }
+        },
+        {
+          "kind": "statblock",
+          "name": "DIREWOLF",
+          "artifact_patch": {
+            "card": {
+              "name": "Dire Wolf"
+            }
+          }
+        },
+        {
+          "kind": "statblock",
+          "name": "GIANTEAGLE",
+          "artifact_patch": {
+            "card": {
+              "name": "Giant Eagle"
+            }
+          }
+        }
+      ],
       "text_reviews": [
         {
           "page_number": 232,
@@ -30,6 +101,88 @@
           "evidence_basis": "rendered_page",
           "rendered_image_checksum": "4e9328a48f9e688f839aa9138d2902dc68853c52529e584421e3a306c66c4ced",
           "review_method": "agent"
+        }
+      ],
+      "additions": [
+        {
+          "kind": "feature",
+          "name": "CANTRIPS",
+          "source_selectors": [
+            {
+              "heading_exact": [
+                "Chapter 3 - Classes",
+                "CLASS FEATURES",
+                "CANTRIPS"
+              ],
+              "page_start": 67
+            }
+          ],
+          "card": {
+            "name": "CANTRIPS",
+            "description": "At 1st level, you know two cantrips of your choice from the druid spell list. You learn additional druid cantrips of your choice at higher levels, as shown in the Cantrips Known column of the Druid table."
+          },
+          "note": "Agent reviewed the Druid source occurrence and retained it as a source-bound catalog feature."
+        },
+        {
+          "kind": "feature",
+          "name": "CANTRIPS",
+          "source_selectors": [
+            {
+              "heading_exact": [
+                "Chapter 3 - Classes",
+                "CLASS FEATURES",
+                "CANTRIPS"
+              ],
+              "page_start": 102
+            }
+          ],
+          "card": {
+            "name": "CANTRIPS",
+            "description": "At 1st level, you know four cantrips of your choice from the sorcerer spell list. You learn additional sorcerer cantrips of your choice at higher levels, as shown in the Cantrips Known column of the Sorcerer table."
+          },
+          "note": "Agent reviewed the Sorcerer source occurrence and retained it as a source-bound catalog feature."
+        },
+        {
+          "kind": "spell",
+          "name": "Demiplane",
+          "source_selectors": [
+            {
+              "heading_exact": "DEMIPLANE",
+              "page_start": 232
+            }
+          ],
+          "card": {
+            "classes": [
+              "Warlock",
+              "Wizard"
+            ],
+            "level": 8,
+            "definition": {
+              "school": "conjuration",
+              "casting_time": "1 action",
+              "range": {
+                "kind": "distance",
+                "normal_ft": 60,
+                "long_ft": 0
+              },
+              "duration": {
+                "kind": "timed",
+                "value": 1,
+                "unit": "hour",
+                "concentration": false
+              },
+              "components": {
+                "verbal": false,
+                "somatic": true,
+                "material": false,
+                "material_description": "",
+                "material_cost_cp": 0,
+                "consumed": false
+              },
+              "effect": "Create the source-sized shadow door to a persistent demiplane; subsequent castings can create a new room or reconnect to a known demiplane under the exact cited rules."
+            }
+          },
+          "note": "Agent inspected the repaired source page and filled the complete source-bound spell card."
         }
       ]
     }

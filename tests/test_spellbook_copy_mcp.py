@@ -58,12 +58,13 @@ def test_discovered_spellbook_copy_is_source_bound_paid_timed_and_atomic(
         )
         spells = await call(
             server,
-            "rule_pack_query",
+            "content_pack",
             {
-                "view": "content_catalog",
+                "action": "list",
                 "payload": {
                     "campaign_id": created["id"],
-                    "kind": "spell",
+                    "kind": "catalog",
+                    "content_kind": "spell",
                     "query": "Burning Hands",
                 },
                 "principal_id": "system:local",

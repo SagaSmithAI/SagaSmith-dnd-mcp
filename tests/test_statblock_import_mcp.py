@@ -221,10 +221,10 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
         )
         staged = await _call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "stage",
+                "action": "start",
                 "payload": {
                     "source_path": str(commoner),
                     "source_key": "srd/commoner",
@@ -238,30 +238,31 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
         job_id = staged["job"]["id"]
         await _call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "inspect",
+                "action": "get",
                 "payload": {"job_id": job_id},
                 "idempotency_key": "inspect-commoner",
             },
         )
         ingested = await _call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "ingest",
+                "action": "get",
                 "payload": {"job_id": job_id},
                 "idempotency_key": "ingest-commoner",
             },
         )
         chunks = await _call(
             server,
-            "rule_pack_query",
+            "content_pack",
             {
-                "view": "source_chunks",
+                "action": "get",
                 "payload": {
+                    "kind": "source",
                     "source_id": ingested["source_id"],
                     "query": "commoner",
                 },
@@ -595,10 +596,10 @@ def test_rule_statblock_recovers_split_text_layout_without_images(tmp_path: Path
         )
         staged = await _call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "stage",
+                "action": "start",
                 "payload": {
                     "source_path": str(source_path),
                     "source_key": "mm/split-guard",
@@ -612,30 +613,34 @@ def test_rule_statblock_recovers_split_text_layout_without_images(tmp_path: Path
         job_id = staged["job"]["id"]
         await _call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "inspect",
+                "action": "get",
                 "payload": {"job_id": job_id},
                 "idempotency_key": "inspect",
             },
         )
         ingested = await _call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "ingest",
+                "action": "get",
                 "payload": {"job_id": job_id},
                 "idempotency_key": "ingest",
             },
         )
         chunks = await _call(
             server,
-            "rule_pack_query",
+            "content_pack",
             {
-                "view": "source_chunks",
-                "payload": {"source_id": ingested["source_id"], "limit": 200},
+                "action": "get",
+                "payload": {
+                    "kind": "source",
+                    "source_id": ingested["source_id"],
+                    "limit": 200,
+                },
             },
         )
 
@@ -727,10 +732,10 @@ def test_standard_statblock_rejects_damaged_spell_names_before_persist(
         )
         staged = await _call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "stage",
+                "action": "start",
                 "payload": {
                     "source_path": str(source_path),
                     "source_key": "mm/broken-spellcaster",
@@ -743,20 +748,20 @@ def test_standard_statblock_rejects_damaged_spell_names_before_persist(
         )
         await _call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "inspect",
+                "action": "get",
                 "payload": {"job_id": staged["job"]["id"]},
                 "idempotency_key": "inspect",
             },
         )
         ingested = await _call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "ingest",
+                "action": "get",
                 "payload": {"job_id": staged["job"]["id"]},
                 "idempotency_key": "ingest",
             },
@@ -815,10 +820,10 @@ def test_standard_statblock_prefills_source_specific_weapon_rider_ruling(
         )
         staged = await _call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "stage",
+                "action": "start",
                 "payload": {
                     "source_path": str(source_path),
                     "source_key": "mm/unsupported-on-hit",
@@ -831,20 +836,20 @@ def test_standard_statblock_prefills_source_specific_weapon_rider_ruling(
         )
         await _call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "inspect",
+                "action": "get",
                 "payload": {"job_id": staged["job"]["id"]},
                 "idempotency_key": "inspect",
             },
         )
         ingested = await _call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "ingest",
+                "action": "get",
                 "payload": {"job_id": staged["job"]["id"]},
                 "idempotency_key": "ingest",
             },
@@ -919,10 +924,10 @@ def test_standard_statblock_keeps_open_multiattack_as_source_bound_agent_ruling(
         )
         staged = await _call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "stage",
+                "action": "start",
                 "payload": {
                     "source_path": str(source_path),
                     "source_key": "mm/open-multiattack",
@@ -935,20 +940,20 @@ def test_standard_statblock_keeps_open_multiattack_as_source_bound_agent_ruling(
         )
         await _call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "inspect",
+                "action": "get",
                 "payload": {"job_id": staged["job"]["id"]},
                 "idempotency_key": "inspect",
             },
         )
         ingested = await _call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "ingest",
+                "action": "get",
                 "payload": {"job_id": staged["job"]["id"]},
                 "idempotency_key": "ingest",
             },
@@ -1012,10 +1017,10 @@ def test_statblock_spellcasting_binds_slots_and_active_content(tmp_path: Path) -
         )
         staged = await _call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "stage",
+                "action": "start",
                 "payload": {
                     "source_path": str(source_path),
                     "source_key": "module/master-of-souls",
@@ -1028,20 +1033,20 @@ def test_statblock_spellcasting_binds_slots_and_active_content(tmp_path: Path) -
         )
         await _call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "inspect",
+                "action": "get",
                 "payload": {"job_id": staged["job"]["id"]},
                 "idempotency_key": "inspect",
             },
         )
         ingested = await _call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "ingest",
+                "action": "get",
                 "payload": {"job_id": staged["job"]["id"]},
                 "idempotency_key": "ingest",
             },
@@ -1300,10 +1305,10 @@ def test_innate_statblock_spellcasting_binds_daily_uses_and_qualifiers(
         )
         staged = await _call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "stage",
+                "action": "start",
                 "payload": {
                     "source_path": str(source_path),
                     "source_key": "module/yuan-ti-malison",
@@ -1316,20 +1321,20 @@ def test_innate_statblock_spellcasting_binds_daily_uses_and_qualifiers(
         )
         await _call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "inspect",
+                "action": "get",
                 "payload": {"job_id": staged["job"]["id"]},
                 "idempotency_key": "inspect",
             },
         )
         ingested = await _call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "ingest",
+                "action": "get",
                 "payload": {"job_id": staged["job"]["id"]},
                 "idempotency_key": "ingest",
             },
@@ -1402,10 +1407,10 @@ def test_statblock_reconstruction_preserves_reaction_heading_paths(tmp_path: Pat
         )
         staged = await _call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "stage",
+                "action": "start",
                 "payload": {
                     "source_path": str(reactive),
                     "source_key": "test/reactive-commoner",
@@ -1418,20 +1423,20 @@ def test_statblock_reconstruction_preserves_reaction_heading_paths(tmp_path: Pat
         job_id = staged["job"]["id"]
         await _call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "inspect",
+                "action": "get",
                 "payload": {"job_id": job_id},
                 "idempotency_key": "inspect",
             },
         )
         ingested = await _call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "ingest",
+                "action": "get",
                 "payload": {"job_id": job_id},
                 "idempotency_key": "ingest",
             },

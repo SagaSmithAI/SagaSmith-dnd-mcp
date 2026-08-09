@@ -70,7 +70,7 @@ from scripts.regression_encounter import (
     _record_source_flee_damage,
     _reinforcement_config,
     _require_committed_encounter_start,
-    _require_encounter_readiness,
+    _require_encounter_preflight,
     _require_live_active_party,
     _required_source_opening_weapon,
     _roll_total,
@@ -284,7 +284,7 @@ def test_active_content_solution_pays_then_executes_generic_plan(
     assert calls[1][1]["expected_revision"] == 12
 
 
-def test_encounter_readiness_rejects_source_participants_before_other_calls() -> None:
+def test_encounter_preflight_rejects_source_participants_before_other_calls() -> None:
     calls: list[tuple[str, dict]] = []
     manifest = {
         "schema_version": 1,
@@ -314,9 +314,9 @@ def test_encounter_readiness_rejects_source_participants_before_other_calls() ->
                 ],
             }
 
-    with pytest.raises(RuntimeError, match="readiness failed before mutation"):
+    with pytest.raises(RuntimeError, match="preflight failed before mutation"):
         asyncio.run(
-            _require_encounter_readiness(
+            _require_encounter_preflight(
                 Client(),
                 campaign_id="campaign-1",
                 scene_id="scene-1",
@@ -329,7 +329,7 @@ def test_encounter_readiness_rejects_source_participants_before_other_calls() ->
             "module_query",
             {
                 "campaign_id": "campaign-1",
-                "view": "readiness",
+                "view": "preflight",
                 "payload": {
                     "scene_id": "scene-1",
                     "participant_manifest": manifest,
@@ -339,7 +339,7 @@ def test_encounter_readiness_rejects_source_participants_before_other_calls() ->
     ]
 
 
-def test_encounter_readiness_reports_unready_actor_blockers() -> None:
+def test_encounter_preflight_reports_invalid_actor_blockers() -> None:
     manifest = {
         "schema_version": 1,
         "groups": [
@@ -363,12 +363,12 @@ def test_encounter_readiness_reports_unready_actor_blockers() -> None:
                     {
                         "key": "source-hostiles",
                         "missing_count": 0,
-                        "unready_count": 1,
-                        "unready_actor_ids": ["mage-1"],
+                        "invalid_count": 1,
+                        "invalid_actor_ids": ["mage-1"],
                         "actors": [
                             {
                                 "id": "mage-1",
-                                "combat_card": {"blocking_reasons": ["missing_attack_range"]},
+                                "combat_card": {"hard_blockers": ["narrative_only_noncombat"]},
                             }
                         ],
                     }
@@ -377,7 +377,7 @@ def test_encounter_readiness_reports_unready_actor_blockers() -> None:
 
     with pytest.raises(RuntimeError) as raised:
         asyncio.run(
-            _require_encounter_readiness(
+            _require_encounter_preflight(
                 Client(),
                 campaign_id="campaign-1",
                 scene_id="scene-1",
@@ -386,9 +386,9 @@ def test_encounter_readiness_reports_unready_actor_blockers() -> None:
         )
 
     message = str(raised.value)
-    assert "'unready_count': 1" in message
-    assert "'unready_actor_ids': ['mage-1']" in message
-    assert "'mage-1': ['missing_attack_range']" in message
+    assert "'invalid_count': 1" in message
+    assert "'invalid_actor_ids': ['mage-1']" in message
+    assert "'mage-1': ['narrative_only_noncombat']" in message
 
 
 def test_agent_attack_contexts_bind_source_and_attack_mode() -> None:
@@ -4449,7 +4449,7 @@ def test_auto_run_starts_from_play_before_loading_combat_tools() -> None:
     }
 
 
-def test_auto_run_finalizes_retained_completed_combat_before_readiness() -> None:
+def test_auto_run_finalizes_retained_completed_combat_before_preflight() -> None:
     calls: list[tuple[str, object]] = []
 
     class Client:

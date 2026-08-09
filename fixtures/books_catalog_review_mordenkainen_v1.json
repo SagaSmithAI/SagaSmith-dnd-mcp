@@ -456,6 +456,17 @@
         },
         {
           "kind": "statblock",
+          "name": "J UIBLEX",
+          "status": "accepted",
+          "artifact_patch": {
+            "card": {
+              "name": "Juiblex"
+            }
+          },
+          "note": "Agent reviewed the same-page identity and corrected only OCR spacing, decorative glyphs, or a split display heading; mechanics remain unchanged."
+        },
+        {
+          "kind": "statblock",
           "name": "NAGP A",
           "status": "accepted",
           "artifact_patch": {

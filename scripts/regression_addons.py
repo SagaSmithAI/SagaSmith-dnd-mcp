@@ -1,4 +1,4 @@
-"""Cold-start regression for detached SagaSmith addon packages.
+"""Cold-start regression for unified SagaSmith addon packages.
 
 The driver intentionally uses only public MCP tools for import, inspection,
 branch activation, catalog exposure, deactivation, and exact re-export checks.
@@ -16,6 +16,8 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
+from sagasmith_core.content_pack import loads_content_archive
+
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
 
@@ -26,7 +28,7 @@ def _arguments() -> argparse.Namespace:
         "roots",
         nargs="+",
         type=Path,
-        help="Directories containing *.addon.sagasmith.json files.",
+        help="Directories containing addon *.sagasmith-pack files.",
     )
     parser.add_argument("--home", type=Path, required=True)
     parser.add_argument("--edition", default="2014")
@@ -45,8 +47,8 @@ def _documents(roots: list[Path]) -> list[Path]:
     files = {
         path.expanduser().resolve()
         for root in roots
-        for path in root.expanduser().resolve().glob("*.addon.sagasmith.json")
-        if path.is_file()
+        for path in root.expanduser().resolve().glob("*.sagasmith-pack")
+        if path.is_file() and loads_content_archive(path.read_bytes())[0]["kind"] == "addon"
     }
     return sorted(files, key=lambda path: str(path).casefold())
 
@@ -54,7 +56,7 @@ def _documents(roots: list[Path]) -> list[Path]:
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
     files = _documents(args.roots)
     if not files:
-        raise ValueError("no *.addon.sagasmith.json packages were found")
+        raise ValueError("no addon *.sagasmith-pack packages were found")
     base = McpConfig.from_environment()
     config = McpConfig(
         home=args.home.expanduser().resolve(),
@@ -64,7 +66,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         dnd_skills_dir=base.dnd_skills_dir,
         modulegen_skills_dir=base.modulegen_skills_dir,
         auto_seed_rules=False,
-        rule_import_roots=(),
+        rule_import_roots=tuple(root.expanduser().resolve() for root in args.roots),
         module_import_roots=(),
     )
     server = create_server(config)
@@ -94,42 +96,25 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         item_started = perf_counter()
         print(f"[{index}/{len(files)}] {path.name}", file=sys.stderr, flush=True)
         try:
-            package = json.loads(path.read_text(encoding="utf-8"))
+            package, _blobs = loads_content_archive(path.read_bytes())
             checksum = str(package.get("checksum") or "")
-            resolution_readiness = dict(
-                package.get("payload", {})
-                .get("manifest", {})
-                .get("resolution_readiness", {})
-            )
-            if (
-                resolution_readiness.get("complete") is not True
-                or resolution_readiness.get("first_use_compilation_required") is not False
-                or list(resolution_readiness.get("unresolved") or [])
-            ):
-                raise RuntimeError("addon has incomplete build-time resolution")
-            manifest = dict(package.get("payload", {}).get("manifest", {}))
-            readiness = dict(manifest.get("readiness") or {})
-            if (
-                manifest.get("readiness_policy") != "build_time_complete"
-                or readiness.get("complete") is not True
-                or any(
-                    dict(readiness.get(dimension) or {}).get("complete") is not True
-                    for dimension in ("source", "catalog", "selection", "runtime")
-                )
-            ):
-                raise RuntimeError(
-                    "addon has incomplete source/catalog/selection/runtime readiness"
-                )
-            key = hashlib.sha256(
-                f"{path}\0{checksum}\0{args.run_id}".encode("utf-8")
-            ).hexdigest()[:20]
+            if package["kind"] != "addon":
+                raise RuntimeError("content package is not an addon")
+            if "readiness" in package:
+                raise RuntimeError("addon still contains the removed readiness field")
+            key = hashlib.sha256(f"{path}\0{checksum}\0{args.run_id}".encode("utf-8")).hexdigest()[
+                :20
+            ]
             imported = await _call(
                 server,
-                "rule_import",
+                "content_pack",
                 {
-                    "campaign_id": campaign["id"],
-                    "action": "import_addon",
-                    "payload": {"addon": package},
+                    "action": "import",
+                    "payload": {
+                        "kind": "addon",
+                        "campaign_id": campaign["id"],
+                        "source_path": str(path),
+                    },
                     "idempotency_key": f"addon-regression-import-{key}",
                 },
             )
@@ -145,10 +130,11 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 raise RuntimeError("addon contains components that were not installed")
             detail = await _call(
                 server,
-                "rule_pack_query",
+                "content_pack",
                 {
-                    "view": "addon",
+                    "action": "get",
                     "payload": {
+                        "kind": "addon",
                         "campaign_id": campaign["id"],
                         "addon_id": package["id"],
                         "version": package["version"],
@@ -166,11 +152,12 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             revision = profile["result"]["campaign_revision"]
             activated = await _call(
                 server,
-                "campaign_rules",
+                "content_pack",
                 {
-                    "campaign_id": campaign["id"],
-                    "action": "set_addon",
+                    "action": "activate",
                     "payload": {
+                        "kind": "addon",
+                        "campaign_id": campaign["id"],
                         "addon_id": package["id"],
                         "version": package["version"],
                     },
@@ -182,10 +169,10 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 raise RuntimeError("addon did not activate")
             catalog = await _call(
                 server,
-                "rule_pack_query",
+                "content_pack",
                 {
-                    "view": "content_catalog",
-                    "payload": {"campaign_id": campaign["id"]},
+                    "action": "list",
+                    "payload": {"kind": "catalog", "campaign_id": campaign["id"]},
                 },
             )
             current = await _call(
@@ -196,14 +183,14 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             revision = current["result"]["revision"]
             disabled = await _call(
                 server,
-                "campaign_rules",
+                "content_pack",
                 {
-                    "campaign_id": campaign["id"],
-                    "action": "set_addon",
+                    "action": "deactivate",
                     "payload": {
+                        "kind": "addon",
+                        "campaign_id": campaign["id"],
                         "addon_id": package["id"],
                         "version": package["version"],
-                        "enabled": False,
                     },
                     "expected_revision": revision,
                     "idempotency_key": f"addon-regression-disable-{key}-r{revision}",
@@ -211,23 +198,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             )
             if disabled["result"]["activation"]["enabled"] is not False:
                 raise RuntimeError("addon did not deactivate")
-            reexported = await _call(
-                server,
-                "rule_pack_query",
-                {
-                    "view": "addon_package",
-                    "payload": {
-                        "campaign_id": campaign["id"],
-                        "portable_id": package["id"],
-                        "version": package["version"],
-                        "manifest": package["payload"]["manifest"],
-                        "components": package["payload"]["components"],
-                        "metadata": package["metadata"],
-                        "include_package": True,
-                    },
-                },
-            )
-            if reexported["result"]["package"] != package:
+            if detail["result"]["package"] != package:
                 raise RuntimeError("public addon re-export differs from the input package")
             report["packages"].append(
                 {
@@ -235,10 +206,9 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     "id": package["id"],
                     "version": package["version"],
                     "checksum": checksum,
-                    "classification": package["payload"]["manifest"]["classification"],
-                    "content_summary": package["payload"]["manifest"]["content_summary"],
-                    "resolution_readiness": resolution_readiness,
-                    "readiness": readiness,
+                    "classification": package["manifest"]["classification"],
+                    "content_summary": package["manifest"]["content_summary"],
+                    "validation": "accepted by content_pack(import)",
                     "components": value["components"],
                     "catalog_artifacts_while_active": len(catalog["result"]),
                     "installed": True,
@@ -262,9 +232,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 flush=True,
             )
     report["seconds"] = round(perf_counter() - started, 3)
-    report["passed"] = (
-        not report["errors"] and len(report["packages"]) == len(files)
-    )
+    report["passed"] = not report["errors"] and len(report["packages"]) == len(files)
     return report
 
 

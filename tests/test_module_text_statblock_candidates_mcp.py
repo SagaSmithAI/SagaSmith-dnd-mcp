@@ -7,6 +7,7 @@ from sagasmith_dnd.statblocks import parse_2014_statblock
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
+from tests.authoring_helpers import finalize_and_activate_module
 
 GOBLIN_MODULE = (
     "# Appendix B: Monsters\n\n"
@@ -95,10 +96,10 @@ def test_text_module_statblock_candidate_can_create_a_source_bound_actor(
         )
         staged = await _call(
             server,
-            "module_import",
+            "module_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "stage",
+                "action": "start",
                 "payload": {
                     "name": "goblins.md",
                     "content": GOBLIN_MODULE,
@@ -108,41 +109,14 @@ def test_text_module_statblock_candidate_can_create_a_source_bound_actor(
                 "idempotency_key": "stage",
             },
         )
-        job_id = staged["job"]["id"]
-        for action in ("inspect", "validate", "ingest"):
-            ingested = await _call(
-                server,
-                "module_import",
-                {
-                    "campaign_id": campaign["id"],
-                    "action": action,
-                    "payload": {"job_id": job_id},
-                    "idempotency_key": action,
-                },
-            )
-        campaign = await _call(
-            server,
-            "campaign_query",
-            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
-        )
-        await _call(
-            server,
-            "module_import",
-            {
-                "campaign_id": campaign["id"],
-                "action": "activate",
-                "payload": {"job_id": job_id},
-                "expected_revision": campaign["revision"],
-                "idempotency_key": "activate",
-            },
-        )
+        module_id = staged["module_id"]
         candidates = await _call(
             server,
             "module_query",
             {
                 "campaign_id": campaign["id"],
                 "view": "candidates",
-                "payload": {"module_id": ingested["module_id"]},
+                "payload": {"module_id": module_id},
             },
         )
 
@@ -159,12 +133,13 @@ def test_text_module_statblock_candidate_can_create_a_source_bound_actor(
         assert candidate["ruling_requirement"]["ruling_kind"] == "source_or_scene_fact"
         reviewed = await _call(
             server,
-            "module_review",
+            "module_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "submit_content",
+                "action": "edit",
                 "payload": {
-                    "module_id": ingested["module_id"],
+                    "operation": "content",
+                    "module_id": module_id,
                     "scene_id": candidate["scene_id"],
                     "content_key": "goblin",
                     "normalized_content": candidate["normalized_content"],
@@ -201,6 +176,15 @@ def test_text_module_statblock_candidate_can_create_a_source_bound_actor(
         assert {
             item["source_key"] for item in created["character"]["sheet"]["inventory"]["items"]
         } == {f"module-review:{reviewed['review']['id']}"}
+        await finalize_and_activate_module(
+            _call,
+            server,
+            campaign["id"],
+            staged,
+            source_key="goblins",
+            title="Goblins",
+            portable_id="dnd5e.module.goblins-test",
+        )
 
     asyncio.run(exercise())
 
@@ -231,10 +215,10 @@ def test_agent_can_fill_custom_monster_multiattack_from_exact_module_source(
         )
         staged = await _call(
             server,
-            "module_import",
+            "module_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "stage",
+                "action": "start",
                 "payload": {
                     "name": "agent-filled-goblin.md",
                     "content": AGENT_FILLED_GOBLIN_MODULE,
@@ -244,41 +228,14 @@ def test_agent_can_fill_custom_monster_multiattack_from_exact_module_source(
                 "idempotency_key": "stage",
             },
         )
-        job_id = staged["job"]["id"]
-        for action in ("inspect", "validate", "ingest"):
-            ingested = await _call(
-                server,
-                "module_import",
-                {
-                    "campaign_id": campaign["id"],
-                    "action": action,
-                    "payload": {"job_id": job_id},
-                    "idempotency_key": action,
-                },
-            )
-        current = await _call(
-            server,
-            "campaign_query",
-            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
-        )
-        await _call(
-            server,
-            "module_import",
-            {
-                "campaign_id": campaign["id"],
-                "action": "activate",
-                "payload": {"job_id": job_id},
-                "expected_revision": current["revision"],
-                "idempotency_key": "activate",
-            },
-        )
+        module_id = staged["module_id"]
         candidates = await _call(
             server,
             "module_query",
             {
                 "campaign_id": campaign["id"],
                 "view": "candidates",
-                "payload": {"module_id": ingested["module_id"]},
+                "payload": {"module_id": module_id},
             },
         )
         candidate = candidates[0]
@@ -287,9 +244,7 @@ def test_agent_can_fill_custom_monster_multiattack_from_exact_module_source(
             source_key="test-agent-fill",
         )
         activity = next(
-            item
-            for item in parsed.sheet["content"]["activities"]
-            if item["name"] == "Multiattack"
+            item for item in parsed.sheet["content"]["activities"] if item["name"] == "Multiattack"
         )
         assert derive_character_sheet(parsed.sheet)["multiattack_options"]
         requirements = candidate["agent_fill_requirements"]
@@ -310,12 +265,13 @@ def test_agent_can_fill_custom_monster_multiattack_from_exact_module_source(
         with pytest.raises(Exception, match="requires an Agent statblock fill"):
             await _call(
                 server,
-                "module_review",
+                "module_draft",
                 {
                     "campaign_id": campaign["id"],
-                    "action": "submit_content",
+                    "action": "edit",
                     "payload": {
-                        "module_id": ingested["module_id"],
+                        "operation": "content",
+                        "module_id": module_id,
                         "scene_id": candidate["scene_id"],
                         "content_key": "parser-only-goblin",
                         "normalized_content": candidate["normalized_content"],
@@ -328,12 +284,13 @@ def test_agent_can_fill_custom_monster_multiattack_from_exact_module_source(
 
         reviewed = await _call(
             server,
-            "module_review",
+            "module_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "submit_content",
+                "action": "edit",
                 "payload": {
-                    "module_id": ingested["module_id"],
+                    "operation": "content",
+                    "module_id": module_id,
                     "scene_id": candidate["scene_id"],
                     "content_key": "agent-filled-goblin",
                     "normalized_content": candidate["normalized_content"],
@@ -375,9 +332,10 @@ def test_agent_can_fill_custom_monster_multiattack_from_exact_module_source(
                 "idempotency_key": "review-agent-filled-goblin",
             },
         )
-        assert reviewed["validation"]["agent_fill"]["multiattack_options"][0][
-            "default_resolver"
-        ] == "agent"
+        assert (
+            reviewed["validation"]["agent_fill"]["multiattack_options"][0]["default_resolver"]
+            == "agent"
+        )
         assert reviewed["validation"]["resolved_warnings"] == []
         assert (
             "Multiattack: Multiattack composition requires a DM ruling"
@@ -411,9 +369,10 @@ def test_agent_can_fill_custom_monster_multiattack_from_exact_module_source(
             "Multiattack: Multiattack composition requires a DM ruling"
             not in created["statblock"]["warnings"]
         )
-        assert created["statblock"]["agent_fill"]["multiattack_options"][0][
-            "ruling_kind"
-        ] == "module_specific_procedure"
+        assert (
+            created["statblock"]["agent_fill"]["multiattack_options"][0]["ruling_kind"]
+            == "module_specific_procedure"
+        )
         assert (
             f"Agent statblock fill: {activity['id']}."
             in created["character"]["notes"]["profile"]["dm_notes"]
@@ -421,12 +380,13 @@ def test_agent_can_fill_custom_monster_multiattack_from_exact_module_source(
 
         ruled_review = await _call(
             server,
-            "module_review",
+            "module_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "submit_content",
+                "action": "edit",
                 "payload": {
-                    "module_id": ingested["module_id"],
+                    "operation": "content",
+                    "module_id": module_id,
                     "scene_id": candidate["scene_id"],
                     "content_key": "agent-ruled-goblin",
                     "normalized_content": candidate["normalized_content"],
@@ -441,8 +401,7 @@ def test_agent_can_fill_custom_monster_multiattack_from_exact_module_source(
                                 "activity_id": activity["id"],
                                 "source_excerpt": activity["description"],
                                 "reason": (
-                                    "This regression exercises the explicit "
-                                    "Agent-ruling route."
+                                    "This regression exercises the explicit Agent-ruling route."
                                 ),
                                 "resolution": "agent_ruling",
                             }
@@ -453,9 +412,7 @@ def test_agent_can_fill_custom_monster_multiattack_from_exact_module_source(
             },
         )
         assert ruled_review["validation"]["settlement"] == "mixed"
-        assert ruled_review["validation"]["ruling_requirements"][0][
-            "default_resolver"
-        ] == "agent"
+        assert ruled_review["validation"]["ruling_requirements"][0]["default_resolver"] == "agent"
         ruled_actor = await _call(
             server,
             "character_create_from",
@@ -472,9 +429,16 @@ def test_agent_can_fill_custom_monster_multiattack_from_exact_module_source(
         )
         assert ruled_actor["character"]["derived"]["multiattack_options"] == []
         assert ruled_actor["statblock"]["settlement"] == "mixed"
-        assert ruled_actor["statblock"]["ruling_requirements"][0][
-            "default_resolver"
-        ] == "agent"
+        assert ruled_actor["statblock"]["ruling_requirements"][0]["default_resolver"] == "agent"
+        await finalize_and_activate_module(
+            _call,
+            server,
+            campaign["id"],
+            staged,
+            source_key="agent-filled-goblin",
+            title="Agent-filled Goblin",
+            portable_id="dnd5e.module.agent-filled-goblin-test",
+        )
 
     asyncio.run(exercise())
 
@@ -502,10 +466,10 @@ def test_text_module_spellcaster_ocr_hydrates_source_bound_spells(
         )
         staged = await _call(
             server,
-            "module_import",
+            "module_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "stage",
+                "action": "start",
                 "payload": {
                     "name": "evil-mage.md",
                     "content": EVIL_MAGE_MODULE,
@@ -515,41 +479,14 @@ def test_text_module_spellcaster_ocr_hydrates_source_bound_spells(
                 "idempotency_key": "stage",
             },
         )
-        job_id = staged["job"]["id"]
-        for action in ("inspect", "validate", "ingest"):
-            ingested = await _call(
-                server,
-                "module_import",
-                {
-                    "campaign_id": campaign["id"],
-                    "action": action,
-                    "payload": {"job_id": job_id},
-                    "idempotency_key": action,
-                },
-            )
-        current = await _call(
-            server,
-            "campaign_query",
-            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
-        )
-        await _call(
-            server,
-            "module_import",
-            {
-                "campaign_id": campaign["id"],
-                "action": "activate",
-                "payload": {"job_id": job_id},
-                "expected_revision": current["revision"],
-                "idempotency_key": "activate",
-            },
-        )
+        module_id = staged["module_id"]
         candidates = await _call(
             server,
             "module_query",
             {
                 "campaign_id": campaign["id"],
                 "view": "candidates",
-                "payload": {"module_id": ingested["module_id"]},
+                "payload": {"module_id": module_id},
             },
         )
 
@@ -562,12 +499,13 @@ def test_text_module_spellcaster_ocr_hydrates_source_bound_spells(
 
         reviewed = await _call(
             server,
-            "module_review",
+            "module_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "submit_content",
+                "action": "edit",
                 "payload": {
-                    "module_id": ingested["module_id"],
+                    "operation": "content",
+                    "module_id": module_id,
                     "scene_id": candidate["scene_id"],
                     "content_key": "evil-mage",
                     "normalized_content": candidate["normalized_content"],
@@ -624,6 +562,15 @@ def test_text_module_spellcaster_ocr_hydrates_source_bound_spells(
         }
         assert len(actor["derived"]["spellcasting"]["prepared_spell_ids"]) == 7
         assert created["statblock"]["warnings"] == []
+        await finalize_and_activate_module(
+            _call,
+            server,
+            campaign["id"],
+            staged,
+            source_key="evil-mage",
+            title="Evil Mage",
+            portable_id="dnd5e.module.evil-mage-test",
+        )
 
     asyncio.run(exercise())
 
@@ -656,10 +603,10 @@ def test_reimported_module_statblock_candidates_have_globally_unique_ids(
         for version in ("one", "two"):
             staged = await _call(
                 server,
-                "module_import",
+                "module_draft",
                 {
                     "campaign_id": campaign["id"],
-                    "action": "stage",
+                    "action": "start",
                     "payload": {
                         "name": f"goblins-{version}.md",
                         "content": GOBLIN_MODULE,
@@ -669,35 +616,16 @@ def test_reimported_module_statblock_candidates_have_globally_unique_ids(
                     "idempotency_key": f"stage-{version}",
                 },
             )
-            job_id = staged["job"]["id"]
-            for action in ("inspect", "validate", "ingest"):
-                result = await _call(
-                    server,
-                    "module_import",
-                    {
-                        "campaign_id": campaign["id"],
-                        "action": action,
-                        "payload": {"job_id": job_id},
-                        "idempotency_key": f"{action}-{version}",
-                    },
-                )
-            current = await _call(
+            activation = await finalize_and_activate_module(
+                _call,
                 server,
-                "campaign_query",
-                {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+                campaign["id"],
+                staged,
+                source_key=f"goblins-{version}",
+                title=f"Goblins {version}",
+                portable_id=f"dnd5e.module.goblins-{version}-test",
             )
-            await _call(
-                server,
-                "module_import",
-                {
-                    "campaign_id": campaign["id"],
-                    "action": "activate",
-                    "payload": {"job_id": job_id},
-                    "expected_revision": current["revision"],
-                    "idempotency_key": f"activate-{version}",
-                },
-            )
-            module_ids.append(result["module_id"])
+            module_ids.append(activation["activated"]["activation"]["module_id"])
 
         candidate_ids = []
         for module_id in module_ids:

@@ -7,6 +7,7 @@ from sagasmith_dnd.character_schema import default_character_sheet
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
+from tests.authoring_helpers import finalize_and_activate_module
 
 
 async def _call(server, name: str, arguments: dict):
@@ -47,10 +48,10 @@ async def _import_ironslag_context(server, campaign_id: str) -> dict:
     )
     staged = await _call(
         server,
-        "module_import",
+        "module_draft",
         {
             "campaign_id": campaign_id,
-            "action": "stage",
+            "action": "start",
             "payload": {
                 "name": "ironslag-context.md",
                 "content": content,
@@ -60,33 +61,15 @@ async def _import_ironslag_context(server, campaign_id: str) -> dict:
             "idempotency_key": "context-stage",
         },
     )
-    job_id = staged["job"]["id"]
-    for action in ("inspect", "validate", "ingest"):
-        await _call(
-            server,
-            "module_import",
-            {
-                "campaign_id": campaign_id,
-                "action": action,
-                "payload": {"job_id": job_id},
-                "idempotency_key": f"context-{action}",
-            },
-        )
-    campaign = await _call(
+    await finalize_and_activate_module(
+        _call,
         server,
-        "campaign_query",
-        {"view": "get", "payload": {"campaign_id": campaign_id}},
-    )
-    await _call(
-        server,
-        "module_import",
-        {
-            "campaign_id": campaign_id,
-            "action": "activate",
-            "payload": {"job_id": job_id},
-            "expected_revision": campaign["revision"],
-            "idempotency_key": "context-activate",
-        },
+        campaign_id,
+        staged,
+        source_key="ironslag-context",
+        title="Ironslag Context",
+        portable_id="dnd5e.module.ironslag-context",
+        edition="2024",
     )
     hits = await _call(
         server,

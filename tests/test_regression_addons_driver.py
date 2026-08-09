@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 from pathlib import Path
 from typing import Any
 
@@ -15,9 +14,7 @@ class _FakeServer:
         self.package = package
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
-    async def call_tool(
-        self, name: str, arguments: dict[str, Any]
-    ) -> tuple[None, Any]:
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> tuple[None, Any]:
         self.calls.append((name, arguments))
         responses: dict[int, Any] = {
             1: {"id": "campaign"},
@@ -34,47 +31,28 @@ class _FakeServer:
             6: {"result": []},
             7: {"result": {"revision": 2}},
             8: {"result": {"activation": {"enabled": False}}},
-            9: {"result": {"package": self.package}},
         }
         return None, responses[len(self.calls)]
 
 
 def _package() -> dict[str, Any]:
     return {
-        "kind": "addon_pack",
+        "kind": "addon",
         "id": "dnd5e.example.addon",
         "version": "1.0.0",
         "checksum": "a" * 64,
         "metadata": {"distribution": "private"},
-        "payload": {
-            "manifest": {
-                "classification": "third_party",
-                "content_summary": {"feature": 1},
-                "readiness_policy": "build_time_complete",
-                "readiness": {
-                    "complete": True,
-                    **{
-                        dimension: {"complete": True, "blockers": []}
-                        for dimension in ("source", "catalog", "selection", "runtime")
-                    },
-                },
-                "resolution_readiness": {
-                    "complete": True,
-                    "first_use_compilation_required": False,
-                    "unresolved": [],
-                },
-            },
-            "components": [],
+        "manifest": {
+            "classification": "third_party",
+            "content_summary": {"feature": 1},
         },
     }
 
 
-def test_addon_directory_regression_uses_only_public_mcp_calls(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_addon_directory_regression_uses_only_public_mcp_calls(tmp_path: Path, monkeypatch) -> None:
     package = _package()
-    package_path = tmp_path / "example.addon.sagasmith.json"
-    package_path.write_text(json.dumps(package), encoding="utf-8")
+    package_path = tmp_path / "example.sagasmith-pack"
+    package_path.write_bytes(b"test archive")
     base = McpConfig(
         home=tmp_path / "base",
         database_url=None,
@@ -87,6 +65,7 @@ def test_addon_directory_regression_uses_only_public_mcp_calls(
     fake = _FakeServer(package)
     monkeypatch.setattr(driver.McpConfig, "from_environment", lambda: base)
     monkeypatch.setattr(driver, "create_server", lambda _config: fake)
+    monkeypatch.setattr(driver, "loads_content_archive", lambda _content: (package, {}))
     args = argparse.Namespace(
         roots=[tmp_path],
         home=tmp_path / "target",
@@ -103,15 +82,13 @@ def test_addon_directory_regression_uses_only_public_mcp_calls(
     assert report["packages"][0]["reexport_identical"] is True
     assert [name for name, _arguments in fake.calls] == [
         "campaign_create",
-        "rule_import",
-        "rule_pack_query",
+        "content_pack",
+        "content_pack",
         "campaign_rules",
-        "campaign_rules",
-        "rule_pack_query",
+        "content_pack",
+        "content_pack",
         "campaign_query",
-        "campaign_rules",
-        "rule_pack_query",
+        "content_pack",
     ]
     assert fake.calls[4][1]["idempotency_key"].endswith("-r1")
     assert fake.calls[7][1]["idempotency_key"].endswith("-r2")
-    assert fake.calls[8][1]["view"] == "addon_package"

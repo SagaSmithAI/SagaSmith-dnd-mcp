@@ -43,7 +43,7 @@ flowchart TB
   artifacts/modules/      # editable generated modules before import
   artifacts/rulebooks/    # content-addressed staged user books
   artifacts/normalized-rulebooks/ # verified normalization/OCR caches
-  artifacts/portable-packages/ # actor/module/preset/rule packages and release manifests
+  artifacts/content-packages/  # unified addon/module/preset/core-rules archives
 ```
 
 客户端不应直接写 SQLite、ChromaDB 或 artifact 目录。所有写入通过 MCP，确保迁移、revision、幂等、权限与 audit receipt 使用同一过程边界。
@@ -176,9 +176,10 @@ discover an allowlisted file
 → DM pins exact version to campaign
 ```
 
-公开入口是 `rule_import` facade：`discover` → `stage` → `inspect` → `ingest`
-→ `extract_candidates` → `review` → `compile` → `install` → `activate`。检查结果只要有
-warning，ingest 就必须由 DM 显式传入 `acknowledge_warnings=true`。检索时传入精确
+公开创作入口只有三个：`rulebook_draft`、`module_draft`、`content_pack`。规则书使用
+`rulebook_draft(start)` 完成机械首轮，再由 Agent 反复执行 `evidence` 与 `edit`，最后
+调用 `finalize` 原子冻结候选并生成 Pack。检查结果只要有 warning，start 就必须由 DM
+显式传入 `acknowledge_warnings=true`。检索时传入精确
 `source_ids`，防止同名章节或不同版本扩展混入证据。PDF 文本层使用 PDFium；纯图片或
 乱码页按页调用 RapidOCR。标准化结果和原始页面提取结果都按内容校验和缓存，幂等重试
 不会重复解析或 OCR 同一本书。
@@ -201,48 +202,42 @@ coverage。商业 PHB/DMG/MM 与扩展书只从用户白名单目录生成 priva
 
 模组生成先形成可编辑 artifact，再经 staged inspect/import。导入生成 scene index 和保守的 location/room 证据；系统不会从散文中凭空画精确战术地图。战斗开始时才为 encounter 创建临时五尺方格 combat map，随后由 DM/Agent 在证据和裁决基础上补充位置与世界变化。地图背景不具机械意义；墙体、视线、掩体、高度、体型占位和困难地形消耗在引擎实现前继续由 DM 裁决。
 
-### 可分享角色卡、怪物预设与结构化模组
+### 统一 Content Package
 
-PC、NPC、怪物统一使用 `sagasmith.portable` actor card。Lobby 中通过
-`character_query(view="portable_card")` 导出，通过
-`character_create_from(mode="portable_card")` 导入 inline package、托管 artifact
-或白名单路径。服务先验证 checksum、D&D sheet 与 campaign edition，再创建新的
-Character identity；campaign id、revision、权限与 actor knowledge 不会迁移。
+PC、NPC、怪物统一使用 `sagasmith.actor-card.v3`，并只通过
+`.sagasmith-pack` 中的 `actors` 交换。Lobby 用
+`character_query(view="content_package")` 导出单角色 preset 包，用
+`character_create_from(mode="content_actor")` 从托管 artifact 或白名单归档按
+`actor_id` 导入。服务验证整包 checksum、D&D sheet 与 campaign edition 后创建新的
+Character identity；图片留在卡和归档中，campaign id、revision、权限、actor
+knowledge 与 Snapshot 状态不会迁移。
 
-服务器启动时把 SRD 2014 的 317 张角色卡和 SRD 2024 的 330 张角色卡安装为
-默认 preset pack，并投影为 `content_catalog(kind="actor_card")`。Host 不需要也不
-应该维护怪物名称表。`rule_pack_query(view="actor_presets")` 可导出整包或单卡；
-第三方 preset pack 也能由同一个 portable character import 路径按
-`artifact_id` 选择卡片。
+服务器启动时把 SRD 2014/2024 角色目录安装为内置 preset 内容。Host 不维护怪物
+名称表，也没有怪物硬编码导入旁路。Addon、Module、Preset 与 Core Rules 全部使用
+`sagasmith.content-package` v2：共同封装 manifest、结构化内容、actors、来源索引及
+`blobs/sha256/` 中的原始文档、标准化全文和角色图，同时保留各自的激活与权限语义。
 
-结构化模组先以 `module_import(action="bind_actor")` 关联 cast、encounter 与
-preset PC，再由 `module_query(view="package")` 导出唯一受支持的 v2
-`.sagasmith-module` 归档及其可索引 JSON descriptor。descriptor 锁定分类、edition、
-推荐人数/等级/升级方式、连续战役策略、依赖、标准化文档、Scene Atlas、内容目录、
-叙事 dossier/关系/结局、审核内容、角色卡、组件 checksum 与七维 readiness；资产
-字节只存在归档的 `blobs/sha256/`，不再 base64 塞入 JSON。
-`module_import(action="import_package")` 读取托管 artifact 或白名单归档路径，先验证
-全部 descriptor、blob 和精确 rule/module 依赖，在目标 campaign 生成新 actor id 并
-恢复关联，最后才可原子激活；`indexed`/`draft` 包只能导入审核，不能激活。旧
-module-pack v1 和 inline 含资产包直接拒绝，没有兼容路由。模组包不是 Snapshot：它
-不包含 progress、world state、memory、actor knowledge、random stream 或 branch DAG。
+`content_pack(action="export", kind="module")` 导出 module 包；`content_pack(action="import")`
+只读取托管 artifact 或白名单 `.sagasmith-pack`，验证全部 blob、依赖、内容证据和 Agent 定稿记录，
+重建本地来源及新 actor identity 后才允许激活。内容包不是 Snapshot，不包含 progress、
+world state、memory、actor knowledge、random stream 或 branch DAG。旧 portable、
+release manifest、`.sagasmith-module` 和 inline 含资产对象均无兼容路由。
 
-扩展规则包通过现有 facade 跨安装迁移：在 Lobby 由 DM 调用
-`rule_pack_query(view="package")` 导出；包内包含 manifest、catalog artifacts、
-mechanic IR、provenance 和完整索引来源。本地 `source_id`/`chunk_id` 会改写为
+扩展规则包通过同一归档跨安装迁移：在 Lobby 由 DM 调用
+`content_pack(action="export", kind="rule")` 导出；包内包含 manifest、catalog artifacts、
+mechanic IR、actors、provenance、完整索引来源及来源文件。本地 `source_id`/`chunk_id` 会改写为
 稳定 `source_key`/`chunk_key`，接收端再通过
-`rule_import(action="import_package")` 创建新本地来源 id 并重绑所有引用及
-resolution-plan fingerprint。导入结果只会成为 validated inactive draft；它不会
-自动 install，也不会修改 campaign rule profile。依赖必须固定精确 version 与
-`metadata.definition_checksum`；该哈希不受两端本地 UUID 或 private/shareable 发布
-元数据影响。独立 rule pack 与组合 addon 一样必须携带
-`resolution_policy=build_time_complete` 及与接收端复算完全一致的 readiness；导出、
+`content_pack(action="import")` 创建新本地来源 id 并重绑所有引用及
+resolution-plan fingerprint。导入会安装内容定义但不会修改 campaign rule profile；
+addon 仍需 `content_pack(action="activate", kind="addon")` 显式启用。依赖必须固定精确 version
+与 definition checksum。Core Rules 与 Addon 一样必须携带
+`resolution_policy=build_time_complete` 及与接收端复算完全一致的 `semantic_validation`；导出、
 导入和安装三个入口都会拒绝缺失、过期或仍含 deferred 语义的包。缺失依赖会显式
 返回，checksum 冲突则拒绝导入。
 
-整书构建先用 `rule_import(action="recover_statblocks")` 批量恢复可证明的角色卡，
-再用 `rule_pack_query(view="preset_package", allow_partial=true)` 生成已就绪的
-preset 组件。`allow_partial` 只允许某个 source-bound 角色模板留在显式待审清单；
+整书构建通过 `rulebook_draft(action="edit", operation="statblock_recovery")` 恢复可证明的角色卡，
+再将已审核 statblock 作为统一包的 actor records 发布。部分恢复只允许某个
+source-bound 角色模板留在显式待审清单；
 完整来源、全部机械候选和每个延迟原因仍必须进入 rule pack/report，不能把 OCR
 失败伪装成完整卡。启用 addon 后，catalog-only statblock 的
 `selection_requirements` 会明确指向
@@ -262,14 +257,12 @@ OCR 可由清晰能力分数恢复损坏的冗余 modifier，也可在六个分�
 和裁定指导列入机械审核队列，因此像大规模随机魔法效果表不会再以 descriptive
 状态绕过发布门禁。
 
-一个商业扩展若还包含预设角色/怪物和冒险资产，应分别发布 `rule_pack`、
-`preset_pack` 与 `module_pack`，再用
-`rule_pack_query(view="release")` 生成薄 `release_manifest`。目标端用
-`rule_import(action="inspect_release")` 按完整 envelope checksum 检查组件和本地状态；manifest 本身没有导入、
-安装或启用权限。`metadata.distribution="shareable"` 的规则包必须明确提供 license
-与 attribution；默认导出是 `private`。
+一个扩展若同时含规则、角色和素材，直接发布一个 Addon content package；若含可独立
+运行的冒险，则另发 Module content package，并以精确 dependency 相连，不再生成
+release manifest。`metadata.distribution="shareable"` 的包必须明确提供 license 与
+attribution；默认导出是 `private`。
 Addon 激活事务不再接收模组 receipts，也不会改变模组 active 状态；模组始终通过
-独立导入、readiness 门禁和自身激活事务处理。
+独立导入、release validation 和自身激活事务处理。
 
 ### Skills、resources 与 prompts
 
@@ -308,8 +301,8 @@ Addon 激活事务不再接收模组 receipts，也不会改变模组 active 状
 | `SAGASMITH_DND_GATEWAY_ORIGINS` | 逗号分隔的精确 CORS origin allowlist |
 
 服务永远不会直接导入模型任意选择的路径。规则书必须位于 allowlisted root；商业内容由用户自行确保使用权。
-Portable JSON 的 `source_path` 同样只允许位于 rule/module import roots；服务端导出
-则写入 MCP 自有的 `artifacts/portable-packages/`。
+Content package 的 `source_path` 同样只允许位于 rule/module import roots；服务端导出
+写入 MCP 自有的托管 artifact 目录。
 
 ## 验证
 
@@ -325,9 +318,9 @@ python scripts\smoke_seed.py --home C:\tmp\sagasmith-dnd-smoke-01
 # 再把每个来源约束的私有描述性探针迁移到隔离实例并逐字节复导出
 python scripts\regression_rulebooks.py C:\path\to\DnD-Books\5e\Books `
   --home C:\tmp\sagasmith-dnd-rulebook-regression `
-  --run-id full-portable-v1 `
-  --portable-roundtrip `
-  --portable-target-home C:\tmp\sagasmith-dnd-rulebook-receiver `
+  --run-id full-content-v1 `
+  --content-roundtrip `
+  --content-target-home C:\tmp\sagasmith-dnd-rulebook-receiver `
   --output C:\tmp\sagasmith-dnd-rulebook-report.json
 
 # 修复后只重跑匹配的文档；glob 大小写不敏感并可重复传入
@@ -345,10 +338,11 @@ python scripts\regression_addons.py C:\private\core-addons C:\private\book-addon
   --output C:\tmp\sagasmith-dnd-addon-audit.json
 ```
 
-便携回归只编译 `catalog_only`、`mechanical_scope=descriptive`、
+内容包回归只编译 `catalog_only`、`mechanical_scope=descriptive`、
 `regression_only=true` 的私有探针，不把未经 Agent/DM 审核的候选宣称为可执行规则。
-接收端必须产生新的 source id，导入状态必须保持 validated inactive，且不能自动 install
-或 activate；完整目录还会生成无运行时权限的 release manifest 并核对每个 envelope checksum。
+接收端必须产生新的 source id，验证统一 descriptor 与所有 blob checksum，并可安装
+全局内容定义；它绝不能自动修改 campaign rule profile。回归随后通过单独的
+Owner/DM 操作启用和停用 Addon，并核对重导出的完整 `.sagasmith-pack` checksum。
 
 Smoke seed 创建两个 PC、一个 NPC、相互隔离的 actor knowledge、一个见证事件、受审计的钱包变更和基线 Snapshot。
 

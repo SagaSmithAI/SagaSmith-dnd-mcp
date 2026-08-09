@@ -53,10 +53,10 @@ def test_public_attack_pauses_for_parry_before_damage(tmp_path: Path, monkeypatc
         )
         staged = await call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "stage",
+                "action": "start",
                 "payload": {
                     "source_path": str(source),
                     "source_key": "parry-lore",
@@ -69,20 +69,20 @@ def test_public_attack_pauses_for_parry_before_damage(tmp_path: Path, monkeypatc
         job_id = staged["job"]["id"]
         await call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "inspect",
+                "action": "get",
                 "payload": {"job_id": job_id},
                 "idempotency_key": "parry-rule:inspect",
             },
         )
         await call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "ingest",
+                "action": "get",
                 "payload": {"job_id": job_id},
                 "idempotency_key": "parry-rule:ingest",
             },

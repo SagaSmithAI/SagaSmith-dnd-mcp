@@ -385,9 +385,7 @@ def _class_pack_name(profile: dict[str, Any]) -> str:
     try:
         return _CLASS_PACK[class_name]
     except KeyError as error:
-        raise ValueError(
-            f"no audited starting-equipment pack for {profile['class']}"
-        ) from error
+        raise ValueError(f"no audited starting-equipment pack for {profile['class']}") from error
 
 
 def _class_starting_supplements(profile: dict[str, Any]) -> list[dict[str, Any]]:
@@ -683,9 +681,7 @@ def lost_mine_party_profiles() -> list[dict[str, Any]]:
                 "shortswords",
             ],
             "tool_proficiencies": ["thieves' tools"],
-            "feature_choices": {
-                "Expertise": {"proficiencies": ["stealth", "persuasion"]}
-            },
+            "feature_choices": {"Expertise": {"proficiencies": ["stealth", "persuasion"]}},
             "items": [
                 _armor(
                     "pip-leather",
@@ -1224,10 +1220,7 @@ def audit_profiles(
     required_methods = {"manual", "standard_array", "point_buy"}
     if not required_methods.issubset(methods):
         raise ValueError("party must cover manual, standard-array, and point-buy generation")
-    spell_modes = {
-        str(dict(item.get("spellcasting") or {}).get("mode") or "")
-        for item in profiles
-    }
+    spell_modes = {str(dict(item.get("spellcasting") or {}).get("mode") or "") for item in profiles}
     if not SPELLCASTING_RESOURCE_MODELS.issubset(spell_modes):
         raise ValueError("party must cover known, prepared, and spellbook casting")
     backgrounds = sorted({str(item["background"]) for item in profiles})
@@ -1240,22 +1233,17 @@ def audit_profiles(
         if len(background_skills) != 2 or len(set(background_skills)) != 2:
             raise ValueError("custom backgrounds must choose exactly two distinct skills")
         if len(background_languages) != 2 or len(set(background_languages)) != 2:
-            raise ValueError(
-                "Core custom backgrounds must choose exactly two distinct languages"
-            )
+            raise ValueError("Core custom backgrounds must choose exactly two distinct languages")
         if len(characteristics.get("personality_traits") or []) != 2:
             raise ValueError("custom backgrounds must choose two personality traits")
         if any(
-            len(characteristics.get(field) or []) != 1
-            for field in ("ideals", "bonds", "flaws")
+            len(characteristics.get(field) or []) != 1 for field in ("ideals", "bonds", "flaws")
         ):
             raise ValueError("custom backgrounds must choose one ideal, bond, and flaw")
     return {
         "selected_size": len(profiles),
         "source_maximum": (
-            int(size_basis["source_maximum"])
-            if "source_maximum" in size_basis
-            else None
+            int(size_basis["source_maximum"]) if "source_maximum" in size_basis else None
         ),
         "party_size_basis": size_basis,
         "classes_unique": True,
@@ -1292,9 +1280,7 @@ def select_profiles(
             profiles,
             campaign_line_id=campaign_line_id,
         )
-    matches = [
-        item for item in profiles if str(item["name"]).casefold() == requested.casefold()
-    ]
+    matches = [item for item in profiles if str(item["name"]).casefold() == requested.casefold()]
     if len(matches) != 1:
         raise ValueError("--profile-name must identify exactly one campaign party profile")
     profile = deepcopy(matches[0])
@@ -1315,9 +1301,7 @@ def select_profiles(
         "species": str(profile["species"]),
         "background": str(profile["background"]),
         "ability_method": str(profile["ability_method"]),
-        "spell_resource_model": str(
-            dict(profile.get("spellcasting") or {}).get("mode") or "none"
-        ),
+        "spell_resource_model": str(dict(profile.get("spellcasting") or {}).get("mode") or "none"),
         "knowledge_inheritance": "none",
     }
 
@@ -1360,8 +1344,7 @@ def _catalog_source(
         (
             item
             for item in catalog
-            if item["kind"] == kind
-            and _normalized_catalog_name(str(item["name"])) == expected
+            if item["kind"] == kind and _normalized_catalog_name(str(item["name"])) == expected
         ),
         None,
     )
@@ -1429,9 +1412,7 @@ def _configure_base_sheet(
     ]
     sheet["traits"]["proficiencies"]["armor"] = list(profile["armor_proficiencies"])
     sheet["traits"]["proficiencies"]["weapons"] = list(profile["weapon_proficiencies"])
-    sheet["traits"]["proficiencies"]["tools"] = list(
-        profile.get("tool_proficiencies") or []
-    )
+    sheet["traits"]["proficiencies"]["tools"] = list(profile.get("tool_proficiencies") or [])
     sheet["resources"] = deepcopy(profile.get("resources") or {})
     items = _source_linked_starting_items(profile, item_catalog)
     sheet["inventory"]["items"] = items
@@ -1466,18 +1447,14 @@ def _configure_base_sheet(
                 "slot_level": 1,
             }
         }
-        max_prepared = (
-            max(1, modifier + 1) if mode in PREPARED_SELECTION_MODES else 0
-        )
+        max_prepared = max(1, modifier + 1) if mode in PREPARED_SELECTION_MODES else 0
         sheet["spellcasting"]["preparation"] = {
             "mode": mode,
             "max_prepared": max_prepared,
             "changes_on": "long_rest",
             "selected_spell_ids": [],
         }
-        sheet["spellcasting"]["ritual_casting"] = bool(
-            spellcasting.get("ritual_casting")
-        )
+        sheet["spellcasting"]["ritual_casting"] = bool(spellcasting.get("ritual_casting"))
         sheet["spellcasting"]["spellbook"] = {
             "enabled": mode == "spellbook",
             "spell_ids": [],
@@ -1512,19 +1489,14 @@ def _spellcasting_audit(
     cantrips = [item for item in cards if int(item.get("level", -1)) == 0]
     leveled = [item for item in cards if int(item.get("level", -1)) > 0]
     known_ids = [
-        str(item["id"])
-        for item in cards
-        if bool(dict(item.get("access") or {}).get("known"))
+        str(item["id"]) for item in cards if bool(dict(item.get("access") or {}).get("known"))
     ]
     prepared_ids = [
         str(item)
-        for item in dict(spellcasting.get("preparation") or {}).get(
-            "selected_spell_ids", []
-        )
+        for item in dict(spellcasting.get("preparation") or {}).get("selected_spell_ids", [])
     ]
     spellbook_ids = [
-        str(item)
-        for item in dict(spellcasting.get("spellbook") or {}).get("spell_ids", [])
+        str(item) for item in dict(spellcasting.get("spellbook") or {}).get("spell_ids", [])
     ]
     mode = str(configured.get("mode") or "none")
     resolution_audit = audit_spell_resolution_paths(sheet)
@@ -1542,9 +1514,7 @@ def _spellcasting_audit(
 
     class_name = str(profile["class"]).casefold()
     level = int(sheet["progression"]["level"])
-    expected_class_cantrips = [
-        str(item) for item in configured.get("cantrips", [])
-    ]
+    expected_class_cantrips = [str(item) for item in configured.get("cantrips", [])]
     expected_cantrip_count = CANTRIPS_KNOWN.get(class_name, (0,) * 20)[level - 1]
     if len(expected_class_cantrips) != expected_cantrip_count:
         raise RuntimeError(
@@ -1559,10 +1529,7 @@ def _spellcasting_audit(
         *expected_class_cantrips,
         *([expected_species_cantrip] if expected_species_cantrip else []),
     ]
-    cards_by_name = {
-        str(item.get("name") or "").strip().casefold(): item
-        for item in cards
-    }
+    cards_by_name = {str(item.get("name") or "").strip().casefold(): item for item in cards}
     missing_cantrips = [
         name for name in expected_cantrip_names if name.casefold() not in cards_by_name
     ]
@@ -1572,9 +1539,7 @@ def _spellcasting_audit(
         if name.casefold() in cards_by_name
         and (
             int(cards_by_name[name.casefold()].get("level", -1)) != 0
-            or not bool(
-                dict(cards_by_name[name.casefold()].get("access") or {}).get("known")
-            )
+            or not bool(dict(cards_by_name[name.casefold()].get("access") or {}).get("known"))
         )
     ]
     if missing_cantrips or invalid_cantrips:
@@ -1583,9 +1548,7 @@ def _spellcasting_audit(
             f"missing={missing_cantrips}, invalid={invalid_cantrips}"
         )
 
-    expected_leveled_names = [
-        str(item) for item in configured.get("spells", [])
-    ]
+    expected_leveled_names = [str(item) for item in configured.get("spells", [])]
     missing_leveled = [
         name for name in expected_leveled_names if name.casefold() not in cards_by_name
     ]
@@ -1595,8 +1558,7 @@ def _spellcasting_audit(
             + ", ".join(missing_leveled)
         )
     expected_leveled_ids = [
-        str(cards_by_name[name.casefold()]["id"])
-        for name in expected_leveled_names
+        str(cards_by_name[name.casefold()]["id"]) for name in expected_leveled_names
     ]
     if class_name in KNOWN_SPELLS:
         required_known = KNOWN_SPELLS[class_name][level - 1]
@@ -1613,17 +1575,13 @@ def _spellcasting_audit(
         raise RuntimeError(f"{profile['name']} known caster has an unowned spell")
     if mode == "spellbook" and set(spellbook_ids) != set(expected_leveled_ids):
         raise RuntimeError(
-            f"{profile['name']} spellbook does not exactly match its six "
-            "level-one Wizard spells"
+            f"{profile['name']} spellbook does not exactly match its six level-one Wizard spells"
         )
     expected_prepared_ids = [
-        str(cards_by_name[str(name).casefold()]["id"])
-        for name in configured.get("prepared", [])
+        str(cards_by_name[str(name).casefold()]["id"]) for name in configured.get("prepared", [])
     ]
     if prepared_ids != expected_prepared_ids:
-        raise RuntimeError(
-            f"{profile['name']} prepared spell ids do not match the audited profile"
-        )
+        raise RuntimeError(f"{profile['name']} prepared spell ids do not match the audited profile")
     if resolution_audit["missing_spell_ids"]:
         raise RuntimeError(
             f"{profile['name']} generated card has spells without a settlement path: "
@@ -1645,10 +1603,10 @@ async def _catalog(client: ExposureClient, campaign_id: str) -> list[dict[str, A
     return list(
         _facade_value(
             await client.domain(
-                "rule_pack_query",
+                "content_pack",
                 {
-                    "view": "content_catalog",
-                    "payload": {"campaign_id": campaign_id},
+                    "action": "list",
+                    "payload": {"kind": "catalog", "campaign_id": campaign_id},
                 },
             )
         )
@@ -1710,12 +1668,8 @@ async def _initialize_prepared_spells(
             )
         )
     )
-    preparation = dict(
-        dict(actor["sheet"].get("spellcasting") or {}).get("preparation") or {}
-    )
-    existing_ids = [
-        str(item) for item in preparation.get("selected_spell_ids") or []
-    ]
+    preparation = dict(dict(actor["sheet"].get("spellcasting") or {}).get("preparation") or {})
+    existing_ids = [str(item) for item in preparation.get("selected_spell_ids") or []]
     if existing_ids:
         if existing_ids != prepared_ids:
             raise RuntimeError(
@@ -1815,9 +1769,7 @@ async def _build_character(
         kind="background",
         name=str(profile.get("background_base") or profile["background"]),
     )
-    background_item_ids = [
-        str(item["id"]) for item in _background_starting_items(profile)
-    ]
+    background_item_ids = [str(item["id"]) for item in _background_starting_items(profile)]
     actor = await _apply_artifact(
         client,
         actor=actor,
@@ -1888,13 +1840,13 @@ async def _build_character(
             artifact = _catalog_match(catalog, kind="spell", name=name)
             spell_ids_by_name[name] = str(artifact["id"])
             level = int(artifact["selection_requirements"].get("level", 0) or 0)
-            existing_ids = {
-                str(item.get("id")) for item in actor["sheet"]["content"]["spells"]
-            }
+            existing_ids = {str(item.get("id")) for item in actor["sheet"]["content"]["spells"]}
             if artifact["id"] in existing_ids:
                 continue
-            method = "known" if level == 0 or mode == "known" else (
-                "spellbook" if mode == "spellbook" else "class_prepared"
+            method = (
+                "known"
+                if level == 0 or mode == "known"
+                else ("spellbook" if mode == "spellbook" else "class_prepared")
             )
             actor = await _apply_artifact(
                 client,
@@ -1903,9 +1855,7 @@ async def _build_character(
                 selection={"source_class": profile["class"], "method": method},
                 key=f"full-party-{slug}-spell-{_token(str(artifact['id']))}",
             )
-        prepared_ids = [
-            spell_ids_by_name[name] for name in spellcasting["prepared"]
-        ]
+        prepared_ids = [spell_ids_by_name[name] for name in spellcasting["prepared"]]
         if prepared_ids:
             actor = await _initialize_prepared_spells(
                 client,
@@ -1915,9 +1865,7 @@ async def _build_character(
             )
     if str(profile["class"]).casefold() == "wizard":
         spellbook_item = next(
-            item
-            for item in actor["sheet"]["inventory"]["items"]
-            if item["kind"] == "spellbook"
+            item for item in actor["sheet"]["inventory"]["items"] if item["kind"] == "spellbook"
         )
         updated = _facade_value(
             await client.domain(
@@ -1932,8 +1880,7 @@ async def _build_character(
                             "mechanics": {
                                 **dict(spellbook_item["mechanics"]),
                                 "spell_ids": [
-                                    spell_ids_by_name[name]
-                                    for name in spellcasting["spells"]
+                                    spell_ids_by_name[name] for name in spellcasting["spells"]
                                 ],
                             }
                         },
@@ -1951,18 +1898,14 @@ async def _build_character(
         "class": profile["class"],
         "species": actor["sheet"]["progression"]["species"],
         "background": actor["sheet"]["progression"]["background"],
-        "background_base": actor["sheet"]["progression"]["background_grants"][
-            "choices"
-        ]["base_background"],
+        "background_base": actor["sheet"]["progression"]["background_grants"]["choices"][
+            "base_background"
+        ],
         "background_skill_ids": list(
-            actor["sheet"]["progression"]["background_grants"]["choices"][
-                "selected_skills"
-            ]
+            actor["sheet"]["progression"]["background_grants"]["choices"]["selected_skills"]
         ),
         "background_equipment_item_ids": list(
-            actor["sheet"]["progression"]["background_grants"][
-                "equipment_item_ids"
-            ]
+            actor["sheet"]["progression"]["background_grants"]["equipment_item_ids"]
         ),
         "background_characteristics": {
             "personality_traits": list(actor["notes"]["profile"]["personality_traits"]),
@@ -1980,9 +1923,7 @@ async def _build_character(
         "prepared_spell_ids": spellcasting_audit["prepared_spell_ids"],
         "spellbook_spell_ids": spellcasting_audit["spellbook_spell_ids"],
         "spellcasting_audit": spellcasting_audit,
-        "inventory_item_ids": [
-            str(item["id"]) for item in actor["sheet"]["inventory"]["items"]
-        ],
+        "inventory_item_ids": [str(item["id"]) for item in actor["sheet"]["inventory"]["items"]],
         "wallet": deepcopy(actor["sheet"]["inventory"]["wallet"]),
         "applied_feature_ids": applied_features,
         "source": "generated",
@@ -2063,8 +2004,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             entry_phase = str(campaign.get("effective_game_phase") or "")
             if entry_phase not in EFFECTIVE_GAME_PHASES:
                 raise RuntimeError(
-                    "campaign view has no valid effective_game_phase: "
-                    f"{entry_phase!r}"
+                    f"campaign view has no valid effective_game_phase: {entry_phase!r}"
                 )
             if entry_phase == "combat":
                 raise RuntimeError("party construction cannot run during active combat")
@@ -2156,7 +2096,6 @@ def main() -> int:
     try:
         report = asyncio.run(_run(args))
     except Exception as error:
-
         report = {
             "action": "build-campaign-party",
             "campaign_id": args.campaign_id,

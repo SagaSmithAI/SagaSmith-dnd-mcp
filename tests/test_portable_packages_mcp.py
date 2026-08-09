@@ -4,29 +4,90 @@ import asyncio
 import base64
 import copy
 import hashlib
-import json
 from pathlib import Path
 
 import pytest
 from mcp.server.fastmcp.exceptions import ToolError
-from sagasmith_core.portable import build_rule_pack
-from sagasmith_dnd.content_readiness import (
+from sagasmith_core.content_pack import dumps_content_archive
+from sagasmith_core.portable import build_rule_pack, portable_rule_chunk_key
+from sagasmith_dnd.character_schema import default_character_notes, default_character_sheet
+from sagasmith_dnd.content_packages import build_addon_content_package
+from sagasmith_dnd.content_validation import (
     build_catalog_review,
     build_selection_contract,
 )
-from sagasmith_dnd.resolution_plan import (
-    compile_resolution_plan,
-    resolution_plan_template,
-)
+from sagasmith_dnd.portable_cards import build_dnd_actor_card
 
 import sagasmith_dnd_mcp.server as server_module
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import (
-    audit_dnd_addon_readiness_components,
-    audit_dnd_addon_resolution_components,
+    _artifact_statblock_source_chunks,
+    _cached_rapidocr_provider,
+    _index_statblock_source_chunks,
+    audit_dnd_addon_semantics,
+    audit_dnd_addon_validation_components,
     create_server,
     finalize_dnd_addon_resolution_components,
 )
+from tests.authoring_helpers import finalize_and_activate_module
+
+
+def test_ocr_provider_is_reused_across_pages_of_the_same_profile(tmp_path: Path) -> None:
+    providers = {}
+
+    first = _cached_rapidocr_provider(
+        providers,
+        model_type="small",
+        scale=2.0,
+        cache_dir=tmp_path,
+    )
+    second = _cached_rapidocr_provider(
+        providers,
+        model_type="small",
+        scale=2.0004,
+        cache_dir=tmp_path,
+    )
+    different = _cached_rapidocr_provider(
+        providers,
+        model_type="medium",
+        scale=2.0,
+        cache_dir=tmp_path,
+    )
+
+    assert first is second
+    assert different is not first
+    assert len(providers) == 2
+
+
+def test_statblock_preset_evidence_is_indexed_once_and_bounded_per_actor() -> None:
+    chunks = [
+        {"id": "other", "heading_path": ["Other"], "content": "irrelevant"},
+        {"id": "wolf-core", "heading_path": ["Wolf"], "content": "core"},
+        {"id": "wolf-actions", "heading_path": ["Wolf", "Actions"], "content": "bite"},
+    ]
+    by_id, by_heading = _index_statblock_source_chunks(chunks)
+
+    cited = _artifact_statblock_source_chunks(
+        {
+            "card": {"name": "Wolf"},
+            "source_citations": [
+                {"chunk_id": "wolf-actions"},
+                {"chunk_id": "wolf-core"},
+                {"chunk_id": "wolf-actions"},
+            ],
+        },
+        chunks_by_id=by_id,
+        chunks_by_heading=by_heading,
+    )
+    heading_fallback = _artifact_statblock_source_chunks(
+        {"card": {"name": "Wolf"}, "source_citations": []},
+        chunks_by_id=by_id,
+        chunks_by_heading=by_heading,
+    )
+
+    assert [chunk["id"] for chunk in cited] == ["wolf-actions", "wolf-core"]
+    assert [chunk["id"] for chunk in heading_fallback] == ["wolf-core", "wolf-actions"]
+    assert all(chunk["id"] != "other" for chunk in (*cited, *heading_fallback))
 
 
 def test_immutable_review_page_render_is_reused_until_the_file_changes(
@@ -97,7 +158,7 @@ def _passing_catalog_decisions() -> list[dict]:
     ]
 
 
-def test_addon_readiness_recomputes_all_four_dimensions_from_content() -> None:
+def test_addon_validation_recomputes_all_four_dimensions_from_content() -> None:
     pack_id = "dnd5e.example.ready-addon"
     source_text = "A harmless imported creature description."
     source_hash = hashlib.sha256(source_text.encode()).hexdigest()
@@ -205,7 +266,7 @@ def test_addon_readiness_recomputes_all_four_dimensions_from_content() -> None:
         dependencies=[],
     )
 
-    report = audit_dnd_addon_readiness_components([component])
+    report = audit_dnd_addon_validation_components([component])
 
     assert report["complete"] is True
     assert report["source"]["verified_count"] == 1
@@ -226,7 +287,7 @@ def test_addon_readiness_recomputes_all_four_dimensions_from_content() -> None:
         status="blocked",
         blockers=["reviewed card is not selection-ready"],
     )
-    blocked_report = audit_dnd_addon_readiness_components([blocked])
+    blocked_report = audit_dnd_addon_validation_components([blocked])
     assert blocked_report["selection"]["complete"] is False
     assert blocked_report["selection"]["blockers"][0]["reason"] == (
         "reviewed card is not selection-ready"
@@ -234,13 +295,13 @@ def test_addon_readiness_recomputes_all_four_dimensions_from_content() -> None:
 
     stale = copy.deepcopy(component)
     stale["payload"]["artifacts"][0]["card"]["name"] = "Changed"
-    stale_report = audit_dnd_addon_readiness_components([stale])
+    stale_report = audit_dnd_addon_validation_components([stale])
     assert stale_report["catalog"]["complete"] is False
     assert "stale" in stale_report["catalog"]["blockers"][0]["reason"]
 
 
 def test_addon_resolution_audit_ignores_items_without_semantic_effects() -> None:
-    report = audit_dnd_addon_resolution_components(
+    report = audit_dnd_addon_semantics(
         [
             {
                 "kind": "preset_pack",
@@ -280,7 +341,7 @@ def test_addon_resolution_audit_ignores_items_without_semantic_effects() -> None
 
 
 def test_addon_resolution_audit_is_independent_of_component_order() -> None:
-    empty_rule_readiness = {
+    empty_semantic_validation = {
         "schema_version": 1,
         "complete": True,
         "artifact_count": 0,
@@ -298,7 +359,7 @@ def test_addon_resolution_audit_is_independent_of_component_order() -> None:
             "payload": {
                 "manifest": {
                     "resolution_policy": "build_time_complete",
-                    "resolution_readiness": copy.deepcopy(empty_rule_readiness),
+                    "semantic_validation": copy.deepcopy(empty_semantic_validation),
                 },
                 "artifacts": [],
                 "mechanics": [],
@@ -308,8 +369,8 @@ def test_addon_resolution_audit_is_independent_of_component_order() -> None:
     first = component("dnd5e.example.first")
     second = component("dnd5e.example.second")
 
-    forward = audit_dnd_addon_resolution_components([first, second])
-    reverse = audit_dnd_addon_resolution_components([second, first])
+    forward = audit_dnd_addon_semantics([first, second])
+    reverse = audit_dnd_addon_semantics([second, first])
 
     assert reverse == forward
     assert [item["id"] for item in reverse["rule_packs"]] == [
@@ -319,7 +380,7 @@ def test_addon_resolution_audit_is_independent_of_component_order() -> None:
 
 
 def test_addon_resolution_audit_rejects_partial_mechanic_refs_without_ruling() -> None:
-    report = audit_dnd_addon_resolution_components(
+    report = audit_dnd_addon_semantics(
         [
             {
                 "kind": "preset_pack",
@@ -468,7 +529,7 @@ def test_addon_export_finalizes_stale_resolved_agent_state() -> None:
         dependencies=[],
     )
 
-    before = audit_dnd_addon_resolution_components([component])
+    before = audit_dnd_addon_semantics([component])
     finalized = finalize_dnd_addon_resolution_components([component])
 
     artifact = finalized[0]["payload"]["artifacts"][0]
@@ -479,10 +540,10 @@ def test_addon_export_finalizes_stale_resolved_agent_state() -> None:
         item["artifact_id"].endswith(":resolution-manifest") for item in before["unresolved"]
     )
     assert manifest["resolution_policy"] == "build_time_complete"
-    assert manifest["resolution_readiness"]["complete"] is True
-    assert manifest["resolution_readiness"]["unresolved"] == []
+    assert manifest["semantic_validation"]["complete"] is True
+    assert manifest["semantic_validation"]["unresolved"] == []
     assert finalized[0]["checksum"] != component["checksum"]
-    assert audit_dnd_addon_resolution_components(finalized)["complete"] is True
+    assert audit_dnd_addon_semantics(finalized)["complete"] is True
 
 
 async def _call(server, name: str, arguments: dict):
@@ -554,7 +615,7 @@ def test_character_card_export_and_import_uses_fresh_identity(tmp_path: Path) ->
             server,
             "character_query",
             {
-                "view": "portable_card",
+                "view": "content_package",
                 "payload": {
                     "character_id": actor["id"],
                     "portable_id": "example.portable-scout",
@@ -577,24 +638,24 @@ def test_character_card_export_and_import_uses_fresh_identity(tmp_path: Path) ->
             server,
             "character_create_from",
             {
-                "mode": "portable_card",
-                "payload": {"card": exported["card"]},
+                "mode": "content_actor",
+                "payload": {
+                    "artifact": exported["artifact"]["artifact"],
+                    "artifact_id": exported["actor"]["id"],
+                },
                 "idempotency_key": "import",
             },
         )
 
         assert imported["character"]["id"] != actor["id"]
         assert imported["character"]["campaign_id"] is None
-        assert imported["portable_card"]["id"] == "example.portable-scout"
+        assert imported["content_actor"]["id"] == "example.portable-scout.actor"
         assert imported["actor_knowledge_imported"] is False
-        assert imported["portable_card"]["image_retained_by_runtime"] is False
+        assert imported["content_actor"]["image_retained_by_runtime"] is False
         assert "image" not in imported["character"]
-        assert exported["card"]["payload"]["image"]["license"] == "CC0-1.0"
-        assert exported["artifact"]["artifact"].endswith(".sagasmith.json")
-        assert "campaign_id" not in exported["card"]["payload"]
-        requirement = exported["card"]["payload"]["sheet"]["content"]["features"][0][
-            "ruling_requirements"
-        ][0]
+        assert exported["artifact"]["artifact"].endswith(".sagasmith-pack")
+        assert "campaign_id" not in exported["actor"]
+        requirement = exported["actor"]["sheet"]["content"]["features"][0]["ruling_requirements"][0]
         assert requirement["policy_ref"] == "actor_card.import.v1"
         assert requirement["default_resolver"] == "agent"
         assert imported["character"]["sheet"]["content"]["features"][0]["ruling_requirements"] == [
@@ -605,13 +666,13 @@ def test_character_card_export_and_import_uses_fresh_identity(tmp_path: Path) ->
 
 
 def test_module_package_round_trip_recreates_cast_bindings(tmp_path: Path) -> None:
-    async def import_markdown(server, campaign_id: str) -> str:
+    async def import_markdown(server, campaign_id: str) -> dict:
         staged = await _call(
             server,
-            "module_import",
+            "module_draft",
             {
                 "campaign_id": campaign_id,
-                "action": "stage",
+                "action": "start",
                 "payload": {
                     "name": "keep.md",
                     "content": (
@@ -626,17 +687,7 @@ def test_module_package_round_trip_recreates_cast_bindings(tmp_path: Path) -> No
             },
         )
         job_id = staged["job"]["id"]
-        for action in ("inspect", "validate", "ingest"):
-            ingested = await _call(
-                server,
-                "module_import",
-                {
-                    "campaign_id": campaign_id,
-                    "action": action,
-                    "payload": {"job_id": job_id},
-                    "idempotency_key": action,
-                },
-            )
+        ingested = staged
         campaign = await _call(
             server,
             "campaign_query",
@@ -644,16 +695,16 @@ def test_module_package_round_trip_recreates_cast_bindings(tmp_path: Path) -> No
         )
         await _call(
             server,
-            "module_import",
+            "module_draft",
             {
                 "campaign_id": campaign_id,
-                "action": "activate",
+                "action": "get",
                 "payload": {"job_id": job_id},
                 "expected_revision": campaign["revision"],
                 "idempotency_key": "activate",
             },
         )
-        return ingested["module_id"]
+        return ingested
 
     async def exercise() -> None:
         server = create_server(_config(tmp_path))
@@ -662,7 +713,8 @@ def test_module_package_round_trip_recreates_cast_bindings(tmp_path: Path) -> No
             "campaign_create",
             {"name": "Package source", "edition": "2014", "idempotency_key": "source"},
         )
-        module_id = await import_markdown(server, source_campaign["id"])
+        staged = await import_markdown(server, source_campaign["id"])
+        module_id = staged["module_id"]
         scene_index = await _call(
             server,
             "module_query",
@@ -689,11 +741,12 @@ def test_module_package_round_trip_recreates_cast_bindings(tmp_path: Path) -> No
         )
         await _call(
             server,
-            "module_import",
+            "module_draft",
             {
                 "campaign_id": source_campaign["id"],
-                "action": "bind_actor",
+                "action": "edit",
                 "payload": {
+                    "operation": "actor",
                     "module_id": module_id,
                     "scene_id": scene_index[0]["scene_id"],
                     "character_id": actor["id"],
@@ -703,19 +756,17 @@ def test_module_package_round_trip_recreates_cast_bindings(tmp_path: Path) -> No
                 },
             },
         )
-        exported = await _call(
+        finalized = await finalize_and_activate_module(
+            _call,
             server,
-            "module_query",
-            {
-                "campaign_id": source_campaign["id"],
-                "view": "package",
-                "payload": {
-                    "module_id": module_id,
-                    "portable_id": "example.keep",
-                    "include_package": True,
-                },
-            },
+            source_campaign["id"],
+            staged,
+            source_key="example.keep",
+            title="The Keep",
+            portable_id="example.keep",
+            activate=False,
         )
+        exported = finalized["finalized"]
         target_campaign = await _call(
             server,
             "campaign_create",
@@ -724,37 +775,34 @@ def test_module_package_round_trip_recreates_cast_bindings(tmp_path: Path) -> No
         with pytest.raises(ToolError, match="payload.activate must be a boolean"):
             await _call(
                 server,
-                "module_import",
+                "content_pack",
                 {
-                    "campaign_id": target_campaign["id"],
-                    "action": "import_package",
-                    "payload": {"artifact": exported["artifact"], "activate": "false"},
+                    "action": "import",
+                    "payload": {
+                        "kind": "module",
+                        "campaign_id": target_campaign["id"],
+                        "artifact": exported["artifact"],
+                        "activate": "false",
+                    },
                     "idempotency_key": "invalid-activation-type",
                 },
             )
-        with pytest.raises(ToolError, match="only playable or complete"):
-            await _call(
-                server,
-                "module_import",
-                {
-                    "campaign_id": target_campaign["id"],
-                    "action": "import_package",
-                    "payload": {"artifact": exported["artifact"], "activate": True},
-                    "idempotency_key": "blocked-package-import",
-                },
-            )
         import_arguments = {
-            "campaign_id": target_campaign["id"],
-            "action": "import_package",
-            "payload": {"artifact": exported["artifact"], "activate": False},
+            "action": "import",
+            "payload": {
+                "kind": "module",
+                "campaign_id": target_campaign["id"],
+                "artifact": exported["artifact"],
+                "activate": False,
+            },
             "idempotency_key": "package-import",
         }
         imported = await _call(
             server,
-            "module_import",
+            "content_pack",
             import_arguments,
         )
-        replay = await _call(server, "module_import", import_arguments)
+        replay = await _call(server, "content_pack", import_arguments)
         bindings = await _call(
             server,
             "module_query",
@@ -766,7 +814,6 @@ def test_module_package_round_trip_recreates_cast_bindings(tmp_path: Path) -> No
         )
 
         assert exported["summary"]["actors"] == 1
-        assert exported["summary"]["readiness"]["level"] == "indexed"
         assert imported["activated"] is False
         assert replay["module_id"] == imported["module_id"]
         assert replay["actor_map"] == imported["actor_map"]
@@ -793,27 +840,34 @@ def test_bundled_srd_monster_presets_are_catalog_imports(tmp_path: Path) -> None
         )
         catalog = await _call(
             server,
-            "rule_pack_query",
+            "content_pack",
             {
-                "view": "content_catalog",
-                "payload": {"campaign_id": campaign["id"], "kind": "actor_card"},
+                "action": "list",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "kind": "catalog",
+                    "content_kind": "actor_card",
+                },
             },
         )
         frog = next(item for item in catalog if item["name"] == "Frog")
         shared = await _call(
             server,
-            "rule_pack_query",
+            "content_pack",
             {
-                "view": "actor_presets",
-                "payload": {"edition": "2014", "include_package": True},
+                "action": "list",
+                "payload": {
+                    "kind": "actor_preset",
+                    "edition": "2014",
+                    "include_package": True,
+                },
             },
         )
-        preset_readiness = audit_dnd_addon_resolution_components([shared["portable_package"]])
         imported = await _call(
             server,
             "character_create_from",
             {
-                "mode": "portable_card",
+                "mode": "content_actor",
                 "payload": {"campaign_id": campaign["id"], "artifact_id": frog["id"]},
                 "idempotency_key": "frog",
             },
@@ -822,10 +876,10 @@ def test_bundled_srd_monster_presets_are_catalog_imports(tmp_path: Path) -> None
             server,
             "character_create_from",
             {
-                "mode": "portable_card",
+                "mode": "content_actor",
                 "payload": {
                     "campaign_id": campaign["id"],
-                    "card": shared["portable_package"],
+                    "artifact": shared["artifact"]["artifact"],
                     "artifact_id": frog["id"],
                     "name": "Shared Frog",
                 },
@@ -835,714 +889,179 @@ def test_bundled_srd_monster_presets_are_catalog_imports(tmp_path: Path) -> None
 
         assert len(catalog) == 317
         assert shared["package"]["cards"] == 317
-        assert shared["artifact"]["kind"] == "preset_pack"
-        assert preset_readiness["complete"] is True
-        assert preset_readiness["unresolved"] == []
-        assert preset_readiness["first_use_compilation_required"] is False
+        assert shared["artifact"]["kind"] == "preset"
+        assert "readiness" not in shared["content_package"]
         assert imported["character"]["character_type"] == "monster"
         assert imported["character"]["name"] == "Frog"
         assert imported["character"]["sheet"]["inventory"]["items"] == []
         assert imported_from_shared_pack["character"]["name"] == "Shared Frog"
-        assert imported_from_shared_pack["portable_card"]["id"] == frog["id"]
+        assert imported_from_shared_pack["content_actor"]["id"] in {
+            actor["id"] for actor in shared["content_package"]["actors"]
+        }
 
     asyncio.run(exercise())
 
 
-def test_extension_rule_pack_export_import_rebinds_sources_and_stays_inactive(
-    tmp_path: Path,
-) -> None:
-    source_root = tmp_path / "rulebooks"
-    source_root.mkdir()
-    rulebook = source_root / "luminous-ward.md"
-    rulebook.write_text(
-        "# Luminous Ward\n"
-        "A creature invoking the ward gains the reviewed optional benefit.\n"
-        "\n## Echo\n"
-        "The ward leaves a visible echo until the scene ends.\n",
-        encoding="utf-8",
-    )
-
-    async def exercise() -> None:
-        source_server = create_server(
-            _config(
-                tmp_path / "source",
-                rule_import_roots=(source_root,),
-            )
-        )
-        campaign = await _call(
-            source_server,
-            "campaign_create",
+def test_unified_addon_archive_import_reexport_and_actor_creation(tmp_path: Path) -> None:
+    source_text = "# Archive Rule\nA source-backed archive rule."
+    chunk_key = portable_rule_chunk_key("example.archive-source", 0, 0, source_text)
+    component = build_rule_pack(
+        portable_id="dnd5e.example.archive-rules",
+        version="2.0.0",
+        system_id="dnd5e",
+        manifest={
+            "id": "dnd5e.example.archive-rules",
+            "version": "2.0.0",
+            "title": "Archive Rules",
+            "namespace": "dnd5e.example.archive-rules",
+            "system_id": "dnd5e",
+            "editions": ["2014"],
+            "dependencies": [],
+            "conflicts": [],
+            "capabilities": [],
+        },
+        artifacts=[],
+        mechanics=[],
+        sources=[
             {
-                "name": "Portable extension source",
+                "source_key": "example.archive-source",
+                "title": "Archive Source",
                 "edition": "2014",
-                "idempotency_key": "campaign",
-            },
-        )
-        with pytest.raises(Exception, match="reserved for validated package import"):
-            await _call(
-                source_server,
-                "rule_pack_compile",
-                {
-                    "action": "draft",
-                    "payload": {
-                        "manifest": {
-                            "id": "dnd5e.example.forged-portable-proof",
-                            "version": "1.0.0",
-                            "title": "Forged proof",
-                            "namespace": "dnd5e.example.forged-portable-proof",
-                            "system_id": "dnd5e",
-                            "editions": ["2014"],
-                            "dependencies": [],
-                            "conflicts": [],
-                            "capabilities": [],
-                        },
-                        "provenance": {
-                            "portable_package": {
-                                "definition_checksum": "a" * 64,
-                            }
-                        },
-                    },
-                },
-            )
-        staged = await _call(
-            source_server,
-            "rule_import",
-            {
-                "campaign_id": campaign["id"],
-                "action": "stage",
-                "payload": {
-                    "source_path": str(rulebook),
-                    "source_key": "example.luminous-ward",
-                    "title": "Luminous Ward",
-                    "edition": "2014",
-                    "publication_id": "example-extension",
-                    "version": "1.0.0",
-                },
-                "idempotency_key": "stage",
-            },
-        )
-        job_id = staged["job"]["id"]
-        await _call(
-            source_server,
-            "rule_import",
-            {
-                "campaign_id": campaign["id"],
-                "action": "inspect",
-                "payload": {"job_id": job_id},
-                "idempotency_key": "inspect",
-            },
-        )
-        ingested = await _call(
-            source_server,
-            "rule_import",
-            {
-                "campaign_id": campaign["id"],
-                "action": "ingest",
-                "payload": {"job_id": job_id},
-                "idempotency_key": "ingest",
-            },
-        )
-        source_id = ingested["source_id"]
-        chunks = await _call(
-            source_server,
-            "rule_pack_query",
-            {"view": "source_chunks", "payload": {"source_id": source_id}},
-        )
-        draft = await _call(
-            source_server,
-            "rule_pack_compile",
-            {
-                "action": "from_source",
-                "payload": {
-                    "source_id": source_id,
-                    "manifest": {
-                        "id": "dnd5e.example.luminous-ward",
-                        "version": "1.0.0",
-                        "title": "Luminous Ward",
-                        "namespace": "dnd5e.example.luminous-ward",
-                        "system_id": "dnd5e",
-                        "editions": ["2014"],
-                        "dependencies": [],
-                        "conflicts": [],
-                        "capabilities": [],
-                    },
-                    "artifacts": [
-                        {
-                            "id": "dnd5e.example.luminous-ward.feature.ward",
-                            "kind": "feature",
-                            "card": {"name": "Luminous Ward"},
-                            "application_state": "catalog_only",
-                            "mechanical_scope": "descriptive",
-                            "source_chunk_ids": [chunks[0]["id"]],
-                            "resolution_plan": resolution_plan_template(
-                                compile_resolution_plan(
-                                    {
-                                        "schema_version": 2,
-                                        "id": ("dnd5e.example.luminous-ward.feature.ward.plan"),
-                                        "source_card_id": (
-                                            "dnd5e.example.luminous-ward.feature.ward"
-                                        ),
-                                        "source_card_kind": "feature",
-                                        "trigger": "scene",
-                                        "trigger_filter": {},
-                                        "slots": {
-                                            "target": {
-                                                "kind": "actor_id",
-                                                "owner": "agent",
-                                                "description": (
-                                                    "The creature selected from the reviewed scene."
-                                                ),
-                                            }
-                                        },
-                                        "steps": [
-                                            {
-                                                "id": "mark",
-                                                "op": "condition.apply",
-                                                "args": {
-                                                    "target_ids": [{"$slot": "target"}],
-                                                    "condition_id": "marked",
-                                                    "source": "Luminous Ward",
-                                                },
-                                            }
-                                        ],
-                                        "citations": [
-                                            {
-                                                "source": ("rule-source:example.luminous-ward"),
-                                                "source_ref": {"chunk_id": chunks[0]["id"]},
-                                                "source_excerpt": (
-                                                    "A creature invoking the ward "
-                                                    "gains the reviewed optional "
-                                                    "benefit."
-                                                ),
-                                            }
-                                        ],
-                                    }
-                                )
-                            ),
-                        },
-                        {
-                            "id": "dnd5e.example.luminous-ward.statblock.sentinel",
-                            "kind": "statblock",
-                            "card": {"name": "Luminous Sentinel"},
-                            "application_state": "catalog_only",
-                            "mechanical_scope": "descriptive",
-                            "semantic_resolution": {
-                                "status": "resolved",
-                                "mode": "descriptive",
-                                "first_use_compilation_required": False,
-                                "clause_ids": ["source-description"],
-                            },
-                            "source_chunk_ids": [chunks[1]["id"]],
-                        },
-                    ],
-                    "provenance": {
-                        "license": "CC-BY-4.0",
-                        "attribution": "Example Author",
-                    },
-                },
-            },
-        )
-        assert draft["status"] == "validated"
-        with pytest.raises(Exception, match="explicit license and attribution"):
-            await _call(
-                source_server,
-                "rule_pack_query",
-                {
-                    "view": "package",
-                    "payload": {
-                        "campaign_id": campaign["id"],
-                        "pack_id": "dnd5e.example.luminous-ward",
-                        "version": "1.0.0",
-                        "metadata": {
-                            "distribution": "shareable",
-                            "license": "",
-                        },
-                    },
-                },
-            )
-        exported = await _call(
-            source_server,
-            "rule_pack_query",
-            {
-                "view": "package",
-                "payload": {
-                    "campaign_id": campaign["id"],
-                    "pack_id": "dnd5e.example.luminous-ward",
-                    "version": "1.0.0",
-                    "include_package": True,
-                    "metadata": {"distribution": "shareable"},
-                },
-            },
-        )
-        package = exported["package"]
-        serialized = json.dumps(package, ensure_ascii=False)
-        assert package["kind"] == "rule_pack"
-        readiness = package["payload"]["manifest"]["resolution_readiness"]
-        assert package["payload"]["manifest"]["resolution_policy"] == ("build_time_complete")
-        assert readiness["complete"] is True
-        assert readiness["unresolved"] == []
-        assert readiness["first_use_compilation_required"] is False
-        assert package["payload"]["sources"][0]["source_key"] == ("example.luminous-ward")
-        portable_chunks = [
-            item
-            for section in package["payload"]["sources"][0]["sections"]
-            for item in section["chunks"]
-        ]
-        assert len(portable_chunks) == 2
-        assert len({item["key"] for item in portable_chunks}) == 2
-        assert "source_id" not in serialized
-        assert "chunk_id" not in serialized
-        portable_plan = package["payload"]["artifacts"][0]["resolution_plan"]
-        assert compile_resolution_plan(portable_plan).fingerprint == (portable_plan["fingerprint"])
-
-        dependent_draft = await _call(
-            source_server,
-            "rule_pack_compile",
-            {
-                "action": "from_source",
-                "payload": {
-                    "source_id": source_id,
-                    "manifest": {
-                        "id": "dnd5e.example.prismatic-aegis",
-                        "version": "1.0.0",
-                        "title": "Prismatic Aegis",
-                        "namespace": "dnd5e.example.prismatic-aegis",
-                        "system_id": "dnd5e",
-                        "editions": ["2014"],
-                        "dependencies": [
+                "locale": "en",
+                "version": "2.0.0",
+                "publication_id": "example.archive-source",
+                "authority": "supplement",
+                "canonical_source_key": None,
+                "checksum": hashlib.sha256(source_text.encode()).hexdigest(),
+                "metadata": {},
+                "sections": [
+                    {
+                        "ordinal": 0,
+                        "parent_ordinal": None,
+                        "level": 1,
+                        "title": "Archive Rule",
+                        "path": ["Archive Rule"],
+                        "content": source_text,
+                        "content_hash": hashlib.sha256(source_text.encode()).hexdigest(),
+                        "start_offset": 0,
+                        "end_offset": len(source_text),
+                        "chunks": [
                             {
-                                "id": package["id"],
-                                "version": package["version"],
-                                "checksum": draft["checksum"],
+                                "key": chunk_key,
+                                "ordinal": 0,
+                                "heading_path": ["Archive Rule"],
+                                "content": source_text,
+                                "content_hash": hashlib.sha256(source_text.encode()).hexdigest(),
+                                "token_count": len(source_text.split()),
+                                "metadata": {
+                                    "start_offset": 0,
+                                    "end_offset": len(source_text),
+                                    "page_start": 1,
+                                    "page_end": 1,
+                                },
                             }
                         ],
-                        "conflicts": [],
-                        "capabilities": [],
-                    },
-                    "artifacts": [
-                        {
-                            "id": "dnd5e.example.prismatic-aegis.feature.aegis",
-                            "kind": "feature",
-                            "card": {"name": "Prismatic Aegis"},
-                            "application_state": "catalog_only",
-                            "mechanical_scope": "descriptive",
-                            "semantic_resolution": {
-                                "status": "resolved",
-                                "mode": "descriptive",
-                                "first_use_compilation_required": False,
-                                "clause_ids": ["source-description"],
-                            },
-                            "source_chunk_ids": [chunks[1]["id"]],
-                        }
-                    ],
-                },
+                    }
+                ],
+            }
+        ],
+        metadata={"distribution": "private"},
+    )
+    notes = default_character_notes()
+    notes["profile"]["summary"] = "A source-backed archive actor."
+    card = build_dnd_actor_card(
+        portable_id="dnd5e.example.archive-actor",
+        version="2.0.0",
+        actor_type="monster",
+        name="Archive Actor",
+        sheet=default_character_sheet(),
+        notes=notes,
+    )
+    package, blobs = build_addon_content_package(
+        package_id="dnd5e.example.archive-addon",
+        version="2.0.0",
+        system_id="dnd5e",
+        manifest={
+            "id": "dnd5e.example.archive-addon",
+            "version": "2.0.0",
+            "system_id": "dnd5e",
+            "title": "Archive Addon",
+            "classification": "third_party",
+            "editions": ["2014"],
+            "activation": {
+                "rule_policy": "branch",
+                "preset_policy": "library",
+                "module_policy": "none",
             },
-        )
-        assert dependent_draft["status"] == "validated"
-        dependent_export = await _call(
-            source_server,
-            "rule_pack_query",
-            {
-                "view": "package",
-                "payload": {
-                    "campaign_id": campaign["id"],
-                    "pack_id": "dnd5e.example.prismatic-aegis",
-                    "version": "1.0.0",
-                    "include_package": True,
-                    "metadata": {
-                        "distribution": "shareable",
-                        "license": "CC-BY-4.0",
-                        "attribution": "Example Author",
-                    },
-                },
-            },
-        )
-        dependent_package = dependent_export["package"]
-        assert (
-            dependent_package["dependencies"][0]["checksum"]
-            == package["metadata"]["definition_checksum"]
-        )
-        assert dependent_package["dependencies"][0]["checksum"] != package["checksum"]
+        },
+        rule_components=[component],
+        preset_cards=[card],
+        metadata={
+            "distribution": "private",
+            "license": "user-supplied",
+            "attribution": "Test source",
+        },
+    )
+    archive_dir = tmp_path / "archives"
+    archive_dir.mkdir()
+    archive_path = archive_dir / "archive-addon.sagasmith-pack"
+    archive_path.write_bytes(dumps_content_archive(package, blobs))
 
-        release = await _call(
-            source_server,
-            "rule_pack_query",
-            {
-                "view": "release",
-                "payload": {
-                    "campaign_id": campaign["id"],
-                    "portable_id": "dnd5e.example.luminous-ward.release",
-                    "version": "1.0.0",
-                    "components": [
-                        {
-                            "kind": "rule_pack",
-                            "id": package["id"],
-                            "version": package["version"],
-                            "checksum": package["checksum"],
-                            "optional": False,
-                        },
-                        {
-                            "kind": "rule_pack",
-                            "id": dependent_package["id"],
-                            "version": dependent_package["version"],
-                            "checksum": dependent_package["checksum"],
-                            "optional": False,
-                        },
-                    ],
-                    "include_manifest": True,
-                },
-            },
-        )
-        assert release["artifact"]["kind"] == "release_manifest"
-        addon_export = await _call(
-            source_server,
-            "rule_pack_query",
-            {
-                "view": "addon_package",
-                "payload": {
-                    "campaign_id": campaign["id"],
-                    "portable_id": "dnd5e.example.luminous-ward.addon",
-                    "version": "1.0.0",
-                    "manifest": {
-                        "id": "dnd5e.example.luminous-ward.addon",
-                        "version": "1.0.0",
-                        "system_id": "dnd5e",
-                        "title": "Luminous Ward Addon",
-                        "editions": ["2014"],
-                        "classification": "third_party",
-                        "content_summary": {"feature": 2},
-                        "activation": {
-                            "rule_policy": "branch",
-                            "preset_policy": "none",
-                            "module_policy": "none",
-                        },
-                    },
-                    "components": [package, dependent_package],
-                    "metadata": {
-                        "distribution": "shareable",
-                        "license": "CC-BY-4.0",
-                        "attribution": "Example Author",
-                    },
-                    "include_package": True,
-                },
-            },
-        )
-        addon = addon_export["package"]
-        assert addon_export["summary"]["components"] == 2
-        readiness = addon["payload"]["manifest"]["resolution_readiness"]
-        assert addon["payload"]["manifest"]["resolution_policy"] == ("build_time_complete")
-        assert readiness["complete"] is True
-        assert readiness["first_use_compilation_required"] is False
-        assert readiness["modes"] == {
-            "descriptive": 2,
-            "primitive_plan": 1,
-        }
-
-        local_addon_import = await _call(
-            source_server,
-            "rule_import",
-            {
-                "campaign_id": campaign["id"],
-                "action": "import_addon",
-                "payload": {"addon": addon},
-                "idempotency_key": "reuse-equivalent-local-rule-packs",
-            },
-        )
-        assert local_addon_import["installed"] is True
-        assert {
-            (component["id"], component["status"])
-            for component in local_addon_import["components"]
-            if component["kind"] == "rule_pack"
-        } == {
-            ("dnd5e.example.luminous-ward", "installed"),
-            ("dnd5e.example.prismatic-aegis", "installed"),
-        }
-
-        addon_server = create_server(_config(tmp_path / "addon-target"))
-        addon_campaign = await _call(
-            addon_server,
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path, rule_import_roots=(archive_dir,)))
+        campaign = await _call(
+            server,
             "campaign_create",
             {
-                "name": "Portable addon target",
+                "name": "Unified content receiver",
                 "edition": "2014",
                 "idempotency_key": "campaign",
             },
         )
-        addon_import_arguments = {
-            "campaign_id": addon_campaign["id"],
-            "action": "import_addon",
-            "payload": {"addon": addon},
-            "idempotency_key": "addon-import",
-        }
-        addon_imported = await _call(addon_server, "rule_import", addon_import_arguments)
-        assert await _call(addon_server, "rule_import", addon_import_arguments) == addon_imported
-        assert addon_imported["installed"] is True
-        assert [item["status"] for item in addon_imported["components"]] == [
-            "installed",
-            "installed",
-        ]
-        addon_detail = await _call(
-            addon_server,
-            "rule_pack_query",
+        imported = await _call(
+            server,
+            "content_pack",
             {
-                "view": "addon",
+                "action": "import",
                 "payload": {
-                    "campaign_id": addon_campaign["id"],
-                    "addon_id": addon["id"],
-                    "version": addon["version"],
-                    "include_package": True,
+                    "kind": "addon",
+                    "campaign_id": campaign["id"],
+                    "source_path": str(archive_path),
                 },
+                "idempotency_key": "import-addon",
             },
         )
-        assert addon_detail["package"] == addon
-        profile = await _call(
-            addon_server,
-            "campaign_rules",
-            {"campaign_id": addon_campaign["id"], "action": "get_profile"},
-        )
-        enable_arguments = {
-            "campaign_id": addon_campaign["id"],
-            "action": "set_addon",
-            "payload": {"addon_id": addon["id"], "version": addon["version"]},
-            "expected_revision": profile["campaign_revision"],
-            "idempotency_key": "addon-enable",
-        }
-        enabled = await _call(addon_server, "campaign_rules", enable_arguments)
-        assert await _call(addon_server, "campaign_rules", enable_arguments) == enabled
-        assert enabled["activation"]["enabled"] is True
-        assert len(enabled["effective_ruleset"]["lock"]) == 2
-        listed_addons = await _call(
-            addon_server,
-            "rule_pack_query",
-            {
-                "view": "addons",
-                "payload": {"campaign_id": addon_campaign["id"]},
-            },
-        )
-        assert listed_addons[0]["activation"]["enabled"] is True
-        statblock_catalog = await _call(
-            addon_server,
-            "rule_pack_query",
-            {
-                "view": "content_catalog",
-                "payload": {
-                    "campaign_id": addon_campaign["id"],
-                    "kind": "statblock",
-                    "query": "Luminous Sentinel",
-                },
-                "principal_id": "system:local",
-            },
-        )
-        assert len(statblock_catalog) == 1
-        statblock = statblock_catalog[0]
-        assert statblock["source_citations"]
-        assert statblock["application_state"] == "catalog_only"
-        assert statblock["selection_requirements"] == {
-            "fields": ["source_id", "chunk_ids", "source_statblock_name"],
-            "creation_tool": "character_create_from",
-            "creation_mode": "statblock",
-            "source_statblock_name": "Luminous Sentinel",
-            "source_resolution": "source_citations",
-            "build_time_actor_card_required": True,
-            "normalization_authority": "engine",
-        }
-
-        target_server = create_server(_config(tmp_path / "target"))
-        target_campaign = await _call(
-            target_server,
-            "campaign_create",
-            {
-                "name": "Portable extension target",
-                "edition": "2014",
-                "idempotency_key": "campaign",
-            },
-        )
-        inspected_release = await _call(
-            target_server,
-            "rule_import",
-            {
-                "campaign_id": target_campaign["id"],
-                "action": "inspect_release",
-                "payload": {"release_manifest": release["release_manifest"]},
-            },
-        )
-        assert inspected_release["authority"] == "manifest_only"
-        assert inspected_release["components"][0]["local_status"] == ("external_package_required")
-        assert inspected_release["auto_install"] is False
-        incomplete_manifest = copy.deepcopy(package["payload"]["manifest"])
-        incomplete_manifest.pop("resolution_policy")
-        incomplete_manifest.pop("resolution_readiness")
-        incomplete_package = build_rule_pack(
-            portable_id=package["id"],
-            version=package["version"],
-            system_id=package["system_id"],
-            manifest=incomplete_manifest,
-            artifacts=package["payload"]["artifacts"],
-            mechanics=package["payload"]["mechanics"],
-            provenance=package["payload"]["provenance"],
-            sources=package["payload"]["sources"],
-            metadata=package["metadata"],
-            dependencies=package["dependencies"],
-        )
-        with pytest.raises(Exception, match="build-time-complete"):
-            await _call(
-                target_server,
-                "rule_import",
-                {
-                    "campaign_id": target_campaign["id"],
-                    "action": "import_package",
-                    "payload": {"package": incomplete_package},
-                    "idempotency_key": "missing-resolution-audit",
-                },
-            )
-        wrong_sources = copy.deepcopy(package["payload"]["sources"])
-        wrong_sources[0]["edition"] = "2024"
-        wrong_edition = build_rule_pack(
-            portable_id=package["id"],
-            version=package["version"],
-            system_id=package["system_id"],
-            manifest=package["payload"]["manifest"],
-            artifacts=package["payload"]["artifacts"],
-            mechanics=package["payload"]["mechanics"],
-            provenance=package["payload"]["provenance"],
-            sources=wrong_sources,
-            metadata=package["metadata"],
-            dependencies=package["dependencies"],
-        )
-        with pytest.raises(Exception, match="editions not declared"):
-            await _call(
-                target_server,
-                "rule_import",
-                {
-                    "campaign_id": target_campaign["id"],
-                    "action": "import_package",
-                    "payload": {"package": wrong_edition},
-                    "idempotency_key": "wrong-edition",
-                },
-            )
-        import_arguments = {
-            "campaign_id": target_campaign["id"],
-            "action": "import_package",
-            "payload": {"package": package},
-            "idempotency_key": "import-package",
-        }
-        imported = await _call(target_server, "rule_import", import_arguments)
-        replayed = await _call(target_server, "rule_import", import_arguments)
-
-        assert replayed == imported
-        assert imported["status"] == "imported"
-        assert imported["draft"]["status"] == "validated"
-        assert imported["installed"] is False
+        assert imported["installed"] is True
         assert imported["activated"] is False
-        assert imported["sources"][0]["source_id"] != source_id
-        target_chunks = await _call(
-            target_server,
-            "rule_pack_query",
+        detail = await _call(
+            server,
+            "content_pack",
             {
-                "view": "source_chunks",
-                "payload": {"source_id": imported["sources"][0]["source_id"]},
-            },
-        )
-        assert [item["section_ordinal"] for item in target_chunks] == [0, 1]
-        assert {item["content"] for item in target_chunks} == {
-            item["content"] for item in portable_chunks
-        }
-        inspected = await _call(
-            target_server,
-            "rule_pack_query",
-            {
-                "view": "inspect",
+                "action": "get",
                 "payload": {
-                    "pack_id": package["id"],
-                    "version": package["version"],
-                },
-            },
-        )
-        local_citation = inspected["artifacts"][0]["source_citations"][0]
-        assert local_citation["source_id"] == imported["sources"][0]["source_id"]
-        assert local_citation["chunk_id"] != chunks[0]["id"]
-        local_plan = inspected["artifacts"][0]["resolution_plan"]
-        assert compile_resolution_plan(local_plan).fingerprint == local_plan["fingerprint"]
-        assert local_plan["citations"][0]["source_ref"]["chunk_id"] == (local_citation["chunk_id"])
-        assert local_plan["fingerprint"] != portable_plan["fingerprint"]
-        reexported = await _call(
-            target_server,
-            "rule_pack_query",
-            {
-                "view": "package",
-                "payload": {
-                    "campaign_id": target_campaign["id"],
-                    "pack_id": package["id"],
+                    "kind": "addon",
+                    "campaign_id": campaign["id"],
+                    "addon_id": package["id"],
                     "version": package["version"],
                     "include_package": True,
-                    "metadata": {"distribution": "shareable"},
                 },
             },
         )
-        assert reexported["package"] == package
-
-        dependent_imported = await _call(
-            target_server,
-            "rule_import",
+        assert detail["package"] == package
+        created = await _call(
+            server,
+            "character_create_from",
             {
-                "campaign_id": target_campaign["id"],
-                "action": "import_package",
-                "payload": {"package": dependent_package},
-                "idempotency_key": "import-dependent-package",
+                "mode": "content_actor",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "artifact": detail["artifact"]["artifact"],
+                    "artifact_id": package["actors"][0]["id"],
+                },
+                "idempotency_key": "create-actor",
             },
         )
-        assert dependent_imported["status"] == "imported"
-        assert dependent_imported["dependencies"][0]["status"] == "validated"
-        for imported_package in (package, dependent_package):
-            installed = await _call(
-                target_server,
-                "rule_pack_change",
-                {
-                    "action": "install",
-                    "pack_id": imported_package["id"],
-                    "version": imported_package["version"],
-                },
-            )
-            assert installed["status"] == "installed"
-        for index, imported_package in enumerate((package, dependent_package)):
-            profile = await _call(
-                target_server,
-                "campaign_rules",
-                {
-                    "campaign_id": target_campaign["id"],
-                    "action": "get_profile",
-                },
-            )
-            activated = await _call(
-                target_server,
-                "campaign_rules",
-                {
-                    "campaign_id": target_campaign["id"],
-                    "action": "set_pack",
-                    "payload": {
-                        "pack_id": imported_package["id"],
-                        "version": imported_package["version"],
-                    },
-                    "expected_revision": profile["campaign_revision"],
-                    "idempotency_key": f"activate-portable-{index}",
-                },
-            )
-            assert activated["activation"]["enabled"] is True
-        inspected_after_import = await _call(
-            target_server,
-            "rule_import",
-            {
-                "campaign_id": target_campaign["id"],
-                "action": "inspect_release",
-                "payload": {"release_manifest": release["release_manifest"]},
-            },
-        )
-        assert all(
-            item["local_status"] == "installed" for item in inspected_after_import["components"]
-        )
-        assert all(
-            item["portable_checksum_status"] == "match"
-            for item in inspected_after_import["components"]
-        )
+        assert created["character"]["name"] == "Archive Actor"
+        assert created["actor_knowledge_imported"] is False
 
     asyncio.run(exercise())

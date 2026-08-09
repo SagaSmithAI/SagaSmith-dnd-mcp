@@ -8,6 +8,7 @@ import pytest
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
+from tests.authoring_helpers import finalize_and_activate_module
 
 
 async def _call(server, name: str, arguments: dict):
@@ -78,10 +79,10 @@ def test_source_bound_loot_is_atomic_idempotent_and_branch_audited(tmp_path: Pat
         character = added_character_item["character"]
         staged = await _call(
             server,
-            "module_import",
+            "module_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "stage",
+                "action": "start",
                 "payload": {
                     "source_path": str(source),
                     "source_key": "loot-module",
@@ -90,44 +91,16 @@ def test_source_bound_loot_is_atomic_idempotent_and_branch_audited(tmp_path: Pat
                 "idempotency_key": "stage",
             },
         )
-        job_id = staged["job"]["id"]
-        for action in ("inspect", "validate"):
-            await _call(
-                server,
-                "module_import",
-                {
-                    "campaign_id": campaign["id"],
-                    "action": action,
-                    "payload": {"job_id": job_id},
-                    "idempotency_key": action,
-                },
-            )
-        ingested = await _call(
+        activation = await finalize_and_activate_module(
+            _call,
             server,
-            "module_import",
-            {
-                "campaign_id": campaign["id"],
-                "action": "ingest",
-                "payload": {"job_id": job_id},
-                "idempotency_key": "ingest",
-            },
+            campaign["id"],
+            staged,
+            source_key="loot-module",
+            title="Loot Module",
+            portable_id="dnd5e.module.loot-test",
         )
-        current = await _call(
-            server,
-            "campaign_query",
-            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
-        )
-        await _call(
-            server,
-            "module_import",
-            {
-                "campaign_id": campaign["id"],
-                "action": "activate",
-                "payload": {"job_id": job_id},
-                "expected_revision": current["revision"],
-                "idempotency_key": "activate",
-            },
-        )
+        module_id = activation["activated"]["activation"]["module_id"]
         search = await _call(
             server,
             "module_search",
@@ -135,13 +108,13 @@ def test_source_bound_loot_is_atomic_idempotent_and_branch_audited(tmp_path: Pat
                 "campaign_id": campaign["id"],
                 "query": "jade frog",
                 "top_k": 3,
-                "module_ids": [ingested["module_id"]],
+                "module_ids": [module_id],
             },
         )
-        assert {item["source_id"] for item in search} == {ingested["module_id"]}
+        assert {item["source_id"] for item in search} == {module_id}
         chunk_id = search[0]["id"]
         expanded = await _call(server, "module_expand", {"chunk_id": chunk_id})
-        assert expanded["source_ref"]["module_id"] == ingested["module_id"]
+        assert expanded["source_ref"]["module_id"] == module_id
         assert expanded["source_ref"]["scene_id"] == expanded["scene"]["id"]
         assert expanded["source_ref"]["chunk_id"] == chunk_id
         assert expanded["source_ref"]["content_sha256"] == expanded["content_sha256"]

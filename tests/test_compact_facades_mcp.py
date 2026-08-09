@@ -51,23 +51,23 @@ def test_compact_facades_reject_unknown_fields_and_wrong_phases(
             },
         )
 
-        with pytest.raises(Exception, match="unsupported rule_import"):
+        with pytest.raises(Exception, match=r"unsupported rulebook_draft\(get\)"):
             await _call(
                 server,
-                "rule_import",
+                "rulebook_draft",
                 {
                     "campaign_id": campaign["id"],
-                    "action": "discover",
-                    "payload": {"job_id": "payload-bypass"},
+                    "action": "get",
+                    "payload": {"unexpected": "payload-bypass"},
                 },
             )
-        with pytest.raises(Exception, match="unsupported module_import"):
+        with pytest.raises(Exception, match=r"unsupported module_draft\(get\)"):
             await _call(
                 server,
-                "module_import",
+                "module_draft",
                 {
                     "campaign_id": campaign["id"],
-                    "action": "inspect",
+                    "action": "get",
                     "payload": {
                         "job_id": "job",
                         "expected_revision": campaign["revision"],
@@ -193,11 +193,10 @@ def test_compact_facades_reject_unknown_fields_and_wrong_phases(
         with pytest.raises(Exception, match="only available during lobby"):
             await _call(
                 server,
-                "module_review",
+                "module_draft",
                 {
                     "campaign_id": campaign["id"],
-                    "action": "submit_content",
-                    "payload": {
+                    "action": "edit", "payload": {"operation": "content",
                         "module_id": "module",
                         "scene_id": "scene",
                         "content_key": "key",
@@ -210,11 +209,11 @@ def test_compact_facades_reject_unknown_fields_and_wrong_phases(
         with pytest.raises(Exception, match="only available during lobby"):
             await _call(
                 server,
-                "rule_import",
+                "rulebook_draft",
                 {
                     "campaign_id": campaign["id"],
-                    "action": "render_page",
-                    "payload": {"job_id": "job", "page_number": 1},
+                    "action": "evidence",
+                    "payload": {"job_id": "job", "kind": "page", "page_number": 1},
                 },
             )
         with pytest.raises(Exception, match="only available during combat"):

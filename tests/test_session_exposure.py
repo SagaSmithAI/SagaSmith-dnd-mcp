@@ -502,16 +502,16 @@ def test_exposures_are_session_scoped_and_phase_safe() -> None:
     registry.load(first, "lobby.modules")
     registry.load(first, "lobby.rules")
 
-    assert "module_import" in registry.visible_tools(first)
+    assert "module_draft" in registry.visible_tools(first)
     assert "campaign_rules" in registry.visible_tools(first)
-    assert "module_import" not in registry.visible_tools(second)
+    assert "module_draft" not in registry.visible_tools(second)
     with pytest.raises(ExposureError):
         registry.load(first, "combat.actions")
     with pytest.raises(ExposureError):
         registry.get(first.id, "session:second")
 
     assert registry.refresh_phase(first, "play") is True
-    assert "module_import" not in registry.visible_tools(first)
+    assert "module_draft" not in registry.visible_tools(first)
     assert registry.visible_tools(first) == set(CORE_TOOLS)
 
 
@@ -813,18 +813,20 @@ def test_stdio_session_uses_native_refresh_and_exposure_call_fallback(tmp_path) 
                     {"exposure_id": exposure_id, "group_id": "lobby.rules"},
                 )
                 assert not loaded.isError
-                assert "rule_import" in {tool.name for tool in (await session.list_tools()).tools}
+                assert "rulebook_draft" in {
+                    tool.name for tool in (await session.list_tools()).tools
+                }
                 inspected = await session.call_tool(
                     "exposure_inspect",
                     {
                         "group_id": "lobby.rules",
-                        "tool_id": "rule_import",
-                        "selector": "stage",
+                        "tool_id": "rulebook_draft",
+                        "selector": "start",
                     },
                 )
                 inspected_payload = json.loads(inspected.content[0].text)
                 assert (
-                    inspected_payload["tool_contract"]["actions"]["stage"]["contract_kind"]
+                    inspected_payload["tool_contract"]["actions"]["start"]["contract_kind"]
                     == "exact_field_contract"
                 )
                 fallback = await session.call_tool(
@@ -943,10 +945,10 @@ def test_stdio_exposure_fallback_preserves_rendered_image_content(tmp_path: Path
             },
         )
         staged = await direct(
-            "module_import",
+            "module_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "stage",
+                "action": "start",
                 "payload": {
                     "source_path": str(source),
                     "source_key": "image-fallback",
@@ -955,33 +957,7 @@ def test_stdio_exposure_fallback_preserves_rendered_image_content(tmp_path: Path
                 "idempotency_key": "image-fallback-stage",
             },
         )
-        job_id = staged["job"]["id"]
-        imported: dict = {}
-        for action in ("inspect", "validate", "ingest"):
-            imported = await direct(
-                "module_import",
-                {
-                    "campaign_id": campaign["id"],
-                    "action": action,
-                    "payload": {"job_id": job_id},
-                    "idempotency_key": f"image-fallback-{action}",
-                },
-            )
-        current = await direct(
-            "campaign_query",
-            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
-        )
-        await direct(
-            "module_import",
-            {
-                "campaign_id": campaign["id"],
-                "action": "activate",
-                "payload": {"job_id": job_id},
-                "expected_revision": current["revision"],
-                "idempotency_key": "image-fallback-activate",
-            },
-        )
-        return campaign["id"], imported["module_id"]
+        return campaign["id"], staged["module_id"]
 
     campaign_id, module_id = asyncio.run(seed())
 
@@ -1035,11 +1011,12 @@ def test_stdio_exposure_fallback_preserves_rendered_image_content(tmp_path: Path
                     "exposure_call",
                     {
                         "exposure_id": exposure_id,
-                        "tool_id": "module_review",
+                        "tool_id": "module_draft",
                         "arguments": {
                             "campaign_id": campaign_id,
-                            "action": "render_page",
+                            "action": "evidence",
                             "payload": {
+                                "kind": "page",
                                 "module_id": module_id,
                                 "page_number": 1,
                                 "scale": 0.5,
@@ -1050,8 +1027,8 @@ def test_stdio_exposure_fallback_preserves_rendered_image_content(tmp_path: Path
                     timeout_seconds=90,
                 )
                 envelope = decoded(rendered)
-                assert envelope["tool_id"] == "module_review"
-                assert envelope["result"]["asset"]["metadata"]["source_page"] == 1
+                assert envelope["tool_id"] == "module_draft"
+                assert envelope["result"]["page_number"] == 1
                 assert len(rendered.content[0].text) < 10_000
                 images = [item for item in rendered.content if isinstance(item, ImageContent)]
                 assert len(images) == 1

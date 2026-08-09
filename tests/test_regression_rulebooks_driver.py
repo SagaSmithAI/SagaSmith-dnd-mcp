@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
+import sys
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -46,14 +49,14 @@ def test_generated_addon_replaces_bootstrap_dependency_for_later_documents() -> 
     identity = ("dnd5e.addon.phb", "1.0.0")
     available = {
         identity: {
-            "kind": "addon_pack",
+            "kind": "addon",
             "id": identity[0],
             "version": identity[1],
             "checksum": "a" * 64,
         }
     }
     generated = {
-        "kind": "addon_pack",
+        "kind": "addon",
         "id": identity[0],
         "version": identity[1],
         "checksum": "b" * 64,
@@ -72,7 +75,7 @@ def test_agent_statblock_slot_reviews_replay_bounded_ocr_corrections() -> None:
     server = _FakeServer(
         [
             (
-                "rule_import",
+                "rulebook_draft",
                 {
                     "result": {
                         "job": {"revision": 7},
@@ -136,9 +139,11 @@ def test_agent_statblock_slot_reviews_replay_bounded_ocr_corrections() -> None:
     assert result["job_revision"] == 7
     assert result["reviews"][0]["derived_from_review_id"] == "bad-caption"
     name, arguments = server.calls[0]
-    assert name == "rule_import"
-    assert arguments["action"] == "recover_statblock"
+    assert name == "rulebook_draft"
+    assert arguments["action"] == "edit"
+    assert arguments["payload"]["operation"] == "statblock_recovery"
     assert arguments["payload"] == {
+        "operation": "statblock_recovery",
         "job_id": "job-1",
         "name": "Nalfeshnee",
         "page_number": 63,
@@ -208,9 +213,9 @@ def test_agent_statblock_slot_review_binds_rendered_page_corrections() -> None:
     checksum = "b" * 64
     server = _FakeServer(
         [
-            ("rule_import", {"image_checksum": checksum, "transcription": {}}),
+            ("rulebook_draft", {"image_checksum": checksum, "transcription": {}}),
             (
-                "rule_import",
+                "rulebook_draft",
                 {
                     "result": {
                         "job": {"revision": 8},
@@ -260,7 +265,8 @@ def test_agent_statblock_slot_review_binds_rendered_page_corrections() -> None:
 
     assert result is not None
     assert result["job_revision"] == 8
-    assert server.calls[0][1]["action"] == "render_page"
+    assert server.calls[0][1]["action"] == "evidence"
+    assert server.calls[0][1]["payload"]["kind"] == "page"
     assert server.calls[1][1]["payload"]["correction_evidence_basis"] == "rendered_page"
     assert server.calls[1][1]["payload"]["rendered_image_checksum"] == checksum
 
@@ -345,14 +351,14 @@ def test_agent_transcription_reviews_allow_idempotent_replay_after_page_changed(
     server = _FakeServer(
         [
             (
-                "rule_import",
+                "rulebook_draft",
                 {
                     "image_checksum": "b" * 64,
                     "transcription": {"normalized": {"text_sha256": "c" * 64}},
                 },
             ),
             (
-                "rule_import",
+                "rulebook_draft",
                 {
                     "result": {
                         "job": {"revision": 3},
@@ -392,9 +398,11 @@ def test_agent_transcription_reviews_allow_idempotent_replay_after_page_changed(
     assert result["count"] == 1
     assert result["job_revision"] == 3
     render_call, review_call = server.calls
-    assert render_call[1]["action"] == "render_page"
+    assert render_call[1]["action"] == "evidence"
+    assert render_call[1]["payload"]["kind"] == "page"
     assert render_call[1]["payload"]["include_ocr_text"] is False
-    assert review_call[1]["action"] == "review_text"
+    assert review_call[1]["action"] == "edit"
+    assert review_call[1]["payload"]["operation"] == "source_text"
     assert review_call[1]["expected_revision"] == 2
     assert review_call[1]["payload"]["review_method"] == "agent"
     assert review_call[1]["payload"]["base_text_sha256"] == base_hash
@@ -432,29 +440,29 @@ def test_transcription_review_manifest_rejects_unbound_or_unsafe_entries() -> No
         )
 
 
-def test_portable_pack_id_is_stable_across_regression_runs() -> None:
-    first = driver._portable_pack_id("book.pdf", run_id="one")
-    assert first == driver._portable_pack_id("book.pdf", run_id="one")
-    assert first == driver._portable_pack_id("book.pdf", run_id="two")
+def test_content_pack_id_is_stable_across_regression_runs() -> None:
+    first = driver._content_pack_id("book.pdf", run_id="one")
+    assert first == driver._content_pack_id("book.pdf", run_id="one")
+    assert first == driver._content_pack_id("book.pdf", run_id="two")
     assert first.startswith("dnd5e.addon.rulebook.book.")
 
 
-def test_dependency_addons_require_exact_review_selection(tmp_path) -> None:
+def test_dependency_addons_require_exact_review_selection(tmp_path, monkeypatch) -> None:
     component = {
-        "kind": "rule_pack",
         "id": "dnd5e.private.phb",
         "version": "1.0.0",
-        "checksum": "a" * 64,
+        "definition_checksum": "a" * 64,
     }
     package = {
-        "kind": "addon_pack",
+        "kind": "addon",
         "id": "dnd5e.private.phb.addon",
         "version": "1.0.0",
         "checksum": "b" * 64,
-        "payload": {"components": [component, {"kind": "preset_pack"}]},
+        "content": {"rule_definitions": [component]},
     }
-    path = tmp_path / "phb.addon.sagasmith.json"
-    path.write_text(json.dumps(package), encoding="utf-8")
+    path = tmp_path / "phb.sagasmith-pack"
+    path.write_bytes(b"test archive")
+    monkeypatch.setattr(driver, "loads_content_archive", lambda _content: (package, {}))
 
     available = driver._load_dependency_addons([path])
     selected = driver._selected_dependency_addons(
@@ -462,13 +470,81 @@ def test_dependency_addons_require_exact_review_selection(tmp_path) -> None:
         available,
     )
 
-    assert selected == [package]
-    assert driver._dependency_rule_components(selected) == [component]
+    assert selected[0]["id"] == package["id"]
+    assert driver._dependency_rule_components(selected) == [
+        {
+            "id": component["id"],
+            "version": component["version"],
+            "checksum": component["definition_checksum"],
+        }
+    ]
     with pytest.raises(ValueError, match="was not supplied"):
         driver._selected_dependency_addons(
             {"dependency_addons": [{"id": "missing.addon", "version": "1.0.0"}]},
             available,
         )
+
+
+def test_dependency_addons_are_installed_on_each_roundtrip_receiver(tmp_path) -> None:
+    dependency_path = tmp_path / "dependencies" / "phb.sagasmith-pack"
+    dependency_path.parent.mkdir()
+    dependency_path.write_bytes(b"dependency")
+    dependency = {
+        "id": "dnd5e.private.phb.addon",
+        "version": "1.0.0",
+        "checksum": "b" * 64,
+        "_local_archive_path": str(dependency_path),
+    }
+    server = _FakeServer([("content_pack", {"result": {"installed": True}})])
+
+    asyncio.run(
+        driver._import_dependency_addons(
+            server=server,
+            campaign_id="receiver",
+            archive_dir=tmp_path / "portable",
+            dependencies=[dependency],
+            receiver="target",
+        )
+    )
+
+    name, arguments = server.calls[0]
+    assert name == "content_pack"
+    assert arguments["action"] == "import"
+    assert arguments["payload"] == {
+        "kind": "addon",
+        "campaign_id": "receiver",
+        "source_path": str(dependency_path.resolve()),
+    }
+    assert "target" in arguments["idempotency_key"]
+
+    activation_server = _FakeServer(
+        [
+            (
+                "campaign_rules",
+                {"result": {"campaign_revision": 7}},
+            ),
+            (
+                "content_pack",
+                {"result": {"activation": {"enabled": True}}},
+            ),
+        ]
+    )
+    asyncio.run(
+        driver._set_dependency_addons_enabled(
+            server=activation_server,
+            campaign_id="receiver",
+            dependencies=[dependency],
+            enabled=True,
+        )
+    )
+    _name, activation_arguments = activation_server.calls[1]
+    assert activation_arguments["payload"] == {
+        "kind": "addon",
+        "campaign_id": "receiver",
+        "addon_id": dependency["id"],
+        "version": dependency["version"],
+    }
+    assert activation_arguments["expected_revision"] == 7
 
 
 def test_source_selector_recovers_bounded_ocr_heading_spacing() -> None:
@@ -495,12 +571,10 @@ def test_source_selector_recovers_bounded_ocr_heading_spacing() -> None:
 def test_actor_name_gate_requires_the_exact_reviewed_multiset() -> None:
     package = {
         "package": {
-            "payload": {
-                "cards": [
-                    {"payload": {"name": "Cackler"}},
-                    {"payload": {"name": "Sire of Insanity"}},
-                ]
-            }
+            "actors": [
+                {"name": "Cackler"},
+                {"name": "Sire of Insanity"},
+            ]
         }
     }
 
@@ -525,31 +599,52 @@ def test_actor_name_gate_requires_the_exact_reviewed_multiset() -> None:
         )
 
 
+def test_expected_dependent_actor_names_are_a_separate_review_boundary() -> None:
+    templates = [
+        {"name": "Alchemical Homunculus"},
+        {"name": "Wildfire Spirit"},
+    ]
+
+    driver._require_expected_dependent_actor_names(
+        {
+            "expected_dependent_actor_names": [
+                "WILDFIRE SPIRIT",
+                "Alchemical Homunculus",
+            ]
+        },
+        templates,
+    )
+    with pytest.raises(RuntimeError, match="dependent actor template names differ"):
+        driver._require_expected_dependent_actor_names(
+            {"expected_dependent_actor_names": ["Steel Defender"]},
+            templates,
+        )
+
+
 def test_actor_card_gate_rejects_source_boundary_leaks() -> None:
     source_text = "# Tiny Servant\n\n***Slam.*** Hit: 5 bludgeoning damage."
     package = {
         "package": {
-            "payload": {
-                "cards": [
-                    {
-                        "payload": {
-                            "name": "Tiny Servant",
-                            "sheet": {
-                                "inventory": {"items": [{"name": "Slam"}]},
-                                "content": {"activities": []},
-                            },
-                            "provenance": {"source_text": source_text},
-                        }
-                    }
-                ]
-            }
+            "actors": [
+                {
+                    "name": "Tiny Servant",
+                    "sheet": {
+                        "inventory": {"items": [{"name": "Slam"}]},
+                        "content": {"activities": []},
+                    },
+                    "provenance": {
+                        "source_text_hash": hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+                        "source_refs": [{"source_key": "xgte", "chunk_key": "tiny-servant"}],
+                    },
+                }
+            ]
         }
     }
     contract = {
         "expected_actor_cards": [
             {
                 "name": "TINY SERVANT",
-                "source_text_sha256": hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+                "source_boundary_sha256": hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
                 "inventory_item_names": ["Slam"],
                 "activity_names": [],
                 "forbidden_text": ["At Higher Levels"],
@@ -558,7 +653,11 @@ def test_actor_card_gate_rejects_source_boundary_leaks() -> None:
     }
 
     driver._require_expected_actor_cards(contract, package)
-    package["package"]["payload"]["cards"][0]["payload"]["sheet"]["content"]["activities"] = [
+    package_without_refs = copy.deepcopy(package)
+    package_without_refs["package"]["actors"][0]["provenance"]["source_refs"] = []
+    with pytest.raises(RuntimeError, match="has no portable source refs"):
+        driver._require_expected_actor_cards(contract, package_without_refs)
+    package["package"]["actors"][0]["sheet"]["content"]["activities"] = [
         {"name": "At Higher Levels"}
     ]
     with pytest.raises(RuntimeError, match="activities differ"):
@@ -580,7 +679,7 @@ def test_publication_metadata_marks_only_core_dependencies_as_standard() -> None
     )
     assert driver._core_content_dependency("2014") == {
         "id": "dnd5e.content.srd2014",
-        "version": "1.21.0",
+        "version": "1.22.0",
     }
     assert driver._core_content_dependency("2024") == {
         "id": "dnd5e.content.srd2024",
@@ -596,6 +695,220 @@ def test_include_globs_are_case_insensitive_and_optional() -> None:
     assert driver._matches_includes(path, ["Player*.pdf", "*guide.PDF"]) is True
     assert driver._matches_includes(path, ["Monster*.pdf"]) is False
     assert driver._matches_includes(path, [], empty=False) is False
+
+
+def test_candidate_baseline_metrics_keep_fragments_review_and_sources_visible() -> None:
+    metrics = driver._candidate_baseline_metrics(
+        [
+            {
+                "kind": "feature",
+                "name": "Shared",
+                "review_status": "pending",
+                "source_chunk_ids": ["chunk-1"],
+                "source_heading_path": ["Chapter", "Shared"],
+            },
+            {
+                "kind": "feature",
+                "name": "Shared",
+                "review_status": "needs_review",
+                "source_chunk_ids": ["chunk-2"],
+                "source_heading_path": ["Chapter", "Shared"],
+            },
+            {
+                "kind": "source_fragment",
+                "name": "Loose prose",
+                "source_chunk_ids": [],
+                "source_heading_path": ["Appendix", "Loose prose"],
+            },
+        ],
+        {"decisions": [{"status": "rejected"}]},
+    )
+
+    assert metrics == {
+        "entity_count": 3,
+        "fragment_count": 1,
+        "review_status_counts": {
+            "needs_review": 1,
+            "pending": 1,
+            "unresolved": 1,
+        },
+        "unresolved_count": 3,
+        "reviewed_rejected_count": 1,
+        "source_bound_entity_count": 2,
+        "source_coverage_ratio": 0.666667,
+        "unique_source_chunk_count": 2,
+        "duplicate_identity_count": 1,
+    }
+
+
+def test_failed_document_snapshot_preserves_observed_parsing_metrics() -> None:
+    snapshot = driver._failed_document_parsing_snapshot(
+        "book.pdf",
+        [
+            {
+                "kind": "feature",
+                "name": "Observed",
+                "review_status": "pending",
+                "source_chunk_ids": ["chunk-1"],
+                "source_heading_path": ["Observed"],
+            }
+        ],
+        {"decisions": [{"status": "rejected"}]},
+        candidate_extraction_seconds=1.23456,
+        phase="extract_candidates",
+    )
+
+    assert snapshot["relative_path"] == "book.pdf"
+    assert snapshot["failure_phase"] == "extract_candidates"
+    assert snapshot["candidate_count"] == 1
+    assert snapshot["parsing_baseline"]["entity_count"] == 1
+    assert snapshot["parsing_baseline"]["source_coverage_ratio"] == 1.0
+    assert snapshot["parsing_baseline"]["candidate_extraction_seconds"] == 1.235
+
+
+def test_parsing_regression_suite_freezes_required_source_families() -> None:
+    path = Path(__file__).resolve().parents[1] / "fixtures" / "parsing_regression_suite_v1.json"
+    suite = json.loads(path.read_text(encoding="utf-8"))
+    ids = {case["id"] for case in suite["cases"]}
+
+    assert suite["expected_data_policy"] == "frozen-do-not-refresh"
+    assert ids == {
+        "dmg2014",
+        "erlw2014",
+        "lmop2014",
+        "mm2014",
+        "mtof2014",
+        "phb2014",
+        "tcoe2014",
+        "vgm2014",
+        "xgte2014",
+    }
+    assert any(case["family"] == "campaign-module" for case in suite["cases"])
+    assert suite["promotion_gate"] == {
+        "minimum_distinct_layout_sources": 3,
+        "minimum_counterexamples": 1,
+        "require_unchanged_unrelated_entity_counts": True,
+        "require_non_decreasing_source_coverage": True,
+        "require_no_new_silent_drops": True,
+        "require_review_status_not_auto_promoted": True,
+        "require_deterministic_idempotent_replay": True,
+    }
+    assert len({case["relative_path"] for case in suite["cases"]}) == len(suite["cases"])
+    assert set(suite["metrics"]) >= {
+        "entity_count",
+        "fragment_count",
+        "unresolved_count",
+        "reviewed_rejected_count",
+        "source_coverage_ratio",
+        "duplicate_identity_count",
+        "candidate_extraction_seconds",
+        "pipeline_seconds",
+        "peak_traced_python_bytes",
+    }
+
+
+def test_phb_duplicate_cantrips_are_replayed_from_source_review_fixture() -> None:
+    manifest = driver._load_catalog_manifest(
+        Path(__file__).resolve().parents[1] / "fixtures" / "core_rulebooks_catalog_review_v1.json"
+    )
+    review = manifest["documents"]["D&D 5E - Player's Handbook.pdf"]
+    cantrip_additions = [
+        addition
+        for addition in review["additions"]
+        if addition["kind"] == "feature" and addition["name"] == "CANTRIPS"
+    ]
+
+    assert review["expected_counts"]["feature"] == 249
+    assert [addition["source_selectors"][0]["page_start"] for addition in cantrip_additions] == [
+        67,
+        102,
+    ]
+
+
+def test_xanathar_duplicate_features_are_replayed_from_source_review_fixture() -> None:
+    manifest = driver._load_catalog_manifest(
+        Path(__file__).resolve().parents[1] / "fixtures" / "books_catalog_review_xanathar_v1.json"
+    )
+    review = manifest["documents"]["D&D 5E - Xanathar's Guide to Everything.pdf"]
+    pages_by_name: dict[str, list[int]] = {}
+    for addition in review["additions"]:
+        if addition["kind"] != "feature":
+            continue
+        pages_by_name.setdefault(addition["name"], []).append(
+            addition["source_selectors"][0]["page_start"]
+        )
+
+    assert pages_by_name["Bonus Proficiencies"] == [16, 35]
+    assert pages_by_name["Bonus Proficiency"] == [20, 31, 32]
+    assert pages_by_name["Channel Divinity"] == [39, 40]
+
+
+def test_tasha_ocr_damaged_subclass_heading_uses_exact_source_content_selector() -> None:
+    manifest = driver._load_catalog_manifest(
+        Path(__file__).resolve().parents[1] / "fixtures" / "books_catalog_review_tasha_v1.json"
+    )
+    review = manifest["documents"]["D&D 5E - Tasha's Cauldron of Everything.pdf"]
+    creation = next(
+        addition for addition in review["additions"] if addition["name"] == "College of Creation"
+    )
+
+    assert creation["source_selectors"] == [
+        {
+            "content_contains": "Bards believe the cosmos is a work of art",
+            "page_start": 29,
+        }
+    ]
+
+
+def test_run_rejects_an_explicit_include_that_matches_no_documents(
+    tmp_path: Path,
+) -> None:
+    with patch.object(
+        sys,
+        "argv",
+        [
+            "regression_rulebooks.py",
+            str(tmp_path),
+            "--home",
+            str(tmp_path / "home"),
+            "--include",
+            "missing.pdf",
+        ],
+    ):
+        args = driver._arguments()
+
+    async def fake_call(_server, tool_name, arguments):
+        if tool_name == "campaign_create":
+            return {"id": "campaign-1"}
+        assert arguments["action"] == "discover"
+        return {"result": {"documents": [{"relative_path": "actual.pdf"}]}}
+
+    with (
+        patch.object(driver, "create_server", return_value=object()),
+        patch.object(driver, "_call", side_effect=fake_call),
+    ):
+        with pytest.raises(ValueError, match="matched no discovered rule documents"):
+            asyncio.run(driver._run(args))
+
+
+def test_baseline_only_rejects_package_output(tmp_path: Path) -> None:
+    with patch.object(
+        sys,
+        "argv",
+        [
+            "regression_rulebooks.py",
+            str(tmp_path),
+            "--home",
+            str(tmp_path / "home"),
+            "--baseline-only",
+            "--addon-output-dir",
+            str(tmp_path / "packages"),
+        ],
+    ):
+        args = driver._arguments()
+
+    with pytest.raises(ValueError, match="cannot build or round-trip content packages"):
+        asyncio.run(driver._run(args))
 
 
 def test_runtime_probe_hp_uses_legal_fixed_average_progression() -> None:
@@ -719,9 +1032,10 @@ def test_runtime_probe_requires_context_idempotency_and_persisted_receipt() -> N
             campaign_id="campaign-1",
             edition="2014",
             package={
+                "format": "sagasmith.content-package",
                 "id": "dnd5e.addon.test",
                 "version": "1.0.0",
-                "payload": {"artifacts": [artifact]},
+                "content": {"artifacts": [artifact]},
             },
             probes=[
                 {
@@ -753,7 +1067,7 @@ def test_large_catalog_augmentation_uses_revisioned_public_batches() -> None:
     server = _FakeServer(
         [
             (
-                "rule_import",
+                "rulebook_draft",
                 {
                     "result": {
                         "job": {"revision": revision},
@@ -940,6 +1254,54 @@ def test_expected_catalog_uses_reviewed_names_instead_of_damaged_ocr() -> None:
     )
 
     assert decisions[0]["artifact"]["card"]["name"] == "Orc"
+
+
+def test_expected_catalog_digest_locks_the_complete_reviewed_identity_set() -> None:
+    candidates = [
+        {
+            "id": "orc",
+            "kind": "species",
+            "name": "Orc",
+            "artifact": {"kind": "species", "card": {"name": "Orc"}},
+        },
+        {
+            "id": "orc-copy",
+            "kind": "species",
+            "name": "Orc",
+            "artifact": {"kind": "species", "card": {"name": "Orc"}},
+        },
+    ]
+    identities = [("species", "orc"), ("species", "orc")]
+    digest = hashlib.sha256(
+        json.dumps(
+            identities,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+    driver._review_spec_decisions(
+        candidates,
+        {
+            "default_status": "accepted",
+            "decisions": [],
+            "expected_catalog_sha256": digest,
+        },
+        reviewer="agent:catalog",
+        method="agent",
+    )
+
+    with pytest.raises(ValueError, match="expected_catalog_sha256 differs"):
+        driver._review_spec_decisions(
+            candidates[:1],
+            {
+                "default_status": "accepted",
+                "decisions": [],
+                "expected_catalog_sha256": digest,
+            },
+            reviewer="agent:catalog",
+            method="agent",
+        )
 
 
 def test_catalog_review_recovers_bounded_ocr_spacing_in_identity() -> None:
@@ -1345,12 +1707,12 @@ def test_portable_receiver_enables_exact_core_dependency() -> None:
                 },
             ),
             (
-                "campaign_rules",
+                "content_pack",
                 {
                     "result": {
                         "activation": {
                             "pack_id": "dnd5e.content.srd2014",
-                            "version": "1.21.0",
+                            "version": "1.22.0",
                             "enabled": True,
                         }
                     }
@@ -1370,8 +1732,10 @@ def test_portable_receiver_enables_exact_core_dependency() -> None:
 
     assert activation["enabled"] is True
     assert server.calls[1][1]["payload"] == {
+        "kind": "rule",
+        "campaign_id": "receiver",
         "pack_id": "dnd5e.content.srd2014",
-        "version": "1.21.0",
+        "version": "1.22.0",
     }
     assert server.calls[1][1]["expected_revision"] == 4
     assert server.calls[1][1]["idempotency_key"].endswith(f"{driver._run_token('reviewed-v2')}-r4")
@@ -1598,6 +1962,57 @@ def test_strict_catalog_manifest_requires_every_selected_document() -> None:
         )
 
 
+def test_complete_statblock_review_requires_exact_actor_name_inventory() -> None:
+    with pytest.raises(ValueError, match="exact expected actor-name inventory"):
+        driver._catalog_document_review(
+            {
+                "version": 1,
+                "strict": True,
+                "documents": {
+                    "Creatures.pdf": {
+                        "complete_review": True,
+                        "expected_counts": {"statblock": 1},
+                    }
+                },
+            },
+            "Creatures.pdf",
+        )
+
+    review = driver._catalog_document_review(
+        {
+            "version": 1,
+            "strict": True,
+            "documents": {
+                "Summons.pdf": {
+                    "complete_review": True,
+                    "expected_counts": {"statblock": 1},
+                    "expected_actor_names": [],
+                    "expected_dependent_actor_names": ["Reviewed Spirit"],
+                }
+            },
+        },
+        "Summons.pdf",
+    )
+    assert review["expected_actor_names"] == []
+
+
+def test_content_roundtrip_defaults_to_the_bundled_strict_catalog_review() -> None:
+    selected = driver._effective_catalog_manifest_path(None, content_roundtrip=True)
+
+    assert selected == driver.DEFAULT_CONTENT_CATALOG_MANIFEST.resolve()
+    manifest = driver._load_catalog_manifest(selected)
+    assert manifest["strict"] is True
+    assert len(manifest["documents"]) == 21
+    assert {
+        "D&D 5E - Eberron - Rising from the Last War.pdf",
+        "D&D 5E - Mordenkainen's Tome of Foes.pdf",
+        "D&D 5E - Sword Coast Adventurer's Guide.pdf",
+        "D&D 5E - The Tortle Package.pdf",
+    }.issubset(manifest["documents"])
+    assert all(review.get("complete_review") is True for review in manifest["documents"].values())
+    assert driver._effective_catalog_manifest_path(None, content_roundtrip=False) is None
+
+
 def test_catalog_manifest_merges_relative_per_book_includes(tmp_path: Path) -> None:
     included = tmp_path / "included.json"
     included.write_text(
@@ -1717,39 +2132,24 @@ def test_catalog_decisions_distinguish_extracted_cards_from_agent_additions() ->
     assert [item["review_status"] for item in decisions] == ["rejected", "accepted"]
 
 
-def test_portable_roundtrip_uses_public_facades_and_preserves_package() -> None:
+def test_content_roundtrip_uses_public_facades_and_preserves_package() -> None:
     package = {
         "id": "dnd5e.regression.rulebook.0123456789abcdef",
         "version": "1.0.0",
         "checksum": "a" * 64,
-        "metadata": {"definition_checksum": "b" * 64},
+        "metadata": {},
+        "content": {"rule_definitions": [{"definition_checksum": "b" * 64}]},
     }
     addon = {
         "id": f"{package['id']}.addon",
         "version": "1.0.0",
         "checksum": "c" * 64,
-        "payload": {
-            "manifest": {
-                "readiness_policy": "build_time_complete",
-                "readiness": {
-                    "complete": True,
-                    **{
-                        dimension: {"complete": True, "blockers": []}
-                        for dimension in ("source", "catalog", "selection", "runtime")
-                    },
-                },
-                "resolution_readiness": {
-                    "complete": True,
-                    "first_use_compilation_required": False,
-                    "unresolved": [],
-                },
-            }
-        },
+        "kind": "addon",
     }
     source = _FakeServer(
         [
             (
-                "rule_pack_query",
+                "content_pack",
                 {
                     "result": [
                         {
@@ -1773,22 +2173,23 @@ def test_portable_roundtrip_uses_public_facades_and_preserves_package() -> None:
                     ]
                 },
             ),
-            ("rule_pack_compile", {"result": {"status": "validated"}}),
+            ("content_pack", {"result": {"status": "validated"}}),
             (
-                "rule_pack_query",
+                "content_pack",
                 {
                     "result": {
                         "package": package,
-                        "artifact": {"path": "managed-package.json"},
+                        "artifact": {"artifact": "managed-package.sagasmith-pack"},
                     }
                 },
             ),
             (
-                "rule_pack_query",
+                "content_pack",
                 {
                     "result": {
                         "package": addon,
-                        "artifact": {"path": "managed-addon.json"},
+                        "artifact": {"artifact": "managed-addon.sagasmith-pack"},
+                        "summary": {"validation": {"complete": True}},
                     }
                 },
             ),
@@ -1797,7 +2198,7 @@ def test_portable_roundtrip_uses_public_facades_and_preserves_package() -> None:
     target = _FakeServer(
         [
             (
-                "rule_import",
+                "content_pack",
                 {
                     "result": {
                         "installed": True,
@@ -1807,21 +2208,22 @@ def test_portable_roundtrip_uses_public_facades_and_preserves_package() -> None:
                 },
             ),
             ("campaign_rules", {"result": {"campaign_revision": 1}}),
-            ("campaign_rules", {"result": {"activation": {"enabled": True}}}),
+            ("content_pack", {"result": {"activation": {"enabled": True}}}),
             ("campaign_query", {"result": {"revision": 2}}),
-            ("campaign_rules", {"result": {"activation": {"enabled": False}}}),
-            ("rule_pack_query", {"result": {"package": package}}),
-            ("rule_pack_query", {"result": {"package": addon}}),
+            ("content_pack", {"result": {"activation": {"enabled": False}}}),
+            ("content_pack", {"result": {"package": package}}),
+            ("content_pack", {"result": {"package": addon}}),
             (
-                "rule_pack_query",
+                "content_pack",
                 {"result": [{"id": "fresh-source", "source_key": "regression.book"}]},
             ),
         ]
     )
 
     result = asyncio.run(
-        driver._portable_roundtrip(
+        driver._content_roundtrip(
             source_server=source,
+            source_archive_dir=Path("artifacts"),
             source_campaign_id="source-campaign",
             target_server=target,
             target_campaign_id="target-campaign",
@@ -1846,10 +2248,10 @@ def test_portable_roundtrip_uses_public_facades_and_preserves_package() -> None:
     assert result["activated"] is True
     assert result["deactivated"] is True
     assert [name for name, _arguments in source.calls] == [
-        "rule_pack_query",
-        "rule_pack_compile",
-        "rule_pack_query",
-        "rule_pack_query",
+        "content_pack",
+        "content_pack",
+        "content_pack",
+        "content_pack",
     ]
     fallback_compile = source.calls[1][1]["payload"]
     assert len(fallback_compile["artifacts"]) == 2
@@ -1865,23 +2267,23 @@ def test_portable_roundtrip_uses_public_facades_and_preserves_package() -> None:
     assert fallback_compile["provenance"]["empty_source_chunk_count"] == 1
     assert "descriptive_fallback" not in fallback_compile["provenance"]
     assert fallback_compile["manifest"]["dependencies"] == [
-        {"id": "dnd5e.content.srd2014", "version": "1.21.0"}
+        {"id": "dnd5e.content.srd2014", "version": "1.22.0"}
     ]
     assert [name for name, _arguments in target.calls] == [
-        "rule_import",
+        "content_pack",
         "campaign_rules",
-        "campaign_rules",
+        "content_pack",
         "campaign_query",
-        "campaign_rules",
-        "rule_pack_query",
-        "rule_pack_query",
-        "rule_pack_query",
+        "content_pack",
+        "content_pack",
+        "content_pack",
+        "content_pack",
     ]
     assert target.calls[2][1]["idempotency_key"] == ("regression-addon-enable-request-r1")
     assert target.calls[4][1]["idempotency_key"] == ("regression-addon-disable-request-r2")
 
 
-def test_portable_roundtrip_rejects_deferred_actor_presets() -> None:
+def test_content_roundtrip_rejects_deferred_actor_presets() -> None:
     package = {
         "id": "dnd5e.addon.rulebook.example",
         "version": "1.0.0",
@@ -1906,7 +2308,7 @@ def test_portable_roundtrip_rejects_deferred_actor_presets() -> None:
     source = _FakeServer(
         [
             (
-                "rule_pack_query",
+                "content_pack",
                 {
                     "result": [
                         {
@@ -1917,20 +2319,21 @@ def test_portable_roundtrip_rejects_deferred_actor_presets() -> None:
                 },
             ),
             (
-                "rule_import",
+                "rulebook_draft",
                 {
                     "result": {
+                        "job": {"revision": 7},
                         "candidates": [
                             {
                                 "id": candidate["id"],
-                                "review_status": "needs_revision",
+                                "review_status": "accepted",
                             }
-                        ]
+                        ],
                     }
                 },
             ),
             (
-                "rule_import",
+                "rulebook_draft",
                 {
                     "result": {
                         "candidates": [
@@ -1942,13 +2345,18 @@ def test_portable_roundtrip_rejects_deferred_actor_presets() -> None:
                     }
                 },
             ),
-            ("rule_import", {"result": {"draft": {"status": "validated"}}}),
+            ("rulebook_draft", {"result": {"draft": {"status": "validated"}}}),
             (
-                "rule_pack_query",
-                {"result": {"package": package, "artifact": {"path": "rules.json"}}},
+                "content_pack",
+                {
+                    "result": {
+                        "package": package,
+                        "artifact": {"artifact": "rules.sagasmith-pack"},
+                    }
+                },
             ),
             (
-                "rule_pack_query",
+                "content_pack",
                 {
                     "result": {
                         "package": None,
@@ -1968,15 +2376,21 @@ def test_portable_roundtrip_rejects_deferred_actor_presets() -> None:
                 },
             ),
             (
-                "rule_pack_query",
-                {"result": {"package": addon, "artifact": {"path": "addon.json"}}},
+                "content_pack",
+                {
+                    "result": {
+                        "package": addon,
+                        "artifact": {"path": "addon.json"},
+                        "summary": {"validation": {"complete": True}},
+                    }
+                },
             ),
         ]
     )
     target = _FakeServer(
         [
             (
-                "rule_import",
+                "content_pack",
                 {
                     "result": {
                         "installed": True,
@@ -1986,13 +2400,13 @@ def test_portable_roundtrip_rejects_deferred_actor_presets() -> None:
                 },
             ),
             ("campaign_rules", {"result": {"campaign_revision": 1}}),
-            ("campaign_rules", {"result": {"activation": {"enabled": True}}}),
+            ("content_pack", {"result": {"activation": {"enabled": True}}}),
             ("campaign_query", {"result": {"revision": 2}}),
-            ("campaign_rules", {"result": {"activation": {"enabled": False}}}),
-            ("rule_pack_query", {"result": {"package": package}}),
-            ("rule_pack_query", {"result": {"package": addon}}),
+            ("content_pack", {"result": {"activation": {"enabled": False}}}),
+            ("content_pack", {"result": {"package": package}}),
+            ("content_pack", {"result": {"package": addon}}),
             (
-                "rule_pack_query",
+                "content_pack",
                 {"result": [{"id": "fresh-source", "source_key": "regression.book"}]},
             ),
         ]
@@ -2000,8 +2414,9 @@ def test_portable_roundtrip_rejects_deferred_actor_presets() -> None:
 
     with pytest.raises(RuntimeError, match="actor preset export is incomplete"):
         asyncio.run(
-            driver._portable_roundtrip(
+            driver._content_roundtrip(
                 source_server=source,
+                source_archive_dir=Path("artifacts"),
                 source_campaign_id="source-campaign",
                 target_server=target,
                 target_campaign_id="target-campaign",
@@ -2025,10 +2440,12 @@ def test_portable_roundtrip_rejects_deferred_actor_presets() -> None:
     assert decision["id"] == candidate["id"]
     assert decision["review_status"] == "accepted"
     assert decision["catalog_review_decision"]["role"] == "primary"
-    critic_decision = source.calls[2][1]["payload"]["decisions"][0]
-    assert critic_decision["catalog_review_decision"]["role"] == "critic"
-    assert preset_call[0] == "rule_pack_query"
-    assert preset_call[1]["view"] == "preset_package"
+    assert source.calls[2][1]["action"] == "finalize"
+    assert source.calls[2][1]["expected_revision"] == 7
+    assert "confirmed every include or exclude" in source.calls[2][1]["payload"]["note"]
+    assert preset_call[0] == "content_pack"
+    assert preset_call[1]["action"] == "build"
+    assert preset_call[1]["payload"]["kind"] == "preset"
     assert preset_call[1]["payload"]["allow_partial"] is True
     assert [item["role"] for item in preset_call[1]["payload"]["catalog_review_decisions"]] == [
         "primary",
@@ -2036,69 +2453,6 @@ def test_portable_roundtrip_rejects_deferred_actor_presets() -> None:
     ]
     assert len(source.calls) == 6
     assert target.calls == []
-
-
-def test_release_check_is_inspection_only() -> None:
-    manifest = {"kind": "release_manifest"}
-    source = _FakeServer(
-        [
-            (
-                "rule_pack_query",
-                {
-                    "result": {
-                        "artifact": {"path": "release.json"},
-                        "release_manifest": manifest,
-                    }
-                },
-            )
-        ]
-    )
-    target = _FakeServer(
-        [
-            (
-                "rule_import",
-                {
-                    "result": {
-                        "release": {"checksum": "c" * 64},
-                        "components": [
-                            {
-                                "local_status": "installed",
-                                "portable_checksum_status": "match",
-                            }
-                        ],
-                        "authority": "manifest_only",
-                        "auto_install": False,
-                        "auto_activate": False,
-                    }
-                },
-            )
-        ]
-    )
-
-    result = asyncio.run(
-        driver._portable_release_check(
-            source_server=source,
-            source_campaign_id="source-campaign",
-            target_server=target,
-            target_campaign_id="target-campaign",
-            components=[
-                {
-                    "kind": "rule_pack",
-                    "id": "dnd5e.example.rules",
-                    "version": "1.0.0",
-                    "checksum": "a" * 64,
-                    "optional": False,
-                }
-            ],
-            run_id="one",
-        )
-    )
-
-    assert result["authority"] == "manifest_only"
-    assert result["auto_install"] is False
-    assert result["auto_activate"] is False
-    assert result["all_components_installed"] is True
-    assert result["all_envelope_checksums_match"] is True
 
 
 def test_wayfinder_review_preserves_printed_typos_as_source_evidence() -> None:
@@ -2239,8 +2593,20 @@ def test_phb_review_replays_agent_corrected_demiplane_transcription() -> None:
     )
     review = manifest["documents"]["D&D 5E - Player's Handbook.pdf"]
 
-    assert "additions" not in review
-    assert "decisions" not in review
+    spell_additions = [item for item in review["additions"] if item["kind"] == "spell"]
+    assert [(item["kind"], item["name"]) for item in spell_additions] == [("spell", "Demiplane")]
+    assert spell_additions[0]["source_selectors"] == [
+        {"heading_exact": "DEMIPLANE", "page_start": 232}
+    ]
+    assert spell_additions[0]["card"]["definition"]["school"] == "conjuration"
+    assert {
+        item["name"]: item["artifact_patch"]["card"]["name"] for item in review["decisions"]
+    } == {
+        "BLACKBEAR": "Black Bear",
+        "BROWNBEAR": "Brown Bear",
+        "DIREWOLF": "Dire Wolf",
+        "GIANTEAGLE": "Giant Eagle",
+    }
     assert review["text_reviews"] == [
         {
             "page_number": 232,

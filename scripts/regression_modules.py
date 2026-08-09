@@ -356,8 +356,8 @@ async def _import_document(
             "seconds": round(perf_counter() - started, 3),
         }
     capabilities = await client.core("server_capabilities", {})
-    normalizer = str(dict(capabilities.get("module_import") or {}).get("normalizer") or "")
-    parser = str(dict(capabilities.get("module_import") or {}).get("parser") or "")
+    normalizer = str(dict(capabilities.get("module_draft") or {}).get("normalizer") or "")
+    parser = str(dict(capabilities.get("module_draft") or {}).get("parser") or "")
     if not normalizer or not parser:
         raise RuntimeError(
             "server capabilities do not publish the module normalizer and parser"
@@ -374,10 +374,10 @@ async def _import_document(
     )
     stage_started = perf_counter()
     staged = await client.domain(
-        "module_import",
+        "module_draft",
         {
             "campaign_id": campaign_id,
-            "action": "stage",
+            "action": "start",
             "payload": {
                 "source_path": str(path),
                 "source_key": f"regression.{_slug(path.stem)}.{_token(relative, length=10)}",
@@ -391,10 +391,10 @@ async def _import_document(
 
     inspect_started = perf_counter()
     inspected = await client.domain(
-        "module_import",
+        "module_draft",
         {
             "campaign_id": campaign_id,
-            "action": "inspect",
+            "action": "get",
             "payload": {"job_id": job_id},
             "idempotency_key": f"module-corpus-inspect-{identity}",
         },
@@ -409,11 +409,10 @@ async def _import_document(
         raise RuntimeError("; ".join(preview.get("errors") or ["module preview is invalid"]))
 
     validated = await client.domain(
-        "module_import",
+        "module_draft",
         {
             "campaign_id": campaign_id,
-            "action": "validate",
-            "payload": {"job_id": job_id},
+            "action": "edit", "payload": {"operation": "advance","job_id": job_id},
             "idempotency_key": f"module-corpus-validate-{identity}",
         },
     )
@@ -422,11 +421,10 @@ async def _import_document(
 
     ingest_started = perf_counter()
     ingested = await client.domain(
-        "module_import",
+        "module_draft",
         {
             "campaign_id": campaign_id,
-            "action": "ingest",
-            "payload": {"job_id": job_id},
+            "action": "edit", "payload": {"operation": "advance","job_id": job_id},
             "idempotency_key": f"module-corpus-ingest-{identity}",
         },
     )
@@ -442,10 +440,10 @@ async def _import_document(
         )
     )
     activated = await client.domain(
-        "module_import",
+        "module_draft",
         {
             "campaign_id": campaign_id,
-            "action": "activate",
+            "action": "get",
             "payload": {"job_id": job_id},
             "expected_revision": campaign["revision"],
             "idempotency_key": f"module-corpus-activate-{identity}",

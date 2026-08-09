@@ -1416,6 +1416,7 @@ def test_monk_unarmored_defense_materializes_its_wisdom_formula(
             "base": 10,
             "ability": "wisdom",
             "allows_shield": False,
+            "includes_dexterity": True,
         }
 
     asyncio.run(exercise())

@@ -4,18 +4,932 @@
     "D&D 5E - Tasha's Cauldron of Everything.pdf": {
       "complete_review": true,
       "default_status": "accepted",
-      "rationale": "Agent reviewed the complete extracted catalog against indexed source pages. Five owner-dependent statblocks whose PDF columns flattened their core fields are corrected from the immutable page text and dual OCR evidence; the corrected source remains a portable, replayable card rather than a title-specific engine rule.",
+      "rationale": "Agent reviewed the complete catalog against indexed source pages. All thirty printed subclasses have explicit parent-class cards and exact source selectors; subclass features inherit that reviewed ownership instead of a damaged PDF outline. Two item continuations are merged back into their source item, decorative marginalia is rejected, OCR-damaged display names are repaired, and five owner-dependent statblocks whose PDF columns flattened their core fields are restored from immutable page text and dual OCR evidence.",
       "expected_counts": {
         "background": 1,
-        "feat": 44,
-        "feature": 370,
+        "feat": 41,
+        "feature": 372,
         "item": 47,
         "species": 1,
         "spell": 21,
         "statblock": 18,
-        "subclass": 9
+        "subclass": 30
       },
+      "expected_actor_names": [
+        "Juvenile Mimic",
+        "Mighty Servant of Leuk-o"
+      ],
+      "expected_dependent_actor_names": [
+        "Aberrant Spirit",
+        "Beast of the Land",
+        "Beast of the Sea",
+        "Beast of the Sky",
+        "Bestial Spirit",
+        "Celestial Spirit",
+        "Construct Spirit",
+        "Dancing Item",
+        "Elemental Spirit",
+        "Fey Spirit",
+        "Fiendish Spirit",
+        "Homunculus Servant",
+        "Shadow Spirit",
+        "Steel Defender",
+        "Undead Spirit",
+        "Wildfire Spirit"
+      ],
+      "additions": [
+        {
+          "kind": "subclass",
+          "name": "Alchemist",
+          "source_selectors": [
+            {"heading_exact": "ALCHEMIST", "page_start": 15}
+          ],
+          "card": {
+            "name": "Alchemist",
+            "class_name": "Artificer",
+            "minimum_level": 3
+          },
+          "note": "Agent reviewed the printed subclass identity and parent class against the exact source page."
+        },
+        {
+          "kind": "subclass",
+          "name": "Armorer",
+          "source_selectors": [
+            {"heading_exact": "ARMORER", "page_start": 16}
+          ],
+          "card": {
+            "name": "Armorer",
+            "class_name": "Artificer",
+            "minimum_level": 3
+          },
+          "note": "Agent reviewed the printed subclass identity and parent class against the exact source page."
+        },
+        {
+          "kind": "subclass",
+          "name": "Artillerist",
+          "source_selectors": [
+            {"heading_exact": "ARTILLERIST", "page_start": 18}
+          ],
+          "card": {
+            "name": "Artillerist",
+            "class_name": "Artificer",
+            "minimum_level": 3
+          },
+          "note": "Agent reviewed the printed subclass identity and parent class against the exact source page."
+        },
+        {
+          "kind": "subclass",
+          "name": "Battle Smith",
+          "source_selectors": [
+            {"heading_exact": "BATTLE SMITH", "page_start": 19}
+          ],
+          "card": {
+            "name": "Battle Smith",
+            "class_name": "Artificer",
+            "minimum_level": 3
+          },
+          "note": "Agent reviewed the printed subclass identity and parent class against the exact source page."
+        },
+        {
+          "kind": "subclass",
+          "name": "College of Creation",
+          "source_selectors": [
+            {
+              "content_contains": "Bards believe the cosmos is a work of art",
+              "page_start": 29
+            }
+          ],
+          "card": {
+            "name": "College of Creation",
+            "class_name": "Bard",
+            "minimum_level": 3
+          },
+          "note": "Agent reviewed the printed subclass identity and parent class against the exact source page."
+        },
+        {
+          "kind": "subclass",
+          "name": "Order Domain",
+          "source_selectors": [
+            {
+              "content_contains": "The Order Domain represents discipline",
+              "page_start": 32
+            }
+          ],
+          "card": {
+            "name": "Order Domain",
+            "class_name": "Cleric",
+            "minimum_level": 1
+          },
+          "note": "Agent reviewed the printed subclass identity and parent class against the exact source page."
+        },
+        {
+          "kind": "subclass",
+          "name": "Peace Domain",
+          "source_selectors": [
+            {"heading_exact": "PEACE DOMAIN SPELLS", "page_start": 34}
+          ],
+          "card": {
+            "name": "Peace Domain",
+            "class_name": "Cleric",
+            "minimum_level": 1
+          },
+          "note": "Agent reviewed the printed subclass identity and parent class against the exact source page."
+        },
+        {
+          "kind": "subclass",
+          "name": "Twilight Domain",
+          "source_selectors": [
+            {
+              "content_contains": "The twilit transition from light into darkness",
+              "page_start": 35
+            },
+            {
+              "content_contains": "You gain domain spells at the cleric levels listed in the Twilight Domain Spells table",
+              "page_start": 35
+            }
+          ],
+          "card": {
+            "name": "Twilight Domain",
+            "class_name": "Cleric",
+            "minimum_level": 1
+          },
+          "note": "Agent reviewed the printed subclass identity and parent class against the exact source page."
+        },
+        {
+          "kind": "subclass",
+          "name": "Circle of Wildfire",
+          "source_selectors": [
+            {"heading_exact": "CIRCLE OF WILDFIRE", "page_start": 40}
+          ],
+          "card": {
+            "name": "Circle of Wildfire",
+            "class_name": "Druid",
+            "minimum_level": 2
+          },
+          "note": "Agent reviewed the printed subclass identity and parent class against the exact source page."
+        },
+        {
+          "kind": "subclass",
+          "name": "Psi Warrior",
+          "source_selectors": [
+            {"heading_exact": "MARTIAL ARC H ETYPE S", "page_start": 43}
+          ],
+          "card": {
+            "name": "Psi Warrior",
+            "class_name": "Fighter",
+            "minimum_level": 3
+          },
+          "note": "Agent reviewed the printed subclass identity and parent class against the exact source page."
+        },
+        {
+          "kind": "subclass",
+          "name": "Rune Knight",
+          "source_selectors": [
+            {"heading_exact": "RUNE KNIGHT", "page_start": 45}
+          ],
+          "card": {
+            "name": "Rune Knight",
+            "class_name": "Fighter",
+            "minimum_level": 3
+          },
+          "note": "Agent reviewed the printed subclass identity and parent class against the exact source page."
+        },
+        {
+          "kind": "subclass",
+          "name": "Way of Mercy",
+          "source_selectors": [
+            {"heading_exact": "WAY OF MERCY", "page_start": 50}
+          ],
+          "card": {
+            "name": "Way of Mercy",
+            "class_name": "Monk",
+            "minimum_level": 3
+          },
+          "note": "Agent reviewed the printed subclass identity and parent class against the exact source page."
+        },
+        {
+          "kind": "subclass",
+          "name": "Way of the Astral Self",
+          "source_selectors": [
+            {"heading_exact": "WAY OF THE ASTRAL SELF", "page_start": 51}
+          ],
+          "card": {
+            "name": "Way of the Astral Self",
+            "class_name": "Monk",
+            "minimum_level": 3
+          },
+          "note": "Agent reviewed the printed subclass identity and parent class against the exact source page."
+        },
+        {
+          "kind": "subclass",
+          "name": "Fey Wanderer",
+          "source_selectors": [
+            {
+              "page_start": 59,
+              "content_contains": "the Fey Wanderer and the Swarm keeper"
+            },
+            {
+              "page_start": 59,
+              "content_contains": "A fey mystique surrounds you"
+            }
+          ],
+          "card": {
+            "name": "Fey Wanderer",
+            "class_name": "Ranger",
+            "minimum_level": 3
+          },
+          "note": "Agent reviewed the printed subclass identity and parent class against the exact source page."
+        },
+        {
+          "kind": "subclass",
+          "name": "Swarmkeeper",
+          "source_selectors": [
+            {
+              "heading_exact": "TASHA",
+              "page_start": 60,
+              "content_contains": "bond with a swarm of nature spirits"
+            }
+          ],
+          "card": {
+            "name": "Swarmkeeper",
+            "class_name": "Ranger",
+            "minimum_level": 3
+          },
+          "note": "Agent reviewed the printed subclass identity and parent class against the exact source page."
+        },
+        {
+          "kind": "subclass",
+          "name": "Phantom",
+          "source_selectors": [
+            {"heading_exact": "PHANTOM", "page_start": 63}
+          ],
+          "card": {
+            "name": "Phantom",
+            "class_name": "Rogue",
+            "minimum_level": 3
+          },
+          "note": "Agent reviewed the printed subclass identity and parent class against the exact source page."
+        },
+        {
+          "kind": "subclass",
+          "name": "Soulknife",
+          "source_selectors": [
+            {"heading_exact": "SOULKNIFE", "page_start": 64}
+          ],
+          "card": {
+            "name": "Soulknife",
+            "class_name": "Rogue",
+            "minimum_level": 3
+          },
+          "note": "Agent reviewed the printed subclass identity and parent class against the exact source page."
+        },
+        {
+          "kind": "subclass",
+          "name": "Aberrant Mind",
+          "source_selectors": [
+            {"heading_exact": "ABERRANT MIND", "page_start": 67}
+          ],
+          "card": {
+            "name": "Aberrant Mind",
+            "class_name": "Sorcerer",
+            "minimum_level": 1
+          },
+          "note": "Agent reviewed the printed subclass identity and parent class against the exact source page."
+        },
+        {
+          "kind": "subclass",
+          "name": "Clockwork Soul",
+          "source_selectors": [
+            {"heading_exact": "CLOCKWORK SOUL", "page_start": 69}
+          ],
+          "card": {
+            "name": "Clockwork Soul",
+            "class_name": "Sorcerer",
+            "minimum_level": 1
+          },
+          "note": "Agent reviewed the printed subclass identity and parent class against the exact source page."
+        },
+        {
+          "kind": "subclass",
+          "name": "The Fathomless",
+          "source_selectors": [
+            {"heading_exact": "THE FATHOMLESS", "page_start": 73}
+          ],
+          "card": {
+            "name": "The Fathomless",
+            "class_name": "Warlock",
+            "minimum_level": 1
+          },
+          "note": "Agent reviewed the printed subclass identity and parent class against the exact source page."
+        },
+        {
+          "kind": "subclass",
+          "name": "The Genie",
+          "source_selectors": [
+            {"heading_exact": "THE GENIE", "page_start": 74}
+          ],
+          "card": {
+            "name": "The Genie",
+            "class_name": "Warlock",
+            "minimum_level": 1
+          },
+          "note": "Agent reviewed the printed subclass identity and parent class against the exact source page."
+        },
+        {
+          "kind": "subclass",
+          "name": "Bladesinging",
+          "source_selectors": [
+            {"heading_exact": "BLADES INGING", "page_start": 77}
+          ],
+          "card": {
+            "name": "Bladesinging",
+            "class_name": "Wizard",
+            "minimum_level": 2
+          },
+          "note": "Agent reviewed the printed subclass identity and parent class against the exact source page."
+        },
+        {
+          "kind": "subclass",
+          "name": "Order of Scribes",
+          "source_selectors": [
+            {
+              "heading_exact": "TASl/A",
+              "page_start": 78,
+              "content_contains": "Magic of the book"
+            }
+          ],
+          "card": {
+            "name": "Order of Scribes",
+            "class_name": "Wizard",
+            "minimum_level": 2
+          },
+          "note": "Agent reviewed the printed subclass identity and parent class against the exact source page."
+        }
+      ],
       "decisions": [
+          {
+            "kind": "subclass",
+            "name": "Sudden Change",
+            "artifact_patch": {
+              "kind": "feature",
+              "application_state": "catalog_only",
+              "selection_applicability": "not_applicable",
+              "mechanical_scope": "descriptive",
+              "card": {
+                "name": "Sudden Change"
+              }
+            }
+          },
+          {
+            "kind": "subclass",
+            "name": "Origin of the Beast",
+            "artifact_patch": {
+              "kind": "feature",
+              "application_state": "catalog_only",
+              "selection_applicability": "not_applicable",
+              "mechanical_scope": "descriptive",
+              "card": {
+                "name": "Origin of the Beast"
+              }
+            }
+          },
+          {
+            "kind": "subclass",
+            "name": "Path of Wild Magic",
+            "artifact_patch": {
+              "card": {
+                "name": "Path of Wild Magic",
+                "class_name": "Barbarian",
+                "minimum_level": 3
+              }
+            }
+          },
+          {
+            "kind": "subclass",
+            "name": "College of Elo Uence",
+            "artifact_patch": {
+              "card": {
+                "name": "College of Eloquence",
+                "class_name": "Bard",
+                "minimum_level": 3
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "C U Stom I Z I N G You R O Ri Gi N",
+            "artifact_patch": {
+              "card": {
+                "name": "Customizing Your Origin"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "C Ha Nging a Skill",
+            "artifact_patch": {
+              "card": {
+                "name": "Changing a Skill"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "Th E Maci C of Arti Fi Ce",
+            "artifact_patch": {
+              "card": {
+                "name": "The Magic of Artifice",
+                "class_name": "Artificer"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "Artific E R Spec Ialists",
+            "artifact_patch": {
+              "card": {
+                "name": "Artificer Specialists",
+                "class_name": "Artificer"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "Tool P Roficiency",
+            "artifact_patch": {
+              "card": {
+                "name": "Tool Proficiency"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "Experim Ental Elixir",
+            "artifact_patch": {
+              "card": {
+                "name": "Experimental Elixir"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "Arcan E Armor",
+            "artifact_patch": {
+              "card": {
+                "name": "Arcane Armor"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "Im Proved Defender",
+            "artifact_patch": {
+              "card": {
+                "name": "Improved Defender"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "B Olster I Ng Magic",
+            "artifact_patch": {
+              "card": {
+                "name": "Bolstering Magic"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "Magicalinspiration",
+            "artifact_patch": {
+              "card": {
+                "name": "Magical Inspiration",
+                "class_name": "Bard"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "C Reative C Rescendo",
+            "artifact_patch": {
+              "card": {
+                "name": "Creative Crescendo"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "I Nfectious Inspiration",
+            "artifact_patch": {
+              "card": {
+                "name": "Infectious Inspiration"
+              }
+            }
+          },
+          {
+            "kind": "feat",
+            "name": "Harness D Ivine Power",
+            "artifact_patch": {
+              "kind": "feature",
+              "card": {
+                "name": "Harness Divine Power",
+                "class_name": "Cleric",
+                "minimum_level": 2
+              }
+            }
+          },
+          {
+            "kind": "feat",
+            "name": "HUMAN CLERIC OF TWILIGHT EYe S OF NIGHT",
+            "artifact_patch": {
+              "kind": "feature",
+              "card": {
+                "name": "Eyes of Night",
+                "class_name": "Cleric",
+                "subclass_name": "Twilight Domain",
+                "minimum_level": 1
+              }
+            }
+          },
+          {
+            "kind": "feat",
+            "name": "Channel D Ivinity: Twilight Sanctuary",
+            "artifact_patch": {
+              "kind": "feature",
+              "card": {
+                "name": "Channel Divinity: Twilight Sanctuary",
+                "class_name": "Cleric",
+                "subclass_name": "Twilight Domain",
+                "minimum_level": 2
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "Tw Ilight Shroud",
+            "artifact_patch": {
+              "card": {
+                "name": "Twilight Shroud"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "C I Rcle Spells",
+            "artifact_patch": {
+              "card": {
+                "name": "Circle Spells"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "Symbiotic E Ntity",
+            "artifact_patch": {
+              "card": {
+                "name": "Symbiotic Entity"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "Fungal B Ody",
+            "artifact_patch": {
+              "card": {
+                "name": "Fungal Body"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "C Osmic Omen",
+            "artifact_patch": {
+              "card": {
+                "name": "Cosmic Omen"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "Twinkling C Onstellations",
+            "artifact_patch": {
+              "card": {
+                "name": "Twinkling Constellations"
+              }
+            }
+          },
+          {
+            "kind": "feat",
+            "name": "I Nterception",
+            "artifact_patch": {
+              "application_state": "catalog_only",
+              "selection_applicability": "not_applicable",
+              "card": {
+                "name": "Interception"
+              }
+            }
+          },
+          {
+            "kind": "feat",
+            "name": "Superior Tec H Niqu E",
+            "artifact_patch": {
+              "application_state": "catalog_only",
+              "selection_applicability": "not_applicable",
+              "card": {
+                "name": "Superior Technique"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "Martial Arc H Etype S",
+            "artifact_patch": {
+              "application_state": "catalog_only",
+              "selection_applicability": "not_applicable",
+              "mechanical_scope": "descriptive",
+              "card": {
+                "name": "Martial Archetypes",
+                "class_name": "Fighter"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "Rune Carver",
+            "artifact_patch": {
+              "card": {
+                "subclass_name": "Rune Knight"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "Giant's M Ight",
+            "artifact_patch": {
+              "card": {
+                "name": "Giant's Might"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "Ki- Fueled Attack",
+            "artifact_patch": {
+              "card": {
+                "name": "Ki-Fueled Attack"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "Flurry of H Ealing and Harm",
+            "artifact_patch": {
+              "card": {
+                "name": "Flurry of Healing and Harm"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "E Xplores T H E Wilds. Additional Ranger Spells",
+            "artifact_patch": {
+              "card": {
+                "name": "Additional Ranger Spells",
+                "class_name": "Ranger"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "DWARF PALADIN OF THE WATCHERS VIGILANT Re BUKe",
+            "artifact_patch": {
+              "card": {
+                "name": "Vigilant Rebuke"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "Annaveltkamp Otherworldly Glamour",
+            "artifact_patch": {
+              "card": {
+                "name": "Otherworldly Glamour"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "Begui Ling Twi St",
+            "artifact_patch": {
+              "card": {
+                "name": "Beguiling Twist"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "Fey Rein Forcements",
+            "artifact_patch": {
+              "card": {
+                "name": "Fey Reinforcements"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "Misty Wan Derer",
+            "artifact_patch": {
+              "card": {
+                "name": "Misty Wanderer"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "Wh Ispers of the Dead",
+            "artifact_patch": {
+              "card": {
+                "name": "Whispers of the Dead"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "Wai Ls From the Grave",
+            "artifact_patch": {
+              "card": {
+                "name": "Wails from the Grave"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "Psychic Vei L",
+            "artifact_patch": {
+              "card": {
+                "name": "Psychic Veil"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "D Eath 's Friend",
+            "artifact_patch": {
+              "card": {
+                "name": "Death's Friend"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "C Lockwork Cavalcade",
+            "artifact_patch": {
+              "card": {
+                "name": "Clockwork Cavalcade"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "Gen Ie's Ves Sel",
+            "artifact_patch": {
+              "card": {
+                "name": "Genie's Vessel"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "Sanctuary Ves Sel",
+            "artifact_patch": {
+              "card": {
+                "name": "Sanctuary Vessel"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "Blade Song",
+            "artifact_patch": {
+              "card": {
+                "name": "Bladesong"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "Training In War and Song",
+            "artifact_patch": {
+              "card": {
+                "name": "Training in War and Song"
+              }
+            }
+          },
+          {
+            "kind": "item",
+            "name": "Alc Hemical C Ompendium",
+            "artifact_patch": {
+              "card": {
+                "name": "Alchemical Compendium"
+              }
+            }
+          },
+          {
+            "kind": "item",
+            "name": "C Rook of Rao",
+            "artifact_patch": {
+              "card": {
+                "name": "Crook of Rao"
+              }
+            }
+          },
+          {
+            "kind": "item",
+            "name": "DEMONOMICON OF l GGWILV",
+            "artifact_patch": {
+              "card": {
+                "name": "Demonomicon of Iggwilv"
+              }
+            }
+          },
+          {
+            "kind": "item",
+            "name": "M Ighty Servant of Leuk- 0",
+            "artifact_patch": {
+              "card": {
+                "name": "Mighty Servant of Leuk-o"
+              }
+            }
+          },
+          {
+            "kind": "item",
+            "name": "PLANECALLER's C ODEX",
+            "artifact_patch": {
+              "card": {
+                "name": "Planecaller's Codex"
+              }
+            }
+          },
+          {
+            "kind": "item",
+            "name": "P Rosthetic Limb",
+            "artifact_patch": {
+              "card": {
+                "name": "Prosthetic Limb"
+              }
+            }
+          },
+          {
+            "kind": "item",
+            "name": "P Rotective Verses",
+            "artifact_patch": {
+              "card": {
+                "name": "Protective Verses"
+              }
+            }
+          },
+          {
+            "kind": "item",
+            "name": "Reveler's C Oncertina",
+            "artifact_patch": {
+              "card": {
+                "name": "Reveler's Concertina"
+              }
+            }
+          },
+          {
+            "kind": "item",
+            "name": "Rhythm-Maker's D Rum",
+            "artifact_patch": {
+              "card": {
+                "name": "Rhythm-Maker's Drum"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "Ability Score I Mprovement",
+            "artifact_patch": {
+              "card": {
+                "name": "Ability Score Improvement"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "Improved C Ritical",
+            "artifact_patch": {
+              "card": {
+                "name": "Improved Critical"
+              }
+            }
+          },
+          {
+            "kind": "feature",
+            "name": "yoi Ar ow� : be\"1Atif1Al. )!Alt keep them 01At of my l\"b. TASHA",
+            "status": "rejected",
+            "note": "Decorative marginalia OCR, not a character feature."
+          },
         {
           "kind": "subclass",
           "name": "C HA NGING YOU R SUB C LA S S",
@@ -291,6 +1205,24 @@
             "card": {
               "name": "Tasha's Otherworldly Guise",
               "classes": ["Sorcerer", "Warlock", "Wizard"]
+            }
+          }
+        },
+        {
+          "kind": "statblock",
+          "name": "C ONSTRUCT SPIRIT",
+          "artifact_patch": {
+            "card": {
+              "name": "Construct Spirit"
+            }
+          }
+        },
+        {
+          "kind": "statblock",
+          "name": "MIGHTY SERVANT OF LEUK- 0",
+          "artifact_patch": {
+            "card": {
+              "name": "Mighty Servant of Leuk-o"
             }
           }
         },

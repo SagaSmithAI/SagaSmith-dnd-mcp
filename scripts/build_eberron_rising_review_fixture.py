@@ -1212,7 +1212,7 @@ def main() -> None:
             "semantics as Agent-as-DM context instead of inventing one-off engine rules."
         ),
         "expected_counts": {
-            "background": 13, "class": 1, "feat": 2, "feature": 42, "item": 26,
+            "background": 14, "class": 1, "feat": 2, "feature": 44, "item": 26,
             "species": 24, "spell": 1, "statblock": 40, "subclass": 3,
         },
         "expected_actor_names": [
@@ -1227,18 +1227,26 @@ def main() -> None:
             "Kalashtar", "Magewright", "Shifter", "Tarkanan Assassin",
             "Warforged Soldier",
         ],
+        "expected_dependent_actor_names": ["Homunculus Servant", "Steel Defender"],
         "runtime_probes": _runtime_probes(),
         "decisions": [
             _gust_decision(wayfinder_document),
             {
                 "kind": "statblock",
                 "name": "STEEL DEFENDER",
-                "artifact_patch": {"card": {"owner_class_name": "Artificer"}},
+                "artifact_patch": {
+                    "card": {"name": "Steel Defender", "owner_class_name": "Artificer"}
+                },
             },
             {
                 "kind": "statblock",
                 "name": "HOMUNCULUS SERVANT",
-                "artifact_patch": {"card": {"owner_class_name": "Artificer"}},
+                "artifact_patch": {
+                    "card": {
+                        "name": "Homunculus Servant",
+                        "owner_class_name": "Artificer",
+                    }
+                },
             },
             {
                 "kind": "statblock",
@@ -1249,6 +1257,49 @@ def main() -> None:
                 "kind": "statblock",
                 "name": "LADY lLLMARROW",
                 "artifact_patch": {"card": {"name": "Lady Illmarrow"}},
+            },
+            {
+                "kind": "statblock",
+                "name": "RAK TuLKHESH",
+                "source_heading_exact": "RAK TuLKHESH",
+                "artifact_patch": {"card": {"name": "Rak Tulkhesh"}},
+            },
+            {
+                "kind": "feature",
+                "name": "REMARKABLE H E ROES",
+                "status": "accepted",
+                "artifact_patch": {"card": {"name": "Remarkable Heroes"}},
+            },
+            {
+                "kind": "species",
+                "name": "C HANGELING",
+                "status": "accepted",
+                "artifact_patch": {"card": {"name": "Changeling"}},
+            },
+            {
+                "kind": "background",
+                "name": "HOUS E AGENT",
+                "status": "accepted",
+                "artifact_patch": {"card": {"name": "House Agent"}},
+            },
+            {
+                "kind": "feature",
+                "name": "M AGIC ITEM SAVANT",
+                "status": "accepted",
+                "artifact_patch": {"card": {"name": "Magic Item Savant"}},
+            },
+            {
+                "kind": "feature",
+                "name": "S OU L OF ARTI FICE",
+                "status": "accepted",
+                "artifact_patch": {"card": {"name": "Soul of Artifice"}},
+            },
+            {
+                "kind": "feature",
+                "name": "ARTIFIC E R SPEC IALI STS",
+                "source_heading_exact": "ARTIFIC E R SPEC IALI STS",
+                "status": "accepted",
+                "artifact_patch": {"card": {"name": "Artificer Specialists"}},
             },
         ],
         "additions": additions,

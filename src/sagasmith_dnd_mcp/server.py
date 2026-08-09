@@ -45,7 +45,6 @@ from sagasmith_core import (
     ModuleService,
     OcrPageLayout,
     PdfTextLayoutProvider,
-    PortableContentError,
     RapidOcrProvider,
     RevisionService,
     RulePackService,
@@ -55,25 +54,13 @@ from sagasmith_core import (
     SnapshotService,
     SubjectContextService,
     apply_document_page_revisions,
-    build_addon_pack,
-    build_module_pack,
-    build_preset_pack,
-    build_release_manifest,
-    build_rule_pack,
     default_local_principal,
     extract_pdf_page_text,
     file_sha256,
     normalize_document,
     normalized_document_page_text,
     ocr_layout_text,
-    portable_rule_definition_checksum,
     render_pdf_page,
-    validate_addon_pack,
-    validate_addon_readiness,
-    validate_module_pack,
-    validate_preset_pack,
-    validate_release_manifest,
-    validate_rule_pack,
     validate_subject_context_fact,
 )
 from sagasmith_core.access import CAMPAIGN_DM_ROLES, LOCAL_SYSTEM_PRINCIPAL_ID
@@ -90,6 +77,14 @@ from sagasmith_core.modules import (
 )
 from sagasmith_core.modules import (
     normalize_source_evidence_text as _normalize_source_evidence_text,
+)
+from sagasmith_core.portable import (
+    PortableContentError,
+    build_module_pack,
+    build_rule_pack,
+    portable_rule_definition_checksum,
+    validate_addon_validation,
+    validate_rule_pack,
 )
 from sagasmith_core.rule_packs import RulePackError, RulesetUnavailableError
 from sagasmith_core.systems import SystemRegistry
@@ -228,15 +223,28 @@ from sagasmith_dnd.conditions import (
 from sagasmith_dnd.consumables import HEALING_POTION_MECHANIC_ID, healing_potion_formula
 from sagasmith_dnd.content_import import (
     artifact_with_direct_resolution,
-    audit_release_resolution_readiness,
+    audit_release_semantic_validation,
     author_selection_card_from_candidate,
+    candidate_draft_issues,
     compiled_artifacts_from_candidates,
     extract_content_inventory,
     module_statblock_review_candidates,
     normalize_2014_statblock_candidate,
     validate_selection_ready_artifacts,
 )
-from sagasmith_dnd.content_readiness import (
+from sagasmith_dnd.content_packages import (
+    build_addon_content_package,
+    build_module_content_package,
+    build_preset_content_package,
+    compose_addon_content_package,
+    content_actor_catalog_definition,
+    validate_dnd_content_package,
+)
+from sagasmith_dnd.content_solution import (
+    ContentSolutionError,
+    build_content_solution,
+)
+from sagasmith_dnd.content_validation import (
     DND_SELECTION_MATERIALIZERS,
     build_catalog_review,
     build_selection_contract,
@@ -244,10 +252,6 @@ from sagasmith_dnd.content_readiness import (
     content_fingerprint,
     selection_contract_errors,
     selection_input_errors,
-)
-from sagasmith_dnd.content_solution import (
-    ContentSolutionError,
-    build_content_solution,
 )
 from sagasmith_dnd.core_content import PACK_ID as CORE_CONTENT_PACK_ID
 from sagasmith_dnd.core_content import PACK_VERSION as CORE_CONTENT_PACK_VERSION
@@ -312,8 +316,8 @@ from sagasmith_dnd.portable_cards import (
     build_dnd_actor_card,
     build_srd2014_preset_pack,
     build_srd2024_preset_pack,
-    preset_pack_catalog_definition,
     validate_dnd_actor_card,
+    validate_dnd_content_actor,
 )
 from sagasmith_dnd.progression import (
     advance_single_class_level,
@@ -681,7 +685,7 @@ def _agent_ruling_resolution(result: Any) -> dict[str, Any] | None:
 
 
 def _ruling_requirement(reason: str, ruling_kind: str) -> dict[str, Any]:
-    """Describe a readiness boundary without collapsing it into free-form prose."""
+    """Describe a ruling boundary without collapsing it into free-form prose."""
 
     return {
         "reason": reason,
@@ -1509,6 +1513,69 @@ def _artifact_source_pages(artifact: dict[str, Any]) -> set[int]:
             continue
         pages.update(range(page_start, page_end + 1))
     return pages
+
+
+def _index_statblock_source_chunks(
+    chunks: list[dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], dict[str, list[dict[str, Any]]]]:
+    """Build one reusable evidence index for a whole rule source."""
+
+    by_id: dict[str, dict[str, Any]] = {}
+    by_heading_entries: dict[str, dict[str, dict[str, Any]]] = {}
+    for position, chunk in enumerate(chunks):
+        chunk_id = str(chunk.get("id") or "")
+        if chunk_id:
+            by_id[chunk_id] = chunk
+        identity = chunk_id or f"position:{position}"
+        for heading in chunk.get("heading_path") or []:
+            heading_key = compact_ascii_key(str(heading))
+            if heading_key:
+                by_heading_entries.setdefault(heading_key, {})[identity] = chunk
+    return by_id, {
+        heading: list(entries.values()) for heading, entries in by_heading_entries.items()
+    }
+
+
+def _artifact_statblock_source_chunks(
+    artifact: dict[str, Any],
+    *,
+    chunks_by_id: dict[str, dict[str, Any]],
+    chunks_by_heading: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Select bounded evidence without rescanning the full document catalog."""
+
+    cited_ids = list(
+        dict.fromkeys(
+            str(citation.get("chunk_id") or "")
+            for citation in artifact.get("source_citations") or []
+            if str(citation.get("chunk_id") or "")
+        )
+    )
+    cited = [chunks_by_id[chunk_id] for chunk_id in cited_ids if chunk_id in chunks_by_id]
+    if cited:
+        return cited
+    name = compact_ascii_key(str(dict(artifact.get("card") or {}).get("name") or ""))
+    return list(chunks_by_heading.get(name, []))
+
+
+def _cached_rapidocr_provider(
+    providers: dict[tuple[str, float], RapidOcrProvider],
+    *,
+    model_type: str,
+    scale: float,
+    cache_dir: Path,
+) -> RapidOcrProvider:
+    """Reuse one lazy OCR engine for every page of the same model profile."""
+
+    key = (str(model_type), round(float(scale), 3))
+    return providers.setdefault(
+        key,
+        RapidOcrProvider(
+            scale=key[1],
+            model_type=key[0],
+            cache_dir=cache_dir,
+        ),
+    )
 
 
 def _ocr_fact_key(value: Any) -> str:
@@ -2403,7 +2470,7 @@ def _subclass_spell_grants(card: dict[str, Any]) -> list[dict[str, Any]]:
     return grants
 
 
-def audit_dnd_addon_resolution_components(
+def audit_dnd_addon_semantics(
     components: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Fail closed when a D&D addon still needs first-use semantic compilation."""
@@ -2416,7 +2483,7 @@ def audit_dnd_addon_resolution_components(
         kind = str(component.get("kind") or "")
         payload = dict(component.get("payload") or {})
         if kind == "rule_pack":
-            report = audit_release_resolution_readiness(
+            report = audit_release_semantic_validation(
                 list(payload.get("artifacts") or []),
                 settled_mechanic_ids=_rule_payload_settled_mechanic_ids(payload),
             )
@@ -2439,7 +2506,7 @@ def audit_dnd_addon_resolution_components(
             )
             if (
                 component_manifest.get("resolution_policy") != "build_time_complete"
-                or component_manifest.get("resolution_readiness") != report
+                or component_manifest.get("semantic_validation") != report
             ):
                 unresolved.append(
                     {
@@ -2547,7 +2614,7 @@ def audit_dnd_addon_resolution_components(
     }
 
 
-def _addon_readiness_blocker(
+def _addon_validation_issue(
     component_id: str,
     item_id: str | None,
     reason: str,
@@ -2847,10 +2914,10 @@ def _rebind_transported_content_attestations(
     return rebound
 
 
-def audit_dnd_addon_readiness_components(
+def audit_dnd_addon_validation_components(
     components: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Recompute source, catalog, selection, and runtime readiness from content."""
+    """Recompute source, catalog, selection, and runtime validation from content."""
 
     source_items = source_verified = 0
     catalog_items = catalog_reviewed = 0
@@ -2872,7 +2939,7 @@ def audit_dnd_addon_readiness_components(
             ]
             chunks = _portable_rule_chunk_content(payload)
             settled_mechanic_ids = _rule_payload_settled_mechanic_ids(payload)
-            runtime_report = audit_release_resolution_readiness(
+            runtime_report = audit_release_semantic_validation(
                 artifacts,
                 settled_mechanic_ids=settled_mechanic_ids,
             )
@@ -2887,7 +2954,7 @@ def audit_dnd_addon_readiness_components(
                     source_verified += 1
                 else:
                     source_blockers.append(
-                        _addon_readiness_blocker(
+                        _addon_validation_issue(
                             component_id,
                             artifact_id,
                             "artifact lacks an exact excerpt from a referenced source chunk",
@@ -2900,7 +2967,7 @@ def audit_dnd_addon_readiness_components(
                     catalog_reviewed += 1
                 else:
                     catalog_blockers.append(
-                        _addon_readiness_blocker(
+                        _addon_validation_issue(
                             component_id,
                             artifact_id,
                             "; ".join(review_errors),
@@ -2929,7 +2996,7 @@ def audit_dnd_addon_readiness_components(
                         selection_ready += 1
                     else:
                         selection_blockers.append(
-                            _addon_readiness_blocker(
+                            _addon_validation_issue(
                                 component_id,
                                 artifact_id,
                                 "; ".join(dict.fromkeys([*contract_errors, *declared_blockers]))
@@ -2940,7 +3007,7 @@ def audit_dnd_addon_readiness_components(
                 runtime_items += 1
                 if artifact_id in unresolved:
                     runtime_blockers.append(
-                        _addon_readiness_blocker(
+                        _addon_validation_issue(
                             component_id,
                             artifact_id,
                             unresolved[artifact_id],
@@ -2956,7 +3023,7 @@ def audit_dnd_addon_readiness_components(
                         runtime_modes[mode] = runtime_modes.get(mode, 0) + 1
                     else:
                         runtime_blockers.append(
-                            _addon_readiness_blocker(
+                            _addon_validation_issue(
                                 component_id,
                                 artifact_id,
                                 "resolved artifact has no canonical runtime mode",
@@ -2980,7 +3047,7 @@ def audit_dnd_addon_readiness_components(
                 source_verified += 1
             else:
                 source_blockers.append(
-                    _addon_readiness_blocker(
+                    _addon_validation_issue(
                         component_id,
                         actor_id,
                         "actor card lacks checksum-bound source text and references",
@@ -2992,7 +3059,7 @@ def audit_dnd_addon_readiness_components(
                 catalog_reviewed += 1
             else:
                 catalog_blockers.append(
-                    _addon_readiness_blocker(
+                    _addon_validation_issue(
                         component_id,
                         actor_id,
                         "; ".join(review_errors),
@@ -3026,7 +3093,7 @@ def audit_dnd_addon_readiness_components(
                     catalog_reviewed += 1
                 else:
                     catalog_blockers.append(
-                        _addon_readiness_blocker(
+                        _addon_validation_issue(
                             component_id,
                             scene_id,
                             "; ".join(review_errors),
@@ -3036,7 +3103,7 @@ def audit_dnd_addon_readiness_components(
         for item_id, mode, blocker in _actor_runtime_entries(component):
             runtime_items += 1
             if blocker:
-                runtime_blockers.append(_addon_readiness_blocker(component_id, item_id, blocker))
+                runtime_blockers.append(_addon_validation_issue(component_id, item_id, blocker))
             else:
                 runtime_resolved += 1
                 runtime_modes[mode] = runtime_modes.get(mode, 0) + 1
@@ -3082,7 +3149,7 @@ def audit_dnd_addon_readiness_components(
             )
         ),
     }
-    return validate_addon_readiness(report)
+    return validate_addon_validation(report)
 
 
 def _finalize_rule_artifact_resolution_states(
@@ -3149,16 +3216,16 @@ def finalize_dnd_addon_resolution_components(
             list(payload.get("artifacts") or [])
         )
         manifest = deepcopy(dict(payload.get("manifest") or {}))
-        readiness = audit_release_resolution_readiness(
+        validation = audit_release_semantic_validation(
             artifacts,
             settled_mechanic_ids=_rule_payload_settled_mechanic_ids(payload),
         )
         if (
             manifest.get("resolution_policy") != "build_time_complete"
-            or manifest.get("resolution_readiness") != readiness
+            or manifest.get("semantic_validation") != validation
         ):
             manifest["resolution_policy"] = "build_time_complete"
-            manifest["resolution_readiness"] = deepcopy(readiness)
+            manifest["semantic_validation"] = deepcopy(validation)
             changed = True
         if not changed:
             finalized.append(component)
@@ -3637,9 +3704,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 *list(value["mechanics"]),
                 *(mechanic for provider in native for mechanic in provider["mechanics"]),
             ]
-            value["fingerprint"] = json_sha256(
-                {"base": effective.fingerprint, "native": native}
-            )
+            value["fingerprint"] = json_sha256({"base": effective.fingerprint, "native": native})
         try:
             context = resolution_context(value, facts=facts)
         except ValueError as error:
@@ -4125,7 +4190,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             *validate_selection_ready_artifacts(artifact_values),
             *native_errors,
         ]
-        resolution_readiness = audit_release_resolution_readiness(
+        semantic_validation = audit_release_semantic_validation(
             artifact_values,
             settled_mechanic_ids=_rule_payload_settled_mechanic_ids(
                 {
@@ -4135,12 +4200,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ),
         )
         manifest_value["resolution_policy"] = "build_time_complete"
-        manifest_value["resolution_readiness"] = deepcopy(resolution_readiness)
-        if not resolution_readiness["complete"]:
+        manifest_value["semantic_validation"] = deepcopy(semantic_validation)
+        if not semantic_validation["complete"]:
             compiler_errors.extend(
                 "build-time semantic resolution required for "
                 f"{item['artifact_id']}: {item['reason']}"
-                for item in resolution_readiness["unresolved"]
+                for item in semantic_validation["unresolved"]
             )
         try:
             compile_mechanics(mechanic_values)
@@ -4283,25 +4348,38 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 return
         except LookupError:
             pass
-        package = builder(config.dnd_skills_dir)
-        if not package:
+        legacy_package = builder(config.dnd_skills_dir)
+        if not legacy_package:
             return
-        manifest, artifacts = preset_pack_catalog_definition(package)
-        resolution_readiness = audit_dnd_addon_resolution_components([package])
-        if not resolution_readiness["complete"]:
+        package, _blobs = build_preset_content_package(
+            package_id=pack_id,
+            version=version,
+            system_id=DND5E.id,
+            title=str(legacy_package["metadata"].get("title") or pack_id),
+            cards=list(legacy_package["payload"]["cards"]),
+            metadata=dict(legacy_package["metadata"]),
+            dependencies=[],
+        )
+        manifest, artifacts = content_actor_catalog_definition(package)
+        # Keep the long-standing public preset identifiers while migrating the
+        # cards themselves to the unified actor-card schema.
+        manifest["id"] = pack_id
+        manifest["namespace"] = pack_id
+        semantic_validation = audit_dnd_addon_semantics([legacy_package])
+        if not semantic_validation["complete"]:
             raise ValueError(
                 f"bundled actor preset pack {pack_id}@{version} has unresolved "
-                f"semantics: {resolution_readiness['unresolved']}"
+                f"semantics: {semantic_validation['unresolved']}"
             )
         manifest["resolution_policy"] = "build_time_complete"
-        manifest["resolution_readiness"] = deepcopy(resolution_readiness)
+        manifest["semantic_validation"] = deepcopy(semantic_validation)
         result = rule_packs.save_draft(
             manifest=manifest,
             artifacts=artifacts,
             provenance={
                 "source": source,
                 "structured": True,
-                "portable_package_checksum": package["checksum"],
+                "content_package_checksum": package["checksum"],
                 "license": package["metadata"].get("license"),
                 "attribution": package["metadata"].get("attribution"),
             },
@@ -4329,42 +4407,26 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Resolve one installed bundled preset without requiring campaign activation."""
 
         identifier = str(artifact_id).strip()
-        matches = []
+        matches: list[dict[str, Any]] = []
         for pack in rule_packs.list_versions():
             if pack.status != "installed":
                 continue
-            matches.extend(
-                dict(dict(artifact.get("card") or {}).get("portable_card") or {})
-                for artifact in pack.artifacts
-                if str(artifact.get("id") or "") == identifier
-            )
+            for artifact in pack.artifacts:
+                if str(artifact.get("id") or "") != identifier:
+                    continue
+                card = dict(artifact.get("card") or {})
+                content_actor = dict(card.get("content_actor") or {})
+                if content_actor:
+                    matches.append(content_actor)
+                    continue
+                portable = dict(card.get("portable_card") or {})
+                if portable:
+                    matches.append(portable)
         if len(matches) != 1:
             raise ValueError("artifact_id must resolve to exactly one installed actor preset")
+        if matches[0].get("schema") == "sagasmith.actor-card.v3":
+            return validate_dnd_content_actor(matches[0])
         return validate_dnd_actor_card(matches[0])
-
-    def portable_input(data: dict[str, Any], *, field: str, expected_kind: str) -> dict[str, Any]:
-        """Load one inline, managed, or allowlisted portable package."""
-
-        choices = [
-            name for name in (field, "artifact", "source_path") if data.get(name) is not None
-        ]
-        if len(choices) != 1:
-            raise ValueError(
-                f"provide exactly one of payload.{field}, payload.artifact, or payload.source_path"
-            )
-        if field in choices:
-            value = data[field]
-            if not isinstance(value, dict):
-                raise ValueError(f"payload.{field} must be an object")
-            package = dict(value)
-        else:
-            package = storage.read_portable_package(
-                artifact=str(data["artifact"]) if "artifact" in choices else None,
-                source_path=data.get("source_path") if "source_path" in choices else None,
-            )
-        if package.get("kind") != expected_kind:
-            raise ValueError(f"portable package kind must be {expected_kind}")
-        return package
 
     def refresh_portable_resolution_plans(value: Any) -> Any:
         """Re-fingerprint plans after stable/local source locators are remapped."""
@@ -4599,7 +4661,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         portable_definition["artifacts"] = _rebind_transported_content_attestations(
             list(portable_definition["artifacts"])
         )
-        resolution_readiness = audit_release_resolution_readiness(
+        semantic_validation = audit_release_semantic_validation(
             list(portable_definition["artifacts"]),
             settled_mechanic_ids=_rule_payload_settled_mechanic_ids(
                 {
@@ -4608,18 +4670,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 }
             ),
         )
-        if not resolution_readiness["complete"]:
+        if not semantic_validation["complete"]:
             raise ValueError(
                 "portable rule-pack export requires build-time semantic "
                 "resolution: "
                 + "; ".join(
                     f"{item['artifact_id']}: {item['reason']}"
-                    for item in resolution_readiness["unresolved"][:20]
+                    for item in semantic_validation["unresolved"][:20]
                 )
             )
         portable_manifest = deepcopy(pack.manifest)
         portable_manifest["resolution_policy"] = "build_time_complete"
-        portable_manifest["resolution_readiness"] = deepcopy(resolution_readiness)
+        portable_manifest["semantic_validation"] = deepcopy(semantic_validation)
         package_dependencies: list[dict[str, Any]] = []
         pinned_dependencies: list[dict[str, Any]] = []
         for dependency in portable_manifest.get("dependencies", []):
@@ -4630,6 +4692,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             dependency_id = str(dependency.get("id") or "")
             dependency_version = str(dependency.get("version") or "")
             dependency_pack = rule_packs.get_version(dependency_id, dependency_version)
+            dependency_provenance = rule_packs.provenance(dependency_id, dependency_version)
+            imported_dependency = dict(dependency_provenance.get("portable_package") or {})
+            content_dependency = dict(dependency_provenance.get("content_definition") or {})
+            stored_definition_checksum = str(
+                content_dependency.get("definition_checksum")
+                or imported_dependency.get("definition_checksum")
+                or ""
+            )
             try:
                 dependency_package = portable_rule_pack_definition(
                     dependency_id,
@@ -4646,13 +4716,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 dependency_definition_checksum = portable_rule_definition_checksum(
                     dependency_package
                 )
-            dependency_provenance = rule_packs.provenance(dependency_id, dependency_version)
-            imported_dependency = dict(dependency_provenance.get("portable_package") or {})
+            if stored_definition_checksum:
+                dependency_definition_checksum = stored_definition_checksum
             expected_checksum = str(dependency.get("checksum") or "")
             accepted_existing_checksums = {
                 dependency_pack.checksum,
                 dependency_definition_checksum,
                 str(imported_dependency.get("definition_checksum") or ""),
+                str(content_dependency.get("definition_checksum") or ""),
             }
             if expected_checksum and expected_checksum not in accepted_existing_checksums:
                 raise ValueError(
@@ -4724,17 +4795,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Rebind portable evidence and create an inactive validated draft."""
 
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
-        require_facade_phase(campaign_id, "rule_import(import_package)", PROFILE_LOBBY)
+        require_facade_phase(campaign_id, "content_pack(import)", PROFILE_LOBBY)
         normalized = validate_rule_pack(package, expected_system_id=DND5E.id)
         imported_manifest = dict(normalized["payload"]["manifest"])
-        imported_readiness = audit_release_resolution_readiness(
+        imported_validation = audit_release_semantic_validation(
             list(normalized["payload"]["artifacts"]),
             settled_mechanic_ids=_rule_payload_settled_mechanic_ids(dict(normalized["payload"])),
         )
         if (
             imported_manifest.get("resolution_policy") != "build_time_complete"
-            or imported_manifest.get("resolution_readiness") != imported_readiness
-            or not imported_readiness["complete"]
+            or imported_manifest.get("semantic_validation") != imported_validation
+            or not imported_validation["complete"]
         ):
             raise ValueError(
                 "portable D&D rule pack must carry an exact build-time-complete "
@@ -4824,9 +4895,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 continue
             local_provenance = rule_packs.provenance(dependency_id, dependency_version)
             local_portable_package = dict(local_provenance.get("portable_package") or {})
+            local_content_definition = dict(local_provenance.get("content_definition") or {})
             accepted_local_checksums = {
                 local.checksum,
                 str(local_portable_package.get("definition_checksum") or ""),
+                str(local_content_definition.get("definition_checksum") or ""),
             }
             if dependency_checksum not in accepted_local_checksums:
                 raise ValueError(
@@ -4964,8 +5037,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "installed": False,
             "activated": False,
             "next_actions": [
-                "rule_pack_change(action='install')",
-                "campaign_rules(action='set_pack')",
+                "content_pack(action='install', kind='rule')",
+                "content_pack(action='activate', kind='rule')",
             ],
         }
         return remember_idempotent(
@@ -4976,7 +5049,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             campaign_id=campaign_id,
         )
 
-    def import_portable_module_package(
+    def import_content_module_package(
         campaign_id: str,
         package: dict[str, Any],
         blobs: dict[str, bytes],
@@ -4984,369 +5057,393 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         principal_id: str,
         idempotency_key: str,
         activate: bool,
+        progress_remaps: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """Import an exact module component and its actor cards through public services."""
+        """Import a unified module through module and character service boundaries."""
 
-        normalized = validate_module_pack(package, expected_system_id=DND5E.id)
-        manifest = dict(normalized["payload"]["manifest"])
-        readiness = dict(normalized["payload"]["readiness"])
-        if activate and readiness["level"] not in {"playable", "complete"}:
-            raise ValueError(
-                "only playable or complete module packages may be activated"
-            )
+        normalized = validate_dnd_content_package(package)
+        if normalized["system_id"] != DND5E.id or normalized["kind"] != "module":
+            raise ValueError("content package must be a dnd5e module")
         campaign_edition = campaign_rules_edition(campaign_id)
-        supported_editions = list(manifest["compatibility"]["editions"])
-        if supported_editions and campaign_edition not in supported_editions:
-            raise ValueError(
-                f"module does not support campaign edition {campaign_edition}"
-            )
-        expected_blob_checksums = {
-            asset["checksum"] for asset in normalized["payload"]["assets"]
-        }
-        if set(blobs) != expected_blob_checksums:
-            raise ValueError("module archive blobs do not match asset descriptors")
-        dependency_status = []
-        installed_modules = {
-            (
-                str(dict(item.get("portable_package") or {}).get("id") or ""),
-                str(dict(item.get("portable_package") or {}).get("version") or ""),
-                str(dict(item.get("portable_package") or {}).get("checksum") or ""),
-            )
-            for item in modules.list(campaign_id, include_retired=True)
-        }
-        for dependency in normalized["dependencies"]:
-            identity = (
-                dependency["id"],
-                dependency["version"],
-                dependency["checksum"],
-            )
-            status = "missing"
-            if dependency["kind"] == "module_pack":
-                status = "installed" if identity in installed_modules else "missing"
-            else:
-                try:
-                    local = rule_packs.get_version(dependency["id"], dependency["version"])
-                except LookupError:
-                    local = None
-                if local is not None and local.status == "installed":
-                    provenance = rule_packs.provenance(
-                        dependency["id"], dependency["version"]
-                    )
-                    portable = dict(provenance.get("portable_package") or {})
-                    accepted = {
-                        local.checksum,
-                        str(portable.get("definition_checksum") or ""),
-                        str(portable.get("checksum") or ""),
-                    }
-                    status = (
-                        "installed"
-                        if dependency["checksum"] in accepted
-                        else "checksum_mismatch"
-                    )
-            dependency_status.append({**dependency, "status": status})
-            if status != "installed" and not dependency["optional"]:
-                raise ValueError(
-                    "required module dependency is not installed with its exact checksum: "
-                    f"{dependency['kind']}:{dependency['id']}@{dependency['version']}"
-                )
-        validated_cards = [
-            validate_dnd_actor_card(card) for card in normalized["payload"]["actors"]
-        ]
-        resolution_audit = audit_dnd_addon_resolution_components(
-            [
-                {
-                    "kind": "module_pack",
-                    "id": normalized["id"],
-                    "payload": {"actors": validated_cards},
-                }
-            ]
+        supported_editions = list(
+            dict(normalized["content"].get("compatibility") or {}).get("editions") or []
         )
-        if not resolution_audit["complete"]:
-            raise ValueError(
-                "portable module actor cards require build-time semantic "
-                f"resolution: {resolution_audit['unresolved']}"
-            )
+        if supported_editions and campaign_edition not in supported_editions:
+            raise ValueError(f"module does not support campaign edition {campaign_edition}")
+        validated_actors = [validate_dnd_content_actor(actor) for actor in normalized["actors"]]
         mismatched = [
-            card["id"]
-            for card in validated_cards
-            if card["payload"]["sheet"]["edition"] != campaign_edition
+            actor["id"]
+            for actor in validated_actors
+            if actor["sheet"]["edition"] != campaign_edition
         ]
         if mismatched:
             raise ValueError(
                 "module actor cards do not match the campaign edition: " + ", ".join(mismatched)
             )
-        result = modules.import_portable_pack(
+        result = modules.import_content_package(
             campaign_id,
             normalized,
-            parser=MarkdownModuleParser(profile=DndModuleProfile()),
+            blobs,
             activate=False,
-            asset_loader=lambda asset: blobs[asset["checksum"]],
             asset_writer=storage.store_portable_module_asset,
         )
         actor_map: dict[str, str] = {}
-        binding_ids: list[str] = []
-        for card in validated_cards:
-            card_payload = card["payload"]
-            bindings = list(card_payload["bindings"])
+        binding_ids = []
+        module_key = str(normalized["sources"][0]["source_key"])
+        for actor in validated_actors:
+            bindings = list(actor["bindings"])
             preset_pc = (
                 any(str(binding.get("binding_kind") or "") == "preset_pc" for binding in bindings)
-                or card_payload["actor_type"] == "pc"
+                or actor["actor_type"] == "pc"
             )
-            character = characters.import_portable_card(
-                card,
+            character = characters.import_content_actor(
+                actor,
                 campaign_id=None if preset_pc else campaign_id,
                 principal_id=principal_id,
-                idempotency_key=f"portable-module:{idempotency_key}:{card['checksum']}",
+                idempotency_key=f"content-module:{idempotency_key}:{actor['id']}",
             )
-            actor_map[card["id"]] = character.id
+            actor_map[actor["id"]] = character.id
             effective_bindings = bindings or [
                 {
                     "kind": "module",
-                    "module_key": normalized["payload"]["source"]["source_key"],
+                    "module_key": module_key,
                     "binding_kind": "preset_pc" if preset_pc else "cast",
                     "role": "",
                 }
             ]
             for binding in effective_bindings:
                 scene_key = str(binding.get("scene_key") or "")
-                scene_id = result["scene_map"].get(scene_key) if scene_key else None
-                binding_kind = str(
-                    binding.get("binding_kind") or ("preset_pc" if preset_pc else "cast")
-                )
                 saved = modules.bind_actor(
                     campaign_id=campaign_id,
                     module_id=result["module_id"],
                     character_id=character.id,
-                    portable_actor_id=card["id"],
-                    binding_kind=binding_kind,
+                    portable_actor_id=actor["id"],
+                    binding_kind=str(
+                        binding.get("binding_kind") or ("preset_pc" if preset_pc else "cast")
+                    ),
                     role=str(binding.get("role") or ""),
-                    scene_id=scene_id,
+                    scene_id=result["scene_map"].get(scene_key) if scene_key else None,
                     metadata={
                         **dict(binding.get("metadata") or {}),
-                        "portable_card_checksum": card["checksum"],
-                        "portable_provenance": deepcopy(card_payload.get("provenance") or {}),
-                        "portable_metadata": deepcopy(card.get("metadata") or {}),
-                        "portable_dependencies": deepcopy(card.get("dependencies") or []),
+                        "content_package_checksum": normalized["checksum"],
+                        "content_actor_version": actor["version"],
+                        "portable_provenance": deepcopy(actor.get("provenance") or {}),
+                        "portable_metadata": deepcopy(actor.get("metadata") or {}),
                     },
                 )
                 binding_ids.append(saved["id"])
         result["actor_map"] = actor_map
         result["actor_binding_ids"] = binding_ids
-        result.pop("actor_cards", None)
-        result["dependencies"] = dependency_status
+        result.pop("actors", None)
+        result["dependencies"] = list(normalized["dependencies"])
         result["activated"] = False
         if activate:
-            activation = modules.activate_candidate(
-                campaign_id,
-                result["module_id"],
-                idempotency_key=f"portable-module-activate:{idempotency_key}",
+            normalized_remaps: list[dict[str, str]] = []
+            remap_targets: dict[str, str] = {}
+            for index, raw in enumerate(progress_remaps or []):
+                if not isinstance(raw, dict):
+                    raise ValueError(f"progress_remaps[{index}] must be an object")
+                unknown = set(raw) - {"from_scene_id", "to_scene_key", "reason"}
+                if unknown:
+                    raise ValueError(
+                        f"progress_remaps[{index}] has unsupported fields: {sorted(unknown)}"
+                    )
+                source_scene_id = str(raw.get("from_scene_id") or "").strip()
+                target_scene_key = str(raw.get("to_scene_key") or "").strip()
+                reason = str(raw.get("reason") or "").strip()
+                if not source_scene_id or not target_scene_key:
+                    raise ValueError(
+                        f"progress_remaps[{index}] requires from_scene_id and to_scene_key"
+                    )
+                if target_scene_key not in result["scene_map"]:
+                    raise ValueError(
+                        f"progress_remaps[{index}].to_scene_key is not in the finalized Pack"
+                    )
+                if not reason or len(reason) > 1000:
+                    raise ValueError(
+                        f"progress_remaps[{index}].reason must contain 1 to 1000 characters"
+                    )
+                if source_scene_id in remap_targets:
+                    raise ValueError("progress_remaps contains duplicate from_scene_id values")
+                target_scene_id = str(result["scene_map"][target_scene_key])
+                remap_targets[source_scene_id] = target_scene_id
+                normalized_remaps.append(
+                    {
+                        "from_scene_id": source_scene_id,
+                        "to_scene_key": target_scene_key,
+                        "to_scene_id": target_scene_id,
+                        "reason": reason,
+                        "resolver": "agent",
+                    }
+                )
+            activation_scope = f"content-module-activation:{campaign_id}"
+            activation_key = f"content-module-activate:{idempotency_key}"
+            activation_payload = {
+                "checksum": normalized["checksum"],
+                "module_id": result["module_id"],
+                "operation": "activate",
+                "progress_remaps": normalized_remaps,
+            }
+            activation_replay = idempotency.lookup(
+                activation_scope,
+                activation_key,
+                activation_payload,
             )
-            result["activation"] = activation
+            result["activation"] = (
+                dict(activation_replay.response or {}).get("activation")
+                if activation_replay is not None
+                else modules.activate_candidate(
+                    campaign_id,
+                    result["module_id"],
+                    progress_remaps=remap_targets,
+                    idempotency_key=activation_key,
+                    idempotency_write=IdempotencyWrite(
+                        scope=activation_scope,
+                        payload=activation_payload,
+                        response=lambda value: {"activation": value},
+                    ),
+                )
+            )
+            result["activation"] = {
+                **dict(result["activation"] or {}),
+                "progress_remap_rulings": normalized_remaps,
+            }
             result["activated"] = True
         return result
 
-    def import_portable_addon(
+    def import_content_rules_package(
         campaign_id: str,
         package: dict[str, Any],
+        blobs: dict[str, bytes],
         *,
         principal_id: str,
         idempotency_key: str,
     ) -> dict[str, Any]:
-        """Import and install every global component of one exact addon."""
+        """Install one unified addon/core-rules/preset archive."""
 
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
-        require_facade_phase(campaign_id, "rule_import(import_addon)", PROFILE_LOBBY)
-        normalized = validate_addon_pack(package, expected_system_id=DND5E.id)
-        manifest = dict(normalized["payload"]["manifest"])
-        actual_resolution_readiness = audit_dnd_addon_resolution_components(
-            list(normalized["payload"]["components"])
-        )
-        actual_readiness = audit_dnd_addon_readiness_components(
-            list(normalized["payload"]["components"])
-        )
-        declared_readiness = manifest.get("readiness")
-        readiness_policy = str(manifest.get("readiness_policy") or "")
-        if declared_readiness is not None and declared_readiness != actual_readiness:
-            raise ValueError("D&D addon readiness manifest does not match embedded content")
-        if readiness_policy not in {
-            "review_required",
-            "build_time_complete",
+        require_facade_phase(campaign_id, "content_pack(import)", PROFILE_LOBBY)
+        value = validate_dnd_content_package(package)
+        if value["system_id"] != DND5E.id or value["kind"] not in {
+            "addon",
+            "core_rules",
+            "preset",
         }:
-            raise ValueError("D&D addon readiness_policy is unsupported")
-        if readiness_policy == "build_time_complete" and not actual_readiness["complete"]:
-            raise ValueError("D&D addon declares build_time_complete but has readiness blockers")
-        has_dnd_content = any(
-            str(component.get("kind") or "") in {"rule_pack", "preset_pack", "module_pack"}
-            for component in normalized["payload"]["components"]
-        )
-        if has_dnd_content and (
-            manifest.get("resolution_policy") != "build_time_complete"
-            or manifest.get("resolution_readiness") != actual_resolution_readiness
-            or not actual_resolution_readiness["complete"]
-        ):
-            raise ValueError(
-                "D&D addon must carry an exact build-time-complete semantic resolution audit"
-            )
-        request = {
-            "operation": "import_addon",
-            "package_checksum": normalized["checksum"],
-        }
-        scope = f"portable-addon-import:{campaign_id}:{principal_id}"
+            raise ValueError("content package must be a dnd5e addon, core_rules, or preset")
+        request = {"operation": "import_content", "package_checksum": value["checksum"]}
+        scope = f"content-package-import:{campaign_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, request)
         if replay is not None:
             return replay
+        managed_archive = storage.write_content_archive(value, blobs)
 
-        imported = addons.import_package(
-            normalized,
-            provenance={"import_campaign_id": campaign_id},
-        )
-        components = list(normalized["payload"]["components"])
-        component_results: list[dict[str, Any]] = []
+        assets = {str(item["asset_key"]): item for item in value["assets"]}
+        source_map: dict[str, str] = {}
+        chunk_map: dict[str, str] = {}
+        source_results = []
+        embedder, _vectors = storage.dense_components()
+        for source in value["sources"]:
+            asset = assets[str(source["normalized_document_asset_key"])]
+            imported = rules.import_content_source(
+                source,
+                blobs[str(asset["checksum"])],
+                system_id=DND5E.id,
+                embedder=embedder,
+            )
+            source_map[str(source["source_key"])] = str(imported["source_id"])
+            chunk_map.update({str(key): str(item) for key, item in imported["chunk_map"].items()})
+            source_results.append(
+                {key: deepcopy(item) for key, item in imported.items() if key != "chunk_map"}
+            )
 
-        pending_rules = {
-            (component["id"], component["version"]): component
-            for component in components
-            if component["kind"] == "rule_pack"
-        }
-        while pending_rules:
+        def localize(item: Any) -> Any:
+            if isinstance(item, list):
+                return [localize(child) for child in item]
+            if isinstance(item, str):
+                if item in chunk_map:
+                    return chunk_map[item]
+                result = item
+                for stable_key, local_id in chunk_map.items():
+                    result = result.replace(f"#chunk:{stable_key}", f"#chunk:{local_id}")
+                return result
+            if not isinstance(item, dict):
+                return deepcopy(item)
+            result = {
+                key: localize(child)
+                for key, child in item.items()
+                if key not in {"source_key", "chunk_key", "rule_definition_id"}
+            }
+            source_key = item.get("source_key")
+            if source_key is not None:
+                result["source_key"] = str(source_key)
+                if str(source_key) in source_map:
+                    result["source_id"] = source_map[str(source_key)]
+            chunk_key = item.get("chunk_key")
+            if chunk_key is not None:
+                if str(chunk_key) not in chunk_map:
+                    raise ValueError(f"content citation references unknown chunk {chunk_key}")
+                result["chunk_id"] = chunk_map[str(chunk_key)]
+            return result
+
+        definitions = list(value["content"].get("rule_definitions") or [])
+        pending = {str(item["id"]): dict(item) for item in definitions}
+        component_results = []
+        while pending:
             progressed = False
-            for identity, component in list(pending_rules.items()):
-                dependency_locks = list(component["dependencies"])
+            for definition_id, definition in list(pending.items()):
+                manifest = deepcopy(dict(definition["manifest"]))
                 dependencies_ready = True
-                for dependency in dependency_locks:
+                for dependency in manifest.get("dependencies") or []:
                     try:
-                        local_dependency = rule_packs.get_version(
-                            dependency["id"], dependency["version"]
+                        dependency_row = rule_packs.get_version(
+                            str(dependency["id"]), str(dependency["version"])
                         )
                     except LookupError:
                         dependencies_ready = False
                         break
-                    if local_dependency.status != "installed":
+                    if dependency_row.status != "installed":
                         dependencies_ready = False
                         break
                 if not dependencies_ready:
                     continue
                 try:
-                    local = rule_packs.get_version(component["id"], component["version"])
+                    existing = rule_packs.get_version(definition_id, str(definition["version"]))
                 except LookupError:
-                    imported_component = import_portable_rule_pack(
-                        campaign_id,
-                        component,
-                        principal_id=principal_id,
-                        idempotency_key=(f"{idempotency_key}:rule:{component['checksum']}"),
+                    existing = None
+                if existing is not None and existing.status == "installed":
+                    provenance = rule_packs.provenance(definition_id, str(definition["version"]))
+                    recorded = str(
+                        dict(provenance.get("content_definition") or {}).get("definition_checksum")
+                        or ""
                     )
-                    if imported_component["status"] != "imported":
-                        raise ValueError(f"addon rule component was rejected: {component['id']}")
-                    local = rule_packs.get_version(component["id"], component["version"])
-                provenance = rule_packs.provenance(component["id"], component["version"])
-                imported_checksum = str(
-                    dict(provenance.get("portable_package") or {}).get("checksum") or ""
-                )
-                if imported_checksum:
-                    equivalent_component = imported_checksum == component["checksum"]
-                    local_definition_checksum = ""
+                    if not recorded:
+                        legacy = portable_rule_pack_definition(
+                            definition_id, str(definition["version"])
+                        )
+                        recorded = portable_rule_definition_checksum(legacy)
+                    if recorded != str(definition["definition_checksum"]):
+                        raise ValueError(f"content rule definition conflict: {definition_id}")
+                    local = existing
                 else:
-                    # A rulebook compiled locally before its dependent addon is
-                    # imported has no portable-package provenance yet.  Compare
-                    # its stable detached definition instead of its database-
-                    # local checksum; source/chunk UUIDs are intentionally not
-                    # portable identities.
-                    local_package = portable_rule_pack_definition(
-                        str(component["id"]),
-                        str(component["version"]),
+                    artifacts = [
+                        {
+                            key: child
+                            for key, child in localize(item).items()
+                            if key != "rule_definition_id"
+                        }
+                        for item in value["content"].get("artifacts") or []
+                        if str(item.get("rule_definition_id") or "") == definition_id
+                    ]
+                    mechanics = [
+                        {
+                            key: child
+                            for key, child in localize(item).items()
+                            if key != "rule_definition_id"
+                        }
+                        for item in value["content"].get("mechanics") or []
+                        if str(item.get("rule_definition_id") or "") == definition_id
+                    ]
+                    localized_artifacts = _rebind_transported_content_attestations(
+                        refresh_portable_resolution_plans(artifacts)
                     )
-                    local_definition_checksum = portable_rule_definition_checksum(local_package)
-                    equivalent_component = local_definition_checksum == str(
-                        dict(component.get("metadata") or {}).get("definition_checksum") or ""
+                    localized_mechanics = _rebind_transported_content_attestations(
+                        refresh_portable_resolution_plans(mechanics)
                     )
-                if not equivalent_component:
-                    raise ValueError(f"addon rule component checksum conflict: {component['id']}")
-                if not imported_checksum:
-                    addons.record_component_equivalence(
-                        imported.addon_id,
-                        imported.version,
-                        kind="rule_pack",
-                        component_id=str(component["id"]),
-                        component_version=str(component["version"]),
-                        checksum=str(component["checksum"]),
-                        basis="portable_definition_checksum",
-                        proof_checksum=local_definition_checksum,
+                    draft = save_rule_pack_draft(
+                        manifest=manifest,
+                        artifacts=localized_artifacts,
+                        mechanics=localized_mechanics,
+                        provenance={
+                            "source": f"content-package:{value['id']}",
+                            "structured": True,
+                            "content_definition": {
+                                "package_id": value["id"],
+                                "package_version": value["version"],
+                                "package_checksum": value["checksum"],
+                                "definition_checksum": definition["definition_checksum"],
+                            },
+                            "license": value["metadata"].get("license"),
+                            "attribution": value["metadata"].get("attribution"),
+                        },
                     )
-                if local.status == "validated":
-                    local = rule_packs.install(component["id"], component["version"])
-                if local.status != "installed":
-                    raise ValueError(f"addon rule component is not installable: {component['id']}")
+                    if draft["status"] != "validated":
+                        raise ValueError(f"content rule definition was rejected: {definition_id}")
+                    local = rule_packs.install(definition_id, str(definition["version"]))
                 component_results.append(
                     {
                         "kind": "rule_pack",
-                        "id": component["id"],
-                        "version": component["version"],
-                        "checksum": component["checksum"],
-                        "status": "installed",
+                        "id": definition_id,
+                        "version": definition["version"],
+                        "checksum": definition["definition_checksum"],
+                        "status": local.status,
                     }
                 )
-                del pending_rules[identity]
+                del pending[definition_id]
                 progressed = True
             if not progressed:
-                unresolved = ", ".join(
-                    f"{pack_id}@{version}" for pack_id, version in sorted(pending_rules)
+                raise ValueError(
+                    "content rule dependencies are unavailable or cyclic: "
+                    + ", ".join(sorted(pending))
                 )
-                raise ValueError("addon rule dependencies are unavailable or cyclic: " + unresolved)
 
-        for component in components:
-            if component["kind"] != "preset_pack":
-                continue
-            value = validate_preset_pack(component, expected_system_id=DND5E.id)
-            for card in value["payload"]["cards"]:
-                validate_dnd_actor_card(card)
-            manifest, artifacts = preset_pack_catalog_definition(value)
+        actor_result = None
+        if value["actors"]:
+            actor_manifest, actor_artifacts = content_actor_catalog_definition(value)
             try:
-                local = rule_packs.get_version(value["id"], value["version"])
+                actor_pack = rule_packs.get_version(actor_manifest["id"], actor_manifest["version"])
             except LookupError:
-                local = rule_packs.save_draft(
-                    manifest=manifest,
-                    artifacts=artifacts,
+                actor_pack = rule_packs.save_draft(
+                    manifest=actor_manifest,
+                    artifacts=actor_artifacts,
                     provenance={
-                        "source": f"portable-addon:{normalized['id']}",
+                        "source": f"content-package:{value['id']}",
                         "structured": True,
-                        "portable_package_checksum": value["checksum"],
-                        "license": value["metadata"].get("license"),
-                        "attribution": value["metadata"].get("attribution"),
+                        "content_package_checksum": value["checksum"],
                     },
                 )
-            provenance = rule_packs.provenance(value["id"], value["version"])
-            if str(provenance.get("portable_package_checksum") or "") != value["checksum"]:
-                raise ValueError(f"addon preset component checksum conflict: {value['id']}")
-            if local.status == "validated":
-                local = rule_packs.install(value["id"], value["version"])
-            if local.status != "installed":
-                raise ValueError(f"addon preset component is not installable: {value['id']}")
-            component_results.append(
-                {
-                    "kind": "preset_pack",
-                    "id": value["id"],
-                    "version": value["version"],
-                    "checksum": value["checksum"],
-                    "status": "installed",
-                    "cards": len(value["payload"]["cards"]),
-                }
-            )
+            if actor_pack.status == "validated":
+                actor_pack = rule_packs.install(actor_manifest["id"], actor_manifest["version"])
+            if actor_pack.status != "installed":
+                raise ValueError(
+                    "content actor catalog is not installable: "
+                    + "; ".join(
+                        str(item) for item in dict(actor_pack.validation_report).get("errors", [])
+                    )
+                )
+            actor_result = {
+                "id": actor_manifest["id"],
+                "version": actor_manifest["version"],
+                "actors": len(actor_artifacts),
+                "status": actor_pack.status,
+            }
 
-        installed = addons.install(imported.addon_id, imported.version)
+        addon_result = None
+        if value["kind"] == "addon":
+            imported_addon = addons.import_package(
+                value,
+                provenance={
+                    "import_campaign_id": campaign_id,
+                    "content_archive_artifact": managed_archive["artifact"],
+                },
+            )
+            addon_result = asdict(addons.install(imported_addon.addon_id, imported_addon.version))
         response = {
-            "addon": asdict(installed),
+            "package": {
+                "kind": value["kind"],
+                "id": value["id"],
+                "version": value["version"],
+                "checksum": value["checksum"],
+            },
+            "sources": source_results,
             "components": component_results,
-            "readiness": actual_readiness,
+            "actor_catalog": actor_result,
+            "addon": addon_result,
+            "artifact": managed_archive,
             "installed": True,
             "activated": False,
-            "next_action": "campaign_rules(action='set_addon')",
         }
         return remember_idempotent(
-            scope,
-            idempotency_key,
-            request,
-            response,
-            campaign_id=campaign_id,
+            scope, idempotency_key, request, response, campaign_id=campaign_id
         )
 
     def managed_module_asset_bytes(source_path: str) -> bytes:
@@ -6795,8 +6892,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         }
         return "narrative_only" in tags
 
-    def combat_card_readiness(character: Any) -> dict[str, Any]:
-        """Summarize whether a card can enter structured combat without hidden gaps."""
+    def combat_card_analysis(character: Any) -> dict[str, Any]:
+        """Separate card validity, actor state, and capability-local restrictions."""
         view = character_view(character)
         derived = dict(view.get("derived") or {})
         sheet = dict(view.get("sheet") or {})
@@ -6807,13 +6904,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         unresolved = list(derived.get("unresolved_rules") or [])
         hit_points = int(dict(derived.get("hit_points") or {}).get("value", 0) or 0)
         conditions = {str(item).strip().casefold() for item in sheet.get("conditions", [])}
-        blockers = list(unresolved)
+        hard_blockers: list[str] = []
+        state_flags: list[str] = []
+        disabled_capabilities: list[dict[str, str]] = [
+            {
+                "id": f"rule:{index + 1}",
+                "kind": "rule",
+                "reason": str(reason),
+            }
+            for index, reason in enumerate(unresolved)
+        ]
         if narrative_only_actor(character):
-            blockers.append("narrative_only_noncombat")
+            hard_blockers.append("narrative_only_noncombat")
         if hit_points <= 0:
-            blockers.append("zero_hit_points")
+            state_flags.append("zero_hit_points")
         if "dead" in conditions:
-            blockers.append("dead")
+            state_flags.append("dead")
         dm_notes = str(
             dict(dict(view.get("notes") or {}).get("profile") or {}).get("dm_notes") or ""
         )
@@ -6857,21 +6963,26 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 and item.split(":", 1)[0] in specific_multiattacks
             )
         ]
-        if any(
+        incomplete_spellcasting = any(
             item.endswith("no active spell artifact or complete statblock action exists")
             or (
                 item.startswith("Spellcasting:")
                 and item.endswith("descriptive passive is not automatically settled")
             )
             for item in manual_rulings
-        ):
-            blockers.append("incomplete_statblock_spell_hydration")
+        )
+        if incomplete_spellcasting:
+            disabled_capabilities.append(
+                {
+                    "id": "spellcasting",
+                    "kind": "spellcasting",
+                    "reason": "incomplete_statblock_spell_hydration",
+                }
+            )
         inventory_items = {
             str(item.get("id") or ""): item
             for item in dict(sheet.get("inventory") or {}).get("items", [])
         }
-        unavailable_attack_ids: list[str] = []
-        missing_attack_range_reasons: list[str] = []
         for attack in attacks:
             attack_id = str(attack.get("item_id") or "")
             attack_name = str(attack.get("name") or attack_id or "Weapon")
@@ -6887,7 +6998,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     )
                 else:
                     reason = f"{attack_name}: ranged weapon range is missing"
-                    missing_attack_range_reasons.append(reason)
+                    disabled_capabilities.append(
+                        {"id": attack_id, "kind": "attack", "reason": reason}
+                    )
                 manual_rulings.append(reason)
             if (
                 "thrown" in properties
@@ -6895,13 +7008,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ):
                 reason = f"{attack_name}: thrown weapon range is missing"
                 manual_rulings.append(reason)
-                missing_attack_range_reasons.append(reason)
+                disabled_capabilities.append(
+                    {"id": attack_id, "kind": "attack", "reason": reason}
+                )
             ammunition_id = str(attack.get("ammunition_item_id") or "")
             if (
                 ammunition_id
                 and int(dict(inventory_items.get(ammunition_id) or {}).get("quantity", 0) or 0) <= 0
             ):
-                unavailable_attack_ids.append(attack_id)
+                disabled_capabilities.append(
+                    {
+                        "id": attack_id,
+                        "kind": "attack",
+                        "reason": f"ammunition {ammunition_id} is unavailable",
+                    }
+                )
 
         spell_resolution_audit = audit_spell_resolution_paths(sheet)
         automatic_spell_ids: list[str] = []
@@ -6927,14 +7048,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "Available spells require Agent effect settlement: " + ", ".join(ruling_spell_ids)
             )
         if incomplete_spell_ids:
-            blockers.append("incomplete_spell_resolution")
             manual_rulings.append(
                 "Available spells lack a recorded settlement path: "
                 + ", ".join(incomplete_spell_ids)
             )
+            disabled_capabilities.extend(
+                {
+                    "id": spell_id,
+                    "kind": "spell",
+                    "reason": "spell lacks a recorded settlement path",
+                }
+                for spell_id in incomplete_spell_ids
+            )
         manual_rulings = list(dict.fromkeys(manual_rulings))
-        if missing_attack_range_reasons:
-            blockers.append("missing_attack_range")
         character_type = str(view.get("character_type") or "")
         ruling_requirements = [
             *[
@@ -6958,11 +7084,35 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         settlement = (
             "source_review_required" if unresolved else "mixed" if manual_rulings else "automatic"
         )
+        disabled_capabilities = list(
+            {
+                (item["id"], item["kind"], item["reason"]): item
+                for item in disabled_capabilities
+            }.values()
+        )
+        disabled_ids = {item["id"] for item in disabled_capabilities}
+        available_capabilities = [
+            {"id": "unarmed-strike", "kind": "attack"},
+            *[
+                {"id": str(item.get("item_id") or ""), "kind": "attack"}
+                for item in attacks
+                if str(item.get("item_id") or "") not in disabled_ids
+            ],
+            *[
+                {"id": spell_id, "kind": "spell"}
+                for spell_id in [*automatic_spell_ids, *ruling_spell_ids]
+                if spell_id not in disabled_ids and not incomplete_spellcasting
+            ],
+        ]
         return {
-            "ready": not blockers,
+            "card_valid": not hard_blockers,
+            "hard_blockers": sorted(set(hard_blockers)),
+            "state_flags": sorted(set(state_flags)),
+            "can_take_turn": not state_flags,
+            "disabled_capabilities": disabled_capabilities,
+            "available_capabilities": available_capabilities,
             "settlement": settlement,
             "default_dm_resolver": "agent",
-            "blocking_reasons": sorted(set(blockers)),
             "unresolved_rules": unresolved,
             "manual_rulings": manual_rulings,
             "normalization_notes": normalization_notes,
@@ -6972,7 +7122,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 for item in ruling_requirements
                 if item["default_resolver"] == "agent"
             ],
-            "external_input_requirements": [
+            "external_source_gaps": [
                 item["reason"]
                 for item in ruling_requirements
                 if item["default_resolver"] == "external_input"
@@ -6989,7 +7139,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "automatic_spell_ids": automatic_spell_ids,
             "ruling_spell_ids": ruling_spell_ids,
             "incomplete_spell_ids": incomplete_spell_ids,
-            "unavailable_attack_ids": sorted(set(unavailable_attack_ids)),
             "unarmed_fallback": True,
             "unarmed_attack_id": "unarmed-strike",
         }
@@ -7310,9 +7459,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             activity
             for activity in dict(sheet.get("content") or {}).get("activities", [])
             if is_multiattack_source_name(activity.get("name"))
-            or dict(dict(activity.get("choices") or {}).get("manual_ruling") or {}).get(
-                "kind"
-            )
+            or dict(dict(activity.get("choices") or {}).get("manual_ruling") or {}).get("kind")
             == "multiattack_composition"
         ]
         unresolved = [
@@ -7936,6 +8083,24 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if isinstance(item, dict)
         ]
         value["candidates"] = candidates
+        if candidates:
+            issues = [
+                deepcopy(issue)
+                for candidate in candidates
+                for issue in candidate.get("draft_issues") or []
+                if isinstance(issue, dict)
+            ]
+            value["draft_workspace"] = {
+                "status": (
+                    "finalized" if str(value.get("state") or "") != "review_required" else "editing"
+                ),
+                "candidate_revision": int(value.get("revision") or 0),
+                "issue_count": len(issues),
+                "blocker_count": sum(
+                    1 for issue in issues if str(issue.get("severity") or "") == "blocker"
+                ),
+                "issues": issues,
+            }
         if str(value.get("state") or "") != "review_required":
             return value
         requirements = [
@@ -8572,14 +8737,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             if (
                 not isinstance(window, dict)
-                or window.get("trigger")
-                not in {"attack_semantic_plan", "attack_on_hit_effect"}
+                or window.get("trigger") not in {"attack_semantic_plan", "attack_on_hit_effect"}
                 or str(window.get("attacker_id") or "") != source_actor_id
                 or str(window.get("weapon_id") or "") != source_card_id
                 or (
                     window.get("trigger") == "attack_semantic_plan"
-                    and str(window.get("plan_fingerprint") or "")
-                    != bound_plan.compiled.fingerprint
+                    and str(window.get("plan_fingerprint") or "") != bound_plan.compiled.fingerprint
                 )
             ):
                 raise CombatEngineError(
@@ -8909,10 +9072,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             },
         )
 
-
-
-
-
     def sync_combatant_conditions(
         encounter: dict[str, Any], actor_id: str, sheet: dict[str, Any]
     ) -> None:
@@ -8932,7 +9091,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     def combatant_zero_hp_buffered(combatant: dict[str, Any]) -> bool:
         return bool(combatant.get("death_saves", False) or combatant.get("zero_hp_recovery", False))
-
 
     def source_participant_rules(
         campaign_id: str,
@@ -9008,8 +9166,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             sheet if sheet != character.sheet else None,
         )
 
-
-
     def add_attack_on_hit_window(
         encounter: dict[str, Any],
         *,
@@ -9051,8 +9207,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         result["pending_on_hit_ruling_id"] = window["id"]
         return window
 
-
-
     def encounter_turn_token(encounter: dict[str, Any]) -> str:
         current = current_combatant(encounter)
         return (
@@ -9060,7 +9214,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             f"{int(encounter.get('turn_index', 0) or 0)}:"
             f"{str((current or {}).get('actor_id') or '')}"
         )
-
 
     def apply_standard_spell_on_hit_mechanics(
         encounter: dict[str, Any],
@@ -9093,8 +9246,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         committed: list[dict[str, Any]] = []
         for mechanic in mechanics:
             if (
-                mechanic
-                == "undead_attack_disadvantage_against_source_until_source_turn_start"
+                mechanic == "undead_attack_disadvantage_against_source_until_source_turn_start"
                 and "undead" not in creature_type
             ):
                 continue
@@ -9118,9 +9270,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     kind="healing_prevention",
                     expires_on_actor_id=attacker_id,
                     expires_at=(
-                        "source_turn_start"
-                        if mechanic.endswith("_start")
-                        else "source_turn_end"
+                        "source_turn_start" if mechanic.endswith("_start") else "source_turn_end"
                     ),
                 )
             else:
@@ -9135,7 +9285,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if committed:
             result["standard_on_hit_effects"] = committed
         return committed
-
 
     def expire_standard_source_turn_effects(
         encounter: dict[str, Any],
@@ -9165,7 +9314,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 expired.append(str(effect.get("id") or ""))
         return expired
 
-
     def require_healing_not_prevented(
         encounter: dict[str, Any] | None,
         *,
@@ -9188,8 +9336,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise CombatEngineError(
                 "target cannot regain hit points while a locked standard spell effect is active"
             )
-
-
 
     def consume_next_attack_advantage(
         encounter: dict[str, Any],
@@ -9693,7 +9839,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ended_reason=reason,
         )
 
-
     def reconcile_actor_witch_bolt_concentration(
         encounter: dict[str, Any],
         actor_id_value: str,
@@ -9891,7 +10036,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 }
         contexts = value.get("target_contexts")
         if not isinstance(contexts, list):
-                raise CombatEngineError("area target_contexts must be a list")
+            raise CombatEngineError("area target_contexts must be a list")
         normalized_contexts: dict[str, str] = {}
         for item in contexts:
             if not isinstance(item, dict) or set(item) != {"target_id", "cover"}:
@@ -11000,12 +11145,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "idempotency_receipt_recovery": True,
                 "structured_rulebook_import": True,
                 "source_bound_rule_packs": True,
-                "portable_rule_pack_import_export": True,
-                "thin_extension_release_manifests": True,
+                "unified_content_package_import_export": True,
+                "source_documents_embedded_in_content_packages": True,
+                "source_backed_actor_images": True,
                 "structured_content_catalog": True,
                 "structured_content_selection_requirements": True,
                 "build_time_content_resolution": True,
-                "module_import_idempotency": True,
+                "editable_rulebook_drafts": True,
+                "deterministic_candidate_revalidation": True,
+                "explicit_rulebook_finalization": True,
+                "module_draft_idempotency": True,
                 "managed_module_document_staging": True,
                 "core_pdf_module_normalization": True,
                 "module_document_cache": True,
@@ -11045,31 +11194,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "ruling_policy": _agent_ruling_policy(),
             "rulebook_import": {
                 "stages": [
-                    "rule_import(discover)",
-                    "rule_import(import_package)",
-                    "rule_import(inspect_release)",
-                    "rule_import(stage)",
-                    "rule_import(inspect)",
-                    "rule_import(render_page)",
-                    "rule_import(recover_statblock)",
-                    "rule_import(recover_statblocks)",
-                    "rule_import(review_text)",
-                    "rule_import(ingest)",
-                    "rule_import(review_statblock)",
-                    "rule_import(extract_candidates)",
-                    "rule_import(review)",
-                    "rule_import(compile)",
-                    "rule_import(install)",
-                    "rule_import(activate)",
+                    "rulebook_draft(start)",
+                    "rulebook_draft(get)",
+                    "rulebook_draft(evidence)",
+                    "rulebook_draft(edit)",
+                    "rulebook_draft(finalize)",
                     "rule_search",
                     "rule_expand",
-                    "rule_pack_compile(from_source)",
-                    "rule_pack_query(test)",
-                    "rule_pack_query(source_chunks)",
-                    "rule_pack_query(package)",
-                    "rule_pack_query(release)",
-                    "rule_pack_change(install)",
-                    "campaign_rules(set_pack)",
+                    "content_pack(test)",
+                    "content_pack(import)",
+                    "content_pack(export)",
+                    "content_pack(install)",
+                    "content_pack(activate)",
                 ],
                 "normalizer": f"sagasmith-core/pdf-layout-v{DOCUMENT_NORMALIZER_VERSION}",
                 "normalization_cache": "content-addressed",
@@ -11090,8 +11226,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 },
                 "text_review": {
                     "actions": [
-                        "rule_import(render_page)",
-                        "rule_import(review_text)",
+                        "rulebook_draft(evidence)",
+                        "rulebook_draft(edit:source_text)",
                     ],
                     "evidence_bases": [
                         "cross_text",
@@ -11144,8 +11280,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ],
                 "portable_package_lifecycle": {
                     "import_result": "validated_inactive_draft",
-                    "installation": "rule_pack_change(install)",
-                    "activation": "campaign_rules(set_pack)",
+                    "installation": "content_pack(install)",
+                    "activation": "content_pack(activate)",
                     "release_manifest_authority": "none",
                 },
                 "settlement_tools": {
@@ -11153,20 +11289,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "combat": "combat_check",
                 },
             },
-            "module_import": {
+            "module_draft": {
                 "stages": [
-                    "module_import(stage)",
-                    "module_import(inspect)",
-                    "module_import(validate)",
-                    "module_import(ingest)",
-                    "module_import(activate)",
-                    "module_import(attach_asset)",
+                    "module_draft(start)",
+                    "module_draft(get)",
+                    "module_draft(evidence)",
+                    "module_draft(edit)",
+                    "module_draft(finalize)",
+                    "content_pack(import)",
+                    "content_pack(activate)",
                     "module_query(assets)",
-                    "module_review(render_page)",
-                    "module_review(render_transcript)",
-                    "module_review(recover_statblock)",
-                    "module_review(submit_content)",
-                    "module_review(submit_transcript)",
                     "module_set_progress(spatial_review)",
                 ],
                 "stage_inputs": ["source_path", "name+content", "module-scoped asset"],
@@ -11191,8 +11323,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 },
                 "text_review": {
                     "actions": [
-                        "module_review(render_transcript)",
-                        "module_review(submit_transcript)",
+                        "module_draft(evidence)",
+                        "module_draft(edit:source_text)",
                     ],
                     "evidence_bases": [
                         "cross_text",
@@ -12270,8 +12402,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         decisions: list[dict[str, Any]],
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
+        operation: str = "edit",
     ) -> dict[str, Any]:
-        """Accept, reject, or complete extracted content cards before pack compilation."""
+        """Edit source-bound candidates without freezing the in-progress pack."""
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for candidate review")
@@ -12387,6 +12520,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 if role == "primary":
                     reviewed_candidate = {
                         **candidate,
+                        # Only an explicit reviewed artifact (including one
+                        # authored as a source-bound catalog addition) is a
+                        # complete mechanics contract.  Accepting an extracted
+                        # identity alone must not silently elevate OCR guesses
+                        # to Agent-reviewed semantics.
+                        "agent_review_complete": bool(
+                            "artifact" in decision
+                            or candidate.get("agent_catalog_addition") is True
+                        ),
                         "artifact": deepcopy(
                             decision.get("artifact", candidate.get("artifact") or {})
                         ),
@@ -12401,6 +12543,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         reviewed_candidate,
                         source_chunks_by_id=source_chunks_by_id,
                         reference_artifacts=reference_artifacts,
+                        context_candidates=candidates_by_id.values(),
                     )
                     first_chunk_id = next(
                         (
@@ -12492,9 +12635,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         status="needs_review",
                     )
                     decision["artifact"] = artifact
-                    decision["review_status"] = "needs_revision"
+                    decision["review_status"] = "accepted"
                     decision["note"] = (
-                        "primary catalog review complete; independent critic or DM review required"
+                        "Agent edit saved; the draft remains editable until explicit finalization"
                     )
                 elif role in {"critic", "dm"}:
                     if current_review.get("status") == "approved":
@@ -12539,9 +12682,24 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         decision["artifact"] = artifact
                 else:
                     raise ValueError("catalog_review_decision.role must be primary, critic, or dm")
+            for decision in normalized_decisions:
+                candidate = candidates_by_id.get(str(decision.get("id") or ""))
+                if candidate is None:
+                    continue
+                proposed = {
+                    **candidate,
+                    "review_status": decision.get(
+                        "review_status", candidate.get("review_status", "pending")
+                    ),
+                }
+                if "artifact" in decision:
+                    proposed["artifact"] = deepcopy(decision["artifact"])
+                decision["draft_issues"] = candidate_draft_issues(proposed)
+                decision.setdefault("editor", principal_id)
+                decision.setdefault("operation", operation)
         payload = {
             "job_id": job_id,
-            "operation": "review",
+            "operation": operation,
             "decisions": normalized_decisions,
         }
         scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
@@ -12565,6 +12723,115 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         candidate_views = [import_candidate_view(item) for item in updated.candidates]
         return {"job": import_job_view(updated), "candidates": candidate_views}
+
+    @internal_operation
+    def import_job_finalize_candidates(
+        campaign_id: str,
+        job_id: str,
+        note: str,
+        principal_id: str,
+        expected_revision: int | None,
+        idempotency_key: str | None,
+    ) -> dict[str, Any]:
+        """Freeze one fully edited rulebook catalog and only then allow compilation."""
+
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        if expected_revision is None or not idempotency_key:
+            raise ValueError("expected_revision and idempotency_key are required for finalization")
+        normalized_note = " ".join(str(note).split())
+        if not 10 <= len(normalized_note) <= 2000:
+            raise ValueError("finalization note must contain 10 to 2000 characters")
+        payload = {
+            "job_id": job_id,
+            "operation": "finalize",
+            "note": normalized_note,
+            "expected_revision": expected_revision,
+        }
+        scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        job = require_import_job(campaign_id, job_id, "rulebook")
+        if job.state != "review_required":
+            raise ValueError("only an editable rulebook draft may be finalized")
+        if not job.source_id:
+            raise ValueError("rulebook candidates need an indexed source before finalization")
+        source = rules.source(job.source_id)
+        finalized_candidates: list[dict[str, Any]] = []
+        for candidate in job.candidates:
+            value = deepcopy(candidate)
+            status = str(value.get("review_status") or "")
+            if status not in {"accepted", "rejected"}:
+                raise ValueError(
+                    f"candidate {value.get('id')} still needs an include or exclude decision"
+                )
+            if status == "accepted":
+                artifact = deepcopy(dict(value.get("artifact") or {}))
+                review = dict(artifact.get("catalog_review") or {})
+                if review.get("status") == "needs_review":
+                    artifact["catalog_review"] = build_catalog_review(
+                        artifact,
+                        decisions=list(review.get("decisions") or []),
+                        status="approved",
+                    )
+                elif review.get("status") != "approved":
+                    raise ValueError(
+                        f"candidate {value.get('id')} has no source-bound Agent review"
+                    )
+                contract_errors = selection_contract_errors(artifact)
+                if contract_errors:
+                    raise ValueError("; ".join(contract_errors))
+                value["artifact"] = artifact
+            value["draft_issues"] = candidate_draft_issues(value)
+            blockers = [
+                issue
+                for issue in value["draft_issues"]
+                if str(issue.get("severity") or "") == "blocker"
+            ]
+            if blockers:
+                raise ValueError(
+                    f"candidate {value.get('id')} has deterministic blockers: "
+                    + "; ".join(str(issue.get("message") or "") for issue in blockers)
+                )
+            finalized_candidates.append(value)
+        validate_rule_candidate_execution_evidence(
+            job,
+            [
+                {
+                    "id": candidate["id"],
+                    "review_status": candidate["review_status"],
+                    "artifact": candidate.get("artifact"),
+                }
+                for candidate in finalized_candidates
+            ],
+        )
+        updated = import_jobs.finalize_candidate_review(
+            job_id,
+            candidates=finalized_candidates,
+            confirmation={
+                "confirmed_by": principal_id,
+                "method": "agent",
+                "note": normalized_note,
+                "source_id": job.source_id,
+                "source_checksum": str(source.get("checksum") or ""),
+                "parser_profile": job.parser_profile,
+                "parser_version": job.parser_version,
+            },
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=lambda result: {
+                    "job": import_job_view(result),
+                    "candidates": [import_candidate_view(item) for item in result.candidates],
+                },
+            ),
+        )
+        return {
+            "job": import_job_view(updated),
+            "candidates": [import_candidate_view(item) for item in updated.candidates],
+        }
 
     @internal_operation
     def campaign_member_grant(
@@ -14187,32 +14454,32 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 and str(current_scene_context["scene_id"]) == resolved_scene_id
                 else modules.read_scene(campaign_id, resolved_scene_id)
             )
-        readiness = None
+        preflight = None
         if participant_manifest is not None:
             if resolved_scene_id is None:
                 raise ValueError("participant_manifest requires an encounter scene_id")
-            readiness = module_scene_readiness(
+            preflight = module_scene_preflight(
                 campaign_id,
                 resolved_scene_id,
                 participant_manifest,
                 principal_id,
             )
-            if not readiness["ready"]:
+            if not preflight["ready"]:
                 unavailable_groups = [
                     item["key"]
-                    for item in readiness["groups"]
-                    if item["blocking"] and (item["missing_count"] or item["unready_count"])
+                    for item in preflight["groups"]
+                    if item["blocking"] and (item["missing_count"] or item["invalid_count"])
                 ]
                 raise CombatEngineError(
                     "scene participant manifest has missing or unusable groups: "
                     + ", ".join(unavailable_groups)
                 )
-            omitted = sorted(set(readiness["initial_actor_ids"]) - set(participant_ids))
+            omitted = sorted(set(preflight["initial_actor_ids"]) - set(participant_ids))
             if omitted:
                 raise CombatEngineError(
                     "combat participant_ids omit manifest combatants: " + ", ".join(omitted)
                 )
-            premature = sorted(set(readiness["reinforcement_actor_ids"]) & set(participant_ids))
+            premature = sorted(set(preflight["reinforcement_actor_ids"]) & set(participant_ids))
             if premature:
                 raise CombatEngineError(
                     "manifest reinforcements must enter through combat_join: "
@@ -14344,8 +14611,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             name=name,
             battle_map=compiled_map,
         )
-        if readiness is not None:
-            encounter["participant_manifest"] = readiness
+        if preflight is not None:
+            encounter["participant_manifest"] = preflight
         if source_condition_records:
             encounter["source_conditions"] = source_condition_records
         initial_sheets = {
@@ -15324,6 +15591,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     expected_revision=record.revision,
                 )
             )
+
         def attack_response(revisions: list[Any]) -> dict[str, Any]:
             response = {
                 **_ruling_status(
@@ -15405,9 +15673,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         ):
             raise CombatEngineError("choice_id is not this target's pending on-hit review")
         source_excerpt = str(normalized.get("source_excerpt") or "").strip()
-        if not source_excerpt or source_excerpt.casefold() != str(
-            window.get("effect") or ""
-        ).strip().casefold():
+        if (
+            not source_excerpt
+            or source_excerpt.casefold() != str(window.get("effect") or "").strip().casefold()
+        ):
             raise CombatEngineError("dismissal requires the exact reviewed source excerpt")
         return combat_choice_resolve(
             campaign_id,
@@ -15419,8 +15688,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             branch_id=branch_id,
             idempotency_key=idempotency_key,
         )
-
-
 
     @public_tool()
     @_agent_ruling_boundary
@@ -15919,10 +16186,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             or expected_elapsed_ticks < 0
         ):
             raise ValueError("expected_elapsed_ticks must be a nonnegative integer")
-        if (
-            normalized_period in NARRATIVE_GAME_TIME_PERIODS
-            and expected_elapsed_ticks is None
-        ):
+        if normalized_period in NARRATIVE_GAME_TIME_PERIODS and expected_elapsed_ticks is None:
             raise ValueError("minute, hour, and day advances require expected_elapsed_ticks")
         if normalized_period == "encounter" and expected_elapsed_ticks is not None:
             raise ValueError(
@@ -16398,11 +16662,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             payload=payload,
             response_fields={
                 **_ruling_status(
-                    (
-                        "pending_ruling"
-                        if on_hit_window is not None
-                        else "committed"
-                    ),
+                    ("pending_ruling" if on_hit_window is not None else "committed"),
                     "source_or_scene_fact",
                 ),
                 "result": result,
@@ -16567,9 +16827,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     ),
                 )
                 if activity_result.get("status") != "committed":
-                    raise CombatEngineError(
-                        "reviewed defensive activity could not be consumed"
-                    )
+                    raise CombatEngineError("reviewed defensive activity could not be consumed")
                 target["sheet"] = activity_result["sheet"]
                 target["derived"] = derive_character_sheet(target["sheet"])
             else:
@@ -16647,11 +16905,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             result["rule_receipts"] = [
                 *list(result.get("rule_receipts") or []),
                 *(list(spell_result.get("rule_receipts") or []) if spell_result else []),
-                *(
-                    list(activity_result.get("rule_receipts") or [])
-                    if activity_result
-                    else []
-                ),
+                *(list(activity_result.get("rule_receipts") or []) if activity_result else []),
             ]
         attacker_combatant = next(
             item for item in next_encounter["combatants"] if item.get("actor_id") == attacker_id
@@ -16718,11 +16972,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             payload=payload,
             response_fields={
                 **_ruling_status(
-                    (
-                        "pending_ruling"
-                        if on_hit_window is not None
-                        else "committed"
-                    ),
+                    ("pending_ruling" if on_hit_window is not None else "committed"),
                     "source_or_scene_fact",
                 ),
                 "result": result,
@@ -18160,12 +18410,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 save = dict(structured_resolution.get("save") or {})
                 if dict(structured_resolution.get("targeting") or {}).get("mode") == "area":
                     spell_area = dict(
-                        dict(structured_resolution.get("targeting") or {}).get("area")
-                        or {}
+                        dict(structured_resolution.get("targeting") or {}).get("area") or {}
                     )
-                    spell_range = dict(
-                        dict(spell_entry.get("definition") or {}).get("range") or {}
-                    )
+                    spell_range = dict(dict(spell_entry.get("definition") or {}).get("range") or {})
                     structured_target = normalize_area_declaration(
                         encounter,
                         source_id=actor_id,
@@ -19791,12 +20038,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 compiled_plan=compiled_activity_plan,
             )
             declaration = {"agent_resolution_commitment": normalized_commitment}
-        elif (
-            str(activity_card.get("description") or "").strip()
-            and not source_card_has_executable_mechanic(
-                campaign_id,
-                activity_card,
-            )
+        elif str(
+            activity_card.get("description") or ""
+        ).strip() and not source_card_has_executable_mechanic(
+            campaign_id,
+            activity_card,
         ):
             return {
                 **_ruling_status(
@@ -19836,10 +20082,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
             if dict(declaration or {}):
                 raise CombatEngineError("this legendary action accepts no declaration")
-        dragonborn_breath = (
-            CORE_DRAGONBORN_BREATH_MECHANIC_ID
-            in {str(item) for item in activity_card.get("mechanic_refs") or []}
-        )
+        dragonborn_breath = CORE_DRAGONBORN_BREATH_MECHANIC_ID in {
+            str(item) for item in activity_card.get("mechanic_refs") or []
+        }
         breath_target_records: dict[str, Any] = {}
         breath_targets: list[dict[str, Any]] = []
         breath_target_contexts: list[dict[str, Any]] = []
@@ -19847,23 +20092,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         breath_save_dc = 0
         breath_damage_expression = ""
         if dragonborn_breath:
-            if (
-                str(activity_card.get("pack_id") or "")
-                != STANDARD_2014_CONTENT_PACK_ID
-                or not activity_id.startswith(
-                    f"{STANDARD_2014_CONTENT_PACK_ID}.species.dragonborn.activity."
-                )
+            if str(
+                activity_card.get("pack_id") or ""
+            ) != STANDARD_2014_CONTENT_PACK_ID or not activity_id.startswith(
+                f"{STANDARD_2014_CONTENT_PACK_ID}.species.dragonborn.activity."
             ):
                 raise CombatEngineError(
                     "Dragonborn Breath Weapon requires its exact locked standard card"
                 )
             if not is_dm(campaign_id, principal_id):
-                raise PermissionError(
-                    "area activity settlement requires the Agent in the DM role"
-                )
+                raise PermissionError("area activity settlement requires the Agent in the DM role")
             breath_spec = dict(
-                dict(activity_card.get("choices") or {}).get("standard_resolution")
-                or {}
+                dict(activity_card.get("choices") or {}).get("standard_resolution") or {}
             )
             if (
                 breath_spec.get("kind") != "area_save_damage"
@@ -19886,9 +20126,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 target_id = str(target_context["target_id"])
                 target = characters.get(target_id)
                 if target.campaign_id != campaign_id:
-                    raise CombatEngineError(
-                        "Breath Weapon targets must share the campaign"
-                    )
+                    raise CombatEngineError("Breath Weapon targets must share the campaign")
                 access.require_actor(
                     campaign_id,
                     target_id,
@@ -19903,9 +20141,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "ability": "constitution",
                 "include_proficiency": True,
             }:
-                raise CombatEngineError(
-                    "Dragonborn Breath Weapon has an invalid save DC formula"
-                )
+                raise CombatEngineError("Dragonborn Breath Weapon has an invalid save DC formula")
             source_derived = derive_character_sheet(current.sheet)
             breath_save_dc = (
                 8
@@ -20317,9 +20553,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 save_ability = str(breath_spec.get("save_ability") or "").casefold()
                 save_bonuses = {
                     str(context["target_id"]): (
-                        {"none": 0, "half": 2, "three_quarters": 5}[
-                            str(context["cover"])
-                        ]
+                        {"none": 0, "half": 2, "three_quarters": 5}[str(context["cover"])]
                         if save_ability == "dexterity"
                         else 0
                     )
@@ -20338,9 +20572,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     half_on_success=True,
                     source=f"standard-activity:{activity_id}",
                     death_saves_by_actor_id={
-                        target_id: combatant_zero_hp_buffered(
-                            combatants_by_id[target_id]
-                        )
+                        target_id: combatant_zero_hp_buffered(combatants_by_id[target_id])
                         for target_id in breath_target_records
                     },
                     save_bonuses_by_actor_id=save_bonuses,
@@ -20351,9 +20583,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 damage_roll = deepcopy(settled_breath["result"]["damage_roll"])
                 for target_result in breath_results:
                     target_id = str(target_result["target_id"])
-                    target_sheet = validate_character_sheet(
-                        settled_breath["sheets"][target_id]
-                    )
+                    target_sheet = validate_character_sheet(settled_breath["sheets"][target_id])
                     sync_combatant_conditions(
                         next_encounter,
                         target_id,
@@ -23543,7 +23773,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ],
         )
         return combat_response(campaign_id, principal_id, response)
-
 
     @internal_operation
     def combat_choice_open(
@@ -27973,7 +28202,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return asdict(result)
 
-    def require_rule_pack_resolution_readiness(
+    def require_rule_pack_semantic_validation(
         pack_id: str,
         version: str,
     ) -> dict[str, Any]:
@@ -27987,7 +28216,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 for artifact in pack.artifacts
                 if dict(artifact.get("card") or {}).get("portable_card")
             ]
-            readiness = audit_dnd_addon_resolution_components(
+            validation = audit_dnd_addon_semantics(
                 [
                     {
                         "kind": "preset_pack",
@@ -27998,7 +28227,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ]
             )
         else:
-            readiness = audit_release_resolution_readiness(
+            validation = audit_release_semantic_validation(
                 [deepcopy(item) for item in pack.artifacts],
                 settled_mechanic_ids=_rule_payload_settled_mechanic_ids(
                     {
@@ -28009,14 +28238,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         if (
             manifest.get("resolution_policy") != "build_time_complete"
-            or manifest.get("resolution_readiness") != readiness
-            or not readiness["complete"]
+            or manifest.get("semantic_validation") != validation
+            or not validation["complete"]
         ):
             raise ValueError(
                 f"rule pack {pack_id}@{version} lacks an exact "
                 "build-time-complete semantic resolution audit"
             )
-        return readiness
+        return validation
 
     @internal_operation
     def memory_list(
@@ -29792,7 +30021,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         updated = import_jobs.record_result(
             job_id,
-            {**dict(job.result), "module_import": asdict(result)},
+            {**dict(job.result), "module_draft": asdict(result)},
             state="imported",
             module_id=result.module_id,
             expected_revision=job.revision,
@@ -29807,161 +30036,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ),
         )
         return {"job": import_job_view(updated), **asdict(result)}
-
-    @internal_operation
-    def module_import_job_activate(
-        campaign_id: str,
-        job_id: str,
-        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
-        expected_revision: int | None = None,
-        idempotency_key: str | None = None,
-        progress_remaps: list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
-        """Atomically promote an imported module revision after its diff was reviewed."""
-        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
-        require_write_contract(expected_revision, idempotency_key)
-        job = require_import_job(campaign_id, job_id, "module")
-        normalized_remaps: list[dict[str, str]] = []
-        remap_targets: dict[str, str] = {}
-        for index, raw in enumerate(progress_remaps or []):
-            if not isinstance(raw, dict):
-                raise ValueError(f"progress_remaps[{index}] must be an object")
-            unknown = set(raw) - {"from_scene_id", "to_scene_id", "reason"}
-            if unknown:
-                raise ValueError(
-                    f"progress_remaps[{index}] has unsupported fields: {sorted(unknown)}"
-                )
-            source_scene_id = str(raw.get("from_scene_id") or "").strip()
-            target_scene_id = str(raw.get("to_scene_id") or "").strip()
-            reason = str(raw.get("reason") or "").strip()
-            if not source_scene_id or not target_scene_id:
-                raise ValueError(f"progress_remaps[{index}] requires from_scene_id and to_scene_id")
-            if not reason or len(reason) > 1000:
-                raise ValueError(
-                    f"progress_remaps[{index}].reason must contain 1 to 1000 characters"
-                )
-            if source_scene_id in remap_targets:
-                raise ValueError("progress_remaps contains duplicate from_scene_id values")
-            remap_targets[source_scene_id] = target_scene_id
-            normalized_remaps.append(
-                {
-                    "from_scene_id": source_scene_id,
-                    "to_scene_id": target_scene_id,
-                    "reason": reason,
-                    "resolver": "agent",
-                }
-            )
-        payload = {
-            "job_id": job_id,
-            "operation": "activate",
-            "module_id": job.module_id,
-            "progress_remaps": normalized_remaps,
-        }
-        scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
-        replay = replay_idempotent(scope, idempotency_key, payload)
-        if replay is not None:
-            return replay
-        if job.state not in {"imported", "activated"} or not job.module_id:
-            raise ValueError("module import job must be imported before activation")
-        campaign_scope = f"{scope}:campaign-state"
-        campaign_key = f"{idempotency_key}:campaign-state"
-        campaign_payload = {**payload, "revision_reason": "module.activation"}
-        campaign_replay = idempotency.lookup(
-            campaign_scope,
-            campaign_key,
-            campaign_payload,
-        )
-        before = None
-        if campaign_replay is None:
-            before = campaigns.get(campaign_id)
-            if dict(before.state or {}).get("combat", {}).get("active", False):
-                raise CombatEngineError("module activation cannot change during active combat")
-            if before.revision != expected_revision:
-                raise ValueError(f"campaign revision conflict: {campaign_id}")
-
-        module_scope = f"{scope}:module-source"
-        module_key = f"{idempotency_key}:module-source"
-        module_payload = {
-            "module_id": job.module_id,
-            "operation": "activate",
-            "progress_remaps": normalized_remaps,
-        }
-        module_replay = idempotency.lookup(module_scope, module_key, module_payload)
-        if module_replay is not None:
-            activation = dict(module_replay.response or {}).get("activation")
-        else:
-            activation = modules.activate_candidate(
-                campaign_id,
-                job.module_id,
-                progress_remaps=remap_targets,
-                idempotency_key=module_key,
-                idempotency_write=IdempotencyWrite(
-                    scope=module_scope,
-                    payload=module_payload,
-                    response=lambda result: {"activation": result},
-                ),
-            )
-        if not isinstance(activation, dict):
-            raise RuntimeError("module activation replay is malformed")
-        activation = {
-            **activation,
-            "progress_remap_rulings": normalized_remaps,
-        }
-
-        if campaign_replay is not None:
-            campaign_revision = int(
-                dict(campaign_replay.response or {}).get("campaign_revision", 0) or 0
-            )
-            if campaign_revision < 1:
-                raise RuntimeError("module campaign-state replay is malformed")
-        else:
-            assert before is not None
-            state = validate_party_state(dict(before.state or {}))
-            after = campaigns.update_audited(
-                campaign_id,
-                state=state,
-                expected_revision=expected_revision,
-                operation="module.import.activate",
-                actor=principal_id,
-                branch_id=current_branch_id(campaign_id),
-                idempotency_key=campaign_key,
-                request_hash=request_hash(campaign_payload),
-                idempotency_write=IdempotencyWrite(
-                    scope=campaign_scope,
-                    payload=campaign_payload,
-                    response=lambda result: {
-                        "campaign_revision": result.revision,
-                    },
-                ),
-            )
-            campaign_revision = after.revision
-        updated = import_jobs.record_result(
-            job_id,
-            {
-                **dict(job.result),
-                "activation": activation,
-                "campaign_revision": campaign_revision,
-            },
-            state="activated",
-            module_id=job.module_id,
-            expected_revision=job.revision,
-            idempotency_key=idempotency_key,
-            idempotency_write=IdempotencyWrite(
-                scope=scope,
-                payload=payload,
-                response=lambda updated_job: {
-                    "job": import_job_view(updated_job),
-                    "activation": activation,
-                    "campaign_revision": campaign_revision,
-                },
-            ),
-        )
-        response = {
-            "job": import_job_view(updated),
-            "activation": activation,
-            "campaign_revision": campaign_revision,
-        }
-        return response
 
     @internal_operation
     def module_write(
@@ -30231,7 +30305,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if campaign_edition != "2014":
             raise ValueError(
                 "layout OCR statblock recovery currently supports only D&D 2014; "
-                "submit an evidence-bound 2024 transcription through module_review"
+                "submit an evidence-bound 2024 transcription through module_draft(edit)"
             )
         if not idempotency_key:
             raise ValueError("idempotency_key is required for OCR statblock recovery")
@@ -30483,7 +30557,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Recover review-only statblock candidates from imported text chunks."""
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         module = next(
-            (item for item in modules.list(campaign_id) if str(item.get("id")) == module_id),
+            (
+                item
+                for item in modules.list(campaign_id, include_retired=True)
+                if str(item.get("id")) == module_id
+            ),
             None,
         )
         if module is None:
@@ -30502,8 +30580,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     f"{module_id}\x1f{local_candidate_id}".encode("utf-8")
                 ).hexdigest()[:20]
             )
-            candidate["review_tool"] = "module_review"
-            candidate["review_action"] = "submit_content"
+            candidate["review_tool"] = "module_draft"
+            candidate["review_action"] = "edit"
+            candidate["review_operation"] = "content"
             candidate["module_id"] = module_id
             candidate["content_kind"] = statblock_content_kind(campaign_edition)
             if candidate.get("execution_state") == "review_ready":
@@ -30555,7 +30634,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             return result
         return player_module_scene_view(campaign_id, result)
 
-    def module_scene_readiness(
+    def module_scene_preflight(
         campaign_id: str,
         scene_id: str,
         participant_manifest: dict[str, Any],
@@ -30656,13 +30735,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "id": actor.id,
                         "name": actor.name,
                         "character_type": actor.character_type,
-                        "combat_card": combat_card_readiness(actor),
+                        "combat_card": combat_card_analysis(actor),
                     }
                 )
-            unready_actor_ids = [
+            invalid_actor_ids = [
                 str(item["id"])
                 for item in actor_views
-                if not dict(item.get("combat_card") or {}).get("ready", False)
+                if not dict(item.get("combat_card") or {}).get("card_valid", False)
             ]
             missing_count = required_count - len(actor_ids)
             blocking = role != "optional"
@@ -30675,8 +30754,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "actor_ids": actor_ids,
                     "actors": actor_views,
                     "missing_count": missing_count,
-                    "unready_count": len(unready_actor_ids),
-                    "unready_actor_ids": unready_actor_ids,
+                    "invalid_count": len(invalid_actor_ids),
+                    "invalid_actor_ids": invalid_actor_ids,
                     "blocking": blocking,
                     "source_scene_id": source_scene_id,
                     "source_excerpt": source_excerpt,
@@ -30693,11 +30772,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             target.extend(actor_ids)
 
         ready = all(
-            not item["blocking"] or (item["missing_count"] == 0 and item["unready_count"] == 0)
+            not item["blocking"] or (item["missing_count"] == 0 and item["invalid_count"] == 0)
             for item in normalized_groups
-        )
-        complete = all(
-            item["missing_count"] == 0 and item["unready_count"] == 0 for item in normalized_groups
         )
         normalized_manifest = {
             "schema_version": 1,
@@ -30710,7 +30786,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             **normalized_manifest,
             "checksum": request_hash(normalized_manifest),
             "ready": ready,
-            "complete": complete,
             "initial_actor_ids": initial_actor_ids,
             "reinforcement_actor_ids": reinforcement_actor_ids,
             "optional_actor_ids": optional_actor_ids,
@@ -30987,13 +31062,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             or abs(float(provider.scale) - normalized_scale) >= 0.001
             or str(getattr(provider, "model_type", "small")) != normalized_model
         ):
-            provider = rapidocr_providers.setdefault(
-                (normalized_model, normalized_scale),
-                RapidOcrProvider(
-                    scale=normalized_scale,
-                    model_type=normalized_model,
-                    cache_dir=config.ocr_page_cache_dir,
-                ),
+            provider = _cached_rapidocr_provider(
+                rapidocr_providers,
+                model_type=normalized_model,
+                scale=normalized_scale,
+                cache_dir=config.ocr_page_cache_dir,
             )
         layout = provider.extract_layout(source, page_numbers=[page_number])[0]
         rapidocr_layout_cache[cache_key] = layout
@@ -31028,9 +31101,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             variant_provider = (
                 provider
                 if variant_model == model
-                else RapidOcrProvider(
-                    scale=scale,
+                else _cached_rapidocr_provider(
+                    rapidocr_providers,
                     model_type=variant_model,
+                    scale=scale,
                     cache_dir=config.ocr_page_cache_dir,
                 )
             )
@@ -31188,7 +31262,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope_key, idempotency_key, request_payload)
         if replay is not None:
             return replay
-        if job.state != "inspected":
+        if job.state != "inspected" and not (job.kind == "module" and job.state == "imported"):
             raise ValueError("text review requires an inspected, not-yet-ingested import job")
         if expected_revision is not None and expected_revision != job.revision:
             raise ValueError(
@@ -31667,7 +31741,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if campaign_rules_edition(campaign_id) != "2014":
             raise ValueError(
                 "layout OCR statblock recovery currently supports only D&D 2014; "
-                "submit an evidence-bound 2024 transcription through rule_import review_statblock"
+                "submit an evidence-bound 2024 transcription through "
+                "rulebook_draft(edit, operation='statblock_review')"
             )
         if not idempotency_key:
             raise ValueError("idempotency_key is required for OCR statblock recovery")
@@ -33126,7 +33201,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             agent_fill_requirements = statblock_agent_fill_requirements(parsed.sheet)
             # Persist the evidence-bound transcription before asking an Agent to
             # interpret source-specific semantics.  This is the immutable base
-            # review consumed by rule_import(review_statblock, base_review_id=...).
+            # review consumed by rulebook_draft(edit, operation=statblock_review).
             # A caller may also submit the fill atomically when it already has one.
             if agent_fill is not None:
                 require_complete_statblock_agent_fill(parsed.sheet, agent_fill)
@@ -33494,7 +33569,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 # Provenance must not depend on whether semantic settlement is
                 # supplied by an imported clause or an existing kernel mechanic.
                 # Persist a verbatim source excerpt on every artifact citation so
-                # portable-addon readiness can prove the same source contract for
+                # portable-addon validation can prove the same source contract for
                 # both paths.
                 source_excerpt = source_chunks_by_id.get(normalized_chunk_id, "")[:4000]
                 if source_excerpt:
@@ -33563,7 +33638,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Compile accepted candidates; incomplete cards remain catalog-only."""
+        """Compile an explicitly finalized candidate catalog."""
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for pack compilation")
@@ -33585,7 +33660,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if not job.source_id:
             raise ValueError("rule import job must be indexed before pack compilation")
         if job.state not in {"reviewed", "compiled", "validated", "failed"}:
-            raise ValueError("all content candidates must be reviewed before pack compilation")
+            raise ValueError("content candidates must be explicitly finalized before compilation")
         artifacts = compiled_artifacts_from_candidates(
             job.candidates,
             pack_id=pack_id,
@@ -33617,108 +33692,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return {"job": import_job_view(updated), "draft": draft}
 
     @internal_operation
-    def rule_import_job_install(
-        campaign_id: str,
-        job_id: str,
-        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
-        idempotency_key: str | None = None,
-    ) -> dict[str, Any]:
-        """Install the exact validated pack compiled by an import job without enabling it."""
-        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
-        if not idempotency_key:
-            raise ValueError("idempotency_key is required for pack installation")
-        job = require_import_job(campaign_id, job_id, "rulebook")
-        draft = dict(job.validation.get("draft") or {})
-        pack_id = str(draft.get("pack_id") or "")
-        version = str(draft.get("version") or "")
-        payload = {"job_id": job_id, "operation": "install", "pack_id": pack_id, "version": version}
-        scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
-        replay = replay_idempotent(scope, idempotency_key, payload)
-        if replay is not None:
-            return replay
-        if job.state not in {"compiled", "installed"} or draft.get("status") != "validated":
-            raise ValueError("import job has no validated pack draft to install")
-        require_rule_pack_resolution_readiness(pack_id, version)
-        installed = asdict(rule_packs.install(pack_id, version))
-        updated = import_jobs.record_result(
-            job_id,
-            {**dict(job.result), "installed_pack": installed},
-            state="installed",
-            source_id=job.source_id,
-            expected_revision=job.revision,
-            idempotency_key=idempotency_key,
-            idempotency_write=IdempotencyWrite(
-                scope=scope,
-                payload=payload,
-                response=lambda result: {
-                    "job": import_job_view(result),
-                    "installed": installed,
-                },
-            ),
-        )
-        return {"job": import_job_view(updated), "installed": installed}
-
-    @internal_operation
-    def rule_import_job_activate(
-        campaign_id: str,
-        job_id: str,
-        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
-        branch_id: str | None = None,
-        expected_revision: int | None = None,
-        idempotency_key: str | None = None,
-    ) -> dict[str, Any]:
-        """Enable an installed imported pack only through the checked-out branch lock."""
-        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
-        require_write_contract(expected_revision, idempotency_key)
-        job = require_import_job(campaign_id, job_id, "rulebook")
-        installed = dict(job.result.get("installed_pack") or {})
-        pack_id = str(installed.get("pack_id") or "")
-        version = str(installed.get("version") or "")
-        payload = {
-            "job_id": job_id,
-            "operation": "activate",
-            "pack_id": pack_id,
-            "version": version,
-            "branch_id": branch_id,
-        }
-        scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
-        replay = replay_idempotent(scope, idempotency_key, payload)
-        if replay is not None:
-            return replay
-        if job.state not in {"installed", "activated"}:
-            raise ValueError("import job must install its pack before activation")
-        activation = campaign_rule_pack_set(
-            campaign_id=campaign_id,
-            pack_id=pack_id,
-            version=version,
-            principal_id=principal_id,
-            branch_id=branch_id,
-            expected_revision=expected_revision,
-            idempotency_key=f"{idempotency_key}:rule-activation",
-        )
-        updated = import_jobs.record_result(
-            job_id,
-            {**dict(job.result), "activation": activation},
-            state="activated",
-            source_id=job.source_id,
-            expected_revision=job.revision,
-            idempotency_key=idempotency_key,
-            idempotency_write=IdempotencyWrite(
-                scope=scope,
-                payload=payload,
-                response=lambda result: {
-                    "job": import_job_view(result),
-                    "activation": activation,
-                },
-            ),
-        )
-        response = {"job": import_job_view(updated), "activation": activation}
-        return response
-
-    @internal_operation
     def rule_pack_install(pack_id: str, version: str) -> dict[str, Any]:
         """Install one validated immutable version without enabling it for a campaign."""
-        require_rule_pack_resolution_readiness(pack_id, version)
+        require_rule_pack_semantic_validation(pack_id, version)
         return asdict(rule_packs.install(pack_id, version))
 
     @internal_operation
@@ -33970,26 +33946,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 installed_pack.manifest,
                 edition=profile.edition,
             )
-            installed_manifest = dict(installed_pack.manifest)
-            if "readiness" in installed_manifest or "readiness_policy" in installed_manifest:
-                if installed_manifest.get("readiness_policy") != "build_time_complete":
-                    raise RulesetUnavailableError(
-                        "addon cannot be enabled until its four-dimensional review is complete"
-                    )
-                readiness = installed_manifest.get("readiness")
-                if not isinstance(readiness, dict):
-                    raise RulesetUnavailableError("addon readiness declaration is missing")
-                try:
-                    verified_readiness = validate_addon_readiness(readiness)
-                except ValueError as error:
-                    raise RulesetUnavailableError(
-                        f"addon readiness declaration is invalid: {error}"
-                    ) from error
-                if verified_readiness["complete"] is not True:
-                    raise RulesetUnavailableError(
-                        "addon cannot be enabled while source, catalog, selection, "
-                        "or runtime readiness has blockers"
-                    )
 
         def activation_response(result: dict[str, Any]) -> dict[str, Any]:
             return {
@@ -35951,12 +35907,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         kind = str(artifact.get("kind") or "")
         card = deepcopy(dict(artifact.get("card") or {}))
         selection = deepcopy(selection or {})
-        pack_manifest = dict(rule_packs.get_version(pack_id, version).manifest)
-        contract_required = (
-            "readiness" in pack_manifest
-            or "readiness_policy" in pack_manifest
-            or artifact.get("selection_contract") is not None
-        )
+        contract_required = artifact.get("selection_contract") is not None
         if contract_required:
             contract_errors = selection_input_errors(artifact, selection)
             if contract_errors:
@@ -37589,6 +37540,25 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 sheet["traits"]["senses"]["darkvision"] = int(grants["darkvision_ft"])
             natural_armor_base = int(grants.get("natural_armor_base", 0) or 0)
             if natural_armor_base:
+                includes_dexterity = grants.get("natural_armor_includes_dexterity", True)
+                armor_change = (
+                    {
+                        "path": "combat.ac.unarmored_base",
+                        "mode": "override",
+                        "value": natural_armor_base,
+                    }
+                    if includes_dexterity
+                    else {
+                        "path": "combat.ac.unarmored_formula",
+                        "mode": "override",
+                        "value": {
+                            "base": natural_armor_base,
+                            "ability": None,
+                            "allows_shield": True,
+                            "includes_dexterity": False,
+                        },
+                    }
+                )
                 sheet, _ = add_effect(
                     sheet,
                     {
@@ -37596,13 +37566,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "kind": "feature",
                         "source": artifact_id,
                         "duration": {"period": "manual", "remaining": 0},
-                        "changes": [
-                            {
-                                "path": "combat.ac.unarmored_base",
-                                "mode": "override",
-                                "value": natural_armor_base,
-                            }
-                        ],
+                        "changes": [armor_change],
                         "description": (
                             "Species alternate AC calculation while not wearing armor; "
                             "a shield applies normally."
@@ -37637,6 +37601,32 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             proficiencies["tool_expertise"] = list(
                 dict.fromkeys([*proficiencies["tool_expertise"], *selected_tool_expertise])
             )
+            for natural_weapon in grants.get("natural_weapons") or []:
+                weapon = dict(natural_weapon)
+                weapon_name = str(weapon["name"]).strip()
+                weapon_identity = hashlib.sha256(
+                    f"{artifact_id}\0{weapon_name.casefold()}".encode("utf-8")
+                ).hexdigest()[:16]
+                sheet, _ = add_inventory_item(
+                    sheet,
+                    {
+                        "id": f"species-natural-weapon-{weapon_identity}",
+                        "name": weapon_name,
+                        "kind": "weapon",
+                        "description": str(weapon.get("description") or ""),
+                        "mechanics": {
+                            "category": "other",
+                            "attack_type": "melee",
+                            "attack_ability": str(weapon["attack_ability"]).casefold(),
+                            "damage_formula": str(weapon["damage_formula"]).casefold(),
+                            "damage_type": str(weapon["damage_type"]).casefold(),
+                            "reach_ft": int(weapon.get("reach_ft", 5)),
+                            "proficient": True,
+                            "always_available": True,
+                        },
+                        "source_key": artifact_id,
+                    },
+                )
             sheet["traits"]["resistances"] = list(
                 dict.fromkeys(
                     [
@@ -39790,8 +39780,8 @@ Useful bounded guidance:
         return (
             f"Create a D&D module for campaign {campaign_id}. Brief: {brief}\n\n"
             "Read sagasmith://skill/modulegen.root first. Write the resulting Markdown with "
-            "module_import(action='stage'), then inspect, validate, ingest, and activate the "
-            "returned import job."
+            "module_draft(action='start'), review/edit it, finalize its Pack, then activate "
+            "through content_pack."
         )
 
     # The public MCP contract intentionally exposes domain facades rather than
@@ -39816,22 +39806,6 @@ Useful bounded guidance:
         if value is None or value == "":
             raise ValueError(f"payload.{name} is required")
         return value
-
-    def strict_facade_payload(
-        payload: dict[str, Any] | None,
-        *,
-        action: str,
-        allowed: set[str],
-        required_names: tuple[str, ...] = (),
-    ) -> dict[str, Any]:
-        """Validate one facade action without accepting an untyped payload escape hatch."""
-        data = facade_payload(payload)
-        unknown = sorted(set(data) - allowed)
-        if unknown:
-            raise ValueError(f"unsupported {action} payload fields: {', '.join(unknown)}")
-        for name in required_names:
-            required(data, name)
-        return data
 
     def require_facade_phase(campaign_id: str, action: str, *phases: str) -> None:
         phase = authoritative_phase(campaign_id)
@@ -39892,22 +39866,7 @@ Useful bounded guidance:
         """Resolve an individual, group, or contested check in the Play phase."""
         require_facade_phase(campaign_id, f"character_check({action})", PROFILE_PLAY)
         if action == "reroll":
-            data = strict_facade_payload(
-                payload,
-                action="character_check(reroll)",
-                allowed={
-                    "actor_id",
-                    "resolution_id",
-                    "roll_index",
-                    "expected_original_roll",
-                },
-                required_names=(
-                    "actor_id",
-                    "resolution_id",
-                    "roll_index",
-                    "expected_original_roll",
-                ),
-            )
+            data = facade_payload(payload)
             return character_heroic_inspiration_reroll(
                 campaign_id,
                 data["actor_id"],
@@ -39920,21 +39879,7 @@ Useful bounded guidance:
                 idempotency_key,
             )
         if action == "group":
-            data = strict_facade_payload(
-                payload,
-                action="character_check(group)",
-                allowed={
-                    "actor_ids",
-                    "ability",
-                    "dc",
-                    "proficient",
-                    "bonus",
-                    "advantage",
-                    "disadvantage",
-                    "rule_facts",
-                },
-                required_names=("actor_ids", "ability", "dc"),
-            )
+            data = facade_payload(payload)
             return character_group_check(
                 campaign_id,
                 data["actor_ids"],
@@ -39951,32 +39896,7 @@ Useful bounded guidance:
                 idempotency_key,
             )
         if action == "contest":
-            data = strict_facade_payload(
-                payload,
-                action="character_check(contest)",
-                allowed={
-                    "source_actor_id",
-                    "target_actor_id",
-                    "source_ability",
-                    "target_ability",
-                    "source_proficient",
-                    "target_proficient",
-                    "source_bonus",
-                    "target_bonus",
-                    "source_advantage",
-                    "source_disadvantage",
-                    "target_advantage",
-                    "target_disadvantage",
-                    "source_rule_facts",
-                    "target_rule_facts",
-                },
-                required_names=(
-                    "source_actor_id",
-                    "target_actor_id",
-                    "source_ability",
-                    "target_ability",
-                ),
-            )
+            data = facade_payload(payload)
             result = character_contest(
                 campaign_id,
                 data["source_actor_id"],
@@ -39999,22 +39919,7 @@ Useful bounded guidance:
                 idempotency_key,
             )
             return result
-        data = strict_facade_payload(
-            payload,
-            action="character_check(check)",
-            allowed={
-                "actor_id",
-                "kind",
-                "ability",
-                "dc",
-                "proficient",
-                "bonus",
-                "advantage",
-                "disadvantage",
-                "rule_facts",
-            },
-            required_names=("actor_id", "kind", "ability"),
-        )
+        data = facade_payload(payload)
         if data["kind"] not in ACTOR_CHECK_KINDS:
             raise ValueError(
                 "character_check(check).payload.kind must be ability, check, save, or death_save"
@@ -40050,37 +39955,11 @@ Useful bounded guidance:
         """Run the source-reviewed 2014 chase procedure only during Play."""
         require_facade_phase(campaign_id, f"chase({action})", PROFILE_PLAY)
         if action == "query":
-            data = strict_facade_payload(
-                payload,
-                action="chase(query)",
-                allowed=set(),
-            )
+            data = facade_payload(payload)
             assert not data
             return facade_result(action, chase_query(campaign_id, principal_id))
         if action == "start":
-            data = strict_facade_payload(
-                payload,
-                action="chase(start)",
-                allowed={
-                    "participant_ids",
-                    "quarry_ids",
-                    "initial_distance_ft",
-                    "scene_id",
-                    "source_ref",
-                    "source_excerpt",
-                    "name",
-                    "participant_config",
-                    "close_transition",
-                },
-                required_names=(
-                    "participant_ids",
-                    "quarry_ids",
-                    "initial_distance_ft",
-                    "scene_id",
-                    "source_ref",
-                    "source_excerpt",
-                ),
-            )
+            data = facade_payload(payload)
             result = chase_start(
                 campaign_id,
                 data["participant_ids"],
@@ -40098,25 +39977,7 @@ Useful bounded guidance:
                 idempotency_key,
             )
         elif action == "take_turn":
-            data = strict_facade_payload(
-                payload,
-                action="chase(take_turn)",
-                allowed={
-                    "actor_id",
-                    "turn_action",
-                    "complication_choice",
-                    "stand_from_prone",
-                    "quarry_visibility",
-                    "expected_actor_revision",
-                },
-                required_names=(
-                    "actor_id",
-                    "turn_action",
-                    "stand_from_prone",
-                    "quarry_visibility",
-                    "expected_actor_revision",
-                ),
-            )
+            data = facade_payload(payload)
             if "complication_choice" not in data:
                 raise ValueError("payload.complication_choice is required")
             turn_action = data.get("turn_action", "dash")
@@ -40136,22 +39997,7 @@ Useful bounded guidance:
                 idempotency_key,
             )
         else:
-            data = strict_facade_payload(
-                payload,
-                action="chase(end)",
-                allowed={
-                    "status",
-                    "summary",
-                    "source_ref",
-                    "source_excerpt",
-                },
-                required_names=(
-                    "status",
-                    "summary",
-                    "source_ref",
-                    "source_excerpt",
-                ),
-            )
+            data = facade_payload(payload)
             status = data["status"]
             if status not in CHASE_MANUAL_OUTCOME_STATUSES:
                 raise ValueError(
@@ -40171,8 +40017,8 @@ Useful bounded guidance:
             )
         return facade_result(action, result)
 
-    @public_tool()
-    def import_query(
+    @internal_operation
+    def _import_job_operation(
         campaign_id: str,
         view: Literal["get", "list"] = "list",
         job_id: str | None = None,
@@ -40188,965 +40034,6 @@ Useful bounded guidance:
         return facade_result(view, import_job_list(campaign_id, kind, principal_id))
 
     @public_tool()
-    def rule_import(
-        campaign_id: Annotated[str, Field(title="Campaign")],
-        action: Literal[
-            "discover",
-            "import_addon",
-            "import_package",
-            "inspect_release",
-            "stage",
-            "inspect",
-            "render_page",
-            "recover_statblock",
-            "recover_statblocks",
-            "ingest",
-            "review_text",
-            "review_statblock",
-            "extract_candidates",
-            "augment_catalog",
-            "review",
-            "compile",
-            "install",
-            "activate",
-        ],
-        payload: dict[str, Any] | None = None,
-        principal_id: Annotated[str, Field(title="Principal")] = LOCAL_SYSTEM_PRINCIPAL_ID,
-        expected_revision: Annotated[int | None, Field(title="Revision")] = None,
-        branch_id: Annotated[str | None, Field(title="BranchID")] = None,
-        idempotency_key: Annotated[str | None, Field(title="Request Key")] = None,
-    ) -> dict[str, Any]:
-        """Run reviewed rule imports; direct rule ingestion stays internal."""
-        if action == "import_addon":
-            data = strict_facade_payload(
-                payload,
-                action="rule_import(import_addon)",
-                allowed={"addon", "artifact", "source_path"},
-            )
-            if not idempotency_key:
-                raise ValueError("idempotency_key is required for portable addon import")
-            package = portable_input(data, field="addon", expected_kind="addon_pack")
-            return facade_result(
-                action,
-                import_portable_addon(
-                    campaign_id,
-                    package,
-                    principal_id=principal_id,
-                    idempotency_key=idempotency_key,
-                ),
-            )
-        if action == "import_package":
-            data = strict_facade_payload(
-                payload,
-                action="rule_import(import_package)",
-                allowed={"package", "artifact", "source_path"},
-            )
-            if not idempotency_key:
-                raise ValueError("idempotency_key is required for portable rule-pack import")
-            package = portable_input(data, field="package", expected_kind="rule_pack")
-            return facade_result(
-                action,
-                import_portable_rule_pack(
-                    campaign_id,
-                    package,
-                    principal_id=principal_id,
-                    idempotency_key=idempotency_key,
-                ),
-            )
-        if action == "inspect_release":
-            data = strict_facade_payload(
-                payload,
-                action="rule_import(inspect_release)",
-                allowed={"release_manifest", "artifact", "source_path"},
-            )
-            access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
-            require_facade_phase(campaign_id, "rule_import(inspect_release)", PROFILE_LOBBY)
-            release = validate_release_manifest(
-                portable_input(
-                    data,
-                    field="release_manifest",
-                    expected_kind="release_manifest",
-                ),
-                expected_system_id=DND5E.id,
-            )
-            routes = {
-                "rule_pack": "rule_import(action='import_package')",
-                "preset_pack": "character_create_from(mode='portable_card')",
-                "module_pack": "module_import(action='import_package')",
-            }
-            components = []
-            for component in release["dependencies"]:
-                local_status = "external_package_required"
-                portable_checksum_status = "not_available"
-                if component["kind"] == "rule_pack":
-                    try:
-                        local = rule_packs.get_version(component["id"], component["version"])
-                    except LookupError:
-                        pass
-                    else:
-                        local_status = local.status
-                        portable_provenance = rule_packs.provenance(
-                            component["id"], component["version"]
-                        )
-                        imported_package = dict(portable_provenance.get("portable_package") or {})
-                        imported_checksum = str(imported_package.get("checksum") or "")
-                        if imported_checksum:
-                            portable_checksum_status = (
-                                "match"
-                                if imported_checksum == component["checksum"]
-                                else "conflict"
-                            )
-                            if portable_checksum_status == "conflict":
-                                local_status = "checksum_conflict"
-                        else:
-                            portable_checksum_status = "unverified_local_build"
-                components.append(
-                    {
-                        **deepcopy(component),
-                        "local_status": local_status,
-                        "portable_checksum_status": portable_checksum_status,
-                        "import_route": routes[component["kind"]],
-                    }
-                )
-            return facade_result(
-                action,
-                {
-                    "release": {
-                        "id": release["id"],
-                        "version": release["version"],
-                        "checksum": release["checksum"],
-                        "metadata": deepcopy(release["metadata"]),
-                    },
-                    "components": components,
-                    "authority": "manifest_only",
-                    "auto_install": False,
-                    "auto_activate": False,
-                },
-            )
-        if action == "discover":
-            data = strict_facade_payload(
-                payload,
-                action="rule_import(discover)",
-                allowed=set(),
-            )
-            assert not data
-            access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
-            discovered = storage.discover_rulebooks()
-            return facade_result(
-                action,
-                {"count": len(discovered), "documents": discovered},
-            )
-        if action == "stage":
-            data = strict_facade_payload(
-                payload,
-                action="rule_import(stage)",
-                allowed={
-                    "source_path",
-                    "source_key",
-                    "title",
-                    "edition",
-                    "locale",
-                    "publication_id",
-                    "version",
-                    "authority",
-                },
-                required_names=("source_path", "source_key", "title", "edition"),
-            )
-            staged = rule_document_stage(campaign_id, required(data, "source_path"), principal_id)
-            artifact = staged["artifact"]
-            result = rule_import_job_create(
-                campaign_id,
-                artifact,
-                required(data, "source_key"),
-                required(data, "title"),
-                required(data, "edition"),
-                data.get("locale", "en"),
-                data.get("publication_id", ""),
-                data.get("version", ""),
-                data.get("authority", "supplement"),
-                principal_id,
-                idempotency_key,
-            )
-            return facade_result(action, {**staged, **result})
-        if action == "render_page":
-            require_facade_phase(
-                campaign_id,
-                "rule_import(render_page)",
-                PROFILE_LOBBY,
-            )
-            data = strict_facade_payload(
-                payload,
-                action="rule_import(render_page)",
-                allowed={"include_ocr_text", "job_id", "page_number", "scale"},
-                required_names=("job_id", "page_number"),
-            )
-            return facade_render_result(  # type: ignore[return-value]
-                rule_document_page_render(
-                    campaign_id,
-                    data["job_id"],
-                    data["page_number"],
-                    data.get("scale", 1.5),
-                    data.get("include_ocr_text", True),
-                    principal_id,
-                )
-            )
-        if action == "recover_statblock":
-            require_facade_phase(
-                campaign_id,
-                "rule_import(recover_statblock)",
-                PROFILE_LOBBY,
-            )
-            data = strict_facade_payload(
-                payload,
-                action="rule_import(recover_statblock)",
-                allowed={
-                    "job_id",
-                    "name",
-                    "page_number",
-                    "statblock_slot",
-                    "agent_fill",
-                    "ocr_corrections",
-                    "correction_evidence_basis",
-                    "rendered_image_checksum",
-                },
-                required_names=("job_id", "name"),
-            )
-            if (
-                "correction_evidence_basis" in data or "rendered_image_checksum" in data
-            ) and "ocr_corrections" not in data:
-                raise ValueError("statblock correction evidence requires ocr_corrections")
-            return facade_result(
-                action,
-                rule_statblock_ocr_recover(
-                    campaign_id,
-                    data["job_id"],
-                    data["name"],
-                    data.get("page_number"),
-                    principal_id,
-                    idempotency_key,
-                    data.get("agent_fill"),
-                    data.get("statblock_slot"),
-                    data.get("ocr_corrections"),
-                    data.get("correction_evidence_basis", "staged_text"),
-                    data.get("rendered_image_checksum"),
-                ),
-            )
-        if action == "recover_statblocks":
-            require_facade_phase(
-                campaign_id,
-                "rule_import(recover_statblocks)",
-                PROFILE_LOBBY,
-            )
-            data = strict_facade_payload(
-                payload,
-                action="rule_import(recover_statblocks)",
-                allowed={"job_id", "page_numbers"},
-                required_names=("job_id",),
-            )
-            return facade_result(
-                action,
-                rule_statblock_catalog_recover(
-                    campaign_id,
-                    str(data["job_id"]),
-                    data.get("page_numbers"),
-                    principal_id,
-                    idempotency_key,
-                ),
-            )
-        if action == "inspect":
-            data = strict_facade_payload(
-                payload,
-                action="rule_import(inspect)",
-                allowed={"job_id"},
-                required_names=("job_id",),
-            )
-            return facade_result(
-                action,
-                rule_import_job_inspect(campaign_id, data["job_id"], principal_id, idempotency_key),
-            )
-        if action == "ingest":
-            data = strict_facade_payload(
-                payload,
-                action="rule_import(ingest)",
-                allowed={"job_id", "acknowledge_warnings"},
-                required_names=("job_id",),
-            )
-            acknowledge_warnings = data.get("acknowledge_warnings", False)
-            if not isinstance(acknowledge_warnings, bool):
-                raise ValueError("payload.acknowledge_warnings must be a boolean")
-            return facade_result(
-                action,
-                rule_import_job_ingest(
-                    campaign_id,
-                    data["job_id"],
-                    acknowledge_warnings,
-                    principal_id,
-                    idempotency_key,
-                ),
-            )
-        if action == "review_text":
-            data = strict_facade_payload(
-                payload,
-                action="rule_import(review_text)",
-                allowed={
-                    "job_id",
-                    "page_number",
-                    "base_text_sha256",
-                    "replacements",
-                    "rationale",
-                    "evidence_basis",
-                    "rendered_image_checksum",
-                    "review_method",
-                },
-                required_names=(
-                    "job_id",
-                    "page_number",
-                    "base_text_sha256",
-                    "replacements",
-                    "rationale",
-                    "evidence_basis",
-                ),
-            )
-            return facade_result(
-                action,
-                submit_import_text_review(
-                    campaign_id,
-                    str(data["job_id"]),
-                    data["page_number"],
-                    str(data["base_text_sha256"]),
-                    data["replacements"],
-                    str(data["rationale"]),
-                    data["evidence_basis"],
-                    data.get("rendered_image_checksum"),
-                    data.get("review_method", "agent"),
-                    principal_id,
-                    expected_revision,
-                    idempotency_key,
-                ),
-            )
-        if action == "review_statblock":
-            review_data = facade_payload(payload)
-            if "base_review_id" in review_data:
-                data = strict_facade_payload(
-                    payload,
-                    action="rule_import(review_statblock)",
-                    allowed={
-                        "job_id",
-                        "base_review_id",
-                        "observation",
-                        "agent_fill",
-                    },
-                    required_names=(
-                        "job_id",
-                        "base_review_id",
-                        "observation",
-                        "agent_fill",
-                    ),
-                )
-                return facade_result(
-                    action,
-                    rule_statblock_review_from_base(
-                        campaign_id,
-                        str(data["job_id"]),
-                        str(data["base_review_id"]),
-                        data["observation"],
-                        data["agent_fill"],
-                        principal_id,
-                        idempotency_key,
-                    ),
-                )
-            data = strict_facade_payload(
-                payload,
-                action="rule_import(review_statblock)",
-                allowed={
-                    "job_id",
-                    "page_number",
-                    "normalized_content",
-                    "observation",
-                    "review_mode",
-                    "evidence_chunk_ids",
-                    "evidence_exclusions",
-                    "agent_fill",
-                },
-                required_names=(
-                    "job_id",
-                    "page_number",
-                    "normalized_content",
-                    "observation",
-                ),
-            )
-            if data.get("review_mode") == "indexed_text":
-                raise ValueError(
-                    "indexed_text is reserved for deterministic "
-                    "rule_import(recover_statblocks) normalization"
-                )
-            return facade_result(
-                action,
-                rule_statblock_review(
-                    campaign_id,
-                    str(data["job_id"]),
-                    data["page_number"],
-                    data["normalized_content"],
-                    data["observation"],
-                    principal_id,
-                    idempotency_key,
-                    data.get("review_mode", "visual"),
-                    data.get("evidence_chunk_ids"),
-                    data.get("agent_fill"),
-                    None,
-                    data.get("evidence_exclusions"),
-                ),
-            )
-        if action == "extract_candidates":
-            data = strict_facade_payload(
-                payload,
-                action="rule_import(extract_candidates)",
-                allowed={"job_id"},
-                required_names=("job_id",),
-            )
-            return facade_result(
-                action,
-                rule_content_candidates_extract(
-                    campaign_id, data["job_id"], principal_id, idempotency_key
-                ),
-            )
-        if action == "augment_catalog":
-            require_facade_phase(
-                campaign_id,
-                "rule_import(augment_catalog)",
-                PROFILE_LOBBY,
-            )
-            data = strict_facade_payload(
-                payload,
-                action="rule_import(augment_catalog)",
-                allowed={"job_id", "additions", "rationale"},
-                required_names=("job_id", "additions", "rationale"),
-            )
-            return facade_result(
-                action,
-                rule_content_candidates_augment(
-                    campaign_id,
-                    str(data["job_id"]),
-                    data["additions"],
-                    str(data["rationale"]),
-                    principal_id,
-                    expected_revision,
-                    idempotency_key,
-                ),
-            )
-        if action == "review":
-            data = strict_facade_payload(
-                payload,
-                action="rule_import(review)",
-                allowed={"job_id", "decisions"},
-                required_names=("job_id", "decisions"),
-            )
-            return facade_result(
-                action,
-                import_job_review_candidates(
-                    campaign_id,
-                    data["job_id"],
-                    data["decisions"],
-                    principal_id,
-                    idempotency_key,
-                ),
-            )
-        if action == "compile":
-            data = strict_facade_payload(
-                payload,
-                action="rule_import(compile)",
-                allowed={"job_id", "manifest", "mechanics", "provenance"},
-                required_names=("job_id", "manifest"),
-            )
-            return facade_result(
-                action,
-                rule_import_job_compile(
-                    campaign_id,
-                    data["job_id"],
-                    data["manifest"],
-                    data.get("mechanics"),
-                    data.get("provenance"),
-                    principal_id,
-                    idempotency_key,
-                ),
-            )
-        if action == "install":
-            data = strict_facade_payload(
-                payload,
-                action="rule_import(install)",
-                allowed={"job_id"},
-                required_names=("job_id",),
-            )
-            return facade_result(
-                action,
-                rule_import_job_install(campaign_id, data["job_id"], principal_id, idempotency_key),
-            )
-        data = strict_facade_payload(
-            payload,
-            action="rule_import(activate)",
-            allowed={"job_id"},
-            required_names=("job_id",),
-        )
-        return facade_result(
-            action,
-            rule_import_job_activate(
-                campaign_id,
-                data["job_id"],
-                principal_id,
-                branch_id,
-                expected_revision,
-                idempotency_key,
-            ),
-        )
-
-    @public_tool()
-    def module_import(
-        campaign_id: str,
-        action: Literal[
-            "stage",
-            "inspect",
-            "validate",
-            "ingest",
-            "activate",
-            "attach_asset",
-            "bind_actor",
-            "import_package",
-        ],
-        payload: dict[str, Any] | None = None,
-        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
-        expected_revision: int | None = None,
-        idempotency_key: str | None = None,
-    ) -> dict[str, Any]:
-        """Run the staged module-import state machine and activate only reviewed revisions."""
-        if action == "bind_actor":
-            data = strict_facade_payload(
-                payload,
-                action="module_import(bind_actor)",
-                allowed={
-                    "module_id",
-                    "character_id",
-                    "portable_actor_id",
-                    "binding_kind",
-                    "role",
-                    "scene_id",
-                    "metadata",
-                },
-                required_names=(
-                    "module_id",
-                    "character_id",
-                    "portable_actor_id",
-                    "binding_kind",
-                ),
-            )
-            access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
-            require_facade_phase(campaign_id, "module_import(bind_actor)", PROFILE_LOBBY)
-            result = modules.bind_actor(
-                campaign_id=campaign_id,
-                module_id=str(data["module_id"]),
-                character_id=str(data["character_id"]),
-                portable_actor_id=str(data["portable_actor_id"]),
-                binding_kind=str(data["binding_kind"]),
-                role=str(data.get("role") or ""),
-                scene_id=(str(data["scene_id"]) if data.get("scene_id") else None),
-                metadata=dict(data.get("metadata") or {}),
-            )
-            return facade_result(action, result)
-        if action == "import_package":
-            data = strict_facade_payload(
-                payload,
-                action="module_import(import_package)",
-                allowed={"package", "artifact", "source_path", "activate"},
-            )
-            access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
-            require_facade_phase(campaign_id, "module_import(import_package)", PROFILE_LOBBY)
-            if not idempotency_key:
-                raise ValueError("idempotency_key is required for portable module import")
-            choices = [
-                name
-                for name in ("package", "artifact", "source_path")
-                if data.get(name) is not None
-            ]
-            if len(choices) != 1:
-                raise ValueError(
-                    "provide exactly one of payload.package, payload.artifact, or "
-                    "payload.source_path"
-                )
-            if choices[0] == "package":
-                package = data["package"]
-                if not isinstance(package, dict):
-                    raise ValueError("payload.package must be an object")
-                blobs: dict[str, bytes] = {}
-            else:
-                package, blobs = storage.read_module_archive(
-                    artifact=(str(data["artifact"]) if choices[0] == "artifact" else None),
-                    source_path=(data.get("source_path") if choices[0] == "source_path" else None),
-                )
-            if package.get("kind") != "module_pack":
-                raise ValueError("portable package kind must be module_pack")
-            activate = data.get("activate", True)
-            if not isinstance(activate, bool):
-                raise ValueError("payload.activate must be a boolean")
-            return facade_result(
-                action,
-                import_portable_module_package(
-                    campaign_id,
-                    package,
-                    blobs,
-                    principal_id=principal_id,
-                    idempotency_key=idempotency_key,
-                    activate=activate,
-                ),
-            )
-        if action == "stage":
-            data = strict_facade_payload(
-                payload,
-                action="module_import(stage)",
-                allowed={"source_path", "name", "content", "title", "source_key"},
-            )
-            access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
-            source_path = data.get("source_path")
-            generated_fields = {"name", "content"}.intersection(data)
-            if source_path is not None and generated_fields:
-                raise ValueError("stage accepts either source_path or name+content, not both")
-            if source_path is not None:
-                staged = storage.stage_module(str(source_path))
-                artifact = str(staged["artifact"])
-            else:
-                staged = module_write(
-                    required(data, "name"), required(data, "content"), principal_id
-                )
-                artifact = staged["artifact"]
-            result = module_import_job_create(
-                campaign_id,
-                artifact,
-                data.get("title"),
-                data.get("source_key"),
-                principal_id,
-                idempotency_key,
-            )
-            return facade_result(action, {**staged, "artifact": artifact, **result})
-        if action == "attach_asset":
-            data = strict_facade_payload(
-                payload,
-                action="module_import(attach_asset)",
-                allowed={
-                    "module_id",
-                    "source_path",
-                    "asset_kind",
-                    "scene_id",
-                    "location_key",
-                    "title",
-                    "metadata",
-                },
-                required_names=("module_id", "source_path", "asset_kind"),
-            )
-            return facade_result(
-                action,
-                module_asset_attach(
-                    campaign_id,
-                    required(data, "module_id"),
-                    required(data, "source_path"),
-                    asset_kind=required(data, "asset_kind"),
-                    scene_id=data.get("scene_id"),
-                    location_key=data.get("location_key"),
-                    title=data.get("title"),
-                    metadata=data.get("metadata"),
-                    principal_id=principal_id,
-                    idempotency_key=idempotency_key,
-                ),
-            )
-        if action == "activate":
-            data = strict_facade_payload(
-                payload,
-                action="module_import(activate)",
-                allowed={"job_id", "progress_remaps"},
-                required_names=("job_id",),
-            )
-        if action == "inspect":
-            data = strict_facade_payload(
-                payload,
-                action="module_import(inspect)",
-                allowed={"job_id"},
-                required_names=("job_id",),
-            )
-            return facade_result(
-                action,
-                module_import_job_inspect(
-                    campaign_id, data["job_id"], principal_id, idempotency_key
-                ),
-            )
-        if action == "validate":
-            data = strict_facade_payload(
-                payload,
-                action="module_import(validate)",
-                allowed={"job_id"},
-                required_names=("job_id",),
-            )
-            return facade_result(
-                action,
-                module_import_job_validate(
-                    campaign_id, data["job_id"], principal_id, idempotency_key
-                ),
-            )
-        if action == "ingest":
-            data = strict_facade_payload(
-                payload,
-                action="module_import(ingest)",
-                allowed={"job_id"},
-                required_names=("job_id",),
-            )
-            return facade_result(
-                action,
-                module_import_job_import(
-                    campaign_id, data["job_id"], principal_id, idempotency_key
-                ),
-            )
-        return facade_result(
-            action,
-            module_import_job_activate(
-                campaign_id,
-                data["job_id"],
-                principal_id,
-                expected_revision,
-                idempotency_key,
-                data.get("progress_remaps"),
-            ),
-        )
-
-    @public_tool()
-    def module_review(
-        campaign_id: str,
-        action: Literal[
-            "render_page",
-            "render_transcript",
-            "recover_statblock",
-            "submit_content",
-            "submit_transcript",
-        ],
-        payload: dict[str, Any],
-        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
-        expected_revision: int | None = None,
-        idempotency_key: str | None = None,
-    ) -> dict[str, Any]:
-        """Render, text-only recover, or submit managed module evidence."""
-        if action == "render_transcript":
-            require_facade_phase(
-                campaign_id,
-                "module_review(render_transcript)",
-                PROFILE_LOBBY,
-            )
-            data = strict_facade_payload(
-                payload,
-                action="module_review(render_transcript)",
-                allowed={"job_id", "page_number", "scale", "include_ocr_text"},
-                required_names=("job_id", "page_number"),
-            )
-            access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
-            job = require_import_job(campaign_id, str(data["job_id"]), "module")
-            source = storage.artifact_module_path(job.artifact)
-            if source.suffix.casefold() != ".pdf":
-                raise ValueError("module transcript rendering requires a staged PDF")
-            include_ocr_text = data.get("include_ocr_text", True)
-            if not isinstance(include_ocr_text, bool):
-                raise ValueError("include_ocr_text must be a boolean")
-            rendered = render_pdf_page(
-                source,
-                data["page_number"],
-                scale=data.get("scale", 1.5),
-            )
-            transcription = staged_transcription_evidence(
-                job,
-                data["page_number"],
-                include_ocr=include_ocr_text,
-            )
-            return facade_render_result(  # type: ignore[return-value]
-                [
-                    {
-                        "campaign_id": campaign_id,
-                        "job_id": job.id,
-                        "artifact": job.artifact,
-                        "source_checksum": rendered.source_checksum,
-                        "page_number": rendered.page_number,
-                        "page_count": rendered.page_count,
-                        "width": rendered.width,
-                        "height": rendered.height,
-                        "scale": rendered.scale,
-                        "image_checksum": rendered.checksum,
-                        "transcription": transcription,
-                    },
-                    Image(data=rendered.content, format="png"),
-                ]
-            )
-        if action == "submit_transcript":
-            require_facade_phase(
-                campaign_id,
-                "module_review(submit_transcript)",
-                PROFILE_LOBBY,
-            )
-            data = strict_facade_payload(
-                payload,
-                action="module_review(submit_transcript)",
-                allowed={
-                    "job_id",
-                    "page_number",
-                    "base_text_sha256",
-                    "replacements",
-                    "rationale",
-                    "evidence_basis",
-                    "rendered_image_checksum",
-                    "review_method",
-                },
-                required_names=(
-                    "job_id",
-                    "page_number",
-                    "base_text_sha256",
-                    "replacements",
-                    "rationale",
-                    "evidence_basis",
-                ),
-            )
-            return facade_result(
-                action,
-                submit_import_text_review(
-                    campaign_id,
-                    str(data["job_id"]),
-                    data["page_number"],
-                    str(data["base_text_sha256"]),
-                    data["replacements"],
-                    str(data["rationale"]),
-                    data["evidence_basis"],
-                    data.get("rendered_image_checksum"),
-                    data.get("review_method", "agent"),
-                    principal_id,
-                    expected_revision,
-                    idempotency_key,
-                ),
-            )
-        if action == "render_page":
-            require_facade_phase(
-                campaign_id,
-                "module_review(render_page)",
-                PROFILE_LOBBY,
-                PROFILE_PLAY,
-            )
-            data = strict_facade_payload(
-                payload,
-                action="module_review(render_page)",
-                allowed={
-                    "module_id",
-                    "page_number",
-                    "source_asset_id",
-                    "scale",
-                    "include_ocr_text",
-                },
-                required_names=("module_id", "page_number"),
-            )
-            return facade_render_result(  # type: ignore[return-value]
-                module_page_render(
-                    campaign_id,
-                    data["module_id"],
-                    data["page_number"],
-                    data.get("source_asset_id"),
-                    data.get("scale", 1.5),
-                    data.get("include_ocr_text", True),
-                    principal_id,
-                )
-            )
-        if action == "recover_statblock":
-            require_facade_phase(
-                campaign_id,
-                "module_review(recover_statblock)",
-                PROFILE_LOBBY,
-            )
-            data = strict_facade_payload(
-                payload,
-                action="module_review(recover_statblock)",
-                allowed={
-                    "module_id",
-                    "scene_id",
-                    "content_key",
-                    "name",
-                    "page_number",
-                    "source_asset_id",
-                    "agent_fill",
-                },
-                required_names=(
-                    "module_id",
-                    "scene_id",
-                    "content_key",
-                    "name",
-                    "page_number",
-                ),
-            )
-            return facade_result(
-                action,
-                module_statblock_ocr_recover(
-                    campaign_id,
-                    data["module_id"],
-                    data["scene_id"],
-                    data["content_key"],
-                    data["name"],
-                    data["page_number"],
-                    data.get("source_asset_id"),
-                    principal_id,
-                    idempotency_key,
-                    data.get("agent_fill"),
-                ),
-            )
-        require_facade_phase(
-            campaign_id,
-            "module_review(submit_content)",
-            PROFILE_LOBBY,
-        )
-        data = strict_facade_payload(
-            payload,
-            action="module_review(submit_content)",
-            allowed={
-                "module_id",
-                "scene_id",
-                "content_key",
-                "normalized_content",
-                "observation",
-                "source_asset_id",
-                "page_number",
-                "source_chunk_ids",
-                "content_kind",
-                "metadata",
-                "agent_fill",
-            },
-            required_names=(
-                "module_id",
-                "scene_id",
-                "content_key",
-                "normalized_content",
-                "observation",
-            ),
-        )
-        expected_content_kind = statblock_content_kind(campaign_rules_edition(campaign_id))
-        content_kind = data.get("content_kind", expected_content_kind)
-        if content_kind != expected_content_kind:
-            raise ValueError(f"payload.content_kind must be {expected_content_kind}")
-        return facade_result(
-            action,
-            module_content_review(
-                campaign_id,
-                data["module_id"],
-                data["scene_id"],
-                data["content_key"],
-                data["normalized_content"],
-                data["observation"],
-                data.get("source_asset_id"),
-                data.get("page_number"),
-                data.get("source_chunk_ids"),
-                content_kind,
-                data.get("metadata"),
-                principal_id,
-                idempotency_key,
-                data.get("agent_fill"),
-            ),
-        )
-
-    @public_tool()
     def module_query(
         campaign_id: str,
         view: Literal[
@@ -41155,7 +40042,7 @@ Useful bounded guidance:
             "scene",
             "current",
             "progress",
-            "readiness",
+            "preflight",
             "assets",
             "content",
             "candidates",
@@ -41180,8 +40067,8 @@ Useful bounded guidance:
             )
         elif view == "current":
             result = module_current(campaign_id, data.get("scope_id", "party"), principal_id)
-        elif view == "readiness":
-            result = module_scene_readiness(
+        elif view == "preflight":
+            result = module_scene_preflight(
                 campaign_id,
                 required(data, "scene_id"),
                 required(data, "participant_manifest"),
@@ -41207,12 +40094,7 @@ Useful bounded guidance:
                 principal_id,
             )
         elif view == "actors":
-            data = strict_facade_payload(
-                payload,
-                action="module_query(actors)",
-                allowed={"module_id", "scene_id", "binding_kind"},
-                required_names=("module_id",),
-            )
+            data = facade_payload(payload)
             access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
             result = modules.list_actor_bindings(
                 campaign_id,
@@ -41221,23 +40103,7 @@ Useful bounded guidance:
                 binding_kind=(str(data["binding_kind"]) if data.get("binding_kind") else None),
             )
         elif view == "package":
-            data = strict_facade_payload(
-                payload,
-                action="module_query(package)",
-                allowed={
-                    "module_id",
-                    "portable_id",
-                    "version",
-                    "metadata",
-                    "dependencies",
-                    "manifest",
-                    "catalogs",
-                    "narrative",
-                    "readiness",
-                    "include_package",
-                },
-                required_names=("module_id", "portable_id"),
-            )
+            data = facade_payload(payload)
             access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
             module_blobs: dict[str, bytes] = {}
             package = modules.export_portable_pack(
@@ -41252,7 +40118,6 @@ Useful bounded guidance:
                 manifest=(dict(data["manifest"]) if data.get("manifest") else None),
                 catalogs=(dict(data["catalogs"]) if data.get("catalogs") else None),
                 narrative=(dict(data["narrative"]) if data.get("narrative") else None),
-                readiness=(dict(data["readiness"]) if data.get("readiness") else None),
             )
             finalized_actors = []
             for actor_card in package["payload"]["actors"]:
@@ -41292,24 +40157,26 @@ Useful bounded guidance:
                     actors=finalized_actors,
                     catalogs=module_payload["catalogs"],
                     narrative=module_payload["narrative"],
-                    readiness=module_payload["readiness"],
                     metadata=package["metadata"],
                     dependencies=package["dependencies"],
                 )
-            artifact = storage.write_module_archive(package, module_blobs)
+            package, module_blobs = build_module_content_package(
+                package,
+                module_blobs,
+            )
+            artifact = storage.write_content_archive(package, module_blobs)
             result = {
                 **artifact,
                 "summary": {
-                    "scenes": len(package["payload"]["scene_atlas"]),
-                    "assets": len(package["payload"]["assets"]),
-                    "content_reviews": len(package["payload"]["content_reviews"]),
-                    "actors": len(package["payload"]["actors"]),
-                    "catalog_entries": package["payload"]["manifest"][
-                        "content_summary"
-                    ]["catalog_entries"],
-                    "dossiers": len(package["payload"]["narrative"]["dossiers"]),
-                    "endings": len(package["payload"]["narrative"]["endings"]),
-                    "readiness": package["payload"]["readiness"],
+                    "scenes": len(package["content"]["scene_atlas"]),
+                    "assets": len(package["assets"]),
+                    "content_reviews": len(package["content_reviews"]),
+                    "actors": len(package["actors"]),
+                    "catalog_entries": sum(
+                        len(items) for items in package["content"]["catalogs"].values()
+                    ),
+                    "dossiers": len(package["content"]["narrative"]["dossiers"]),
+                    "endings": len(package["content"]["narrative"]["endings"]),
                 },
                 **({"package": package} if data.get("include_package") is True else {}),
             }
@@ -41322,1094 +40189,2041 @@ Useful bounded guidance:
             )
         return facade_result(view, result)
 
-    @public_tool()
-    def rule_pack_compile(
-        action: Literal["draft", "from_source"],
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Compile a rule-pack draft, optionally bound to an indexed source."""
+    def _content_pack_actor_presets(
+        payload: dict[str, Any] | None,
+        principal_id: str,
+    ) -> Any:
         data = facade_payload(payload)
-        if action == "draft":
-            result = rule_pack_draft(
-                required(data, "manifest"),
-                data.get("artifacts"),
-                data.get("mechanics"),
-                data.get("provenance"),
-            )
-        else:
-            result = rule_pack_draft_from_source(
-                required(data, "source_id"),
-                required(data, "manifest"),
-                data.get("artifacts"),
-                data.get("mechanics"),
-                data.get("provenance"),
-            )
-        return facade_result(action, result)
-
-    @public_tool()
-    def rule_pack_query(
-        view: Literal[
-            "list",
-            "inspect",
-            "test",
-            "content_catalog",
-            "sources",
-            "source_chunks",
-            "actor_presets",
-            "addons",
-            "addon",
-            "addon_package",
-            "preset_package",
-            "package",
-            "release",
-        ] = "list",
-        payload: dict[str, Any] | None = None,
-        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
-    ) -> dict[str, Any]:
-        """List, inspect, test, or browse selection-ready rule-pack content."""
-        data = facade_payload(payload)
-        if view == "list":
-            result = rule_pack_list(data.get("pack_id"))
-        elif view == "inspect":
-            result = rule_pack_inspect(required(data, "pack_id"), required(data, "version"))
-        elif view == "test":
-            result = rule_pack_test(required(data, "pack_id"), required(data, "version"))
-        elif view == "content_catalog":
-            result = content_catalog_list(
-                required(data, "campaign_id"),
-                data.get("kind"),
-                data.get("query", ""),
-                principal_id,
-                data.get("branch_id"),
-                include_context=bool(data.get("include_context", False)),
-            )
-        elif view == "actor_presets":
-            data = strict_facade_payload(
-                payload,
-                action="rule_pack_query(actor_presets)",
-                allowed={"edition", "artifact_id", "include_package"},
-                required_names=("edition",),
-            )
-            edition = normalize_dnd_edition(str(required(data, "edition")))
-            package = (
-                build_srd2014_preset_pack(config.dnd_skills_dir)
-                if edition == "2014"
-                else build_srd2024_preset_pack(config.dnd_skills_dir)
-            )
-            if not package:
-                raise ValueError("bundled D&D actor presets are unavailable")
-            artifact_id = str(data.get("artifact_id") or "").strip()
-            if artifact_id:
-                matches = [
-                    card for card in package["payload"]["cards"] if card["id"] == artifact_id
-                ]
-                if len(matches) != 1:
-                    raise ValueError("artifact_id is not present in the actor preset pack")
-                card = validate_dnd_actor_card(matches[0])
-                result = {
-                    "card": card,
-                    "artifact": storage.write_portable_package(card),
-                }
-            else:
-                result = {
-                    "package": {
-                        "id": package["id"],
-                        "version": package["version"],
-                        "checksum": package["checksum"],
-                        "cards": len(package["payload"]["cards"]),
-                        "metadata": deepcopy(package["metadata"]),
-                    },
-                    "artifact": storage.write_portable_package(package),
-                    **(
-                        {"portable_package": package} if data.get("include_package") is True else {}
-                    ),
-                }
-        elif view == "addons":
-            data = strict_facade_payload(
-                payload,
-                action="rule_pack_query(addons)",
-                allowed={"campaign_id", "addon_id", "branch_id"},
-                required_names=("campaign_id",),
-            )
-            campaign_id = str(data["campaign_id"])
-            access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
-            versions = addons.list_versions(str(data["addon_id"]) if data.get("addon_id") else None)
-            active = {
-                item.addon_id: asdict(item)
-                for item in addons.activations(
-                    campaign_id,
-                    branch_id=(str(data["branch_id"]) if data.get("branch_id") else None),
-                )
-            }
-            result = [
-                {**asdict(item), "activation": active.get(item.addon_id)} for item in versions
-            ]
-        elif view == "addon":
-            data = strict_facade_payload(
-                payload,
-                action="rule_pack_query(addon)",
-                allowed={
-                    "campaign_id",
-                    "addon_id",
-                    "version",
-                    "include_package",
-                },
-                required_names=("campaign_id", "addon_id", "version"),
-            )
-            campaign_id = str(data["campaign_id"])
-            access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
-            addon_id = str(data["addon_id"])
-            version = str(data["version"])
-            info = addons.get_version(addon_id, version)
-            package = addons.get_package(addon_id, version)
+        edition = normalize_dnd_edition(str(required(data, "edition")))
+        package = (
+            build_srd2014_preset_pack(config.dnd_skills_dir)
+            if edition == "2014"
+            else build_srd2024_preset_pack(config.dnd_skills_dir)
+        )
+        if not package:
+            raise ValueError("bundled D&D actor presets are unavailable")
+        artifact_id = str(data.get("artifact_id") or "").strip()
+        cards = list(package["payload"]["cards"])
+        if artifact_id:
+            matches = [card for card in cards if card["id"] == artifact_id]
+            if len(matches) != 1:
+                raise ValueError("artifact_id is not present in the actor preset pack")
+            cards = [validate_dnd_actor_card(matches[0])]
+        package, package_blobs = build_preset_content_package(
+            package_id=str(package["id"]),
+            version=str(package["version"]),
+            system_id=DND5E.id,
+            title=str(package["metadata"].get("title") or package["id"]),
+            cards=cards,
+            metadata=dict(package["metadata"]),
+        )
+        artifact = storage.write_content_archive(package, package_blobs)
+        if artifact_id:
             result = {
-                "addon": asdict(info),
-                "components": addons.component_status(addon_id, version),
-                "artifact": storage.write_portable_package(package),
-                **({"package": package} if data.get("include_package") is True else {}),
+                "card": package["actors"][0],
+                "artifact": artifact,
             }
-        elif view == "preset_package":
-            data = strict_facade_payload(
-                payload,
-                action="rule_pack_query(preset_package)",
-                allowed={
-                    "allow_partial",
-                    "catalog_review_decisions",
-                    "campaign_id",
-                    "pack_id",
-                    "version",
-                    "portable_id",
-                    "metadata",
-                    "include_package",
+        else:
+            result = {
+                "package": {
+                    "id": package["id"],
+                    "version": package["version"],
+                    "checksum": package["checksum"],
+                    "cards": len(package["actors"]),
+                    "metadata": deepcopy(package["metadata"]),
                 },
-                required_names=("campaign_id", "pack_id", "version", "portable_id"),
-            )
-            campaign_id = str(data["campaign_id"])
-            access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
-            require_facade_phase(
+                "artifact": artifact,
+                **({"content_package": package} if data.get("include_package") is True else {}),
+            }
+        return result
+
+    def _content_pack_addons(
+        payload: dict[str, Any] | None,
+        principal_id: str,
+    ) -> Any:
+        data = facade_payload(payload)
+        campaign_id = str(data["campaign_id"])
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        versions = addons.list_versions(str(data["addon_id"]) if data.get("addon_id") else None)
+        active = {
+            item.addon_id: asdict(item)
+            for item in addons.activations(
                 campaign_id,
-                "rule_pack_query(preset_package)",
-                PROFILE_LOBBY,
+                branch_id=(str(data["branch_id"]) if data.get("branch_id") else None),
             )
-            pack_id = str(data["pack_id"])
-            version = str(data["version"])
-            allow_partial = data.get("allow_partial", False)
-            if not isinstance(allow_partial, bool):
-                raise ValueError("payload.allow_partial must be a boolean")
-            raw_catalog_review_decisions = data.get("catalog_review_decisions")
-            if raw_catalog_review_decisions is not None and not isinstance(
-                raw_catalog_review_decisions, list
-            ):
-                raise ValueError("payload.catalog_review_decisions must be an array")
-            catalog_review_decisions = (
-                deepcopy(raw_catalog_review_decisions)
-                if raw_catalog_review_decisions is not None
-                else None
-            )
-            pack = rule_packs.get_version(pack_id, version)
-            edition = campaign_rules_edition(campaign_id)
-            cards = []
-            failures = []
-            dependent_templates: list[dict[str, Any]] = []
-            bundled_core_reuses: list[dict[str, str]] = []
-            reviewed_ocr_supersessions: list[dict[str, str]] = []
-            excluded_source_reviews: list[dict[str, str]] = []
-            claimed_review_artifact_ids: set[str] = set()
-            bundled_core_card_ids: set[str] = set()
-            seen_source_checksums: set[str] = set()
-            reviewed_source_names: set[str] = set()
+        }
+        result = [{**asdict(item), "activation": active.get(item.addon_id)} for item in versions]
+        return result
 
-            def append_dependent_template(
-                *,
-                name: str,
-                source_text: str,
-                source_refs: list[str],
-                requirement: dict[str, Any],
-                artifact_id: str | None = None,
-            ) -> str:
-                normalized_name = " ".join(str(name).split())
-                solution_errors = dependent_actor_template_solution_errors(requirement)
-                if solution_errors:
-                    raise ValueError(
-                        "dependent actor template is not runtime-ready: "
-                        + "; ".join(solution_errors)
-                    )
-                preview = parse_2014_statblock_template_preview(
-                    source_text,
-                    source_key=f"dependent-template-preview:{artifact_id or normalized_name}",
-                    rule_refs=source_refs,
-                    name=normalized_name,
+    def _content_pack_addon(
+        payload: dict[str, Any] | None,
+        principal_id: str,
+    ) -> Any:
+        data = facade_payload(payload)
+        campaign_id = str(data["campaign_id"])
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        addon_id = str(data["addon_id"])
+        version = str(data["version"])
+        info = addons.get_version(addon_id, version)
+        package = addons.get_package(addon_id, version)
+        archive_name = str(info.provenance.get("content_archive_artifact") or "")
+        if not archive_name:
+            raise LookupError("installed addon has no unified content archive")
+        archived_package, archived_blobs = storage.read_content_archive(artifact=archive_name)
+        if archived_package != package:
+            raise ValueError("installed addon descriptor differs from its content archive")
+        result = {
+            "addon": asdict(info),
+            "components": addons.component_status(addon_id, version),
+            "artifact": storage.write_content_archive(package, archived_blobs),
+            **({"package": package} if data.get("include_package") is True else {}),
+        }
+        return result
+
+    def _content_pack_build_preset(
+        payload: dict[str, Any] | None,
+        principal_id: str,
+    ) -> Any:
+        data = facade_payload(payload)
+        campaign_id = str(data["campaign_id"])
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        require_facade_phase(
+            campaign_id,
+            "content_pack(build:preset)",
+            PROFILE_LOBBY,
+        )
+        pack_id = str(data["pack_id"])
+        version = str(data["version"])
+        allow_partial = data.get("allow_partial", False)
+        if not isinstance(allow_partial, bool):
+            raise ValueError("payload.allow_partial must be a boolean")
+        raw_catalog_review_decisions = data.get("catalog_review_decisions")
+        if raw_catalog_review_decisions is not None and not isinstance(
+            raw_catalog_review_decisions, list
+        ):
+            raise ValueError("payload.catalog_review_decisions must be an array")
+        catalog_review_decisions = (
+            deepcopy(raw_catalog_review_decisions)
+            if raw_catalog_review_decisions is not None
+            else None
+        )
+        pack = rule_packs.get_version(pack_id, version)
+        edition = campaign_rules_edition(campaign_id)
+        cards = []
+        failures = []
+        dependent_templates: list[dict[str, Any]] = []
+        bundled_core_reuses: list[dict[str, str]] = []
+        reviewed_ocr_supersessions: list[dict[str, str]] = []
+        excluded_source_reviews: list[dict[str, str]] = []
+        claimed_review_artifact_ids: set[str] = set()
+        bundled_core_card_ids: set[str] = set()
+        seen_source_checksums: set[str] = set()
+        reviewed_source_names: set[str] = set()
+
+        def append_dependent_template(
+            *,
+            name: str,
+            source_text: str,
+            source_refs: list[str],
+            requirement: dict[str, Any],
+            artifact_id: str | None = None,
+        ) -> str:
+            normalized_name = " ".join(str(name).split())
+            solution_errors = dependent_actor_template_solution_errors(requirement)
+            if solution_errors:
+                raise ValueError(
+                    "dependent actor template is not runtime-ready: " + "; ".join(solution_errors)
                 )
-                expected_weapon_names = sorted(
-                    str(item.get("name") or "").strip()
-                    for item in preview.sheet["inventory"]["items"]
-                    if item.get("kind") == "weapon" and str(item.get("name") or "").strip()
-                )
-                source_checksum = hashlib.sha256(source_text.encode()).hexdigest()
-                if source_checksum in seen_source_checksums:
-                    return compact_ascii_key(normalized_name)
-                dependent_templates.append(
-                    {
-                        "name": normalized_name,
-                        "source_checksum": source_checksum,
-                        "source_refs": deepcopy(source_refs),
-                        "requirement": deepcopy(requirement),
-                        "expected_weapon_names": expected_weapon_names,
-                        **({"artifact_id": str(artifact_id)} if artifact_id else {}),
-                    }
-                )
-                seen_source_checksums.add(source_checksum)
+            preview = parse_2014_statblock_template_preview(
+                source_text,
+                source_key=f"dependent-template-preview:{artifact_id or normalized_name}",
+                rule_refs=source_refs,
+                name=normalized_name,
+            )
+            expected_weapon_names = sorted(
+                str(item.get("name") or "").strip()
+                for item in preview.sheet["inventory"]["items"]
+                if item.get("kind") == "weapon" and str(item.get("name") or "").strip()
+            )
+            source_checksum = hashlib.sha256(source_text.encode()).hexdigest()
+            if source_checksum in seen_source_checksums:
                 return compact_ascii_key(normalized_name)
+            dependent_templates.append(
+                {
+                    "name": normalized_name,
+                    "source_checksum": source_checksum,
+                    "source_refs": deepcopy(source_refs),
+                    "requirement": deepcopy(requirement),
+                    "expected_weapon_names": expected_weapon_names,
+                    **({"artifact_id": str(artifact_id)} if artifact_id else {}),
+                }
+            )
+            seen_source_checksums.add(source_checksum)
+            return compact_ascii_key(normalized_name)
 
-            def append_preset_card(
-                *,
-                source_text: str,
-                source_identity: str,
-                source_refs: list[str],
-                semantic_fill: dict[str, Any] | None = None,
-            ) -> str:
-                source_checksum = hashlib.sha256(source_text.encode()).hexdigest()
-                if source_checksum in seen_source_checksums:
-                    existing_heading = re.search(r"(?m)^#{1,6}\s+(.+?)\s*$", source_text)
-                    return compact_ascii_key(
-                        existing_heading.group(1)
-                        if existing_heading is not None
+        def append_preset_card(
+            *,
+            source_text: str,
+            source_identity: str,
+            source_refs: list[str],
+            semantic_fill: dict[str, Any] | None = None,
+        ) -> str:
+            source_checksum = hashlib.sha256(source_text.encode()).hexdigest()
+            if source_checksum in seen_source_checksums:
+                existing_heading = re.search(r"(?m)^#{1,6}\s+(.+?)\s*$", source_text)
+                return compact_ascii_key(
+                    existing_heading.group(1) if existing_heading is not None else source_identity
+                )
+            template_requirement = parameterized_statblock_requirements(source_text)
+            if template_requirement is not None:
+                heading = re.search(r"(?m)^#{1,6}\s+(.+?)\s*$", source_text)
+                return append_dependent_template(
+                    name=(
+                        " ".join(heading.group(1).split())
+                        if heading is not None
                         else source_identity
-                    )
-                template_requirement = parameterized_statblock_requirements(source_text)
-                if template_requirement is not None:
-                    heading = re.search(r"(?m)^#{1,6}\s+(.+?)\s*$", source_text)
-                    return append_dependent_template(
-                        name=(
-                            " ".join(heading.group(1).split())
-                            if heading is not None
-                            else source_identity
-                        ),
-                        source_text=source_text,
-                        source_refs=source_refs,
-                        requirement=template_requirement,
-                    )
-                parsed = parse_2014_statblock(
-                    source_text,
-                    source_key=source_identity,
-                    rule_refs=source_refs,
-                )
-                if not _valid_statblock_heading(parsed.name):
-                    raise StatblockImportError(
-                        "statblock heading is OCR debris and requires source review"
-                    )
-                normalized_fill = None
-                if semantic_fill is not None:
-                    filled = apply_reviewed_statblock_fill(parsed.sheet, semantic_fill)
-                    parsed = replace(parsed, sheet=filled["sheet"])
-                    normalized_fill = filled["fill"]
-                parsed = replace(
-                    parsed,
-                    sheet=finalize_actor_sheet_rulings(parsed.sheet, campaign_id),
-                )
-                portable_card = actor_card_from_statblock(
-                    parsed,
-                    portable_id=(
-                        f"{data['portable_id']}.actor."
-                        f"{ascii_slug(parsed.name) or 'creature'}."
-                        f"{source_checksum[:8]}"
                     ),
-                    version=version,
-                    actor_type="monster",
-                    edition=edition,
                     source_text=source_text,
                     source_refs=source_refs,
-                    pack_id=pack_id,
-                    pack_version=version,
-                    distribution="private",
-                    license_name="user-supplied",
-                    tags=["monster", f"dnd5e-{edition}", "addon"],
-                    semantic_fill=normalized_fill,
+                    requirement=template_requirement,
                 )
-                if catalog_review_decisions is not None:
-                    portable_card = bind_actor_catalog_review(
-                        portable_card,
-                        decisions=catalog_review_decisions,
-                    )
-                seen_source_checksums.add(source_checksum)
-                cards.append(portable_card)
-                return compact_ascii_key(parsed.name)
+            parsed = parse_2014_statblock(
+                source_text,
+                source_key=source_identity,
+                rule_refs=source_refs,
+            )
+            if not _valid_statblock_heading(parsed.name):
+                raise StatblockImportError(
+                    "statblock heading is OCR debris and requires source review"
+                )
+            normalized_fill = None
+            if semantic_fill is not None:
+                filled = apply_reviewed_statblock_fill(parsed.sheet, semantic_fill)
+                parsed = replace(parsed, sheet=filled["sheet"])
+                normalized_fill = filled["fill"]
+            parsed = replace(
+                parsed,
+                sheet=finalize_actor_sheet_rulings(parsed.sheet, campaign_id),
+            )
+            portable_card = actor_card_from_statblock(
+                parsed,
+                portable_id=(
+                    f"{data['portable_id']}.actor."
+                    f"{ascii_slug(parsed.name) or 'creature'}."
+                    f"{source_checksum[:8]}"
+                ),
+                version=version,
+                actor_type="monster",
+                edition=edition,
+                source_text=source_text,
+                source_refs=source_refs,
+                pack_id=pack_id,
+                pack_version=version,
+                distribution="private",
+                license_name="user-supplied",
+                tags=["monster", f"dnd5e-{edition}", "addon"],
+                semantic_fill=normalized_fill,
+            )
+            if catalog_review_decisions is not None:
+                portable_card = bind_actor_catalog_review(
+                    portable_card,
+                    decisions=catalog_review_decisions,
+                )
+            seen_source_checksums.add(source_checksum)
+            cards.append(portable_card)
+            return compact_ascii_key(parsed.name)
 
-            reviewed_source_names_by_page: dict[int, set[str]] = {}
-            reviewed_mechanical_identities_by_page: dict[int, set[str]] = {}
-            catalog_actor_names_by_page: dict[int, list[tuple[str, str]]] = {}
-            catalog_actor_mechanics_by_page: dict[int, list[tuple[str, str, str]]] = {}
-            catalog_statblocks_by_id: dict[str, dict[str, Any]] = {}
-            for artifact in pack.artifacts:
-                if artifact.get("kind") != "statblock":
-                    continue
-                catalog_statblocks_by_id[str(artifact.get("id") or "")] = artifact
-                artifact_name = " ".join(
-                    str(dict(artifact.get("card") or {}).get("name") or "").split()
+        reviewed_source_names_by_page: dict[int, set[str]] = {}
+        reviewed_mechanical_identities_by_page: dict[int, set[str]] = {}
+        catalog_actor_names_by_page: dict[int, list[tuple[str, str]]] = {}
+        catalog_actor_mechanics_by_page: dict[int, list[tuple[str, str, str]]] = {}
+        catalog_statblocks_by_id: dict[str, dict[str, Any]] = {}
+        for artifact in pack.artifacts:
+            if artifact.get("kind") != "statblock":
+                continue
+            catalog_statblocks_by_id[str(artifact.get("id") or "")] = artifact
+            artifact_name = " ".join(
+                str(dict(artifact.get("card") or {}).get("name") or "").split()
+            )
+            if not _valid_statblock_heading(artifact_name):
+                continue
+            for page_number in _artifact_source_pages(artifact):
+                catalog_actor_names_by_page.setdefault(page_number, []).append(
+                    (artifact_name, str(artifact.get("id") or ""))
                 )
-                if not _valid_statblock_heading(artifact_name):
-                    continue
-                for page_number in _artifact_source_pages(artifact):
-                    catalog_actor_names_by_page.setdefault(page_number, []).append(
-                        (artifact_name, str(artifact.get("id") or ""))
+            source_text = str(
+                dict(artifact.get("card") or {}).get("normalized_content") or ""
+            ).strip()
+            if source_text:
+                try:
+                    parsed_artifact = parse_2014_statblock_template_preview(
+                        source_text,
+                        source_key=str(artifact.get("id") or "catalog-statblock"),
+                        rule_refs=[],
                     )
-                source_text = str(
-                    dict(artifact.get("card") or {}).get("normalized_content") or ""
-                ).strip()
-                if source_text:
+                except (StatblockImportError, ValueError):
+                    pass
+                else:
+                    mechanical_identity = _statblock_mechanical_identity(parsed_artifact)
+                    for page_number in _artifact_source_pages(artifact):
+                        catalog_actor_mechanics_by_page.setdefault(page_number, []).append(
+                            (
+                                mechanical_identity,
+                                artifact_name,
+                                str(artifact.get("id") or ""),
+                            )
+                        )
+        indexed_source_chunks: list[dict[str, Any]] = []
+        import_job_id = str(pack.provenance.get("import_job_id") or "")
+        source_info = dict(pack.provenance.get("rule_source") or {})
+        publication_id = str(source_info.get("publication_id") or "")
+        bundled_core_cards = (
+            list(build_srd2014_preset_pack(config.dnd_skills_dir)["payload"]["cards"])
+            if edition == "2014" and publication_id == "mm2014"
+            else []
+        )
+        if import_job_id:
+            job = require_import_job(campaign_id, import_job_id, "rulebook")
+            if str(job.source_id or "") != str(source_info.get("source_id") or ""):
+                raise ValueError("rule pack import job no longer matches its rule source")
+            indexed_source_chunks = rules.source_chunks(str(job.source_id))
+            # A filled review is derived from an immutable base transcription
+            # and has the same normalized source checksum.  Prefer it so the
+            # portable preset carries a reviewed solution; otherwise retain
+            # the base card with its prefilled Agent-ruling boundary.
+            source_reviews = list(dict(job.result or {}).get("statblock_reviews") or [])
+            source_reviews = _select_preferred_statblock_reviews(source_reviews)
+            for review in source_reviews:
+                source_text = str(review.get("normalized_content") or "").strip()
+                review_checksum = hashlib.sha256(source_text.encode()).hexdigest()
+                if not source_text or review_checksum != str(
+                    review.get("normalized_content_sha256") or ""
+                ):
+                    failures.append({"artifact_id": review.get("id"), "error": "stale review"})
+                    continue
+                if parameterized_statblock_requirements(source_text) is not None:
+                    # The reviewed source belongs to the catalog's dependent
+                    # actor template. It must be instantiated with a real
+                    # owner, never exported as a static preset using preview
+                    # values from build-time validation.
+                    continue
+                page_number = int(review.get("page_number") or 0)
+                reviewed_heading = re.search(
+                    r"(?m)^#{1,6}\s+(.+?)\s*$",
+                    source_text,
+                )
+                canonical_artifact: tuple[str, str] | None = None
+                if reviewed_heading is not None:
+                    reviewed_name = reviewed_heading.group(1)
+                    canonical_artifact = _canonical_statblock_artifact_for_review(
+                        reviewed_name,
+                        catalog_actor_names_by_page.get(page_number, []),
+                    )
+                if canonical_artifact is None:
                     try:
-                        parsed_artifact = parse_2014_statblock_template_preview(
+                        reviewed_preview = parse_2014_statblock_template_preview(
                             source_text,
-                            source_key=str(artifact.get("id") or "catalog-statblock"),
+                            source_key=str(review.get("id") or "reviewed-statblock"),
                             rule_refs=[],
                         )
                     except (StatblockImportError, ValueError):
                         pass
                     else:
-                        mechanical_identity = _statblock_mechanical_identity(parsed_artifact)
-                        for page_number in _artifact_source_pages(artifact):
-                            catalog_actor_mechanics_by_page.setdefault(page_number, []).append(
-                                (
-                                    mechanical_identity,
-                                    artifact_name,
-                                    str(artifact.get("id") or ""),
+                        canonical_artifact = _canonical_statblock_artifact_for_mechanics(
+                            _statblock_mechanical_identity(reviewed_preview),
+                            catalog_actor_mechanics_by_page.get(page_number, []),
+                        )
+                claim_disposition = _claim_catalog_artifact_for_source_review(
+                    canonical_artifact,
+                    claimed_review_artifact_ids,
+                )
+                if claim_disposition != "accepted":
+                    excluded_source_reviews.append(
+                        _portable_statblock_review_audit(
+                            review,
+                            reviewed_name=(
+                                canonical_artifact[0]
+                                if canonical_artifact is not None
+                                else (
+                                    reviewed_heading.group(1)
+                                    if reviewed_heading is not None
+                                    else ""
                                 )
-                            )
-            indexed_source_chunks: list[dict[str, Any]] = []
-            import_job_id = str(pack.provenance.get("import_job_id") or "")
-            source_info = dict(pack.provenance.get("rule_source") or {})
-            publication_id = str(source_info.get("publication_id") or "")
-            bundled_core_cards = (
-                list(build_srd2014_preset_pack(config.dnd_skills_dir)["payload"]["cards"])
-                if edition == "2014" and publication_id == "mm2014"
-                else []
-            )
-            if import_job_id:
-                job = require_import_job(campaign_id, import_job_id, "rulebook")
-                if str(job.source_id or "") != str(source_info.get("source_id") or ""):
-                    raise ValueError("rule pack import job no longer matches its rule source")
-                indexed_source_chunks = rules.source_chunks(str(job.source_id))
-                # A filled review is derived from an immutable base transcription
-                # and has the same normalized source checksum.  Prefer it so the
-                # portable preset carries a reviewed solution; otherwise retain
-                # the base card with its prefilled Agent-ruling boundary.
-                source_reviews = list(dict(job.result or {}).get("statblock_reviews") or [])
-                source_reviews = _select_preferred_statblock_reviews(source_reviews)
-                for review in source_reviews:
-                    source_text = str(review.get("normalized_content") or "").strip()
-                    review_checksum = hashlib.sha256(source_text.encode()).hexdigest()
-                    if not source_text or review_checksum != str(
-                        review.get("normalized_content_sha256") or ""
-                    ):
-                        failures.append({"artifact_id": review.get("id"), "error": "stale review"})
-                        continue
-                    if parameterized_statblock_requirements(source_text) is not None:
-                        # The reviewed source belongs to the catalog's dependent
-                        # actor template. It must be instantiated with a real
-                        # owner, never exported as a static preset using preview
-                        # values from build-time validation.
-                        continue
-                    page_number = int(review.get("page_number") or 0)
-                    reviewed_heading = re.search(
-                        r"(?m)^#{1,6}\s+(.+?)\s*$",
-                        source_text,
-                    )
-                    canonical_artifact: tuple[str, str] | None = None
-                    if reviewed_heading is not None:
-                        reviewed_name = reviewed_heading.group(1)
-                        canonical_artifact = _canonical_statblock_artifact_for_review(
-                            reviewed_name,
-                            catalog_actor_names_by_page.get(page_number, []),
-                        )
-                    if canonical_artifact is None:
-                        try:
-                            reviewed_preview = parse_2014_statblock_template_preview(
-                                source_text,
-                                source_key=str(review.get("id") or "reviewed-statblock"),
-                                rule_refs=[],
-                            )
-                        except (StatblockImportError, ValueError):
-                            pass
-                        else:
-                            canonical_artifact = _canonical_statblock_artifact_for_mechanics(
-                                _statblock_mechanical_identity(reviewed_preview),
-                                catalog_actor_mechanics_by_page.get(page_number, []),
-                            )
-                    claim_disposition = _claim_catalog_artifact_for_source_review(
-                        canonical_artifact,
-                        claimed_review_artifact_ids,
-                    )
-                    if claim_disposition != "accepted":
-                        excluded_source_reviews.append(
-                            _portable_statblock_review_audit(
-                                review,
-                                reviewed_name=(
-                                    canonical_artifact[0]
-                                    if canonical_artifact is not None
-                                    else (
-                                        reviewed_heading.group(1)
-                                        if reviewed_heading is not None
-                                        else ""
-                                    )
-                                ),
-                                basis=claim_disposition,
-                            )
-                        )
-                        continue
-                    assert canonical_artifact is not None
-                    canonical_name, canonical_artifact_id = canonical_artifact
-                    assert reviewed_heading is not None
-                    catalog_boundary = _catalog_statblock_text_superseding_source_review(
-                        catalog_statblocks_by_id.get(canonical_artifact_id),
-                        review_checksum,
-                    )
-                    if catalog_boundary:
-                        excluded_source_reviews.append(
-                            _portable_statblock_review_audit(
-                                review,
-                                reviewed_name=canonical_name,
-                                basis="catalog_reviewed_boundary_supersedes_source_review",
-                            )
-                        )
-                        reviewed_ocr_supersessions.append(
-                            {
-                                "artifact_id": canonical_artifact_id,
-                                "reviewed_name": canonical_name,
-                                "basis": "catalog_reviewed_boundary",
-                            }
-                        )
-                        continue
-                    if canonical_name != reviewed_heading.group(1):
-                        source_text = (
-                            source_text[: reviewed_heading.start(1)]
-                            + canonical_name
-                            + source_text[reviewed_heading.end(1) :]
-                        )
-                        reviewed_ocr_supersessions.append(
-                            {
-                                "artifact_id": canonical_artifact_id,
-                                "reviewed_name": canonical_name,
-                                "basis": "catalog_review_canonical_identity",
-                            }
-                        )
-                    try:
-                        reviewed_name = append_preset_card(
-                            source_text=source_text,
-                            source_identity=(
-                                f"rule-pack:{pack_id}@{version}#review:{review_checksum[:16]}"
                             ),
-                            source_refs=[
-                                f"rule-pack:{pack_id}@{version}#page:{page_number}",
-                                (f"rule-pack:{pack_id}@{version}#review:{review_checksum[:16]}"),
-                                *(
-                                    [
-                                        f"rule-pack:{pack_id}@{version}#artifact:"
-                                        f"{canonical_artifact[1]}"
-                                    ]
-                                    if canonical_artifact is not None
-                                    else []
-                                ),
-                            ],
-                            semantic_fill=(
-                                dict(review["agent_statblock_fill"])
-                                if review.get("agent_statblock_fill") is not None
-                                else None
-                            ),
+                            basis=claim_disposition,
                         )
-                        reviewed_source_names.add(reviewed_name)
-                        reviewed_source_names_by_page.setdefault(page_number, set()).add(
-                            reviewed_name
-                        )
-                        reviewed_parsed = parse_2014_statblock(
-                            source_text,
-                            source_key=(
-                                f"rule-pack:{pack_id}@{version}#review:{review_checksum[:16]}"
-                            ),
-                            rule_refs=[],
-                        )
-                        reviewed_mechanical_identities_by_page.setdefault(page_number, set()).add(
-                            _statblock_mechanical_identity(reviewed_parsed)
-                        )
-                    except (
-                        StatblockImportError,
-                        PortableContentError,
-                        ValueError,
-                    ) as error:
-                        failures.append({"artifact_id": review.get("id"), "error": str(error)})
-            for artifact in pack.artifacts:
-                if artifact.get("kind") != "statblock":
+                    )
                     continue
-                card = dict(artifact.get("card") or {})
-                try:
-                    for variant in _reviewed_statblock_variants(card):
-                        append_preset_card(
-                            source_text=variant["normalized_content"],
-                            source_identity=(
-                                f"{artifact['id']}#reviewed-variant:{ascii_slug(variant['name'])}"
-                            ),
-                            source_refs=[
-                                f"rule-pack:{pack_id}@{version}#artifact:{artifact['id']}",
-                                f"rule-pack:{pack_id}@{version}#variant:"
-                                f"{ascii_slug(variant['name'])}",
-                            ],
+                assert canonical_artifact is not None
+                canonical_name, canonical_artifact_id = canonical_artifact
+                assert reviewed_heading is not None
+                catalog_boundary = _catalog_statblock_text_superseding_source_review(
+                    catalog_statblocks_by_id.get(canonical_artifact_id),
+                    review_checksum,
+                )
+                if catalog_boundary:
+                    excluded_source_reviews.append(
+                        _portable_statblock_review_audit(
+                            review,
+                            reviewed_name=canonical_name,
+                            basis="catalog_reviewed_boundary_supersedes_source_review",
                         )
+                    )
+                    reviewed_ocr_supersessions.append(
+                        {
+                            "artifact_id": canonical_artifact_id,
+                            "reviewed_name": canonical_name,
+                            "basis": "catalog_reviewed_boundary",
+                        }
+                    )
+                    continue
+                if canonical_name != reviewed_heading.group(1):
+                    source_text = (
+                        source_text[: reviewed_heading.start(1)]
+                        + canonical_name
+                        + source_text[reviewed_heading.end(1) :]
+                    )
+                    reviewed_ocr_supersessions.append(
+                        {
+                            "artifact_id": canonical_artifact_id,
+                            "reviewed_name": canonical_name,
+                            "basis": "catalog_review_canonical_identity",
+                        }
+                    )
+                try:
+                    reviewed_name = append_preset_card(
+                        source_text=source_text,
+                        source_identity=(
+                            f"rule-pack:{pack_id}@{version}#review:{review_checksum[:16]}"
+                        ),
+                        source_refs=[
+                            f"rule-pack:{pack_id}@{version}#page:{page_number}",
+                            (f"rule-pack:{pack_id}@{version}#review:{review_checksum[:16]}"),
+                            *(
+                                [f"rule-pack:{pack_id}@{version}#artifact:{canonical_artifact[1]}"]
+                                if canonical_artifact is not None
+                                else []
+                            ),
+                        ],
+                        semantic_fill=(
+                            dict(review["agent_statblock_fill"])
+                            if review.get("agent_statblock_fill") is not None
+                            else None
+                        ),
+                    )
+                    reviewed_source_names.add(reviewed_name)
+                    reviewed_source_names_by_page.setdefault(page_number, set()).add(reviewed_name)
+                    reviewed_parsed = parse_2014_statblock(
+                        source_text,
+                        source_key=(f"rule-pack:{pack_id}@{version}#review:{review_checksum[:16]}"),
+                        rule_refs=[],
+                    )
+                    reviewed_mechanical_identities_by_page.setdefault(page_number, set()).add(
+                        _statblock_mechanical_identity(reviewed_parsed)
+                    )
                 except (
                     StatblockImportError,
                     PortableContentError,
                     ValueError,
                 ) as error:
-                    failures.append(
-                        {
-                            "artifact_id": artifact.get("id"),
-                            "error": f"reviewed statblock variant: {error}",
-                        }
+                    failures.append({"artifact_id": review.get("id"), "error": str(error)})
+        indexed_chunks_by_id, indexed_chunks_by_heading = _index_statblock_source_chunks(
+            indexed_source_chunks
+        )
+        for artifact in pack.artifacts:
+            if artifact.get("kind") != "statblock":
+                continue
+            card = dict(artifact.get("card") or {})
+            try:
+                for variant in _reviewed_statblock_variants(card):
+                    append_preset_card(
+                        source_text=variant["normalized_content"],
+                        source_identity=(
+                            f"{artifact['id']}#reviewed-variant:{ascii_slug(variant['name'])}"
+                        ),
+                        source_refs=[
+                            f"rule-pack:{pack_id}@{version}#artifact:{artifact['id']}",
+                            f"rule-pack:{pack_id}@{version}#variant:{ascii_slug(variant['name'])}",
+                        ],
                     )
-                card_name = compact_ascii_key(str(card.get("name") or ""))
-                if card_name in reviewed_source_names:
-                    continue
-                citation_pages = {
-                    int(citation.get("page_start") or 0)
-                    for citation in artifact.get("source_citations") or []
-                }
-                reviewed_matches = {
-                    reviewed_name
-                    for page_number in citation_pages
-                    for reviewed_name in reviewed_source_names_by_page.get(page_number, set())
-                    if _bounded_ocr_heading_equivalent(card_name, reviewed_name)
-                }
-                if len(reviewed_matches) == 1:
-                    continue
-                noisy_reviewed_matches = {
-                    reviewed_name
-                    for page_number in citation_pages
-                    for reviewed_name in reviewed_source_names_by_page.get(page_number, set())
-                    if _noisy_ocr_heading_equivalent(
-                        str(card.get("name") or ""),
-                        reviewed_name,
-                    )
-                }
-                if len(noisy_reviewed_matches) == 1:
-                    reviewed_ocr_supersessions.append(
-                        {
-                            "artifact_id": str(artifact.get("id") or ""),
-                            "reviewed_name": next(iter(noisy_reviewed_matches)),
-                            "basis": "same_page_unique_noisy_heading_match",
-                        }
-                    )
-                    continue
-                bundled_card = _bundled_mm2014_actor_card(
-                    name=str(card.get("name") or ""),
-                    edition=edition,
-                    publication_id=publication_id,
-                    cards=bundled_core_cards,
-                )
-                if bundled_card is not None:
-                    source_card_id = str(bundled_card["id"])
-                    bundled_payload = dict(bundled_card["payload"])
-                    bundled_provenance = deepcopy(dict(bundled_payload.get("provenance") or {}))
-                    bundled_provenance["reused_actor_card"] = {
-                        "id": source_card_id,
-                        "version": str(bundled_card["version"]),
-                        "checksum": str(bundled_card["checksum"]),
-                        "basis": "mm2014_srd51_identity",
+            except (
+                StatblockImportError,
+                PortableContentError,
+                ValueError,
+            ) as error:
+                failures.append(
+                    {
+                        "artifact_id": artifact.get("id"),
+                        "error": f"reviewed statblock variant: {error}",
                     }
-                    bundled_card = build_dnd_actor_card(
-                        portable_id=(
-                            f"{data['portable_id']}.actor.srd2014-"
-                            f"{ascii_slug(str(bundled_payload['name']))}"
-                        ),
-                        version=version,
-                        actor_type=str(bundled_payload["actor_type"]),
-                        name=str(bundled_payload["name"]),
-                        player_name=bundled_payload.get("player_name"),
-                        summary=str(bundled_payload.get("summary") or ""),
-                        sheet=dict(bundled_payload["sheet"]),
-                        notes=dict(bundled_payload["notes"]),
-                        provenance=bundled_provenance,
-                        bindings=list(bundled_payload.get("bindings") or []),
-                        metadata=dict(bundled_card.get("metadata") or {}),
-                        dependencies=list(bundled_card.get("dependencies") or []),
-                    )
-                    if catalog_review_decisions is not None:
-                        bundled_card = bind_actor_catalog_review(
-                            bundled_card,
-                            decisions=catalog_review_decisions,
-                        )
-                    bundled_card_id = str(bundled_card["id"])
-                    if bundled_card_id not in bundled_core_card_ids:
-                        cards.append(bundled_card)
-                        bundled_core_card_ids.add(bundled_card_id)
-                    bundled_core_reuses.append(
-                        {
-                            "artifact_id": str(artifact.get("id") or ""),
-                            "card_id": bundled_card_id,
-                            "source_card_id": source_card_id,
-                            "name": str(dict(bundled_card.get("payload") or {}).get("name") or ""),
-                        }
-                    )
-                    continue
-                source_text = str(card.get("normalized_content") or "").strip()
-                artifact_chunk_ids = list(
-                    dict.fromkeys(
-                        str(citation.get("chunk_id") or "")
-                        for citation in artifact.get("source_citations") or []
-                        if str(citation.get("chunk_id") or "")
-                    )
                 )
-                artifact_chunks = [
-                    chunk
-                    for chunk in indexed_source_chunks
-                    if str(chunk.get("id") or "") in artifact_chunk_ids
-                ]
-                if not artifact_chunks:
-                    normalized_card_name = compact_ascii_key(str(card.get("name") or ""))
-                    artifact_chunks = [
-                        chunk
-                        for chunk in indexed_source_chunks
-                        if normalized_card_name
-                        and any(
-                            compact_ascii_key(str(heading)) == normalized_card_name
-                            for heading in chunk.get("heading_path") or []
-                        )
-                    ]
-                raw_template_source = "\n\n".join(
-                    str(chunk.get("content") or "").strip()
-                    for chunk in sorted(
-                        artifact_chunks,
-                        key=lambda item: (
-                            int(item.get("ordinal") or 0),
-                            str(item.get("id") or ""),
-                        ),
-                    )
-                    if str(chunk.get("content") or "").strip()
+            card_name = compact_ascii_key(str(card.get("name") or ""))
+            if card_name in reviewed_source_names:
+                continue
+            citation_pages = {
+                int(citation.get("page_start") or 0)
+                for citation in artifact.get("source_citations") or []
+            }
+            reviewed_matches = {
+                reviewed_name
+                for page_number in citation_pages
+                for reviewed_name in reviewed_source_names_by_page.get(page_number, set())
+                if _bounded_ocr_heading_equivalent(card_name, reviewed_name)
+            }
+            if len(reviewed_matches) == 1:
+                continue
+            noisy_reviewed_matches = {
+                reviewed_name
+                for page_number in citation_pages
+                for reviewed_name in reviewed_source_names_by_page.get(page_number, set())
+                if _noisy_ocr_heading_equivalent(
+                    str(card.get("name") or ""),
+                    reviewed_name,
                 )
-                if raw_template_source:
-                    raw_template_source = (
-                        f"# {str(card.get('name') or '').strip()}\n\n{raw_template_source}"
+            }
+            if len(noisy_reviewed_matches) == 1:
+                reviewed_ocr_supersessions.append(
+                    {
+                        "artifact_id": str(artifact.get("id") or ""),
+                        "reviewed_name": next(iter(noisy_reviewed_matches)),
+                        "basis": "same_page_unique_noisy_heading_match",
+                    }
+                )
+                continue
+            bundled_card = _bundled_mm2014_actor_card(
+                name=str(card.get("name") or ""),
+                edition=edition,
+                publication_id=publication_id,
+                cards=bundled_core_cards,
+            )
+            if bundled_card is not None:
+                source_card_id = str(bundled_card["id"])
+                bundled_payload = dict(bundled_card["payload"])
+                bundled_provenance = deepcopy(dict(bundled_payload.get("provenance") or {}))
+                bundled_provenance["reused_actor_card"] = {
+                    "id": source_card_id,
+                    "version": str(bundled_card["version"]),
+                    "checksum": str(bundled_card["checksum"]),
+                    "basis": "mm2014_srd51_identity",
+                }
+                bundled_card = build_dnd_actor_card(
+                    portable_id=(
+                        f"{data['portable_id']}.actor.srd2014-"
+                        f"{ascii_slug(str(bundled_payload['name']))}"
+                    ),
+                    version=version,
+                    actor_type=str(bundled_payload["actor_type"]),
+                    name=str(bundled_payload["name"]),
+                    player_name=bundled_payload.get("player_name"),
+                    summary=str(bundled_payload.get("summary") or ""),
+                    sheet=dict(bundled_payload["sheet"]),
+                    notes=dict(bundled_payload["notes"]),
+                    provenance=bundled_provenance,
+                    bindings=list(bundled_payload.get("bindings") or []),
+                    metadata=dict(bundled_card.get("metadata") or {}),
+                    dependencies=list(bundled_card.get("dependencies") or []),
+                )
+                if catalog_review_decisions is not None:
+                    bundled_card = bind_actor_catalog_review(
+                        bundled_card,
+                        decisions=catalog_review_decisions,
                     )
-                template_requirement = card.get("dependent_actor_template")
-                if not isinstance(template_requirement, dict):
-                    inferred_template_source = source_text or raw_template_source
-                    inferred_requirement = parameterized_statblock_requirements(
-                        inferred_template_source
-                    )
-                    if isinstance(
-                        inferred_requirement, dict
-                    ) and not dependent_actor_template_solution_errors(inferred_requirement):
-                        try:
-                            parse_2014_statblock_template_preview(
-                                inferred_template_source,
-                                source_key=(
-                                    "dependent-template-preview:"
-                                    f"{artifact.get('id') or card.get('name') or 'catalog'}"
-                                ),
-                                rule_refs=[],
-                                name=str(card.get("name") or "").strip() or None,
-                            )
-                        except (StatblockImportError, ValueError):
-                            pass
-                        else:
-                            template_requirement = inferred_requirement
-                if isinstance(template_requirement, dict):
-                    template_source = source_text or raw_template_source
-                    if not template_source:
-                        failures.append(
-                            {
-                                "artifact_id": artifact.get("id"),
-                                "error": "dependent actor template has no source text",
-                            }
-                        )
-                        continue
+                bundled_card_id = str(bundled_card["id"])
+                if bundled_card_id not in bundled_core_card_ids:
+                    cards.append(bundled_card)
+                    bundled_core_card_ids.add(bundled_card_id)
+                bundled_core_reuses.append(
+                    {
+                        "artifact_id": str(artifact.get("id") or ""),
+                        "card_id": bundled_card_id,
+                        "source_card_id": source_card_id,
+                        "name": str(dict(bundled_card.get("payload") or {}).get("name") or ""),
+                    }
+                )
+                continue
+            source_text = str(card.get("normalized_content") or "").strip()
+            artifact_chunks = _artifact_statblock_source_chunks(
+                artifact,
+                chunks_by_id=indexed_chunks_by_id,
+                chunks_by_heading=indexed_chunks_by_heading,
+            )
+            raw_template_source = "\n\n".join(
+                str(chunk.get("content") or "").strip()
+                for chunk in sorted(
+                    artifact_chunks,
+                    key=lambda item: (
+                        int(item.get("ordinal") or 0),
+                        str(item.get("id") or ""),
+                    ),
+                )
+                if str(chunk.get("content") or "").strip()
+            )
+            if raw_template_source:
+                raw_template_source = (
+                    f"# {str(card.get('name') or '').strip()}\n\n{raw_template_source}"
+                )
+            template_requirement = card.get("dependent_actor_template")
+            if not isinstance(template_requirement, dict):
+                inferred_template_source = source_text or raw_template_source
+                inferred_requirement = parameterized_statblock_requirements(
+                    inferred_template_source
+                )
+                if isinstance(
+                    inferred_requirement, dict
+                ) and not dependent_actor_template_solution_errors(inferred_requirement):
                     try:
-                        append_dependent_template(
-                            name=str(card.get("name") or artifact.get("id") or ""),
-                            source_text=template_source,
-                            source_refs=[
-                                f"rule-pack:{pack_id}@{version}#artifact:{artifact['id']}"
-                            ],
-                            requirement=template_requirement,
-                            artifact_id=str(artifact.get("id") or ""),
-                        )
-                    except (StatblockImportError, ValueError) as error:
-                        failures.append({"artifact_id": artifact.get("id"), "error": str(error)})
-                    continue
-                indexed_source_text = ""
-                if indexed_source_chunks:
-                    try:
-                        indexed_recovery = normalize_2014_statblock_candidate(
-                            str(card.get("name") or ""),
-                            indexed_source_chunks,
+                        parse_2014_statblock_template_preview(
+                            inferred_template_source,
+                            source_key=(
+                                "dependent-template-preview:"
+                                f"{artifact.get('id') or card.get('name') or 'catalog'}"
+                            ),
+                            rule_refs=[],
+                            name=str(card.get("name") or "").strip() or None,
                         )
                     except (StatblockImportError, ValueError):
                         pass
                     else:
-                        indexed_source_text = str(indexed_recovery["normalized_content"]).strip()
-                action_variants = split_2014_statblock_action_variants(indexed_source_text)
-                if action_variants:
-                    variant_refs = [
-                        f"rule-pack:{pack_id}@{version}#artifact:{artifact['id']}",
-                    ]
-                    try:
-                        for action_variant in action_variants:
-                            append_preset_card(
-                                source_text=action_variant["normalized_content"],
-                                source_identity=(
-                                    f"{artifact['id']}#action-variant:"
-                                    f"{ascii_slug(action_variant['label'])}"
-                                ),
-                                source_refs=variant_refs,
-                            )
-                    except (
-                        StatblockImportError,
-                        PortableContentError,
-                        ValueError,
-                    ) as error:
-                        failures.append({"artifact_id": artifact.get("id"), "error": str(error)})
-                    continue
-                if indexed_source_text and not source_text:
-                    source_text = indexed_source_text
-                elif indexed_source_text and source_text:
-                    try:
-                        parse_2014_statblock(
-                            source_text,
-                            source_key=str(artifact["id"]),
-                            rule_refs=[],
-                        )
-                    except StatblockImportError:
-                        source_text = indexed_source_text
-                if not source_text:
-                    if not _valid_statblock_heading(str(card.get("name") or "")):
-                        continue
-                    failures.append({"artifact_id": artifact.get("id"), "error": "not normalized"})
-                    continue
-                source_heading = re.search(
-                    r"(?m)^#{1,6}\s+(.+?)\s*$",
-                    source_text,
-                )
-                reviewed_card_name = str(card.get("name") or "").strip()
-                if (
-                    source_heading is not None
-                    and _valid_statblock_heading(reviewed_card_name)
-                    and source_heading.group(1) != reviewed_card_name
-                ):
-                    source_text = (
-                        source_text[: source_heading.start(1)]
-                        + reviewed_card_name
-                        + source_text[source_heading.end(1) :]
-                    )
-                    reviewed_ocr_supersessions.append(
+                        template_requirement = inferred_requirement
+            if isinstance(template_requirement, dict):
+                template_source = source_text or raw_template_source
+                if not template_source:
+                    failures.append(
                         {
-                            "artifact_id": str(artifact.get("id") or ""),
-                            "reviewed_name": reviewed_card_name,
-                            "basis": "catalog_artifact_canonical_identity",
+                            "artifact_id": artifact.get("id"),
+                            "error": "dependent actor template has no source text",
                         }
                     )
-                if not _valid_statblock_heading(str(card.get("name") or "")):
-                    try:
-                        unresolved_heading = parse_2014_statblock(
-                            source_text,
-                            source_key=str(artifact["id"]),
-                            rule_refs=[],
-                        )
-                    except StatblockImportError:
-                        pass
-                    else:
-                        identity = _statblock_mechanical_identity(unresolved_heading)
-                        if any(
-                            identity
-                            in reviewed_mechanical_identities_by_page.get(page_number, set())
-                            for page_number in citation_pages
-                        ):
-                            continue
+                    continue
                 try:
-                    append_preset_card(
-                        source_text=source_text,
-                        source_identity=str(artifact["id"]),
+                    append_dependent_template(
+                        name=str(card.get("name") or artifact.get("id") or ""),
+                        source_text=template_source,
                         source_refs=[f"rule-pack:{pack_id}@{version}#artifact:{artifact['id']}"],
+                        requirement=template_requirement,
+                        artifact_id=str(artifact.get("id") or ""),
                     )
+                except (StatblockImportError, ValueError) as error:
+                    failures.append({"artifact_id": artifact.get("id"), "error": str(error)})
+                continue
+            indexed_source_text = ""
+            if artifact_chunks:
+                try:
+                    indexed_recovery = normalize_2014_statblock_candidate(
+                        str(card.get("name") or ""),
+                        artifact_chunks,
+                    )
+                except (StatblockImportError, ValueError):
+                    pass
+                else:
+                    indexed_source_text = str(indexed_recovery["normalized_content"]).strip()
+            source_text_parseable = False
+            if source_text:
+                try:
+                    parse_2014_statblock(
+                        source_text,
+                        source_key=str(artifact["id"]),
+                        rule_refs=[],
+                    )
+                except StatblockImportError:
+                    pass
+                else:
+                    source_text_parseable = True
+            if (
+                not indexed_source_text
+                and not source_text_parseable
+                and indexed_source_chunks
+                and len(artifact_chunks) < len(indexed_source_chunks)
+            ):
+                try:
+                    indexed_recovery = normalize_2014_statblock_candidate(
+                        str(card.get("name") or ""),
+                        indexed_source_chunks,
+                    )
+                except (StatblockImportError, ValueError):
+                    pass
+                else:
+                    indexed_source_text = str(indexed_recovery["normalized_content"]).strip()
+            action_variants = split_2014_statblock_action_variants(indexed_source_text)
+            if action_variants:
+                variant_refs = [
+                    f"rule-pack:{pack_id}@{version}#artifact:{artifact['id']}",
+                ]
+                try:
+                    for action_variant in action_variants:
+                        append_preset_card(
+                            source_text=action_variant["normalized_content"],
+                            source_identity=(
+                                f"{artifact['id']}#action-variant:"
+                                f"{ascii_slug(action_variant['label'])}"
+                            ),
+                            source_refs=variant_refs,
+                        )
                 except (
                     StatblockImportError,
                     PortableContentError,
                     ValueError,
                 ) as error:
                     failures.append({"artifact_id": artifact.get("id"), "error": str(error)})
+                continue
+            if indexed_source_text and not source_text:
+                source_text = indexed_source_text
+            elif indexed_source_text and source_text:
+                try:
+                    parse_2014_statblock(
+                        source_text,
+                        source_key=str(artifact["id"]),
+                        rule_refs=[],
+                    )
+                except StatblockImportError:
+                    source_text = indexed_source_text
+            if not source_text:
+                if not _valid_statblock_heading(str(card.get("name") or "")):
                     continue
-            if failures and not allow_partial:
-                raise ValueError(
-                    "statblock preset compilation requires review: "
-                    + "; ".join(f"{item['artifact_id']}: {item['error']}" for item in failures[:20])
-                )
-            if not cards and not dependent_templates and not allow_partial:
-                raise ValueError("rule pack contains no review-ready statblocks")
-            if not cards:
-                return facade_result(
-                    view,
-                    {
-                        "artifact": None,
-                        "summary": {
-                            "cards": 0,
-                            "failures": failures,
-                            "complete": not failures,
-                            "deferred": len(failures),
-                            "dependent_actor_templates": dependent_templates,
-                        },
-                        "package": None,
-                    },
-                )
-            requested_metadata = dict(data.get("metadata") or {})
-            package = build_preset_pack(
-                portable_id=str(data["portable_id"]),
-                version=version,
-                system_id=DND5E.id,
-                cards=cards,
-                metadata={
-                    "title": f"{pack.manifest.get('title') or pack_id} Actor Presets",
-                    "edition": edition,
-                    "distribution": "private",
-                    "license": "user-supplied",
-                    "bundled_core_reuses": deepcopy(bundled_core_reuses),
-                    "reviewed_ocr_supersessions": deepcopy(reviewed_ocr_supersessions),
-                    "excluded_source_reviews": deepcopy(excluded_source_reviews),
-                    **requested_metadata,
-                },
-                dependencies=[
-                    {
-                        "kind": "content_pack",
-                        "id": pack_id,
-                        "version": version,
-                        "optional": False,
-                    }
-                ],
+                failures.append({"artifact_id": artifact.get("id"), "error": "not normalized"})
+                continue
+            source_heading = re.search(
+                r"(?m)^#{1,6}\s+(.+?)\s*$",
+                source_text,
             )
-            result = {
-                "artifact": storage.write_portable_package(package),
+            reviewed_card_name = str(card.get("name") or "").strip()
+            if (
+                source_heading is not None
+                and _valid_statblock_heading(reviewed_card_name)
+                and source_heading.group(1) != reviewed_card_name
+            ):
+                source_text = (
+                    source_text[: source_heading.start(1)]
+                    + reviewed_card_name
+                    + source_text[source_heading.end(1) :]
+                )
+                reviewed_ocr_supersessions.append(
+                    {
+                        "artifact_id": str(artifact.get("id") or ""),
+                        "reviewed_name": reviewed_card_name,
+                        "basis": "catalog_artifact_canonical_identity",
+                    }
+                )
+            if not _valid_statblock_heading(str(card.get("name") or "")):
+                try:
+                    unresolved_heading = parse_2014_statblock(
+                        source_text,
+                        source_key=str(artifact["id"]),
+                        rule_refs=[],
+                    )
+                except StatblockImportError:
+                    pass
+                else:
+                    identity = _statblock_mechanical_identity(unresolved_heading)
+                    if any(
+                        identity in reviewed_mechanical_identities_by_page.get(page_number, set())
+                        for page_number in citation_pages
+                    ):
+                        continue
+            try:
+                append_preset_card(
+                    source_text=source_text,
+                    source_identity=str(artifact["id"]),
+                    source_refs=[f"rule-pack:{pack_id}@{version}#artifact:{artifact['id']}"],
+                )
+            except (
+                StatblockImportError,
+                PortableContentError,
+                ValueError,
+            ) as error:
+                failures.append({"artifact_id": artifact.get("id"), "error": str(error)})
+                continue
+        if failures and not allow_partial:
+            raise ValueError(
+                "statblock preset compilation requires review: "
+                + "; ".join(f"{item['artifact_id']}: {item['error']}" for item in failures[:20])
+            )
+        if not cards and not dependent_templates and not allow_partial:
+            raise ValueError("rule pack contains no review-ready statblocks")
+        if not cards:
+            return {
+                "artifact": None,
                 "summary": {
-                    "cards": len(cards),
+                    "cards": 0,
                     "failures": failures,
                     "complete": not failures,
                     "deferred": len(failures),
                     "dependent_actor_templates": dependent_templates,
-                    "bundled_core_reuses": bundled_core_reuses,
-                    "reviewed_ocr_supersessions": reviewed_ocr_supersessions,
-                    "excluded_source_reviews": excluded_source_reviews,
                 },
-                **({"package": package} if data.get("include_package") is True else {}),
+                "package": None,
             }
-        elif view == "addon_package":
-            data = strict_facade_payload(
-                payload,
-                action="rule_pack_query(addon_package)",
-                allowed={
-                    "campaign_id",
-                    "portable_id",
-                    "version",
-                    "manifest",
-                    "components",
-                    "metadata",
-                    "include_package",
+        requested_metadata = dict(data.get("metadata") or {})
+        title = f"{pack.manifest.get('title') or pack_id} Actor Presets"
+        package, package_blobs = build_preset_content_package(
+            package_id=str(data["portable_id"]),
+            version=version,
+            system_id=DND5E.id,
+            title=title,
+            cards=cards,
+            metadata={
+                "title": title,
+                "edition": edition,
+                "distribution": "private",
+                "license": "user-supplied",
+                "attribution": "User supplied source",
+                "bundled_core_reuses": deepcopy(bundled_core_reuses),
+                "reviewed_ocr_supersessions": deepcopy(reviewed_ocr_supersessions),
+                "excluded_source_reviews": deepcopy(excluded_source_reviews),
+                **requested_metadata,
+            },
+        )
+        result = {
+            "artifact": storage.write_content_archive(package, package_blobs),
+            "summary": {
+                "cards": len(cards),
+                "failures": failures,
+                "complete": not failures,
+                "deferred": len(failures),
+                "dependent_actor_templates": dependent_templates,
+                "bundled_core_reuses": bundled_core_reuses,
+                "reviewed_ocr_supersessions": reviewed_ocr_supersessions,
+                "excluded_source_reviews": excluded_source_reviews,
+            },
+            **({"package": package} if data.get("include_package") is True else {}),
+        }
+        return result
+
+    def _content_pack_build_addon(
+        payload: dict[str, Any] | None,
+        principal_id: str,
+    ) -> Any:
+        data = facade_payload(payload)
+        campaign_id = str(data["campaign_id"])
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        require_facade_phase(
+            campaign_id,
+            "content_pack(build:addon)",
+            PROFILE_LOBBY,
+        )
+        component_artifacts = data["component_artifacts"]
+        if (
+            not isinstance(component_artifacts, list)
+            or not component_artifacts
+            or any(not isinstance(item, str) or not item for item in component_artifacts)
+        ):
+            raise ValueError("payload.component_artifacts must be a non-empty string array")
+        components = [storage.read_content_archive(artifact=item) for item in component_artifacts]
+        validation = audit_dnd_addon_validation_components(components)
+        if validation["complete"] is not True:
+            raise ValueError("addon release validation failed")
+        addon_manifest = {
+            **dict(data["manifest"]),
+        }
+        package, package_blobs = compose_addon_content_package(
+            package_id=str(data["portable_id"]),
+            version=str(data["version"]),
+            system_id=DND5E.id,
+            manifest=addon_manifest,
+            components=components,
+            metadata={
+                "attribution": "User supplied source",
+                **dict(data.get("metadata") or {}),
+            },
+        )
+        result = {
+            "artifact": storage.write_content_archive(package, package_blobs),
+            "summary": {
+                "components": len(components),
+                "content": deepcopy(package["manifest"]["content_summary"]),
+                "distribution": package["metadata"]["distribution"],
+                "validation": validation,
+            },
+            **({"package": package} if data.get("include_package") is True else {}),
+        }
+        return result
+
+    def _content_pack_export_rule(
+        payload: dict[str, Any] | None,
+        principal_id: str,
+    ) -> Any:
+        data = facade_payload(payload)
+        access.require_campaign(
+            str(data["campaign_id"]),
+            principal_id,
+            roles=CAMPAIGN_DM_ROLES,
+        )
+        require_facade_phase(
+            str(data["campaign_id"]),
+            "content_pack(export:rule)",
+            PROFILE_LOBBY,
+        )
+        rule_component = portable_rule_pack_definition(
+            str(data["pack_id"]),
+            str(data["version"]),
+            metadata=dict(data.get("metadata") or {}),
+        )
+        component_manifest = dict(rule_component["payload"]["manifest"])
+        package, package_blobs = build_addon_content_package(
+            package_id=str(rule_component["id"]),
+            version=str(rule_component["version"]),
+            system_id=DND5E.id,
+            manifest={
+                **component_manifest,
+                "classification": "official_core",
+                "activation": {
+                    "rule_policy": "branch",
+                    "preset_policy": "none",
+                    "module_policy": "none",
                 },
-                required_names=(
-                    "campaign_id",
-                    "portable_id",
-                    "version",
-                    "manifest",
-                    "components",
-                ),
-            )
-            campaign_id = str(data["campaign_id"])
-            access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
-            require_facade_phase(
+            },
+            rule_components=[rule_component],
+            metadata={
+                "distribution": "private",
+                "license": "user-supplied",
+                "attribution": "User supplied source",
+                **dict(data.get("metadata") or {}),
+            },
+            kind="core_rules",
+        )
+        artifact = storage.write_content_archive(package, package_blobs)
+        result = {
+            "artifact": artifact,
+            "summary": {
+                "artifacts": len(package["content"]["artifacts"]),
+                "mechanics": len(package["content"]["mechanics"]),
+                "sources": len(package["sources"]),
+                "dependencies": len(package["dependencies"]),
+                "distribution": package["metadata"]["distribution"],
+            },
+            **({"package": package} if data.get("include_package") is True else {}),
+        }
+        return result
+
+    def _content_pack_source_chunks(
+        payload: dict[str, Any] | None,
+        principal_id: str,
+    ) -> Any:
+        data = facade_payload(payload)
+        source_id = str(required(data, "source_id"))
+        source = rules.source(source_id)
+        if str(source.get("system_id") or "") != DND5E.id:
+            raise ValueError("rule source must belong to the dnd5e rule corpus")
+        page = data.get("page")
+        if page is not None and (isinstance(page, bool) or not isinstance(page, int) or page < 1):
+            raise ValueError("payload.page must be a positive integer")
+        query = str(data.get("query") or "").strip().casefold()
+        limit = data.get("limit", 50)
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
+            raise ValueError("payload.limit must be an integer between 1 and 200")
+        offset = data.get("offset", 0)
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ValueError("payload.offset must be a non-negative integer")
+        chunks = rules.source_chunks(source_id)
+        if page is not None:
+            chunks = [
+                item
+                for item in chunks
+                if isinstance(item.get("page_start"), int)
+                and isinstance(item.get("page_end"), int)
+                and int(item["page_start"]) <= page <= int(item["page_end"])
+            ]
+        if query:
+            chunks = [
+                item
+                for item in chunks
+                if query
+                in "\n".join(
+                    [
+                        *[str(value) for value in item.get("heading_path", [])],
+                        str(item.get("content") or ""),
+                    ]
+                ).casefold()
+            ]
+        result = chunks[offset : offset + limit]
+        return result
+
+    def _facade_value(value: Any) -> Any:
+        """Unwrap a nested public-tool result used by another public facade."""
+
+        if isinstance(value, dict) and "result" in value:
+            return value["result"]
+        return value
+
+    @public_tool()
+    def rulebook_draft(
+        campaign_id: Annotated[str, Field(title="Campaign")],
+        action: Literal["start", "get", "evidence", "edit", "finalize"],
+        payload: dict[str, Any] | None = None,
+        principal_id: Annotated[str, Field(title="Principal")] = LOCAL_SYSTEM_PRINCIPAL_ID,
+        expected_revision: Annotated[int | None, Field(title="Revision")] = None,
+        idempotency_key: Annotated[str | None, Field(title="Request Key")] = None,
+    ) -> dict[str, Any]:
+        """Create, inspect, edit, and finalize one source-bound rulebook draft."""
+
+        require_facade_phase(campaign_id, f"rulebook_draft({action})", PROFILE_LOBBY)
+        if action == "get":
+            data = facade_payload(payload)
+            if data.get("job_id"):
+                job = import_job_get(campaign_id, str(data["job_id"]), principal_id)
+                source = rules.source(str(job["source_id"])) if job.get("source_id") else None
+                result = {
+                    "job": job,
+                    "candidates": list(job.get("candidates") or []),
+                    "inspection": deepcopy(job.get("inspection")),
+                    "source_id": job.get("source_id"),
+                    "source": source,
+                }
+            else:
+                result = {"jobs": import_job_list(campaign_id, "rulebook", principal_id)}
+            return facade_result(action, result)
+
+        if action == "start":
+            data = facade_payload(payload)
+            if not idempotency_key:
+                raise ValueError("idempotency_key is required to start a rulebook draft")
+            acknowledge_warnings = data.get("acknowledge_warnings", False)
+            if not isinstance(acknowledge_warnings, bool):
+                raise ValueError("payload.acknowledge_warnings must be a boolean")
+            staged = rule_document_stage(campaign_id, str(data["source_path"]), principal_id)
+            created = rule_import_job_create(
                 campaign_id,
-                "rule_pack_query(addon_package)",
-                PROFILE_LOBBY,
+                str(staged["artifact"]),
+                str(data["source_key"]),
+                str(data["title"]),
+                str(data["edition"]),
+                str(data.get("locale") or "en"),
+                str(data.get("publication_id") or ""),
+                str(data.get("version") or ""),
+                str(data.get("authority") or "supplement"),
+                principal_id,
+                f"{idempotency_key}:create",
             )
-            components = data["components"]
-            if not isinstance(components, list):
-                raise ValueError("payload.components must be an array")
-            components = finalize_dnd_addon_resolution_components(components)
-            resolution_readiness = audit_dnd_addon_resolution_components(components)
-            if not resolution_readiness["complete"]:
-                raise ValueError(
-                    "D&D addon export requires build-time semantic resolution: "
-                    + "; ".join(
-                        f"{item['artifact_id']}: {item['reason']}"
-                        for item in resolution_readiness["unresolved"][:20]
+            job_id = str(dict(created["job"])["id"])
+            inspected = rule_import_job_inspect(
+                campaign_id,
+                job_id,
+                principal_id,
+                f"{idempotency_key}:inspect",
+            )
+            warnings = list(dict(inspected.get("inspection") or {}).get("warnings") or [])
+            if warnings and not acknowledge_warnings:
+                return facade_result(
+                    action,
+                    {
+                        **staged,
+                        **inspected,
+                        "status": "source_review_required",
+                        "warnings": warnings,
+                    },
+                )
+            indexed = rule_import_job_ingest(
+                campaign_id,
+                job_id,
+                acknowledge_warnings,
+                principal_id,
+                f"{idempotency_key}:index",
+            )
+            extracted = rule_content_candidates_extract(
+                campaign_id,
+                job_id,
+                principal_id,
+                f"{idempotency_key}:extract",
+            )
+            return facade_result(
+                action,
+                {
+                    **staged,
+                    "source": indexed.get("source"),
+                    "inventory": extracted.get("inventory"),
+                    "inspection": inspected.get("inspection"),
+                    "candidates": extracted.get("candidates"),
+                    "job": extracted["job"],
+                    "status": "editing",
+                },
+            )
+
+        data = facade_payload(payload)
+        job_id = str(required(data, "job_id"))
+        if action == "evidence":
+            data = facade_payload(payload)
+            kind = str(data["kind"])
+            if kind == "page":
+                return facade_render_result(
+                    rule_document_page_render(
+                        campaign_id,
+                        job_id,
+                        required(data, "page_number"),
+                        data.get("scale", 1.5),
+                        data.get("include_ocr_text", True),
+                        principal_id,
                     )
                 )
-            readiness = audit_dnd_addon_readiness_components(components)
-            addon_manifest = {
-                **dict(data["manifest"]),
-                "resolution_policy": "build_time_complete",
-                "resolution_readiness": resolution_readiness,
-                "readiness_policy": (
-                    "build_time_complete" if readiness["complete"] else "review_required"
-                ),
-                "readiness": readiness,
-            }
-            package = build_addon_pack(
-                portable_id=str(data["portable_id"]),
-                version=str(data["version"]),
-                system_id=DND5E.id,
-                manifest=addon_manifest,
-                components=components,
-                metadata=dict(data.get("metadata") or {}),
-            )
-            result = {
-                "artifact": storage.write_portable_package(package),
-                "summary": {
-                    "components": len(package["payload"]["components"]),
-                    "content": deepcopy(package["payload"]["manifest"]["content_summary"]),
-                    "distribution": package["metadata"]["distribution"],
-                    "resolution_readiness": deepcopy(resolution_readiness),
-                    "readiness": deepcopy(readiness),
-                },
-                **({"package": package} if data.get("include_package") is True else {}),
-            }
-        elif view == "package":
-            data = strict_facade_payload(
-                payload,
-                action="rule_pack_query(package)",
-                allowed={
-                    "campaign_id",
-                    "pack_id",
-                    "version",
-                    "metadata",
-                    "include_package",
-                },
-                required_names=("campaign_id", "pack_id", "version"),
-            )
-            access.require_campaign(
-                str(data["campaign_id"]),
-                principal_id,
-                roles=CAMPAIGN_DM_ROLES,
-            )
-            require_facade_phase(
-                str(data["campaign_id"]),
-                "rule_pack_query(package)",
-                PROFILE_LOBBY,
-            )
-            package = portable_rule_pack_definition(
-                str(data["pack_id"]),
-                str(data["version"]),
-                metadata=dict(data.get("metadata") or {}),
-            )
-            artifact = storage.write_portable_package(package)
-            result = {
-                "artifact": artifact,
-                "summary": {
-                    "artifacts": len(package["payload"]["artifacts"]),
-                    "mechanics": len(package["payload"]["mechanics"]),
-                    "sources": len(package["payload"]["sources"]),
-                    "dependencies": len(package["dependencies"]),
-                    "distribution": package["metadata"]["distribution"],
-                },
-                **({"package": package} if data.get("include_package") is True else {}),
-            }
-        elif view == "release":
-            data = strict_facade_payload(
-                payload,
-                action="rule_pack_query(release)",
-                allowed={
-                    "campaign_id",
-                    "portable_id",
-                    "version",
-                    "components",
-                    "metadata",
-                    "include_manifest",
-                },
-                required_names=(
-                    "campaign_id",
-                    "portable_id",
-                    "version",
-                    "components",
-                ),
-            )
-            access.require_campaign(
-                str(data["campaign_id"]),
-                principal_id,
-                roles=CAMPAIGN_DM_ROLES,
-            )
-            require_facade_phase(
-                str(data["campaign_id"]),
-                "rule_pack_query(release)",
-                PROFILE_LOBBY,
-            )
-            components = data["components"]
-            if not isinstance(components, list):
-                raise ValueError("payload.components must be an array")
-            release = build_release_manifest(
-                portable_id=str(data["portable_id"]),
-                version=str(data["version"]),
-                system_id=DND5E.id,
-                components=components,
-                metadata=dict(data.get("metadata") or {}),
-            )
-            validate_release_manifest(release, expected_system_id=DND5E.id)
-            artifact = storage.write_portable_package(release)
-            result = {
-                "artifact": artifact,
-                "components": deepcopy(release["dependencies"]),
-                **({"release_manifest": release} if data.get("include_manifest") is True else {}),
-            }
-        elif view == "sources":
-            result = rules.sources(
-                system_id=data.get("system_id", DND5E.id),
-                edition=data.get("edition"),
-            )
-        else:
-            source_id = str(required(data, "source_id"))
-            source = rules.source(source_id)
-            if str(source.get("system_id") or "") != DND5E.id:
-                raise ValueError("rule source must belong to the dnd5e rule corpus")
-            page = data.get("page")
-            if page is not None and (
-                isinstance(page, bool) or not isinstance(page, int) or page < 1
-            ):
-                raise ValueError("payload.page must be a positive integer")
-            query = str(data.get("query") or "").strip().casefold()
-            limit = data.get("limit", 50)
-            if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
-                raise ValueError("payload.limit must be an integer between 1 and 200")
-            offset = data.get("offset", 0)
-            if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
-                raise ValueError("payload.offset must be a non-negative integer")
-            chunks = rules.source_chunks(source_id)
-            if page is not None:
+            if kind != "chunks":
+                raise ValueError("payload.kind must be page or chunks")
+            job = require_import_job(campaign_id, job_id, "rulebook")
+            if not job.source_id:
+                raise ValueError("rulebook draft has not completed mechanical extraction")
+            chunks = list(rules.source_chunks(job.source_id))
+            page_number = data.get("page_number")
+            if page_number is not None:
                 chunks = [
                     item
                     for item in chunks
                     if isinstance(item.get("page_start"), int)
                     and isinstance(item.get("page_end"), int)
-                    and int(item["page_start"]) <= page <= int(item["page_end"])
+                    and int(item["page_start"]) <= int(page_number) <= int(item["page_end"])
                 ]
+            query = str(data.get("query") or "").strip().casefold()
             if query:
                 chunks = [
-                    item
-                    for item in chunks
-                    if query
-                    in "\n".join(
-                        [
-                            *[str(value) for value in item.get("heading_path", [])],
-                            str(item.get("content") or ""),
-                        ]
-                    ).casefold()
+                    item for item in chunks if query in str(item.get("content") or "").casefold()
                 ]
-            result = chunks[offset : offset + limit]
-        return facade_result(view, result)
+            offset = int(data.get("offset", 0))
+            limit = int(data.get("limit", 50))
+            if offset < 0 or not 1 <= limit <= 200:
+                raise ValueError("payload offset/limit is outside the supported range")
+            return facade_result(action, chunks[offset : offset + limit])
+
+        if action == "edit":
+            operation = str(required(data, "operation"))
+            operation_payload = {key: value for key, value in data.items() if key != "operation"}
+            if operation == "candidates":
+                decisions = required(operation_payload, "decisions")
+                result = import_job_review_candidates(
+                    campaign_id,
+                    job_id,
+                    decisions,
+                    principal_id,
+                    idempotency_key,
+                    "edit",
+                )
+            elif operation == "catalog":
+                result = rule_content_candidates_augment(
+                    campaign_id,
+                    job_id,
+                    required(operation_payload, "additions"),
+                    str(required(operation_payload, "rationale")),
+                    principal_id,
+                    expected_revision,
+                    idempotency_key,
+                )
+            elif operation == "source_text":
+                result = submit_import_text_review(
+                    campaign_id,
+                    job_id,
+                    int(required(operation_payload, "page_number")),
+                    str(required(operation_payload, "base_text_sha256")),
+                    required(operation_payload, "replacements"),
+                    str(required(operation_payload, "rationale")),
+                    required(operation_payload, "evidence_basis"),
+                    operation_payload.get("rendered_image_checksum"),
+                    operation_payload.get("review_method", "agent"),
+                    principal_id,
+                    expected_revision,
+                    idempotency_key,
+                )
+            elif operation == "statblock_recovery":
+                if operation_payload.get("name"):
+                    result = rule_statblock_ocr_recover(
+                        campaign_id,
+                        job_id,
+                        str(operation_payload["name"]),
+                        operation_payload.get("page_number"),
+                        principal_id,
+                        idempotency_key,
+                        operation_payload.get("agent_fill"),
+                        operation_payload.get("statblock_slot"),
+                        operation_payload.get("ocr_corrections"),
+                        operation_payload.get("correction_evidence_basis", "staged_text"),
+                        operation_payload.get("rendered_image_checksum"),
+                    )
+                else:
+                    result = rule_statblock_catalog_recover(
+                        campaign_id,
+                        job_id,
+                        operation_payload.get("page_numbers"),
+                        principal_id,
+                        idempotency_key,
+                    )
+            elif operation == "statblock_review":
+                if operation_payload.get("review_mode") == "indexed_text":
+                    raise ValueError(
+                        "review_mode indexed_text is reserved for mechanical extraction"
+                    )
+                if operation_payload.get("base_review_id"):
+                    result = rule_statblock_review_from_base(
+                        campaign_id,
+                        job_id,
+                        str(operation_payload["base_review_id"]),
+                        required(operation_payload, "observation"),
+                        required(operation_payload, "agent_fill"),
+                        principal_id,
+                        idempotency_key,
+                    )
+                else:
+                    result = rule_statblock_review(
+                        campaign_id,
+                        job_id,
+                        int(required(operation_payload, "page_number")),
+                        required(operation_payload, "normalized_content"),
+                        required(operation_payload, "observation"),
+                        principal_id,
+                        idempotency_key,
+                        operation_payload.get("review_mode", "visual"),
+                        operation_payload.get("evidence_chunk_ids"),
+                        operation_payload.get("agent_fill"),
+                        None,
+                        operation_payload.get("evidence_exclusions"),
+                    )
+            elif operation == "advance":
+                if not idempotency_key:
+                    raise ValueError("idempotency_key is required to advance a draft")
+                acknowledge = operation_payload.get("acknowledge_warnings", False)
+                if not isinstance(acknowledge, bool):
+                    raise ValueError("payload.acknowledge_warnings must be a boolean")
+                job = require_import_job(campaign_id, job_id, "rulebook")
+                if job.state in {"staged", "failed"}:
+                    rule_import_job_inspect(
+                        campaign_id, job_id, principal_id, f"{idempotency_key}:inspect"
+                    )
+                    job = require_import_job(campaign_id, job_id, "rulebook")
+                blocked_result: dict[str, Any] | None = None
+                if job.state == "inspected":
+                    indexed = rule_import_job_ingest(
+                        campaign_id,
+                        job_id,
+                        acknowledge,
+                        principal_id,
+                        f"{idempotency_key}:index",
+                    )
+                    job = require_import_job(campaign_id, job_id, "rulebook")
+                    if indexed.get("committed") is False:
+                        blocked_result = indexed
+                if blocked_result is not None:
+                    result = blocked_result
+                    result.setdefault("job", import_job_view(job))
+                elif job.state == "extracted":
+                    result = rule_content_candidates_extract(
+                        campaign_id,
+                        job_id,
+                        principal_id,
+                        f"{idempotency_key}:extract",
+                    )
+                else:
+                    result = {"job": import_job_view(job)}
+                job_view = dict(result["job"])
+                source_id = job_view.get("source_id")
+                result = {
+                    **result,
+                    "source_id": source_id,
+                    "source": rules.source(str(source_id)) if source_id else None,
+                    "candidates": list(job_view.get("candidates") or []),
+                }
+            else:
+                raise ValueError(
+                    "payload.operation must be advance, source_text, statblock_recovery, "
+                    "statblock_review, catalog, or candidates"
+                )
+            return facade_result(action, result)
+
+        data = facade_payload(payload)
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required to finalize a rulebook draft")
+        finalized = import_job_finalize_candidates(
+            campaign_id,
+            job_id,
+            str(data["note"]),
+            principal_id,
+            expected_revision,
+            f"{idempotency_key}:freeze",
+        )
+        compiled = rule_import_job_compile(
+            campaign_id,
+            job_id,
+            data["manifest"],
+            data.get("mechanics"),
+            data.get("provenance"),
+            principal_id,
+            f"{idempotency_key}:compile",
+        )
+        return facade_result(
+            action,
+            {
+                "job": compiled["job"],
+                "draft": compiled["draft"],
+                "finalization": finalized.get("finalization"),
+            },
+        )
 
     @public_tool()
-    def rule_pack_change(
-        action: Literal["install", "remove"],
-        pack_id: str,
-        version: str,
+    def module_draft(
+        campaign_id: Annotated[str, Field(title="Campaign")],
+        action: Literal["start", "get", "evidence", "edit", "finalize"],
+        payload: dict[str, Any] | None = None,
+        principal_id: Annotated[str, Field(title="Principal")] = LOCAL_SYSTEM_PRINCIPAL_ID,
+        expected_revision: Annotated[int | None, Field(title="Revision")] = None,
+        idempotency_key: Annotated[str | None, Field(title="Request Key")] = None,
     ) -> dict[str, Any]:
-        """Install or remove a locally compiled rule-pack version."""
-        result = (
-            rule_pack_install(pack_id, version)
-            if action == "install"
-            else rule_pack_remove(pack_id, version)
+        """Create, inspect, edit, and finalize one source-bound module draft."""
+
+        if action != "evidence":
+            require_facade_phase(campaign_id, f"module_draft({action})", PROFILE_LOBBY)
+        if action == "get":
+            data = facade_payload(payload)
+            result = (
+                {"job": import_job_get(campaign_id, str(data["job_id"]), principal_id)}
+                if data.get("job_id")
+                else {"jobs": import_job_list(campaign_id, "module", principal_id)}
+            )
+            return facade_result(action, result)
+
+        if action == "start":
+            data = facade_payload(payload)
+            if not idempotency_key:
+                raise ValueError("idempotency_key is required to start a module draft")
+            source_path = data.get("source_path")
+            generated_fields = {"name", "content"}.intersection(data)
+            if source_path is not None and generated_fields:
+                raise ValueError("start accepts either source_path or name+content, not both")
+            if source_path is not None:
+                stored = storage.stage_module(str(source_path))
+                artifact = str(stored["artifact"])
+            else:
+                stored = module_write(
+                    str(required(data, "name")),
+                    str(required(data, "content")),
+                    principal_id,
+                )
+                artifact = str(stored["artifact"])
+            staged = module_import_job_create(
+                campaign_id,
+                artifact,
+                data.get("title"),
+                data.get("source_key"),
+                principal_id,
+                f"{idempotency_key}:create",
+            )
+            job_id = str(dict(staged["job"])["id"])
+            inspected = module_import_job_inspect(
+                campaign_id, job_id, principal_id, f"{idempotency_key}:inspect"
+            )
+            validated = module_import_job_validate(
+                campaign_id, job_id, principal_id, f"{idempotency_key}:validate"
+            )
+            if not dict(validated.get("validation") or {}).get("valid"):
+                return facade_result(
+                    action,
+                    {
+                        "job": validated["job"],
+                        "inspection": inspected.get("preview"),
+                        "validation": validated.get("validation"),
+                        "status": "editing",
+                    },
+                )
+            imported = module_import_job_import(
+                campaign_id, job_id, principal_id, f"{idempotency_key}:import"
+            )
+            return facade_result(
+                action,
+                {
+                    "job": imported["job"],
+                    "inspection": inspected.get("preview"),
+                    "validation": validated.get("validation"),
+                    "module_id": imported.get("module_id"),
+                    "status": "editing",
+                },
+            )
+
+        data = facade_payload(payload)
+        job_id = str(data.get("job_id") or "")
+        if not job_id and data.get("module_id"):
+            matching_jobs = [
+                item
+                for item in import_jobs.list(campaign_id, kind="module")
+                if item.module_id == str(data["module_id"])
+            ]
+            if len(matching_jobs) != 1:
+                raise ValueError("payload.module_id must resolve to exactly one editable draft")
+            job_id = matching_jobs[0].id
+        if not job_id:
+            raise ValueError("payload.job_id or payload.module_id is required")
+        if action == "evidence":
+            data = facade_payload(payload)
+            access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+            job = require_import_job(campaign_id, job_id, "module")
+            evidence_kind = str(
+                data.get("kind") or ("page" if data.get("page_number") else "chunks")
+            )
+            if evidence_kind == "chunks":
+                if not job.module_id:
+                    raise ValueError("module chunk evidence requires a mechanically imported draft")
+                chunks = modules.list_chunks(
+                    campaign_id,
+                    job.module_id,
+                    scene_id=(str(data["scene_id"]) if data.get("scene_id") else None),
+                )
+                query = str(data.get("query") or "").strip().casefold()
+                if query:
+                    chunks = [
+                        item
+                        for item in chunks
+                        if query
+                        in "\n".join(
+                            [
+                                *[str(value) for value in item.get("heading_path", [])],
+                                str(item.get("content") or ""),
+                            ]
+                        ).casefold()
+                    ]
+                limit = data.get("limit", 100)
+                if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+                    raise ValueError("payload.limit must be an integer between 1 and 500")
+                return facade_result(action, chunks[:limit])
+            if evidence_kind != "page":
+                raise ValueError("payload.kind must be page or chunks")
+            if not data.get("page_number"):
+                raise ValueError("payload.page_number is required for page evidence")
+            source = storage.artifact_module_path(job.artifact)
+            if source.suffix.casefold() != ".pdf":
+                raise ValueError("module evidence rendering requires a staged PDF")
+            rendered = render_pdf_page(source, data["page_number"], scale=data.get("scale", 1.5))
+            transcription = staged_transcription_evidence(
+                job,
+                data["page_number"],
+                include_ocr=data.get("include_ocr_text", True),
+            )
+            return facade_render_result(
+                [
+                    {
+                        "campaign_id": campaign_id,
+                        "job_id": job.id,
+                        "artifact": job.artifact,
+                        "source_checksum": rendered.source_checksum,
+                        "page_number": rendered.page_number,
+                        "page_count": rendered.page_count,
+                        "width": rendered.width,
+                        "height": rendered.height,
+                        "scale": rendered.scale,
+                        "image_checksum": rendered.checksum,
+                        "transcription": transcription,
+                    },
+                    Image(data=rendered.content, format="png"),
+                ]
+            )
+
+        if action == "edit":
+            job = require_import_job(campaign_id, job_id, "module")
+            if dict(job.result or {}).get("finalized_package"):
+                raise ValueError("a finalized module draft is immutable")
+            operation = str(required(data, "operation"))
+            value = {key: item for key, item in data.items() if key != "operation"}
+            if operation == "source_text":
+                if job.state == "failed":
+                    if not idempotency_key:
+                        raise ValueError("idempotency_key is required for source editing")
+                    module_import_job_inspect(
+                        campaign_id, job_id, principal_id, f"{idempotency_key}:inspect"
+                    )
+                result = submit_import_text_review(
+                    campaign_id,
+                    job_id,
+                    int(required(value, "page_number")),
+                    str(required(value, "base_text_sha256")),
+                    required(value, "replacements"),
+                    str(required(value, "rationale")),
+                    required(value, "evidence_basis"),
+                    value.get("rendered_image_checksum"),
+                    value.get("review_method", "agent"),
+                    principal_id,
+                    expected_revision,
+                    idempotency_key,
+                )
+            elif operation == "content":
+                result = module_content_review(
+                    campaign_id,
+                    str(job.module_id or required(value, "module_id")),
+                    str(required(value, "scene_id")),
+                    str(required(value, "content_key")),
+                    required(value, "normalized_content"),
+                    required(value, "observation"),
+                    value.get("source_asset_id"),
+                    value.get("page_number"),
+                    value.get("source_chunk_ids"),
+                    value.get(
+                        "content_kind",
+                        statblock_content_kind(campaign_rules_edition(campaign_id)),
+                    ),
+                    value.get("metadata"),
+                    principal_id,
+                    idempotency_key,
+                    value.get("agent_fill"),
+                )
+            elif operation == "statblock":
+                result = module_statblock_ocr_recover(
+                    campaign_id,
+                    str(job.module_id or required(value, "module_id")),
+                    str(required(value, "scene_id")),
+                    str(required(value, "content_key")),
+                    str(required(value, "name")),
+                    int(required(value, "page_number")),
+                    value.get("source_asset_id"),
+                    principal_id,
+                    idempotency_key,
+                    value.get("agent_fill"),
+                )
+            elif operation == "asset":
+                result = module_asset_attach(
+                    campaign_id,
+                    str(job.module_id or required(value, "module_id")),
+                    str(required(value, "source_path")),
+                    asset_kind=str(required(value, "asset_kind")),
+                    scene_id=value.get("scene_id"),
+                    location_key=value.get("location_key"),
+                    title=value.get("title"),
+                    metadata=value.get("metadata"),
+                    principal_id=principal_id,
+                    idempotency_key=idempotency_key,
+                )
+            elif operation == "actor":
+                result = modules.bind_actor(
+                    campaign_id=campaign_id,
+                    module_id=str(job.module_id or required(value, "module_id")),
+                    character_id=str(required(value, "character_id")),
+                    portable_actor_id=str(required(value, "portable_actor_id")),
+                    binding_kind=str(required(value, "binding_kind")),
+                    role=str(value.get("role") or ""),
+                    scene_id=(str(value["scene_id"]) if value.get("scene_id") else None),
+                    metadata=dict(value.get("metadata") or {}),
+                )
+            elif operation == "package":
+                if not idempotency_key:
+                    raise ValueError("idempotency_key is required for module Pack edits")
+                if job.state != "imported" or not job.module_id:
+                    raise ValueError("module Pack decisions require a mechanically imported draft")
+                allowed_decisions = {
+                    "catalogs",
+                    "dependencies",
+                    "manifest",
+                    "metadata",
+                    "narrative",
+                    "version",
+                }
+                unsupported = sorted(set(value) - allowed_decisions - {"job_id", "note"})
+                if unsupported:
+                    raise ValueError(
+                        "module Pack edit has unsupported fields: " + ", ".join(unsupported)
+                    )
+                decisions = {
+                    key: deepcopy(item) for key, item in value.items() if key in allowed_decisions
+                }
+                if not decisions:
+                    raise ValueError("module Pack edit requires at least one decision field")
+                prior_result = dict(job.result or {})
+                pack_draft = {
+                    **dict(prior_result.get("pack_draft") or {}),
+                    **decisions,
+                }
+                edit_record = {
+                    "revision": job.revision + 1,
+                    "editor": principal_id,
+                    "note": str(value.get("note") or "").strip(),
+                    "fields": sorted(decisions),
+                }
+                request_payload = {
+                    "job_id": job_id,
+                    "operation": operation,
+                    "decisions": decisions,
+                    "note": edit_record["note"],
+                }
+                scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
+                updated = import_jobs.record_result(
+                    job_id,
+                    {
+                        **prior_result,
+                        "pack_draft": pack_draft,
+                        "pack_edit_history": [
+                            *list(prior_result.get("pack_edit_history") or []),
+                            edit_record,
+                        ],
+                    },
+                    state="imported",
+                    module_id=job.module_id,
+                    expected_revision=expected_revision,
+                    idempotency_key=idempotency_key,
+                    idempotency_write=IdempotencyWrite(
+                        scope=scope,
+                        payload=request_payload,
+                        response=lambda saved: {"job": import_job_view(saved)},
+                    ),
+                )
+                result = {"job": import_job_view(updated), "pack_draft": pack_draft}
+            elif operation == "advance":
+                if not idempotency_key:
+                    raise ValueError("idempotency_key is required to advance a module draft")
+                if job.state in {"staged", "failed"}:
+                    module_import_job_inspect(
+                        campaign_id, job_id, principal_id, f"{idempotency_key}:inspect"
+                    )
+                    job = require_import_job(campaign_id, job_id, "module")
+                if job.state == "inspected":
+                    validated = module_import_job_validate(
+                        campaign_id, job_id, principal_id, f"{idempotency_key}:validate"
+                    )
+                    if not dict(validated.get("validation") or {}).get("valid"):
+                        return facade_result(action, validated)
+                    job = require_import_job(campaign_id, job_id, "module")
+                if job.state == "validated":
+                    result = module_import_job_import(
+                        campaign_id, job_id, principal_id, f"{idempotency_key}:import"
+                    )
+                else:
+                    result = {
+                        "job": import_job_view(job),
+                        "inspection": deepcopy(job.inspection),
+                        "validation": deepcopy(job.validation),
+                        "module_id": job.module_id,
+                    }
+            else:
+                raise ValueError(
+                    "payload.operation must be advance, source_text, content, "
+                    "statblock, asset, actor, or package"
+                )
+            return facade_result(action, result)
+
+        data = facade_payload(payload)
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required to finalize a module draft")
+        job = require_import_job(campaign_id, job_id, "module")
+        request_payload = {
+            "job_id": job_id,
+            "operation": "finalize_module_draft",
+            **{key: deepcopy(value) for key, value in data.items() if key != "include_package"},
+        }
+        scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, request_payload)
+        if replay is not None:
+            return facade_result(action, replay)
+        if job.state != "imported" or not job.module_id:
+            raise ValueError("module draft must complete mechanical import before finalization")
+        saved_pack_draft = dict(dict(job.result or {}).get("pack_draft") or {})
+        final_data = {**saved_pack_draft, **data}
+        confirmation = final_data.get("confirmation")
+        if not isinstance(confirmation, dict) or set(confirmation) != {"confirmed", "note"}:
+            raise ValueError("module draft confirmation requires exactly confirmed and note")
+        if confirmation.get("confirmed") is not True:
+            raise ValueError("the Agent must explicitly confirm module finalization")
+        confirmation_note = str(confirmation.get("note") or "").strip()
+        if not confirmation_note or len(confirmation_note) > 2000:
+            raise ValueError("module draft confirmation.note must contain 1 to 2000 characters")
+        agent_confirmation = {
+            "confirmed": True,
+            "reviewer": principal_id,
+            "note": confirmation_note,
+        }
+        final_data["metadata"] = {
+            **dict(final_data.get("metadata") or {}),
+            "agent_finalization": agent_confirmation,
+        }
+        packaged = _facade_value(
+            module_query(
+                campaign_id,
+                "package",
+                {
+                    key: value
+                    for key, value in final_data.items()
+                    if key not in {"confirmation", "job_id"}
+                }
+                | {"module_id": job.module_id, "include_package": True},
+                principal_id,
+            )
         )
-        return facade_result(action, result)
+        finalized_package = {
+            "artifact": packaged["artifact"],
+            "summary": packaged["summary"],
+            "package": packaged.get("package"),
+            "confirmation": agent_confirmation,
+        }
+        updated = import_jobs.record_result(
+            job_id,
+            {**dict(job.result), "finalized_package": finalized_package},
+            state="compiled",
+            module_id=job.module_id,
+            expected_revision=job.revision,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=request_payload,
+                response=lambda result: {
+                    "job": import_job_view(result),
+                    **finalized_package,
+                },
+            ),
+        )
+        return facade_result(
+            action,
+            {"job": import_job_view(updated), **finalized_package},
+        )
+
+    @internal_operation
+    def campaign_addon_set(
+        campaign_id: str,
+        addon_id: str,
+        version: str,
+        *,
+        enabled: bool,
+        options: dict[str, Any] | None,
+        principal_id: str,
+        branch_id: str | None,
+        expected_revision: int | None,
+        idempotency_key: str | None,
+    ) -> dict[str, Any]:
+        """Enable or disable one installed addon through the unified Pack facade."""
+
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        require_facade_phase(campaign_id, "content_pack(activate)", PROFILE_LOBBY)
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for addon activation")
+        request = {
+            "operation": "set_addon",
+            "addon_id": addon_id,
+            "version": version,
+            "enabled": enabled,
+            "options": dict(options or {}),
+            "branch_id": branch_id,
+            "expected_revision": expected_revision,
+        }
+        scope = f"addon-activation:{campaign_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, request)
+        if replay is not None:
+            return replay
+        effective_revision = expected_revision
+        if enabled:
+            requirements = addons.activation_requirements(
+                campaign_id,
+                addon_id=addon_id,
+                version=version,
+                branch_id=branch_id,
+            )
+            if effective_revision is None:
+                effective_revision = int(requirements["campaign_revision"])
+        activation = addons.set_activation(
+            campaign_id,
+            addon_id=addon_id,
+            version=version,
+            enabled=enabled,
+            options=dict(options or {}),
+            branch_id=branch_id,
+            expected_campaign_revision=effective_revision,
+        )
+        response = {
+            "activation": asdict(activation),
+            "effective_ruleset": asdict(
+                rule_packs.effective_ruleset(campaign_id, branch_id=branch_id)
+            ),
+        }
+        return remember_idempotent(
+            scope,
+            idempotency_key,
+            request,
+            response,
+            campaign_id=campaign_id,
+        )
+
+    @public_tool()
+    def content_pack(
+        action: Literal[
+            "list",
+            "get",
+            "test",
+            "build",
+            "import",
+            "export",
+            "install",
+            "activate",
+            "deactivate",
+            "remove",
+        ],
+        payload: dict[str, Any] | None = None,
+        principal_id: Annotated[str, Field(title="Principal")] = LOCAL_SYSTEM_PRINCIPAL_ID,
+        expected_revision: Annotated[int | None, Field(title="Revision")] = None,
+        idempotency_key: Annotated[str | None, Field(title="Request Key")] = None,
+    ) -> dict[str, Any]:
+        """Build and manage finalized rule, addon, preset, and module packs."""
+
+        data = facade_payload(payload)
+        kind = str(required(data, "kind"))
+        routing_kinds = {
+            "actor_preset",
+            "addon",
+            "archive",
+            "catalog",
+            "module",
+            "preset",
+            "rule",
+            "rule_archive",
+            "source",
+            "source_rule",
+        }
+        if kind not in routing_kinds:
+            raise ValueError("payload.kind must explicitly name a supported Pack or content route")
+        if action == "list":
+            if kind == "rule":
+                result = rule_pack_list(data.get("pack_id"))
+            elif kind == "source":
+                result = rules.sources(
+                    system_id=data.get("system_id", DND5E.id),
+                    edition=data.get("edition"),
+                )
+            elif kind == "addon":
+                if data.get("campaign_id"):
+                    result = _content_pack_addons(
+                        {key: value for key, value in data.items() if key != "kind"},
+                        principal_id,
+                    )
+                else:
+                    result = [asdict(item) for item in addons.list_versions(data.get("addon_id"))]
+            elif kind == "catalog":
+                catalog_payload = {key: value for key, value in data.items() if key != "kind"}
+                if "content_kind" in catalog_payload:
+                    catalog_payload["kind"] = catalog_payload.pop("content_kind")
+                result = content_catalog_list(
+                    str(required(catalog_payload, "campaign_id")),
+                    catalog_payload.get("kind"),
+                    str(catalog_payload.get("query") or ""),
+                    principal_id,
+                    catalog_payload.get("branch_id"),
+                    include_context=bool(catalog_payload.get("include_context", False)),
+                )
+            elif kind == "actor_preset":
+                result = _content_pack_actor_presets(
+                    {key: value for key, value in data.items() if key != "kind"},
+                    principal_id,
+                )
+            elif kind == "module":
+                result = module_list(str(required(data, "campaign_id")), principal_id)
+            else:
+                raise ValueError(
+                    "payload.kind must be rule, source, addon, catalog, actor_preset, or module"
+                )
+            return facade_result(action, result)
+
+        if action == "get":
+            if kind == "rule":
+                result = rule_pack_inspect(
+                    str(required(data, "pack_id")), str(required(data, "version"))
+                )
+            elif kind == "archive":
+                package, _blobs = storage.read_content_archive(
+                    artifact=(str(data["artifact"]) if data.get("artifact") else None),
+                    source_path=(data.get("source_path") if data.get("source_path") else None),
+                )
+                result = package
+            elif kind == "addon":
+                result = _content_pack_addon(
+                    {key: value for key, value in data.items() if key != "kind"},
+                    principal_id,
+                )
+            elif kind == "source":
+                result = _content_pack_source_chunks(
+                    {key: value for key, value in data.items() if key != "kind"},
+                    principal_id,
+                )
+            elif kind == "actor_preset":
+                result = _content_pack_actor_presets(
+                    {key: value for key, value in data.items() if key != "kind"},
+                    principal_id,
+                )
+            else:
+                raise ValueError(
+                    "payload.kind must be rule, source, addon, actor_preset, or archive"
+                )
+            return facade_result(action, result)
+
+        if action == "test":
+            if kind != "rule":
+                raise ValueError("only rule packs expose declarative mechanic tests")
+            return facade_result(
+                action,
+                rule_pack_test(str(required(data, "pack_id")), str(required(data, "version"))),
+            )
+
+        if action == "build":
+            if kind == "rule":
+                result = rule_pack_draft(
+                    required(data, "manifest"),
+                    data.get("artifacts"),
+                    data.get("mechanics"),
+                    data.get("provenance"),
+                )
+            elif kind == "source_rule":
+                result = rule_pack_draft_from_source(
+                    str(required(data, "source_id")),
+                    required(data, "manifest"),
+                    data.get("artifacts"),
+                    data.get("mechanics"),
+                    data.get("provenance"),
+                )
+            elif kind == "preset":
+                result = _content_pack_build_preset(
+                    {key: value for key, value in data.items() if key != "kind"}, principal_id
+                )
+            elif kind == "addon":
+                result = _content_pack_build_addon(
+                    {key: value for key, value in data.items() if key != "kind"}, principal_id
+                )
+            elif kind == "rule_archive":
+                result = _content_pack_export_rule(
+                    {key: value for key, value in data.items() if key != "kind"}, principal_id
+                )
+            else:
+                raise ValueError(
+                    "payload.kind must be rule, source_rule, preset, addon, or rule_archive"
+                )
+            return facade_result(action, result)
+
+        if action == "import":
+            campaign_id = str(required(data, "campaign_id"))
+            if not idempotency_key:
+                raise ValueError("idempotency_key is required for Pack import")
+            activate = data.get("activate", False)
+            if not isinstance(activate, bool):
+                raise ValueError("payload.activate must be a boolean")
+            choices = [name for name in ("artifact", "source_path") if data.get(name) is not None]
+            if len(choices) != 1:
+                raise ValueError("provide exactly one of payload.artifact or payload.source_path")
+            package, blobs = storage.read_content_archive(
+                artifact=(str(data["artifact"]) if choices[0] == "artifact" else None),
+                source_path=(data.get("source_path") if choices[0] == "source_path" else None),
+            )
+            accepted_archive_kinds = {
+                "module": {"module"},
+                "addon": {"addon"},
+                "preset": {"preset"},
+                "rule": {"core_rules"},
+            }
+            if kind not in accepted_archive_kinds:
+                raise ValueError("Pack import kind must be module, addon, preset, or rule")
+            package_kind = str(package.get("kind") or "")
+            if package_kind not in accepted_archive_kinds[kind]:
+                raise ValueError(
+                    f"payload.kind {kind} does not match archive kind {package_kind or '<missing>'}"
+                )
+            if kind == "module":
+                result = import_content_module_package(
+                    campaign_id,
+                    package,
+                    blobs,
+                    principal_id=principal_id,
+                    idempotency_key=idempotency_key,
+                    activate=activate,
+                    progress_remaps=data.get("progress_remaps"),
+                )
+            else:
+                result = import_content_rules_package(
+                    campaign_id,
+                    package,
+                    blobs,
+                    principal_id=principal_id,
+                    idempotency_key=idempotency_key,
+                )
+            return facade_result(action, result)
+
+        if action == "export":
+            if kind == "rule":
+                result = _content_pack_export_rule(
+                    {key: value for key, value in data.items() if key != "kind"},
+                    principal_id,
+                )
+            elif kind == "module":
+                result = _facade_value(
+                    module_query(
+                        str(required(data, "campaign_id")),
+                        "package",
+                        {key: value for key, value in data.items() if key != "kind"},
+                        principal_id,
+                    )
+                )
+            elif kind == "addon":
+                result = _content_pack_addon(
+                    {key: value for key, value in data.items() if key != "kind"},
+                    principal_id,
+                )
+            else:
+                raise ValueError("payload.kind must be rule, addon, or module")
+            return facade_result(action, result)
+
+        if action == "install":
+            if kind != "rule":
+                raise ValueError("portable addon and module packs are installed with import")
+            result = rule_pack_install(
+                str(required(data, "pack_id")), str(required(data, "version"))
+            )
+            return facade_result(action, result)
+
+        if action in {"activate", "deactivate"}:
+            campaign_id = str(required(data, "campaign_id"))
+            if kind == "rule":
+                if action == "activate":
+                    result = campaign_rule_pack_set(
+                        campaign_id,
+                        str(required(data, "pack_id")),
+                        str(required(data, "version")),
+                        bool(data.get("enabled", True)),
+                        dict(data.get("options") or {}),
+                        principal_id,
+                        data.get("branch_id"),
+                        expected_revision,
+                        idempotency_key,
+                    )
+                else:
+                    result = campaign_rule_pack_remove(
+                        campaign_id,
+                        str(required(data, "pack_id")),
+                        principal_id,
+                        data.get("branch_id"),
+                        expected_revision,
+                        idempotency_key,
+                    )
+            elif kind == "module" and action == "activate":
+                if not idempotency_key:
+                    raise ValueError("idempotency_key is required for module activation")
+                choices = [
+                    name for name in ("artifact", "source_path") if data.get(name) is not None
+                ]
+                if len(choices) != 1:
+                    raise ValueError(
+                        "module activation requires exactly one Pack artifact or source_path"
+                    )
+                package, blobs = storage.read_content_archive(
+                    artifact=(str(data["artifact"]) if choices[0] == "artifact" else None),
+                    source_path=(data.get("source_path") if choices[0] == "source_path" else None),
+                )
+                result = import_content_module_package(
+                    campaign_id,
+                    package,
+                    blobs,
+                    principal_id=principal_id,
+                    idempotency_key=idempotency_key,
+                    activate=True,
+                    progress_remaps=data.get("progress_remaps"),
+                )
+            elif kind == "addon":
+                result = campaign_addon_set(
+                    campaign_id,
+                    str(required(data, "addon_id")),
+                    str(required(data, "version")),
+                    enabled=action == "activate",
+                    options=dict(data.get("options") or {}),
+                    principal_id=principal_id,
+                    branch_id=data.get("branch_id"),
+                    expected_revision=expected_revision,
+                    idempotency_key=idempotency_key,
+                )
+            else:
+                raise ValueError("this Pack kind does not support the requested activation action")
+            return facade_result(action, result)
+
+        if kind != "rule":
+            raise ValueError("only unreferenced rule-pack versions support direct removal")
+        return facade_result(
+            action,
+            rule_pack_remove(str(required(data, "pack_id")), str(required(data, "version"))),
+        )
 
     @public_tool()
     def campaign_rules(
@@ -42417,9 +42231,6 @@ Useful bounded guidance:
         action: Literal[
             "get_profile",
             "set_profile",
-            "set_pack",
-            "remove_pack",
-            "set_addon",
             "core_relock",
             "explain",
             "receipts",
@@ -42430,7 +42241,7 @@ Useful bounded guidance:
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Read and change the campaign rule profile and enabled pack set."""
+        """Read and change the base campaign rule profile; Pack changes use content_pack."""
         data = facade_payload(payload)
         if action == "get_profile":
             result = campaign_rule_profile_get(campaign_id, principal_id)
@@ -42445,101 +42256,8 @@ Useful bounded guidance:
                 expected_revision,
                 idempotency_key,
             )
-        elif action == "set_pack":
-            result = campaign_rule_pack_set(
-                campaign_id,
-                required(data, "pack_id"),
-                required(data, "version"),
-                data.get("enabled", True),
-                data.get("options"),
-                principal_id,
-                branch_id,
-                expected_revision,
-                idempotency_key,
-            )
-        elif action == "remove_pack":
-            result = campaign_rule_pack_remove(
-                campaign_id,
-                required(data, "pack_id"),
-                principal_id,
-                branch_id,
-                expected_revision,
-                idempotency_key,
-            )
-        elif action == "set_addon":
-            data = strict_facade_payload(
-                payload,
-                action="campaign_rules(set_addon)",
-                allowed={"addon_id", "version", "enabled", "options"},
-                required_names=("addon_id", "version"),
-            )
-            access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
-            require_facade_phase(campaign_id, "campaign_rules(set_addon)", PROFILE_LOBBY)
-            if not idempotency_key:
-                raise ValueError("idempotency_key is required for addon activation")
-            enabled = data.get("enabled", True)
-            if not isinstance(enabled, bool):
-                raise ValueError("payload.enabled must be a boolean")
-            request = {
-                "operation": "set_addon",
-                "addon_id": str(data["addon_id"]),
-                "version": str(data["version"]),
-                "enabled": enabled,
-                "options": dict(data.get("options") or {}),
-                "branch_id": branch_id,
-                "expected_revision": expected_revision,
-            }
-            scope = f"addon-activation:{campaign_id}:{principal_id}"
-            replay = replay_idempotent(scope, idempotency_key, request)
-            if replay is not None:
-                return facade_result(action, replay)
-            effective_revision = expected_revision
-            if enabled:
-                requirements = addons.activation_requirements(
-                    campaign_id,
-                    addon_id=request["addon_id"],
-                    version=request["version"],
-                    branch_id=branch_id,
-                )
-                if effective_revision is None:
-                    effective_revision = int(requirements["campaign_revision"])
-            activation = addons.set_activation(
-                campaign_id,
-                addon_id=request["addon_id"],
-                version=request["version"],
-                enabled=enabled,
-                options=request["options"],
-                branch_id=branch_id,
-                expected_campaign_revision=effective_revision,
-            )
-            response = {
-                "activation": asdict(activation),
-                "effective_ruleset": asdict(
-                    rule_packs.effective_ruleset(campaign_id, branch_id=branch_id)
-                ),
-            }
-            result = remember_idempotent(
-                scope,
-                idempotency_key,
-                request,
-                response,
-                campaign_id=campaign_id,
-            )
         elif action == "core_relock":
-            data = strict_facade_payload(
-                payload,
-                action="campaign_rules(core_relock)",
-                allowed={
-                    "expected_core_fingerprint",
-                    "reason",
-                    "expected_head_snapshot_id",
-                },
-                required_names=(
-                    "expected_core_fingerprint",
-                    "reason",
-                    "expected_head_snapshot_id",
-                ),
-            )
+            data = facade_payload(payload)
             result = campaign_core_relock(
                 campaign_id,
                 data["expected_core_fingerprint"],
@@ -42573,7 +42291,7 @@ Useful bounded guidance:
             "document",
             "rest",
             "advancement",
-            "portable_card",
+            "content_package",
         ] = "list",
         payload: dict[str, Any] | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
@@ -42582,22 +42300,8 @@ Useful bounded guidance:
         data = facade_payload(payload)
         if view == "get":
             result = character_get(required(data, "character_id"), principal_id)
-        elif view == "portable_card":
-            data = strict_facade_payload(
-                payload,
-                action="character_query(portable_card)",
-                allowed={
-                    "character_id",
-                    "portable_id",
-                    "version",
-                    "provenance",
-                    "bindings",
-                    "image",
-                    "metadata",
-                    "dependencies",
-                },
-                required_names=("character_id",),
-            )
+        elif view == "content_package":
+            data = facade_payload(payload)
             character = characters.get(str(required(data, "character_id")))
             if character.campaign_id is not None:
                 require_character_control(character, principal_id)
@@ -42608,9 +42312,10 @@ Useful bounded guidance:
             portable_id = str(data.get("portable_id") or "").strip() or (
                 f"dnd5e.shared.{ascii_slug(character.name) or 'actor'}"
             )
-            card = build_dnd_actor_card(
-                portable_id=portable_id,
-                version=str(data.get("version") or "1.0.0"),
+            package_version = str(data.get("version") or "2.0.0")
+            legacy_card = build_dnd_actor_card(
+                portable_id=f"{portable_id}.actor",
+                version=package_version,
                 actor_type=character.character_type,
                 name=character.name,
                 player_name=character.player_name,
@@ -42626,9 +42331,28 @@ Useful bounded guidance:
                 metadata=dict(data.get("metadata") or {}),
                 dependencies=list(data.get("dependencies") or []),
             )
+            package, package_blobs = build_preset_content_package(
+                package_id=portable_id,
+                version=package_version,
+                system_id=DND5E.id,
+                title=f"{character.name} Actor Card",
+                cards=[legacy_card],
+                metadata={
+                    **dict(data.get("metadata") or {}),
+                    "title": f"{character.name} Actor Card",
+                    "distribution": "private",
+                    "license": "private",
+                    "attribution": "User supplied actor",
+                },
+            )
             result = {
-                "card": card,
-                "artifact": storage.write_portable_package(card),
+                "actor": package["actors"][0],
+                "package": {
+                    "id": package["id"],
+                    "version": package["version"],
+                    "checksum": package["checksum"],
+                },
+                "artifact": storage.write_content_archive(package, package_blobs),
                 "excluded_runtime_state": [
                     "database_id",
                     "campaign_id",
@@ -42636,7 +42360,7 @@ Useful bounded guidance:
                     "revision",
                     "actor_knowledge",
                     "snapshots",
-                    "portable_card_image",
+                    "actor_image_blob",
                 ],
             }
         elif view == "batch":
@@ -43162,7 +42886,7 @@ Useful bounded guidance:
             "reviewed_rule_statblock",
             "module_statblock",
             "narrative_npc",
-            "portable_card",
+            "content_actor",
         ],
         payload: dict[str, Any],
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
@@ -43170,113 +42894,70 @@ Useful bounded guidance:
     ) -> dict[str, Any]:
         """Create directly, by build/template, or from source-bound module evidence."""
         data = facade_payload(payload)
-        if mode == "portable_card":
-            data = strict_facade_payload(
-                payload,
-                action="character_create_from(portable_card)",
-                allowed={
-                    "campaign_id",
-                    "artifact_id",
-                    "card",
-                    "artifact",
-                    "source_path",
-                    "name",
-                    "player_name",
-                },
-            )
+        if mode == "content_actor":
+            data = facade_payload(payload)
             artifact_id = str(data.get("artifact_id") or "").strip()
-            portable_sources = [
-                field
-                for field in ("card", "artifact", "source_path")
-                if data.get(field) is not None
+            package_sources = [
+                field for field in ("artifact", "source_path") if data.get(field) is not None
             ]
-            if not portable_sources:
+            package_checksum = None
+            if not package_sources:
                 if not artifact_id:
-                    raise ValueError(
-                        "provide artifact_id or exactly one portable card/package source"
-                    )
+                    raise ValueError("provide artifact_id or one content package archive")
                 card = default_preset_actor_card(artifact_id)
             else:
-                if len(portable_sources) != 1:
+                if len(package_sources) != 1 or not artifact_id:
                     raise ValueError(
-                        "provide exactly one of payload.card, payload.artifact, or "
-                        "payload.source_path"
+                        "a package import requires artifact_id and exactly one of "
+                        "payload.artifact or payload.source_path"
                     )
-                source = portable_sources[0]
-                if source == "card":
-                    raw_package = data["card"]
-                    if not isinstance(raw_package, dict):
-                        raise ValueError("payload.card must be an object")
-                else:
-                    raw_package = storage.read_portable_package(
-                        artifact=(str(data["artifact"]) if source == "artifact" else None),
-                        source_path=(data.get("source_path") if source == "source_path" else None),
-                    )
-                if raw_package.get("kind") == "actor_card":
-                    if artifact_id:
-                        raise ValueError(
-                            "artifact_id selects a card only when importing a preset pack"
-                        )
-                    card = validate_dnd_actor_card(raw_package)
-                elif raw_package.get("kind") == "preset_pack":
-                    if not artifact_id:
-                        raise ValueError("artifact_id is required when importing a preset pack")
-                    preset = validate_preset_pack(raw_package, expected_system_id=DND5E.id)
-                    matches = [
-                        item for item in preset["payload"]["cards"] if item["id"] == artifact_id
-                    ]
-                    if len(matches) != 1:
-                        raise ValueError(
-                            "artifact_id must identify exactly one card in the preset pack"
-                        )
-                    card = validate_dnd_actor_card(matches[0])
-                else:
-                    raise ValueError(
-                        "portable character import requires an actor_card or preset_pack"
-                    )
-            resolution_audit = audit_dnd_addon_resolution_components(
-                [
-                    {
-                        "kind": "preset_pack",
-                        "id": "portable-character-import",
-                        "payload": {"cards": [card]},
-                    }
-                ]
-            )
-            if not resolution_audit["complete"]:
-                raise ValueError(
-                    "portable actor card requires build-time semantic "
-                    f"resolution: {resolution_audit['unresolved']}"
+                source = package_sources[0]
+                package, _blobs = storage.read_content_archive(
+                    artifact=(str(data["artifact"]) if source == "artifact" else None),
+                    source_path=(data.get("source_path") if source == "source_path" else None),
                 )
-            card_payload = card["payload"]
+                matches = [item for item in package["actors"] if item["id"] == artifact_id]
+                if not matches:
+                    _catalog_manifest, catalog_artifacts = content_actor_catalog_definition(package)
+                    matches = [
+                        deepcopy(dict(item["card"]["content_actor"]))
+                        for item in catalog_artifacts
+                        if item["id"] == artifact_id
+                    ]
+                if len(matches) != 1:
+                    raise ValueError("artifact_id must identify exactly one package actor")
+                card = validate_dnd_content_actor(matches[0])
+                package_checksum = package["checksum"]
+            if card.get("schema") != "sagasmith.actor-card.v3":
+                raise ValueError("installed actor preset is not a unified v3 actor card")
             campaign_id = str(data["campaign_id"]) if data.get("campaign_id") is not None else None
             if campaign_id is not None and (
-                card_payload["sheet"]["edition"] != campaign_rules_edition(campaign_id)
+                card["sheet"]["edition"] != campaign_rules_edition(campaign_id)
             ):
-                raise ValueError("portable actor card edition does not match the campaign")
+                raise ValueError("content actor edition does not match the campaign")
             character = character_create(
-                str(data.get("name") or card_payload["name"]),
+                str(data.get("name") or card["name"]),
                 campaign_id,
-                str(card_payload["actor_type"]),
+                str(card["actor_type"]),
                 (
                     str(data["player_name"])
                     if data.get("player_name") is not None
-                    else card_payload["player_name"]
+                    else card["player_name"]
                 ),
-                str(card_payload["summary"]),
-                dict(card_payload["sheet"]),
-                dict(card_payload["notes"]),
+                str(card["summary"]),
+                dict(card["sheet"]),
+                dict(card["notes"]),
                 principal_id,
                 idempotency_key,
             )
             result = {
                 "character": character,
-                "portable_card": {
+                "content_actor": {
                     "id": card["id"],
                     "version": card["version"],
-                    "checksum": card["checksum"],
-                    "provenance": deepcopy(card_payload.get("provenance") or {}),
-                    "bindings": deepcopy(card_payload.get("bindings") or []),
+                    "package_checksum": package_checksum,
+                    "provenance": deepcopy(card.get("provenance") or {}),
+                    "bindings": deepcopy(card.get("bindings") or []),
                     "image_retained_by_runtime": False,
                 },
                 "actor_knowledge_imported": False,
@@ -44584,12 +44265,7 @@ Useful bounded guidance:
         """Read campaigns, party state, or one complete resume bundle."""
         data = facade_payload(payload)
         if view == "binding":
-            data = strict_facade_payload(
-                payload,
-                action="campaign_query(binding)",
-                allowed={"campaign_id"},
-                required_names=("campaign_id",),
-            )
+            data = facade_payload(payload)
             campaign_id = required(data, "campaign_id")
             result = authoritative_host_context_binding(
                 campaign_id,
@@ -44598,21 +44274,7 @@ Useful bounded guidance:
             if result is None:
                 raise LookupError("campaign has no active branch context")
         elif view == "resume":
-            data = strict_facade_payload(
-                payload,
-                action="campaign_query(resume)",
-                allowed={
-                    "actor_id",
-                    "audience",
-                    "budget_chars",
-                    "campaign_id",
-                    "limit",
-                    "query",
-                    "related_refs",
-                    "scope_id",
-                },
-                required_names=("campaign_id",),
-            )
+            data = facade_payload(payload)
             campaign_id = required(data, "campaign_id")
             membership = access.require_campaign(campaign_id, principal_id)
             branch_values = branch_list(campaign_id, principal_id)
@@ -44771,12 +44433,7 @@ Useful bounded guidance:
         if action not in action_contracts:
             raise ValueError(f"unsupported campaign_change action: {action}")
         allowed_fields, required_fields = action_contracts[action]
-        data = strict_facade_payload(
-            payload,
-            action=f"campaign_change({action})",
-            allowed=allowed_fields,
-            required_names=required_fields,
-        )
+        data = facade_payload(payload)
         if action == "clock_set":
             result = campaign_clock_set_impl(
                 campaign_id,
@@ -45405,11 +45062,7 @@ Useful bounded guidance:
                 PROFILE_LOBBY,
                 PROFILE_PLAY,
             )
-            data = strict_facade_payload(
-                payload,
-                action="memory_query(diagnostics)",
-                allowed={"branch_id"},
-            )
+            data = facade_payload(payload)
             return facade_result(
                 view,
                 continuity_diagnostics(
@@ -45464,20 +45117,7 @@ Useful bounded guidance:
                 PROFILE_LOBBY,
                 PROFILE_PLAY,
             )
-            commit_payload = strict_facade_payload(
-                payload,
-                action="memory_change(commit)",
-                allowed={
-                    "event",
-                    "facts",
-                    "actor_knowledge",
-                    "snapshot",
-                    "branch_id",
-                    "context_receipt",
-                    "npc_turn",
-                },
-                required_names=("event",),
-            )
+            commit_payload = facade_payload(payload)
             if branch_id is not None and commit_payload.get("branch_id") not in {None, branch_id}:
                 raise ValueError("payload.branch_id conflicts with top-level branch_id")
             if branch_id is not None:
@@ -45934,37 +45574,7 @@ Useful bounded guidance:
                 idempotency_key,
             )
         else:
-            data = strict_facade_payload(
-                payload,
-                action="combat_hp_change.save_damage",
-                allowed={
-                    "target_ids",
-                    "source_actor_id",
-                    "source_card_id",
-                    "source_card_kind",
-                    "save_ability",
-                    "save_dc",
-                    "damage_expression",
-                    "damage_type",
-                    "half_on_success",
-                    "save_advantage",
-                    "save_disadvantage",
-                    "mechanic_source_excerpt",
-                    "agent_ruling",
-                },
-                required_names=(
-                    "source_actor_id",
-                    "source_card_id",
-                    "source_card_kind",
-                    "save_ability",
-                    "save_dc",
-                    "damage_expression",
-                    "damage_type",
-                    "half_on_success",
-                    "mechanic_source_excerpt",
-                    "agent_ruling",
-                ),
-            )
+            data = facade_payload(payload)
             save_damage_target_ids = list(data.get("target_ids") or [target_id])
             if target_id not in save_damage_target_ids:
                 raise CombatEngineError(
@@ -46028,11 +45638,7 @@ Useful bounded guidance:
             source_card_kind,
         )
         if action == "query":
-            strict_facade_payload(
-                payload,
-                action="content_solution(query)",
-                allowed=set(),
-            )
+            facade_payload(payload)
             return {
                 "status": (
                     "compiled"
@@ -46045,12 +45651,7 @@ Useful bounded guidance:
                 "resolution_plan": deepcopy(source_card.get("resolution_plan")),
                 "resolution_solution": deepcopy(source_card.get("resolution_solution")),
             }
-        data = strict_facade_payload(
-            payload,
-            action="content_solution(compile)",
-            allowed={"resolution_plan", "agent_ruling"},
-            required_names=("resolution_plan", "agent_ruling"),
-        )
+        data = facade_payload(payload)
         if expected_revision is None or not idempotency_key:
             raise ValueError(
                 "expected_revision and idempotency_key are required "
@@ -46179,12 +45780,7 @@ Useful bounded guidance:
         )
         resolved_actor_id = str(required({"actor_id": actor_id}, "actor_id"))
         if action == "execute_plan":
-            data = strict_facade_payload(
-                payload,
-                action="combat_choice(execute_plan)",
-                allowed={"commitment"},
-                required_names=("commitment",),
-            )
+            data = facade_payload(payload)
             result = combat_resolution_plan(
                 campaign_id,
                 resolved_actor_id,
@@ -46195,12 +45791,7 @@ Useful bounded guidance:
                 idempotency_key=idempotency_key,
             )
         elif action == "open":
-            data = strict_facade_payload(
-                payload,
-                action="combat_choice(open)",
-                allowed={"event", "candidates", "kind"},
-                required_names=("event",),
-            )
+            data = facade_payload(payload)
             result = combat_choice_open(
                 campaign_id,
                 resolved_actor_id,
@@ -46213,12 +45804,7 @@ Useful bounded guidance:
                 idempotency_key,
             )
         elif action == "resolve_defense":
-            data = strict_facade_payload(
-                payload,
-                action="combat_choice(resolve_defense)",
-                allowed={"choice_id", "selection"},
-                required_names=("choice_id", "selection"),
-            )
+            data = facade_payload(payload)
             choice_id = required(data, "choice_id")
             _campaign, encounter = active_encounter(campaign_id)
             window = next(
@@ -46241,12 +45827,7 @@ Useful bounded guidance:
                 idempotency_key,
             )
         elif action == "resolve":
-            data = strict_facade_payload(
-                payload,
-                action="combat_choice(resolve)",
-                allowed={"choice_id", "selection"},
-                required_names=("choice_id", "selection"),
-            )
+            data = facade_payload(payload)
             result = combat_choice_resolve(
                 campaign_id,
                 resolved_actor_id,
@@ -46258,12 +45839,7 @@ Useful bounded guidance:
                 idempotency_key,
             )
         else:
-            data = strict_facade_payload(
-                payload,
-                action="combat_choice(on_hit_ruling)",
-                allowed={"choice_id", "selection"},
-                required_names=("choice_id", "selection"),
-            )
+            data = facade_payload(payload)
             result = combat_on_hit_ruling(
                 campaign_id,
                 resolved_actor_id,

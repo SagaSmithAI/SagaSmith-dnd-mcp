@@ -68,10 +68,15 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
         )
         spells = await call(
             server,
-            "rule_pack_query",
+            "content_pack",
             {
-                "view": "content_catalog",
-                "payload": {"campaign_id": campaign["id"], "kind": "spell", "query": "Fireball"},
+                "action": "list",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "kind": "catalog",
+                    "content_kind": "spell",
+                    "query": "Fireball",
+                },
                 "principal_id": "system:local",
             },
         )
@@ -85,10 +90,15 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
         assert fireball["selection_requirements"]["level"] == 3
         standard_spells = await call(
             server,
-            "rule_pack_query",
+            "content_pack",
             {
-                "view": "content_catalog",
-                "payload": {"campaign_id": campaign["id"], "kind": "spell", "query": "Witch Bolt"},
+                "action": "list",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "kind": "catalog",
+                    "content_kind": "spell",
+                    "query": "Witch Bolt",
+                },
                 "principal_id": "system:local",
             },
         )
@@ -136,12 +146,13 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
 
         subclasses = await call(
             server,
-            "rule_pack_query",
+            "content_pack",
             {
-                "view": "content_catalog",
+                "action": "list",
                 "payload": {
                     "campaign_id": campaign["id"],
-                    "kind": "subclass",
+                    "kind": "catalog",
+                    "content_kind": "subclass",
                     "query": "Berserker",
                 },
                 "principal_id": "system:local",
@@ -208,12 +219,13 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
             item
             for item in await call(
                 server,
-                "rule_pack_query",
+                "content_pack",
                 {
-                    "view": "content_catalog",
+                    "action": "list",
                     "payload": {
                         "campaign_id": campaign["id"],
-                        "kind": "subclass",
+                        "kind": "catalog",
+                        "content_kind": "subclass",
                         "query": "Life Domain",
                     },
                     "principal_id": "system:local",
@@ -269,12 +281,13 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
             item
             for item in await call(
                 server,
-                "rule_pack_query",
+                "content_pack",
                 {
-                    "view": "content_catalog",
+                    "action": "list",
                     "payload": {
                         "campaign_id": campaign["id"],
-                        "kind": "feature",
+                        "kind": "catalog",
+                        "content_kind": "feature",
                         "query": "Bonus Proficiency",
                     },
                     "principal_id": "system:local",
@@ -299,12 +312,13 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
             item
             for item in await call(
                 server,
-                "rule_pack_query",
+                "content_pack",
                 {
-                    "view": "content_catalog",
+                    "action": "list",
                     "payload": {
                         "campaign_id": campaign["id"],
-                        "kind": "feature",
+                        "kind": "catalog",
+                        "content_kind": "feature",
                         "query": "Disciple of Life",
                     },
                     "principal_id": "system:local",
@@ -438,12 +452,13 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
 
         backgrounds = await call(
             server,
-            "rule_pack_query",
+            "content_pack",
             {
-                "view": "content_catalog",
+                "action": "list",
                 "payload": {
                     "campaign_id": campaign["id"],
-                    "kind": "background",
+                    "kind": "catalog",
+                    "content_kind": "background",
                     "query": "Acolyte",
                 },
                 "principal_id": "system:local",
@@ -559,10 +574,15 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
 
         feats = await call(
             server,
-            "rule_pack_query",
+            "content_pack",
             {
-                "view": "content_catalog",
-                "payload": {"campaign_id": campaign["id"], "kind": "feat", "query": "Grappler"},
+                "action": "list",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "kind": "catalog",
+                    "content_kind": "feat",
+                    "query": "Grappler",
+                },
                 "principal_id": "system:local",
             },
         )
@@ -596,12 +616,13 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
 
         features = await call(
             server,
-            "rule_pack_query",
+            "content_pack",
             {
-                "view": "content_catalog",
+                "action": "list",
                 "payload": {
                     "campaign_id": campaign["id"],
-                    "kind": "feature",
+                    "kind": "catalog",
+                    "content_kind": "feature",
                     "query": "Sneak Attack",
                 },
                 "principal_id": "system:local",
@@ -637,12 +658,13 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
 
         species = await call(
             server,
-            "rule_pack_query",
+            "content_pack",
             {
-                "view": "content_catalog",
+                "action": "list",
                 "payload": {
                     "campaign_id": campaign["id"],
-                    "kind": "species",
+                    "kind": "catalog",
+                    "content_kind": "species",
                     "query": "Hill Dwarf",
                 },
                 "principal_id": "system:local",
@@ -714,10 +736,15 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
 
         half_orc_catalog = await call(
             server,
-            "rule_pack_query",
+            "content_pack",
             {
-                "view": "content_catalog",
-                "payload": {"campaign_id": campaign["id"], "kind": "species", "query": "Half-Orc"},
+                "action": "list",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "kind": "catalog",
+                    "content_kind": "species",
+                    "query": "Half-Orc",
+                },
                 "principal_id": "system:local",
             },
         )
@@ -764,12 +791,13 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
             item
             for item in await call(
                 server,
-                "rule_pack_query",
+                "content_pack",
                 {
-                    "view": "content_catalog",
+                    "action": "list",
                     "payload": {
                         "campaign_id": campaign["id"],
-                        "kind": "spell",
+                        "kind": "catalog",
+                        "content_kind": "spell",
                         "query": "Fire Bolt",
                     },
                     "principal_id": "system:local",
@@ -781,12 +809,13 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
             item
             for item in await call(
                 server,
-                "rule_pack_query",
+                "content_pack",
                 {
-                    "view": "content_catalog",
+                    "action": "list",
                     "payload": {
                         "campaign_id": campaign["id"],
-                        "kind": "species",
+                        "kind": "catalog",
+                        "content_kind": "species",
                         "query": "High Elf",
                     },
                     "principal_id": "system:local",
@@ -911,10 +940,11 @@ def test_rule_pack_authoring_activation_and_explanation(tmp_path: Path) -> None:
             )
         draft = await call(
             server,
-            "rule_pack_compile",
+            "content_pack",
             {
-                "action": "draft",
+                "action": "build",
                 "payload": {
+                    "kind": "rule",
                     "manifest": {
                         "id": "dnd5e.xgte",
                         "version": "1.0.0",
@@ -966,26 +996,37 @@ def test_rule_pack_authoring_activation_and_explanation(tmp_path: Path) -> None:
         assert draft["status"] == "validated"
         test_report = await call(
             server,
-            "rule_pack_query",
+            "content_pack",
             {
-                "view": "test",
-                "payload": {"pack_id": "dnd5e.xgte", "version": "1.0.0"},
+                "action": "test",
+                "payload": {
+                    "kind": "rule",
+                    "pack_id": "dnd5e.xgte",
+                    "version": "1.0.0",
+                },
                 "principal_id": "system:local",
             },
         )
         assert test_report["passed"] is True
         await call(
             server,
-            "rule_pack_change",
-            {"action": "install", "pack_id": "dnd5e.xgte", "version": "1.0.0"},
+            "content_pack",
+            {
+                "action": "install",
+                "payload": {"kind": "rule", "pack_id": "dnd5e.xgte", "version": "1.0.0"},
+            },
         )
         activated = await call(
             server,
-            "campaign_rules",
+            "content_pack",
             {
-                "campaign_id": campaign["id"],
-                "action": "set_pack",
-                "payload": {"pack_id": "dnd5e.xgte", "version": "1.0.0"},
+                "action": "activate",
+                "payload": {
+                    "kind": "rule",
+                    "campaign_id": campaign["id"],
+                    "pack_id": "dnd5e.xgte",
+                    "version": "1.0.0",
+                },
                 "principal_id": "system:local",
                 "expected_revision": profile["campaign_revision"],
                 "idempotency_key": "activate-xgte",
@@ -994,11 +1035,15 @@ def test_rule_pack_authoring_activation_and_explanation(tmp_path: Path) -> None:
         assert (
             await call(
                 server,
-                "campaign_rules",
+                "content_pack",
                 {
-                    "campaign_id": campaign["id"],
-                    "action": "set_pack",
-                    "payload": {"pack_id": "dnd5e.xgte", "version": "1.0.0"},
+                    "action": "activate",
+                    "payload": {
+                        "kind": "rule",
+                        "campaign_id": campaign["id"],
+                        "pack_id": "dnd5e.xgte",
+                        "version": "1.0.0",
+                    },
                     "principal_id": "system:local",
                     "expected_revision": profile["campaign_revision"],
                     "idempotency_key": "activate-xgte",
@@ -1088,10 +1133,11 @@ def test_rule_pack_authoring_activation_and_explanation(tmp_path: Path) -> None:
 
         rejected = await call(
             server,
-            "rule_pack_compile",
+            "content_pack",
             {
-                "action": "draft",
+                "action": "build",
                 "payload": {
+                    "kind": "rule",
                     "manifest": {
                         "id": "dnd5e.unsafe",
                         "version": "1.0.0",
@@ -1151,10 +1197,10 @@ def test_rulebook_import_source_bound_pack_and_noncombat_settlement(tmp_path: Pa
         with pytest.raises(Exception, match="outside configured import roots"):
             await call(
                 server,
-                "rule_import",
+                "rulebook_draft",
                 {
                     "campaign_id": campaign["id"],
-                    "action": "stage",
+                    "action": "start",
                     "payload": {
                         "source_path": str(outside),
                         "source_key": "outside",
@@ -1166,10 +1212,10 @@ def test_rulebook_import_source_bound_pack_and_noncombat_settlement(tmp_path: Pa
             )
         staged = await call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "stage",
+                "action": "start",
                 "payload": {
                     "source_path": str(rulebook),
                     "source_key": "xgte-user",
@@ -1183,31 +1229,31 @@ def test_rulebook_import_source_bound_pack_and_noncombat_settlement(tmp_path: Pa
         job_id = staged["job"]["id"]
         inspection = await call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "inspect",
+                "action": "get",
                 "payload": {"job_id": job_id},
                 "idempotency_key": "import-xgte:inspect",
             },
         )
-        assert inspection["job"]["state"] == "inspected"
+        assert inspection["job"]["state"] in {"extracted", "review_required"}
         imported = await call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "ingest",
+                "action": "get",
                 "payload": {"job_id": job_id},
                 "idempotency_key": "import-xgte:ingest",
             },
         )
         replayed = await call(
             server,
-            "rule_import",
+            "rulebook_draft",
             {
                 "campaign_id": campaign["id"],
-                "action": "ingest",
+                "action": "get",
                 "payload": {"job_id": job_id},
                 "idempotency_key": "import-xgte:ingest",
             },
@@ -1222,10 +1268,11 @@ def test_rulebook_import_source_bound_pack_and_noncombat_settlement(tmp_path: Pa
         with pytest.raises(Exception, match="source edition"):
             await call(
                 server,
-                "rule_pack_compile",
+                "content_pack",
                 {
-                    "action": "from_source",
+                    "action": "build",
                     "payload": {
+                        "kind": "source_rule",
                         "source_id": imported["source_id"],
                         "manifest": {
                             "id": "dnd5e.xgte.wrong-edition",
@@ -1239,10 +1286,11 @@ def test_rulebook_import_source_bound_pack_and_noncombat_settlement(tmp_path: Pa
             )
         draft = await call(
             server,
-            "rule_pack_compile",
+            "content_pack",
             {
-                "action": "from_source",
+                "action": "build",
                 "payload": {
+                    "kind": "source_rule",
                     "source_id": imported["source_id"],
                     "manifest": {
                         "id": "dnd5e.xgte.tool_synergy",
@@ -1310,16 +1358,28 @@ def test_rulebook_import_source_bound_pack_and_noncombat_settlement(tmp_path: Pa
         with pytest.raises(Exception):
             await call(
                 server,
-                "rule_pack_compile",
+                "content_pack",
                 {
-                    "action": "from_source",
-                    "payload": {"source_id": "not-the-source", "manifest": {}, "mechanics": []},
+                    "action": "build",
+                    "payload": {
+                        "kind": "source_rule",
+                        "source_id": "not-the-source",
+                        "manifest": {},
+                        "mechanics": [],
+                    },
                 },
             )
         await call(
             server,
-            "rule_pack_change",
-            {"action": "install", "pack_id": "dnd5e.xgte.tool_synergy", "version": "1.0.0"},
+            "content_pack",
+            {
+                "action": "install",
+                "payload": {
+                    "kind": "rule",
+                    "pack_id": "dnd5e.xgte.tool_synergy",
+                    "version": "1.0.0",
+                },
+            },
         )
         profile = await call(
             server,
@@ -1335,11 +1395,15 @@ def test_rulebook_import_source_bound_pack_and_noncombat_settlement(tmp_path: Pa
         )
         activated = await call(
             server,
-            "campaign_rules",
+            "content_pack",
             {
-                "campaign_id": campaign["id"],
-                "action": "set_pack",
-                "payload": {"pack_id": "dnd5e.xgte.tool_synergy", "version": "1.0.0"},
+                "action": "activate",
+                "payload": {
+                    "kind": "rule",
+                    "campaign_id": campaign["id"],
+                    "pack_id": "dnd5e.xgte.tool_synergy",
+                    "version": "1.0.0",
+                },
                 "principal_id": "system:local",
                 "expected_revision": profile["campaign_revision"],
                 "idempotency_key": "xgte-activate",

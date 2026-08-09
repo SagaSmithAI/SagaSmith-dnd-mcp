@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 import shutil
 from mimetypes import guess_type
@@ -17,9 +16,9 @@ from sagasmith_core import (
     RapidOcrProvider,
     VectorStore,
     create_embedder,
-    dumps_module_archive,
+    dumps_content_archive,
     file_sha256,
-    loads_module_archive,
+    loads_content_archive,
 )
 from sagasmith_core.database import sqlite_database_url
 from sagasmith_dnd.system import DND5E
@@ -73,9 +72,7 @@ class SagaSmithStorage:
                 "import_roots": [str(path) for path in self.config.rule_import_roots],
                 "ocr": {
                     "enabled": self.config.rule_ocr_enabled,
-                    "provider": (
-                        "rapidocr-cascade" if self.config.rule_ocr_enabled else None
-                    ),
+                    "provider": ("rapidocr-cascade" if self.config.rule_ocr_enabled else None),
                     "scale": self.config.rule_ocr_scale,
                     "models": (
                         self.ocr_model_chain(self.config.rule_ocr_model)
@@ -90,9 +87,7 @@ class SagaSmithStorage:
                 "import_roots": [str(path) for path in self.config.module_import_roots],
                 "ocr": {
                     "enabled": self.config.module_ocr_enabled,
-                    "provider": (
-                        "rapidocr-cascade" if self.config.module_ocr_enabled else None
-                    ),
+                    "provider": ("rapidocr-cascade" if self.config.module_ocr_enabled else None),
                     "scale": self.config.module_ocr_scale,
                     "models": (
                         self.ocr_model_chain(self.config.module_ocr_model)
@@ -336,9 +331,7 @@ class SagaSmithStorage:
             ".webp",
         }
         if source.suffix.casefold() not in allowed:
-            raise ValueError(
-                "module asset must be an image, PDF, HTML, SVG, or text document"
-            )
+            raise ValueError("module asset must be an image, PDF, HTML, SVG, or text document")
         if not self.config.module_import_roots:
             raise PermissionError("no module import roots are configured")
         if not any(
@@ -373,116 +366,56 @@ class SagaSmithStorage:
             "staged": True,
         }
 
-    def write_portable_package(self, package: dict[str, Any]) -> dict[str, Any]:
-        """Persist an already validated portable package in managed storage."""
-
-        package_id = str(package.get("id") or "").strip()
-        checksum = str(package.get("checksum") or "").strip()
-        if not package_id or not re.fullmatch(r"[0-9a-f]{64}", checksum):
-            raise ValueError("portable package requires a valid id and checksum")
-        content = (
-            json.dumps(package, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
-        ).encode("utf-8")
-        safe_id = re.sub(r"[^A-Za-z0-9._-]+", "-", package_id).strip("-.")
-        filename = f"{checksum[:12]}-{safe_id}.sagasmith.json"
-        target = (self.config.portable_packages_dir / filename).resolve()
-        if target.parent != self.config.portable_packages_dir.resolve():
-            raise ValueError("invalid portable package artifact name")
-        if not target.exists():
-            target.write_bytes(content)
-        elif hashlib.sha256(target.read_bytes()).hexdigest() != hashlib.sha256(content).hexdigest():
-            raise RuntimeError("managed portable package file mismatch")
-        return {
-            "artifact": filename,
-            "checksum": checksum,
-            "size": len(content),
-            "kind": package.get("kind"),
-            "id": package_id,
-            "version": package.get("version"),
-        }
-
-    def write_module_archive(
+    def write_content_archive(
         self, package: dict[str, Any], blobs: dict[str, bytes]
     ) -> dict[str, Any]:
-        """Persist one verified v2 module descriptor and content-addressed blobs."""
+        """Persist any unified content package using the shared archive format."""
 
-        content = dumps_module_archive(package, blobs)
+        content = dumps_content_archive(package, blobs)
         checksum = str(package["checksum"])
         safe_id = re.sub(r"[^A-Za-z0-9._-]+", "-", str(package["id"])).strip("-.")
-        filename = f"{checksum[:12]}-{safe_id}.sagasmith-module"
+        filename = f"{checksum[:12]}-{safe_id}.sagasmith-pack"
         target = (self.config.portable_packages_dir / filename).resolve()
         if target.parent != self.config.portable_packages_dir.resolve():
-            raise ValueError("invalid module archive artifact name")
+            raise ValueError("invalid content package archive artifact name")
         if not target.exists():
             target.write_bytes(content)
         elif hashlib.sha256(target.read_bytes()).hexdigest() != hashlib.sha256(content).hexdigest():
-            raise RuntimeError("managed module archive mismatch")
+            raise RuntimeError("managed content package archive mismatch")
         return {
             "artifact": filename,
             "checksum": checksum,
             "archive_checksum": hashlib.sha256(content).hexdigest(),
             "size": len(content),
-            "kind": "module_pack",
+            "kind": package["kind"],
             "id": package["id"],
             "version": package["version"],
         }
 
-    def read_module_archive(
+    def read_content_archive(
         self, *, artifact: str | None = None, source_path: str | Path | None = None
     ) -> tuple[dict[str, Any], dict[str, bytes]]:
-        """Read one managed or allowlisted `.sagasmith-module` archive."""
+        """Read one managed or allowlisted unified content package archive."""
 
         if (artifact is None) == (source_path is None):
             raise ValueError("provide exactly one of artifact or source_path")
         if artifact is not None:
             target = (self.config.portable_packages_dir / artifact).resolve()
             if target.parent != self.config.portable_packages_dir.resolve():
-                raise ValueError("invalid managed module archive artifact")
+                raise ValueError("invalid managed content package artifact")
         else:
             target = Path(source_path or "").expanduser().resolve()
-            roots = tuple(path.resolve() for path in self.config.module_import_roots)
-            if not roots or not any(target.is_relative_to(root) for root in roots):
-                raise PermissionError("module archive is outside configured import roots")
-        if not target.is_file() or not target.name.casefold().endswith(".sagasmith-module"):
-            raise LookupError(str(target))
-        if target.stat().st_size > 2 * 1024 * 1024 * 1024:
-            raise ValueError("module archive exceeds the 2 GiB safety limit")
-        return loads_module_archive(target.read_bytes())
-
-    def read_portable_package(
-        self, *, artifact: str | None = None, source_path: str | Path | None = None
-    ) -> dict[str, Any]:
-        """Read a managed export or an allowlisted user-supplied portable JSON file."""
-
-        if (artifact is None) == (source_path is None):
-            raise ValueError("provide exactly one of artifact or source_path")
-        if artifact is not None:
-            target = (self.config.portable_packages_dir / artifact).resolve()
-            if target.parent != self.config.portable_packages_dir.resolve():
-                raise ValueError("invalid managed portable package artifact")
-        else:
-            target = Path(source_path or "").expanduser().resolve()
-            allowed_roots = {
+            roots = {
                 *(root.resolve() for root in self.config.module_import_roots),
                 *(root.resolve() for root in self.config.rule_import_roots),
             }
-            if not allowed_roots or not any(
-                target.is_relative_to(root) for root in allowed_roots
-            ):
-                raise PermissionError("portable package is outside configured import roots")
-        if not target.is_file() or not target.name.casefold().endswith(
-            (".json", ".sagasmith")
-        ):
+            if not roots or not any(target.is_relative_to(root) for root in roots):
+                raise PermissionError("content package is outside configured import roots")
+        if not target.is_file() or not target.name.casefold().endswith(".sagasmith-pack"):
             raise LookupError(str(target))
-        if target.stat().st_size > 100 * 1024 * 1024:
-            raise ValueError("portable package exceeds the 100 MiB safety limit")
-        try:
-            value = json.loads(target.read_text(encoding="utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ValueError("portable package must be UTF-8 JSON") from exc
-        if not isinstance(value, dict):
-            raise ValueError("portable package must contain a JSON object")
-        return value
+        if target.stat().st_size > 4 * 1024 * 1024 * 1024:
+            raise ValueError("content package exceeds the 4 GiB safety limit")
+        return loads_content_archive(target.read_bytes())
 
     def store_portable_module_asset(
         self, module_id: str, asset: dict[str, Any], content: bytes
@@ -494,9 +427,7 @@ class SagaSmithStorage:
         checksum = hashlib.sha256(content).hexdigest()
         if checksum != asset.get("checksum") or len(content) != asset.get("size"):
             raise ValueError("portable module asset checksum or size mismatch")
-        safe_name = re.sub(
-            r"[^A-Za-z0-9._-]+", "-", str(asset.get("name") or "asset")
-        ).strip("-.")
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", str(asset.get("name") or "asset")).strip("-.")
         directory = (self.config.module_assets_dir / module_id).resolve()
         if directory.parent != self.config.module_assets_dir.resolve():
             raise ValueError("invalid portable module asset directory")
@@ -528,10 +459,7 @@ class SagaSmithStorage:
             raise ValueError("invalid rendered module asset directory")
         directory.mkdir(parents=True, exist_ok=True)
         scale_key = f"{scale:.2f}".replace(".", "-")
-        filename = (
-            f"{source_checksum[:12]}-page-{page_number:04d}-"
-            f"x{scale_key}-{checksum[:12]}.png"
-        )
+        filename = f"{source_checksum[:12]}-page-{page_number:04d}-x{scale_key}-{checksum[:12]}.png"
         target = (directory / filename).resolve()
         if target.parent != directory:
             raise ValueError("invalid rendered module asset path")
