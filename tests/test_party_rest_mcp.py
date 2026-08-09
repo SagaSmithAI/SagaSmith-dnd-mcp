@@ -155,12 +155,10 @@ def test_party_long_rest_advances_once_and_settles_members_atomically(tmp_path: 
                         "character_id": first["id"],
                         "expected_revision": first["revision"],
                         "rest_activity_minutes": {"meditation": 30},
-                        "rest_schedule": LONG_REST_SCHEDULE,
                     },
                     {
                         "character_id": second["id"],
                         "expected_revision": second["revision"],
-                        "rest_schedule": LONG_REST_SCHEDULE,
                     },
                 ]
             },
@@ -235,7 +233,6 @@ def test_party_long_rest_advances_once_and_settles_members_atomically(tmp_path: 
                             {
                                 "character_id": updated[0]["id"],
                                 "expected_revision": updated[0]["revision"],
-                                "rest_schedule": LONG_REST_SCHEDULE,
                             }
                         ]
                     },

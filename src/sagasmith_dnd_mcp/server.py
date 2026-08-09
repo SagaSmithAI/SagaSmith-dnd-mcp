@@ -25084,7 +25084,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "character_id",
             "expected_revision",
             "rest_activity_minutes",
-            "rest_schedule",
             "hit_dice_spends",
             "arcane_recovery",
             "natural_recovery",
@@ -25141,7 +25140,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "rest_activity_minutes": validate_rest_activity_minutes(
                         raw_member.get("rest_activity_minutes")
                     ),
-                    "rest_schedule": deepcopy(raw_member.get("rest_schedule")),
                     "hit_dice_spends": list(hit_dice_spends or []),
                     "arcane_recovery": deepcopy(arcane_recovery or {}),
                     "natural_recovery": deepcopy(natural_recovery or {}),
@@ -25238,17 +25236,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         duration_minutes = elapsed_hours * 60
         started_elapsed_ticks = int(next_state["game_time"]["elapsed_ticks"])
         for member in normalized_resting:
-            requested_schedule = member["rest_schedule"]
-            if requested_schedule is None:
-                requested_schedule = {
-                    "sleep_minutes": 0,
-                    "light_activity_minutes": duration_minutes,
-                    "strenuous_activity_minutes": 0,
-                }
-            member["rest_schedule"] = validate_rest_schedule(
+            member["derived_rest_timing"] = validate_rest_schedule(
                 rest_type="short_rest",
                 duration_minutes=duration_minutes,
-                rest_schedule=requested_schedule,
                 allows_trance=False,
             )
             record_rest_completion(
@@ -25257,7 +25247,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 started_elapsed_ticks=started_elapsed_ticks,
                 completed_elapsed_ticks=started_elapsed_ticks
                 + game_time_ticks("hour", elapsed_hours),
-                rest_schedule=member["rest_schedule"],
             )
         next_state, time_transition = advance_state_game_time(
             next_state,
@@ -25379,7 +25368,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     rest_type="short_rest",
                     started_elapsed_ticks=started_elapsed_ticks,
                     completed_elapsed_ticks=int(time_transition["after"]["elapsed_ticks"]),
-                    rest_schedule=resting_member["rest_schedule"],
                 )
                 rested[current.id] = {
                     key: value
@@ -26281,7 +26269,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "prepared_spell_ids",
             "hit_dice_recovery",
             "rest_activity_minutes",
-            "rest_schedule",
             "food_and_drink",
             "hit_dice_spends",
             "arcane_recovery",
@@ -26374,10 +26361,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             rest_activities = validate_rest_activity_minutes(
                 raw_member.get("rest_activity_minutes")
             )
-            rest_schedule = validate_rest_schedule(
+            derived_rest_timing = validate_rest_schedule(
                 rest_type=normalized_rest_type,
                 duration_minutes=duration_minutes,
-                rest_schedule=raw_member.get("rest_schedule"),
                 allows_trance=(
                     allows_trance_rest(current_member.sheet)
                     if normalized_rest_type == "long_rest"
@@ -26388,7 +26374,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "character_id": character_id,
                 "expected_revision": character_revision,
                 "rest_activity_minutes": rest_activities,
-                "rest_schedule": rest_schedule,
+                "derived_rest_timing": derived_rest_timing,
             }
             if normalized_rest_type == "long_rest":
                 normalized_member.update(
@@ -26468,7 +26454,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 rest_type=normalized_rest_type,
                 started_elapsed_ticks=started_elapsed_ticks,
                 completed_elapsed_ticks=completed_elapsed_ticks,
-                rest_schedule=member["rest_schedule"],
             )
             if normalized_rest_type == "long_rest" and member["prepared_spell_ids"] is not None:
                 preparation_hydration = hydrate_class_prepared_spell_cards(
@@ -26477,21 +26462,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     spell_ids=member["prepared_spell_ids"],
                     branch_id=resolved_branch_id,
                 )
-                preparation_preview = replace_prepared_spells(
+                replace_prepared_spells(
                     preparation_hydration["sheet"],
                     spell_ids=member["prepared_spell_ids"],
                     event="long_rest",
                 )
-                required_minutes = int(preparation_preview.get("preparation_minutes", 0) or 0)
-                available_minutes = int(
-                    member["rest_schedule"].get("light_activity_minutes", 0) or 0
-                )
-                if available_minutes < required_minutes:
-                    raise CombatEngineError(
-                        f"prepared spell list for {current.id} requires "
-                        f"{required_minutes} minutes of light preparation activity; "
-                        f"the rest schedule records {available_minutes}"
-                    )
             if normalized_rest_type == "short_rest":
                 validate_rest_hit_dice_requests(
                     current.sheet,
@@ -26623,7 +26598,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     rest_type=normalized_rest_type,
                     started_elapsed_ticks=started_elapsed_ticks,
                     completed_elapsed_ticks=completed_elapsed_ticks,
-                    rest_schedule=member["rest_schedule"],
                 )
                 preparation_result = None
                 if normalized_rest_type == "long_rest" and member["prepared_spell_ids"] is not None:
@@ -42661,10 +42635,9 @@ Useful bounded guidance:
             duration_minutes = data.get("duration_minutes")
             if isinstance(duration_minutes, bool) or not isinstance(duration_minutes, int):
                 raise CombatEngineError("short rest preflight requires duration_minutes")
-            rest_schedule = validate_rest_schedule(
+            derived_rest_timing = validate_rest_schedule(
                 rest_type=rest_type,
                 duration_minutes=duration_minutes,
-                rest_schedule=data.get("rest_schedule"),
             )
             rest_rules = effective_rule_context(
                 current.campaign_id,
@@ -42687,7 +42660,7 @@ Useful bounded guidance:
                 "attune_item_id": attune_item_id,
                 "attunement_prerequisite_confirmed": (True if attune_item_id is not None else None),
                 "rest_activity_minutes": rest_activity_minutes,
-                "rest_schedule": rest_schedule,
+                "derived_rest_timing": derived_rest_timing,
                 "pending": list(before_rules.pending),
                 "ruleset_fingerprint": rest_rules.fingerprint,
             }

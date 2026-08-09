@@ -534,7 +534,6 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                     "hit_dice_spends",
                     "natural_recovery",
                     "rest_activity_minutes",
-                    "rest_schedule",
                     "rest_type",
                     "song_of_rest_source_actor_id",
                     "sorcerous_restoration_points",
