@@ -11,6 +11,7 @@ from typing import Any, Awaitable, Callable
 
 from aiohttp import web
 from sagasmith_core.access import LOCAL_SYSTEM_PRINCIPAL_ID
+
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
 
