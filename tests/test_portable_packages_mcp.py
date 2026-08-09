@@ -779,7 +779,8 @@ def test_module_package_round_trip_recreates_cast_bindings(tmp_path: Path) -> No
         assert replay["actor_map"] == imported["actor_map"]
         assert len(bindings) == 1
         assert imported["actor_map"]["example.keep.guard"] != actor["id"]
-        assert bindings[0]["portable_actor_id"] == "example.keep.guard"
+        assert bindings[0]["actor_card_id"] == "example.keep.guard"
+        assert "portable_actor_id" not in bindings[0]
         assert bindings[0]["scene_key"] == scene_index[0]["stable_key"]
         assert bindings[0]["role"] == "gate guard"
 

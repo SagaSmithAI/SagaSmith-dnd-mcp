@@ -4835,7 +4835,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     campaign_id=campaign_id,
                     module_id=result["module_id"],
                     character_id=character.id,
-                    portable_actor_id=actor["id"],
+                    actor_card_id=actor["id"],
                     binding_kind=str(
                         binding.get("binding_kind") or ("preset_pc" if preset_pc else "cast")
                     ),
@@ -41749,7 +41749,7 @@ boundary.
                     campaign_id=campaign_id,
                     module_id=str(job.module_id or required(value, "module_id")),
                     character_id=str(required(value, "character_id")),
-                    portable_actor_id=str(required(value, "actor_card_id")),
+                    actor_card_id=str(required(value, "actor_card_id")),
                     binding_kind=str(required(value, "binding_kind")),
                     role=str(value.get("role") or ""),
                     scene_id=(str(value["scene_id"]) if value.get("scene_id") else None),
