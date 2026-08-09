@@ -818,6 +818,12 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
         assert "rulebook_draft(finalize)" in capabilities["rulebook_import"]["stages"]
         assert "content_pack(import)" in capabilities["rulebook_import"]["stages"]
         assert "content_pack(install)" not in capabilities["rulebook_import"]["stages"]
+        assert capabilities["rulebook_import"]["content_package_lifecycle"] == {
+            "import_result": "stored_inactive_pack",
+            "storage": "rulebook_draft(finalize) or content_pack(import)",
+            "activation": "content_pack(activate)",
+            "release_manifest_authority": "none",
+        }
         assert capabilities["rulebook_import"]["text_review"] == {
             "actions": [
                 "rulebook_draft(evidence)",

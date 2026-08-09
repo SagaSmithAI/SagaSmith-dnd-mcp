@@ -11181,8 +11181,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "page_end",
                 ],
                 "content_package_lifecycle": {
-                    "import_result": "installed_inactive_pack",
-                    "installation": "rulebook_draft(finalize) or content_pack(import)",
+                    "import_result": "stored_inactive_pack",
+                    "storage": "rulebook_draft(finalize) or content_pack(import)",
                     "activation": "content_pack(activate)",
                     "release_manifest_authority": "none",
                 },
