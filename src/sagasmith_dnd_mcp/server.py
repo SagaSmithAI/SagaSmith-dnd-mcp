@@ -80,7 +80,6 @@ from sagasmith_core.modules import (
 )
 from sagasmith_core.portable import (
     PortableContentError,
-    build_module_pack,
     build_rule_pack,
     portable_rule_definition_checksum,
     validate_addon_validation,
@@ -40230,7 +40229,7 @@ Useful bounded guidance:
             data = facade_payload(payload)
             access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
             module_blobs: dict[str, bytes] = {}
-            package = modules.export_portable_pack(
+            descriptor = modules.export_content_descriptor(
                 campaign_id,
                 str(required(data, "module_id")),
                 portable_id=str(required(data, "portable_id")),
@@ -40244,7 +40243,7 @@ Useful bounded guidance:
                 narrative=(dict(data["narrative"]) if data.get("narrative") else None),
             )
             finalized_actors = []
-            for actor_card in package["payload"]["actors"]:
+            for actor_card in descriptor["actors"]:
                 card = validate_dnd_actor_card(actor_card)
                 card_payload = card["payload"]
                 finalized_actors.append(
@@ -40266,26 +40265,9 @@ Useful bounded guidance:
                         dependencies=card.get("dependencies") or [],
                     )
                 )
-            if finalized_actors != package["payload"]["actors"]:
-                module_payload = package["payload"]
-                package = build_module_pack(
-                    portable_id=package["id"],
-                    version=package["version"],
-                    system_id=package["system_id"],
-                    manifest=module_payload["manifest"],
-                    source=module_payload["source"],
-                    document=module_payload["document"],
-                    scene_atlas=module_payload["scene_atlas"],
-                    assets=module_payload["assets"],
-                    content_reviews=module_payload["content_reviews"],
-                    actors=finalized_actors,
-                    catalogs=module_payload["catalogs"],
-                    narrative=module_payload["narrative"],
-                    metadata=package["metadata"],
-                    dependencies=package["dependencies"],
-                )
+            descriptor["actors"] = finalized_actors
             package, module_blobs = build_module_content_package(
-                package,
+                descriptor,
                 module_blobs,
             )
             artifact = storage.write_content_archive(package, module_blobs)

@@ -772,7 +772,7 @@ def test_module_package_round_trip_recreates_cast_bindings(tmp_path: Path) -> No
             "campaign_create",
             {"name": "Package target", "edition": "2014", "idempotency_key": "target"},
         )
-        with pytest.raises(ToolError, match="payload.activate must be a boolean"):
+        with pytest.raises(ToolError, match=r"unsupported content_pack\(import\) payload"):
             await _call(
                 server,
                 "content_pack",
@@ -793,7 +793,6 @@ def test_module_package_round_trip_recreates_cast_bindings(tmp_path: Path) -> No
                 "kind": "module",
                 "campaign_id": target_campaign["id"],
                 "artifact": exported["artifact"],
-                "activate": False,
             },
             "idempotency_key": "package-import",
         }
