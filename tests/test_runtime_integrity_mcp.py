@@ -1424,6 +1424,27 @@ def test_structured_combat_is_atomic_and_player_filtered(tmp_path: Path) -> None
         target = next(
             item["actor_id"] for item in status["combatants"] if item["actor_id"] != current
         )
+        attack_action = {
+            "attack_bonus": 99,
+            "damage_expression": "1d4",
+            "damage_type": "slashing",
+            "context": {
+                "spatial_facts": {
+                    "decision_id": "test-direct-attack",
+                    "reason": "The target is visible and within the attack's normal range.",
+                    "targetable": True,
+                    "in_range": True,
+                    "long_range": False,
+                    "cover_degree": "none",
+                    "attacker_can_see_target": True,
+                    "target_can_see_attacker": True,
+                    "target_within_5_ft": True,
+                    "close_threat_actor_ids": [],
+                    "helper_actor_ids": [],
+                    "target_adjacent_ally_actor_ids": [],
+                }
+            },
+        }
         attack = await call_raw(
             server,
             "combat_resolve_attack",
@@ -1431,11 +1452,7 @@ def test_structured_combat_is_atomic_and_player_filtered(tmp_path: Path) -> None
                 "campaign_id": campaign["id"],
                 "actor_id": current,
                 "target_id": target,
-                "action": {
-                    "attack_bonus": 99,
-                    "damage_expression": "1d4",
-                    "damage_type": "slashing",
-                },
+                "action": attack_action,
                 "expected_revision": started["campaign_revision"],
                 "idempotency_key": "combat-attack",
             },
@@ -1447,11 +1464,7 @@ def test_structured_combat_is_atomic_and_player_filtered(tmp_path: Path) -> None
                 "campaign_id": campaign["id"],
                 "actor_id": current,
                 "target_id": target,
-                "action": {
-                    "attack_bonus": 99,
-                    "damage_expression": "1d4",
-                    "damage_type": "slashing",
-                },
+                "action": attack_action,
                 "expected_revision": started["campaign_revision"],
                 "idempotency_key": "combat-attack",
             },
@@ -1608,7 +1621,11 @@ def test_combat_sneak_attack_persists_the_once_per_turn_token(
             "combat_start",
             {
                 "positioning_mode": "grid",
-                "battle_map": {"width_cells": 12, "height_cells": 12},
+                "battle_map": {
+                    "width_cells": 12,
+                    "height_cells": 12,
+                    "blocked_cells": [{"x": 1, "y": 0}],
+                },
                 "campaign_id": campaign["id"],
                 "participant_ids": [rogue["id"], ally["id"], target["id"]],
                 "participant_config": [
@@ -1795,7 +1812,6 @@ def test_module_scene_creates_a_temporary_battle_map(tmp_path: Path) -> None:
                     {"actor_id": threat["id"], "initiative": 10, "position": {"x": 3, "y": 0}},
                 ],
                 "scene_id": scene["scene_id"],
-                "battle_map": {"blocked_cells": [{"x": 1, "y": 0}]},
                 "expected_revision": campaign["revision"],
                 "idempotency_key": "map-combat-start",
             },
@@ -2136,7 +2152,20 @@ def test_combat_boundaries_and_private_knowledge_filter(tmp_path: Path) -> None:
                     "campaign_id": campaign["id"],
                     "actor_id": other,
                     "action": "move",
-                    "payload": {"distance": 5},
+                    "payload": {
+                        "distance": 5,
+                        "spatial_facts": {
+                            "decision_id": "test-out-of-turn-move",
+                            "reason": "The destination is clear and no enemy gains a reaction.",
+                            "destination_legal": True,
+                            "distance_ft": 5,
+                            "difficult_terrain_extra_ft": 0,
+                            "moves_farther_from_turn_source": False,
+                            "enters_turn_source_30_ft": False,
+                            "moves_closer_to_visible_fear_source": False,
+                            "opportunity_attack_actor_ids": [],
+                        },
+                    },
                     "principal_id": "system:local",
                     "expected_revision": started["campaign_revision"],
                     "idempotency_key": "out-of-turn-move",

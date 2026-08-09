@@ -132,13 +132,12 @@ def test_2024_campaign_uses_only_the_source_linked_2024_catalog(tmp_path: Path) 
         )
         fireball = await _call(
             server,
-            "content_pack",
+            "character_query",
             {
-                "action": "list",
+                "view": "catalog",
                 "payload": {
                     "campaign_id": campaign_2024["id"],
-                    "kind": "catalog",
-                    "content_kind": "spell",
+                    "kind": "spell",
                     "query": "Fireball",
                 },
                 "principal_id": "system:local",
@@ -151,13 +150,12 @@ def test_2024_campaign_uses_only_the_source_linked_2024_catalog(tmp_path: Path) 
 
         longsword = await _call(
             server,
-            "content_pack",
+            "character_query",
             {
-                "action": "list",
+                "view": "catalog",
                 "payload": {
                     "campaign_id": campaign_2024["id"],
-                    "kind": "catalog",
-                    "content_kind": "item",
+                    "kind": "item",
                     "query": "Longsword",
                 },
                 "principal_id": "system:local",
@@ -169,13 +167,12 @@ def test_2024_campaign_uses_only_the_source_linked_2024_catalog(tmp_path: Path) 
 
         tools = await _call(
             server,
-            "content_pack",
+            "character_query",
             {
-                "action": "list",
+                "view": "catalog",
                 "payload": {
                     "campaign_id": campaign_2024["id"],
-                    "kind": "catalog",
-                    "content_kind": "item",
+                    "kind": "item",
                     "query": "Calligrapher's Supplies",
                 },
                 "principal_id": "system:local",
@@ -185,13 +182,12 @@ def test_2024_campaign_uses_only_the_source_linked_2024_catalog(tmp_path: Path) 
 
         backgrounds = await _call(
             server,
-            "content_pack",
+            "character_query",
             {
-                "action": "list",
+                "view": "catalog",
                 "payload": {
                     "campaign_id": campaign_2024["id"],
-                    "kind": "catalog",
-                    "content_kind": "background",
+                    "kind": "background",
                     "query": "Acolyte",
                 },
                 "principal_id": "system:local",
@@ -216,13 +212,12 @@ def test_2024_campaign_uses_only_the_source_linked_2024_catalog(tmp_path: Path) 
         )
         old_fireball = await _call(
             server,
-            "content_pack",
+            "character_query",
             {
-                "action": "list",
+                "view": "catalog",
                 "payload": {
                     "campaign_id": campaign_2014["id"],
-                    "kind": "catalog",
-                    "content_kind": "spell",
+                    "kind": "spell",
                     "query": "Fireball",
                 },
                 "principal_id": "system:local",
