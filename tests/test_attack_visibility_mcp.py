@@ -213,4 +213,32 @@ def test_hidden_attack_reveals_attacker_to_its_target(tmp_path: Path) -> None:
         assert agent_plan["status"] == "ready"
         assert agent_plan["spatial_ruling"]["decision_id"] == "spatial:agent-preflight"
 
+        moved = await call(
+            "combat_movement",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": attacker["id"],
+                "action": "move",
+                "payload": {
+                    "distance": 5,
+                    "spatial_facts": {
+                        "decision_id": "spatial:agent-move",
+                        "reason": "The attacker shifts through an open nearby space.",
+                        "destination_legal": True,
+                        "distance_ft": 5,
+                        "difficult_terrain_extra_ft": 0,
+                        "moves_farther_from_turn_source": True,
+                        "enters_turn_source_30_ft": False,
+                        "moves_closer_to_visible_fear_source": False,
+                        "opportunity_attack_actor_ids": [],
+                    },
+                },
+                "expected_revision": agent_started["campaign_revision"],
+                "idempotency_key": "agent-move",
+            },
+        )
+        assert moved["combat"]["log"][-1]["decision"]["decision_id"] == (
+            "spatial:agent-move"
+        )
+
     asyncio.run(exercise())

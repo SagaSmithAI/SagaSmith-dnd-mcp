@@ -8889,6 +8889,80 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             },
         )
 
+    def validate_agent_movement_facts(
+        encounter: dict[str, Any],
+        spatial_facts: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Validate the Agent's coordinate-free movement judgment."""
+
+        positioning_mode = str(encounter.get("positioning_mode") or "grid")
+        if positioning_mode == "grid":
+            if spatial_facts is not None:
+                raise CombatEngineError(
+                    "grid movement derives spatial facts from encounter coordinates"
+                )
+            return None
+        if not isinstance(spatial_facts, dict):
+            raise NeedsRulingError(
+                "agent-positioned movement requires an Agent spatial decision",
+                missing=("movement.spatial_facts",),
+                ruling_kind="agent_dm_adjudication",
+            )
+        required_fields = {
+            "decision_id",
+            "reason",
+            "destination_legal",
+            "distance_ft",
+            "difficult_terrain_extra_ft",
+            "moves_farther_from_turn_source",
+            "enters_turn_source_30_ft",
+            "moves_closer_to_visible_fear_source",
+            "opportunity_attack_actor_ids",
+        }
+        if set(spatial_facts) != required_fields:
+            raise CombatEngineError(
+                "Agent movement spatial facts must contain the complete movement fact set"
+            )
+        decision_id = str(spatial_facts.get("decision_id") or "").strip()
+        reason = " ".join(str(spatial_facts.get("reason") or "").split())
+        if not decision_id or not reason:
+            raise CombatEngineError("Agent movement facts require decision_id and reason")
+        for field in {
+            "destination_legal",
+            "moves_farther_from_turn_source",
+            "enters_turn_source_30_ft",
+            "moves_closer_to_visible_fear_source",
+        }:
+            if not isinstance(spatial_facts[field], bool):
+                raise CombatEngineError(f"Agent movement spatial fact {field} must be boolean")
+        for field in {"distance_ft", "difficult_terrain_extra_ft"}:
+            value = spatial_facts[field]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value % 5:
+                raise CombatEngineError(
+                    f"Agent movement spatial fact {field} must be a non-negative "
+                    "five-foot increment"
+                )
+        participant_ids = {
+            str(item.get("actor_id") or "") for item in encounter.get("combatants", [])
+        }
+        threat_ids = spatial_facts["opportunity_attack_actor_ids"]
+        if (
+            not isinstance(threat_ids, list)
+            or any(not isinstance(item, str) for item in threat_ids)
+            or len(set(threat_ids)) != len(threat_ids)
+            or set(threat_ids) - participant_ids
+        ):
+            raise CombatEngineError(
+                "Agent movement opportunity_attack_actor_ids must contain unique current "
+                "combatant IDs"
+            )
+        return {
+            **dict(spatial_facts),
+            "decision_id": decision_id,
+            "reason": reason,
+            "opportunity_attack_actor_ids": list(threat_ids),
+        }
+
     def sync_combatant_conditions(
         encounter: dict[str, Any], actor_id: str, sheet: dict[str, Any]
     ) -> None:
@@ -16870,6 +16944,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         path: list[Any] | None = None,
         movement_mode: str = "voluntary",
         crawl: bool = False,
+        spatial_facts: dict[str, Any] | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
@@ -16886,6 +16961,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "path": path,
             "movement_mode": movement_mode,
             "crawl": crawl,
+            "spatial_facts": spatial_facts,
             "branch_id": resolved_branch_id,
         }
         scope = f"combat-move:{campaign_id}:{resolved_branch_id}:{principal_id}"
@@ -16900,6 +16976,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         _, encounter = active_encounter(campaign_id)
         require_no_blocking_pending(encounter)
+        normalized_spatial_facts = validate_agent_movement_facts(encounter, spatial_facts)
         moving_combatant = next(
             item for item in encounter.get("combatants", []) if item.get("actor_id") == actor_id
         )
@@ -16915,6 +16992,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             path=path,
             movement_mode=movement_mode,
             crawl=crawl,
+            spatial_facts=normalized_spatial_facts,
         )
         range_reconciliation = reconcile_witch_bolt_range(next_encounter)
         next_encounter = range_reconciliation["encounter"]
@@ -45408,6 +45486,7 @@ Useful bounded guidance:
                 data.get("path"),
                 data.get("movement_mode", "voluntary"),
                 data.get("crawl", False),
+                data.get("spatial_facts"),
                 principal_id,
                 expected_revision,
                 branch_id,

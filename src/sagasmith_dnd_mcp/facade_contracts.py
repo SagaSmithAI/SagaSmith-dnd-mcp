@@ -1184,6 +1184,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                     "distance",
                     "movement_mode",
                     "path",
+                    "spatial_facts",
                 ),
                 ("distance",),
             )
