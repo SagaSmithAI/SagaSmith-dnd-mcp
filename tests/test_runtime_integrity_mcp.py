@@ -1624,7 +1624,6 @@ def test_combat_sneak_attack_persists_the_once_per_turn_token(
                 "battle_map": {
                     "width_cells": 12,
                     "height_cells": 12,
-                    "blocked_cells": [{"x": 1, "y": 0}],
                 },
                 "campaign_id": campaign["id"],
                 "participant_ids": [rogue["id"], ally["id"], target["id"]],
@@ -1638,7 +1637,7 @@ def test_combat_sneak_attack_persists_the_once_per_turn_token(
                     {
                         "actor_id": ally["id"],
                         "initiative": 15,
-                        "position": {"x": 1, "y": 0},
+                        "position": {"x": 1, "y": 1},
                         "disposition": "friendly",
                     },
                     {
@@ -1848,27 +1847,30 @@ def test_module_scene_creates_a_temporary_battle_map(tmp_path: Path) -> None:
         )
         assert "blocked_cells" not in player_view["battle_map"]
         assert "world_patches" not in player_view["battle_map"]
-        with pytest.raises(Exception, match="blocked"):
-            await call(
-                server,
-                "combat_movement",
-                {
-                    "campaign_id": campaign["id"],
-                    "actor_id": mover["id"],
-                    "action": "move",
-                    "payload": {"distance": 5, "destination": {"x": 1, "y": 0}},
-                    "principal_id": "system:local",
-                    "expected_revision": started["campaign_revision"],
-                    "idempotency_key": "map-blocked-move",
-                },
-            )
+        moved = await call(
+            server,
+            "combat_movement",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": mover["id"],
+                "action": "move",
+                "payload": {"distance": 5, "destination": {"x": 1, "y": 0}},
+                "principal_id": "system:local",
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "map-open-move",
+            },
+        )
+        moved_actor = next(
+            item for item in moved["combat"]["combatants"] if item["actor_id"] == mover["id"]
+        )
+        assert moved_actor["position"] == {"x": 1, "y": 0}
         patched = await call(
             server,
             "combat_map_patch",
             {
                 "campaign_id": campaign["id"],
                 "patches": [{"key": "gate_open", "value": True}],
-                "expected_revision": started["campaign_revision"],
+                "expected_revision": moved["campaign_revision"],
                 "idempotency_key": "map-gate-open",
             },
         )

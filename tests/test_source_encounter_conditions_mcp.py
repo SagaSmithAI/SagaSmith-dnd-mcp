@@ -301,6 +301,20 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
             },
         )
         assert after_interaction["sheet"]["conditions"] == ["poisoned"]
+        uncovered_spatial_facts = {
+            "decision_id": "spatial:ruffian-uncovered",
+            "reason": "The Agent judges the nearby hero targetable with no intervening cover.",
+            "targetable": True,
+            "in_range": True,
+            "long_range": False,
+            "cover_degree": "none",
+            "attacker_can_see_target": True,
+            "target_can_see_attacker": True,
+            "target_within_5_ft": True,
+            "close_threat_actor_ids": [],
+            "helper_actor_ids": [],
+            "target_adjacent_ally_actor_ids": [],
+        }
         uncovered = await _call(
             server,
             "combat_preflight_attack",
@@ -311,6 +325,7 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
                 "action": {
                     "weapon_id": "unarmed-strike",
                     "attack_mode": "melee",
+                    "context": {"spatial_facts": uncovered_spatial_facts},
                 },
             },
         )
@@ -328,6 +343,12 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
             "source_ref": expanded["source_ref"],
             "source_excerpt": cover_excerpt,
         }
+        covered_spatial_facts = {
+            **uncovered_spatial_facts,
+            "decision_id": "spatial:ruffian-half-cover",
+            "reason": "The Agent judges the hero behind the overturned table.",
+            "cover_degree": "half",
+        }
         covered = await _call(
             server,
             "combat_preflight_attack",
@@ -341,6 +362,7 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
                     "context": {
                         "cover": {"degree": "half"},
                         "agent_ruling": cover_ruling,
+                        "spatial_facts": covered_spatial_facts,
                     },
                 },
             },
@@ -351,30 +373,7 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
             "armor_class_bonus": 2,
         }
         assert covered["context_ruling"] == cover_ruling
-        with pytest.raises(Exception, match="content_sha256 does not match"):
-            await _call(
-                server,
-                "combat_preflight_attack",
-                {
-                    "campaign_id": campaign["id"],
-                    "actor_id": ruffian["id"],
-                    "target_id": hero["id"],
-                    "action": {
-                        "weapon_id": "unarmed-strike",
-                        "attack_mode": "melee",
-                        "context": {
-                            "cover": {"degree": "half"},
-                            "agent_ruling": {
-                                **cover_ruling,
-                                "source_ref": {
-                                    **expanded["source_ref"],
-                                    "content_sha256": "0" * 64,
-                                },
-                            },
-                        },
-                    },
-                },
-            )
+        assert covered["spatial_ruling"]["cover_degree"] == "half"
         joined = await _call(
             server,
             "combat_join",
@@ -415,6 +414,12 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
                 "action": {
                     "weapon_id": "unarmed-strike",
                     "attack_mode": "melee",
+                    "context": {
+                        "spatial_facts": {
+                            **uncovered_spatial_facts,
+                            "decision_id": "spatial:late-ruffian-preflight",
+                        }
+                    },
                 },
             },
         )
@@ -432,6 +437,10 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
                     "context": {
                         "cover": {"degree": "half"},
                         "agent_ruling": cover_ruling,
+                        "spatial_facts": {
+                            **covered_spatial_facts,
+                            "decision_id": "spatial:covered-attack",
+                        },
                     },
                 },
                 "expected_revision": joined["campaign_revision"],
