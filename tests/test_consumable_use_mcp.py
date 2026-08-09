@@ -49,17 +49,6 @@ def test_shared_healing_potion_use_is_atomic_rolled_and_idempotent(
                 "idempotency_key": "campaign",
             },
         )
-        await _call(
-            server,
-            "game_phase",
-            {
-                "campaign_id": campaign["id"],
-                "action": "set",
-                "tool_profile": "play",
-                "expected_revision": campaign["revision"],
-                "idempotency_key": "play",
-            },
-        )
         sheet = default_character_sheet()
         sheet["edition"] = "2014"
         sheet["combat"]["hp"] = {"value": 1, "max": 12, "temp": 0}
@@ -74,6 +63,17 @@ def test_shared_healing_potion_use_is_atomic_rolled_and_idempotent(
                     "sheet": sheet,
                 },
                 "idempotency_key": "actor",
+            },
+        )
+        await _call(
+            server,
+            "game_phase",
+            {
+                "campaign_id": campaign["id"],
+                "action": "set",
+                "tool_profile": "play",
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "play",
             },
         )
         current = await _call(

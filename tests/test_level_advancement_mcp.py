@@ -1137,7 +1137,6 @@ def test_extra_attack_materializes_the_fighter_level_count_through_mcp(
                 "idempotency_key": "actor",
             },
         )
-
         applied = await _call(
             server,
             "character_content_apply",
@@ -1795,6 +1794,20 @@ def test_spell_mastery_preserves_existing_preparation_state(
                 "idempotency_key": "actor",
             },
         )
+        mastery_catalog = await _call(
+            server,
+            "character_query",
+            {
+                "view": "catalog",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "kind": "feature",
+                    "query": "dnd5e.content.srd2014.feature.wizard-spell-mastery",
+                    "include_context": True,
+                },
+            },
+        )
+        mastery_source_ref = mastery_catalog[0]["runtime_context"]["rule_refs"][0]
 
         applied = await _call(
             server,
@@ -1851,6 +1864,11 @@ def test_spell_mastery_preserves_existing_preparation_state(
                 {
                     "character_id": actor["id"],
                     "artifact_id": ("dnd5e.content.srd2014.feature.wizard-spell-mastery"),
+                    "grant": {
+                        "kind": "training",
+                        "reason": "The wizard is retraining Spell Mastery.",
+                        "source_ref": mastery_source_ref,
+                    },
                     "selection": {
                         "spell_artifact_ids": spell_ids[2:],
                         "replace_existing": True,
@@ -1881,6 +1899,11 @@ def test_spell_mastery_preserves_existing_preparation_state(
             {
                 "character_id": actor["id"],
                 "artifact_id": ("dnd5e.content.srd2014.feature.wizard-spell-mastery"),
+                "grant": {
+                    "kind": "training",
+                    "reason": "The wizard completed Spell Mastery retraining.",
+                    "source_ref": mastery_source_ref,
+                },
                 "selection": {
                     "spell_artifact_ids": spell_ids[2:],
                     "replace_existing": True,

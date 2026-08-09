@@ -48,7 +48,7 @@ async def _import_module(call, server, campaign_id: str, source_path: Path, key:
             "action": "finalize",
             "payload": {
                 "job_id": job_id,
-                "portable_id": f"dnd5e.module.{key}",
+                "pack_id": f"dnd5e.module.{key}",
                 "version": "1.0.0",
                 "manifest": {
                     "title": source_path.stem,
@@ -112,7 +112,7 @@ async def _import_module(call, server, campaign_id: str, source_path: Path, key:
             "payload": {
                 "campaign_id": campaign_id,
                 "kind": "module",
-                "artifact": finalized["artifact"],
+                "module_id": finalized["job"]["module_id"],
             },
             "expected_revision": campaign["revision"],
             "idempotency_key": f"{key}:activate",
@@ -334,7 +334,7 @@ def test_mcp_first_full_workflow(tmp_path: Path) -> None:
             },
         )
         imported = await _import_module(call, server, campaign["id"], source, "parity-module")
-        assert imported["activated"] is True
+        assert imported["activation"]["active"] is True
         scenes = await call(
             server,
             "module_query",
