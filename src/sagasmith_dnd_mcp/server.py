@@ -27326,6 +27326,76 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             response_extra={"result": result},
         )
 
+    def character_make_death_save(
+        character_id: str,
+        *,
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Resolve one death save after combat has returned to Play."""
+        current = characters.get(character_id)
+        require_character_control(current, principal_id)
+        require_outside_active_combat(current, "post-combat death save")
+        if current.campaign_id is None:
+            raise CombatEngineError("death saves require a campaign-bound actor")
+        access.require_campaign(current.campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        applied = resolve_death_save_to_sheet(
+            current.sheet,
+            ruleset=campaign_rules_edition(current.campaign_id),
+        )
+        result = {key: value for key, value in applied.items() if key != "sheet"}
+        return update_sheet(
+            character_id,
+            applied["sheet"],
+            operation="character.death_save.resolve",
+            principal_id=principal_id,
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            payload={},
+            response_extra={"result": result},
+        )
+
+    def character_stabilize(
+        character_id: str,
+        *,
+        source_actor_id: str,
+        reason: str,
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Commit an Agent-adjudicated stabilization after combat."""
+        current = characters.get(character_id)
+        require_character_control(current, principal_id)
+        require_outside_active_combat(current, "post-combat stabilization")
+        if current.campaign_id is None:
+            raise CombatEngineError("stabilization requires a campaign-bound actor")
+        access.require_campaign(current.campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        source = require_campaign_actor(current.campaign_id, source_actor_id)
+        source_conditions = condition_ids(source.sheet.get("conditions", []))
+        if source.id == current.id or source_conditions & {"dead", "incapacitated", "unconscious"}:
+            raise CombatEngineError("stabilization requires a conscious assisting actor")
+        normalized_reason = " ".join(str(reason or "").split())
+        if not normalized_reason or len(normalized_reason) > 1000:
+            raise CombatEngineError(
+                "post-combat stabilization reason must contain 1 to 1000 characters"
+            )
+        applied = stabilize_sheet(current.sheet)
+        result = {key: value for key, value in applied.items() if key != "sheet"}
+        result["source_actor_id"] = source.id
+        result["reason"] = normalized_reason
+        return update_sheet(
+            character_id,
+            applied["sheet"],
+            operation="character.stabilize",
+            principal_id=principal_id,
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            payload={"source_actor_id": source.id, "reason": normalized_reason},
+            response_extra={"result": result},
+        )
+
     def character_apply_raise_dead(
         character_id: str,
         *,
@@ -28924,17 +28994,28 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         ending_actors = {
             actor_id_value: characters.get(actor_id_value) for actor_id_value in ending_actor_ids
         }
+        post_combat_recovery: list[dict[str, Any]] = []
         for combatant in combat.get("combatants", []):
             if not combatant.get("death_saves", False):
                 continue
             actor = ending_actors[str(combatant["actor_id"])]
-            hp = int(actor.sheet.get("combat", {}).get("hp", {}).get("value", 0) or 0)
+            actor_combat = dict(actor.sheet.get("combat") or {})
+            hp = int(dict(actor_combat.get("hp") or {}).get("value", 0) or 0)
             conditions = condition_ids(actor.sheet.get("conditions", []))
             if hp == 0 and not conditions & DEATH_SAVE_SETTLED_CONDITIONS:
-                raise CombatEngineError(
-                    f"cannot end combat while {actor.id} is still making death saves"
+                post_combat_recovery.append(
+                    {
+                        "actor_id": actor.id,
+                        "status": "dying",
+                        "unresolved_at_end": True,
+                        "death_saves": deepcopy(
+                            dict(actor_combat.get("death_saves") or {})
+                        ),
+                        "resolution_actions": ["heal", "stabilize", "death_save"],
+                    }
                 )
         combat["active"] = False
+        combat["post_combat_recovery"] = post_combat_recovery
         if outcome_value:
             combat["outcome"] = outcome_value
         ending_readied = list(combat.get("readied", []))
@@ -28991,6 +29072,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "combat": combat,
                 "outcome": outcome_value or None,
                 "tool_profile": PROFILE_PLAY,
+                "post_combat_recovery": post_combat_recovery,
                 "effects_expired": sorted(expired_effects),
                 "readied_spells_expired": sorted(
                     str(item.get("id")) for item in ending_readied if item.get("kind") == "spell"
@@ -44124,6 +44206,8 @@ Useful bounded guidance:
             "exhaustion_set",
             "damage",
             "heal",
+            "death_save",
+            "stabilize",
             "revive",
             "level_advance",
             "resource_sync",
@@ -44189,6 +44273,22 @@ Useful bounded guidance:
                 source_actor_id=data.get("source_actor_id"),
                 spell_id=data.get("spell_id"),
                 spell_level=data.get("spell_level"),
+                principal_id=principal_id,
+                expected_revision=expected_revision,
+                idempotency_key=idempotency_key,
+            )
+        elif action == "death_save":
+            result = character_make_death_save(
+                character_id,
+                principal_id=principal_id,
+                expected_revision=expected_revision,
+                idempotency_key=idempotency_key,
+            )
+        elif action == "stabilize":
+            result = character_stabilize(
+                character_id,
+                source_actor_id=required(data, "source_actor_id"),
+                reason=required(data, "reason"),
                 principal_id=principal_id,
                 expected_revision=expected_revision,
                 idempotency_key=idempotency_key,

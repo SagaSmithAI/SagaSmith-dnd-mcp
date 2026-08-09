@@ -803,6 +803,13 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                 ("amount",),
             )
         ],
+        "death_save": [_variant(())],
+        "stabilize": [
+            _variant(
+                ("reason", "source_actor_id"),
+                ("source_actor_id", "reason"),
+            )
+        ],
         "revive": [
             _variant(
                 (
