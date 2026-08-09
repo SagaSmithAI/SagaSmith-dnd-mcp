@@ -40,10 +40,29 @@ ACTOR_ACTION_KINDS = frozenset(
         "use_item",
         "exchange_item",
         "scene_transition",
+        "observe",
+        "interact",
+        "follow",
+        "wait",
         "other",
     }
 )
-ACTOR_NARRATIVE_ACTION_KINDS = frozenset({"none", "gesture", "refuse"})
+ACTOR_NARRATIVE_ACTION_KINDS = frozenset(
+    {
+        "none",
+        "gesture",
+        "offer",
+        "refuse",
+        "surrender",
+        "move",
+        "flee",
+        "scene_transition",
+        "observe",
+        "interact",
+        "follow",
+        "wait",
+    }
+)
 
 
 def _object(value: Any, field: str) -> dict[str, Any]:

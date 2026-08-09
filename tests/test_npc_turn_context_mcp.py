@@ -143,12 +143,17 @@ def test_npc_turn_bundle_is_actor_scoped_and_commits_only_accepted_deltas(
         bundle_schema = json.loads(
             files("sagasmith_dnd_mcp")
             .joinpath("contracts")
-            .joinpath("npc-turn-bundle.v1.schema.json")
+            .joinpath("npc-turn-bundle.v2.schema.json")
             .read_text(encoding="utf-8")
         )
         Draft202012Validator(bundle_schema).validate(bundle)
 
         assert bundle["purpose"] == "npc_turn"
+        assert bundle["schema_version"] == 2
+        assert bundle["conversation"]["campaign_id"] == campaign["id"]
+        assert bundle["conversation"]["participants"][0]["actor_id"] == npc["id"]
+        assert bundle["delegation"]["contract"] == "sagasmith.delegation.v1"
+        assert bundle["delegation"]["tools_exposed"] is False
         assert "principal_id" not in bundle["bundle_receipt"]
         assert len(bundle["bundle_receipt"]["principal_fingerprint"]) == 64
         assert bundle["actor"]["id"] == npc["id"]
@@ -247,6 +252,31 @@ def test_npc_turn_bundle_is_actor_scoped_and_commits_only_accepted_deltas(
         }
         assert committed["actor_knowledge"][0]["epistemic_status"] == "rumor"
         assert "basis_refs" not in committed["event"]["payload"]
+        assert committed["event"]["payload"]["public_speech_acts"] == [
+            {
+                "kind": "assert",
+                "content": "He claims to be Duke Zalto's son.",
+                "targets": [pc["id"]],
+            }
+        ]
+        assert committed["event"]["payload"]["visible_portrayal_cues"] == [
+            "tries to hide his fear"
+        ]
+        assert "truth_posture" not in committed["event"]["payload"]["public_speech_acts"][0]
+        next_bundle = await _call(
+            server,
+            "continuity_context",
+            {
+                "campaign_id": campaign["id"],
+                "purpose": "npc_turn",
+                "actor_id": npc["id"],
+                "interlocutor_actor_ids": [pc["id"]],
+            },
+        )
+        assert next_bundle["conversation"]["cursor"]["event_count"] == 1
+        assert next_bundle["conversation"]["events"][0]["public_speech_acts"] == [
+            committed["event"]["payload"]["public_speech_acts"][0]
+        ]
         context = await _call(
             server,
             "continuity_context",
@@ -475,7 +505,7 @@ def test_npc_turn_is_live_phase_only_and_contract_schemas_ship(tmp_path: Path) -
     bundle_schema = json.loads(
         files("sagasmith_dnd_mcp")
         .joinpath("contracts")
-        .joinpath("npc-turn-bundle.v1.schema.json")
+        .joinpath("npc-turn-bundle.v2.schema.json")
         .read_text(encoding="utf-8")
     )
     proposal_schema = json.loads(
@@ -501,6 +531,10 @@ def test_npc_turn_is_live_phase_only_and_contract_schemas_ship(tmp_path: Path) -
         "use_item",
         "exchange_item",
         "scene_transition",
+        "observe",
+        "interact",
+        "follow",
+        "wait",
         "other",
     ]
     Draft202012Validator.check_schema(proposal_schema)
@@ -595,3 +629,14 @@ def test_mechanical_npc_proposals_must_request_public_resolution() -> None:
     normalized["proposed_action"]["target_ref"] = "actor:outsider"
     with pytest.raises(ValueError, match="action target is outside its bundle"):
         validate_npc_targets(normalized, allowed_actor_ids={"npc", "pc"})
+
+    narrative = {
+        **proposal,
+        "proposed_action": {
+            "kind": "move",
+            "target_ref": "actor:pc",
+            "summary": "Steps back toward the doorway.",
+        },
+        "resolution_requests": [],
+    }
+    assert normalize_npc_turn_proposal(narrative)["proposed_action"]["kind"] == "move"

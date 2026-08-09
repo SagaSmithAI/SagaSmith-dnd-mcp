@@ -6,6 +6,7 @@ from copy import deepcopy
 from typing import Any
 
 NPC_TURN_SCHEMA_VERSION = 1
+NPC_TURN_BUNDLE_SCHEMA_VERSION = 2
 NPC_TURN_PURPOSES = frozenset({"general", "npc_turn"})
 NPC_TRUTH_POSTURES = frozenset(
     {"believes_true", "uncertain", "intentional_deception", "opinion", "nonfactual"}
@@ -26,10 +27,29 @@ NPC_ACTION_KINDS = frozenset(
         "use_item",
         "exchange_item",
         "scene_transition",
+        "observe",
+        "interact",
+        "follow",
+        "wait",
         "other",
     }
 )
-NPC_NARRATIVE_ACTION_KINDS = frozenset({"none", "gesture", "refuse"})
+NPC_NARRATIVE_ACTION_KINDS = frozenset(
+    {
+        "none",
+        "gesture",
+        "offer",
+        "refuse",
+        "surrender",
+        "move",
+        "flee",
+        "scene_transition",
+        "observe",
+        "interact",
+        "follow",
+        "wait",
+    }
+)
 NPC_RESOLUTION_KINDS = frozenset(
     {"ability_check", "contest", "saving_throw", "attack", "dm_adjudication"}
 )

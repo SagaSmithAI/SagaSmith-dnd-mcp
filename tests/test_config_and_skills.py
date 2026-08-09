@@ -415,6 +415,7 @@ def test_server_exposes_static_skill_overview_resource(tmp_path: Path) -> None:
             "sagasmith://bootstrap",
             "sagasmith://skills/assets",
             "sagasmith://skills/overview",
+            "sagasmith://delegation",
         ]
         bootstrap = await server.read_resource("sagasmith://bootstrap")
         assert "zero-knowledge bootstrap" in bootstrap[0].content
@@ -424,6 +425,9 @@ def test_server_exposes_static_skill_overview_resource(tmp_path: Path) -> None:
         assert "skill_read" not in content[0].content
         assert "skill_asset_list" not in content[0].content
         assert "skill_asset_read" not in content[0].content
+        delegation = await server.read_resource("sagasmith://delegation")
+        assert "awaited worker" in delegation[0].content
+        assert "zero tools" in delegation[0].content
 
     asyncio.run(inspect_resources())
 

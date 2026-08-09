@@ -14,7 +14,7 @@
       "type": "object",
       "required": ["kind", "target_ref", "summary"],
       "properties": {
-        "kind": {"enum": ["none", "gesture", "offer", "refuse", "surrender", "move", "flee", "attack", "use_item", "exchange_item", "scene_transition", "other"]},
+        "kind": {"enum": ["none", "gesture", "offer", "refuse", "surrender", "move", "flee", "attack", "use_item", "exchange_item", "scene_transition", "observe", "interact", "follow", "wait", "other"]},
         "target_ref": {"type": "string", "maxLength": 300},
         "summary": {"type": "string", "maxLength": 1000}
       },
