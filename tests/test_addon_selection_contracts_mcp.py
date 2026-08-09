@@ -24,6 +24,7 @@ from sagasmith_dnd_mcp.server import (
     _validated_species_proficiency_choices,
     create_server,
 )
+from tests.authoring_helpers import import_and_activate_addon_fixture
 
 
 def test_active_addon_options_extend_selector_without_granting_extra_choices() -> None:
@@ -492,55 +493,24 @@ def test_reviewed_addon_feat_materializes_bounded_spell_sources(tmp_path: Path) 
             status="ready",
             references=["book:eberron:p112"],
         )
-        draft = await _call(
+        await import_and_activate_addon_fixture(
+            _call,
             server,
-            "content_pack",
-            {
-                "action": "build",
-                "payload": {
-                    "kind": "rule",
-                    "manifest": {
-                        "id": "dnd5e.addon.eberron",
-                        "version": "1.0.0",
-                        "title": "Reviewed Eberron",
-                        "namespace": "dnd5e.addon.eberron",
-                        "system_id": "dnd5e",
-                        "editions": ["2014"],
-                        "capabilities": [],
-                    },
-                    "artifacts": [artifact],
-                    "mechanics": [],
-                },
+            campaign["id"],
+            config.home,
+            manifest={
+                "id": "dnd5e.addon.eberron",
+                "version": "1.0.0",
+                "title": "Reviewed Eberron",
+                "namespace": "dnd5e.addon.eberron",
+                "system_id": "dnd5e",
+                "editions": ["2014"],
+                "capabilities": [],
             },
-        )
-        assert draft["status"] == "validated", str(draft)
-        await _call(
-            server,
-            "content_pack",
-            {
-                "action": "install",
-                "payload": {
-                    "kind": "rule",
-                    "pack_id": "dnd5e.addon.eberron",
-                    "version": "1.0.0",
-                },
-            },
-        )
-        await _call(
-            server,
-            "content_pack",
-            {
-                "action": "activate",
-                "payload": {
-                    "kind": "rule",
-                    "campaign_id": campaign["id"],
-                    "pack_id": "dnd5e.addon.eberron",
-                    "version": "1.0.0",
-                },
-                "principal_id": "system:local",
-                "expected_revision": profile["campaign_revision"],
-                "idempotency_key": "addon-feat-activate",
-            },
+            artifacts=[artifact],
+            mechanics=[],
+            expected_revision=profile["campaign_revision"],
+            request_key="addon-feat",
         )
         sheet = default_character_sheet()
         sheet["abilities"]["constitution"]["score"] = 10
@@ -704,55 +674,24 @@ to hit, reach 5 ft., one target. *Hit:* 1d8 + PB force damage.
                 "idempotency_key": "addon-actor-profile",
             },
         )
-        draft = await _call(
+        await import_and_activate_addon_fixture(
+            _call,
             server,
-            "content_pack",
-            {
-                "action": "build",
-                "payload": {
-                    "kind": "rule",
-                    "manifest": {
-                        "id": "dnd5e.addon.defender",
-                        "version": "1.0.0",
-                        "title": "Reviewed Defender",
-                        "namespace": "dnd5e.addon.defender",
-                        "system_id": "dnd5e",
-                        "editions": ["2014"],
-                        "capabilities": [],
-                    },
-                    "artifacts": [artifact],
-                    "mechanics": [],
-                },
+            campaign["id"],
+            config.home,
+            manifest={
+                "id": "dnd5e.addon.defender",
+                "version": "1.0.0",
+                "title": "Reviewed Defender",
+                "namespace": "dnd5e.addon.defender",
+                "system_id": "dnd5e",
+                "editions": ["2014"],
+                "capabilities": [],
             },
-        )
-        assert draft["status"] == "validated", str(draft)
-        await _call(
-            server,
-            "content_pack",
-            {
-                "action": "install",
-                "payload": {
-                    "kind": "rule",
-                    "pack_id": "dnd5e.addon.defender",
-                    "version": "1.0.0",
-                },
-            },
-        )
-        await _call(
-            server,
-            "content_pack",
-            {
-                "action": "activate",
-                "payload": {
-                    "kind": "rule",
-                    "campaign_id": campaign["id"],
-                    "pack_id": "dnd5e.addon.defender",
-                    "version": "1.0.0",
-                },
-                "principal_id": "system:local",
-                "expected_revision": profile["campaign_revision"],
-                "idempotency_key": "addon-actor-activate",
-            },
+            artifacts=[artifact],
+            mechanics=[],
+            expected_revision=profile["campaign_revision"],
+            request_key="addon-actor",
         )
         owner_sheet = default_character_sheet()
         owner_sheet["progression"]["level"] = 5
@@ -773,12 +712,12 @@ to hit, reach 5 ft., one target. *Hit:* 1d8 + PB force damage.
         )
         catalog = await _call(
             server,
-            "content_pack",
+            "character_query",
             {
-                "action": "list",
+                "view": "catalog",
                 "payload": {
-                    "kind": "catalog",
                     "campaign_id": campaign["id"],
+                    "kind": "statblock",
                     "query": artifact["id"],
                 },
                 "principal_id": "system:local",
@@ -914,55 +853,24 @@ def test_reviewed_addon_item_uses_bound_inventory_materializer(tmp_path: Path) -
             status="ready",
             references=["book:addon:p1"],
         )
-        draft = await _call(
+        await import_and_activate_addon_fixture(
+            _call,
             server,
-            "content_pack",
-            {
-                "action": "build",
-                "payload": {
-                    "kind": "rule",
-                    "manifest": {
-                        "id": "dnd5e.addon.reviewed-item",
-                        "version": "1.0.0",
-                        "title": "Reviewed item",
-                        "namespace": "dnd5e.addon.reviewed-item",
-                        "system_id": "dnd5e",
-                        "editions": ["2014"],
-                        "capabilities": [],
-                    },
-                    "artifacts": [artifact],
-                    "mechanics": [],
-                },
+            campaign["id"],
+            config.home,
+            manifest={
+                "id": "dnd5e.addon.reviewed-item",
+                "version": "1.0.0",
+                "title": "Reviewed item",
+                "namespace": "dnd5e.addon.reviewed-item",
+                "system_id": "dnd5e",
+                "editions": ["2014"],
+                "capabilities": [],
             },
-        )
-        assert draft["status"] == "validated", str(draft)
-        await _call(
-            server,
-            "content_pack",
-            {
-                "action": "install",
-                "payload": {
-                    "kind": "rule",
-                    "pack_id": "dnd5e.addon.reviewed-item",
-                    "version": "1.0.0",
-                },
-            },
-        )
-        await _call(
-            server,
-            "content_pack",
-            {
-                "action": "activate",
-                "payload": {
-                    "kind": "rule",
-                    "campaign_id": campaign["id"],
-                    "pack_id": "dnd5e.addon.reviewed-item",
-                    "version": "1.0.0",
-                },
-                "principal_id": "system:local",
-                "expected_revision": profile["campaign_revision"],
-                "idempotency_key": "addon-item-activate",
-            },
+            artifacts=[artifact],
+            mechanics=[],
+            expected_revision=profile["campaign_revision"],
+            request_key="addon-item",
         )
         character = await _call(
             server,
@@ -1018,12 +926,12 @@ def test_reviewed_addon_item_uses_bound_inventory_materializer(tmp_path: Path) -
         assert applied["rule_receipts"][0]["mechanic_id"] == ("dnd5e.character.inventory_item.v1")
         queried = await _call(
             server,
-            "content_pack",
+            "character_query",
             {
-                "action": "list",
+                "view": "catalog",
                 "payload": {
-                    "kind": "catalog",
                     "campaign_id": campaign["id"],
+                    "kind": "item",
                     "query": artifact["id"],
                     "include_context": True,
                 },
@@ -1440,71 +1348,39 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
             status="ready",
             references=["book:addon:p2"],
         )
-        draft = await _call(
+        await import_and_activate_addon_fixture(
+            _call,
             server,
-            "content_pack",
-            {
-                "action": "build",
-                "payload": {
-                    "kind": "rule",
-                    "manifest": {
-                        "id": "dnd5e.addon.guild",
-                        "version": "1.0.0",
-                        "title": "Guild addon",
-                        "namespace": "dnd5e.addon.guild",
-                        "system_id": "dnd5e",
-                        "editions": ["2014"],
-                        "capabilities": [],
-                    },
-                    "artifacts": [
-                        artifact,
-                        reprinted_aid,
-                        species_artifact,
-                        species_feat_artifact,
-                        subclass_artifact,
-                    ],
-                    "mechanics": [],
-                },
+            campaign["id"],
+            config.home,
+            manifest={
+                "id": "dnd5e.addon.guild",
+                "version": "1.0.0",
+                "title": "Guild addon",
+                "namespace": "dnd5e.addon.guild",
+                "system_id": "dnd5e",
+                "editions": ["2014"],
+                "capabilities": [],
             },
-        )
-        assert draft["status"] == "validated", str(draft)
-        await _call(
-            server,
-            "content_pack",
-            {
-                "action": "install",
-                "payload": {
-                    "kind": "rule",
-                    "pack_id": "dnd5e.addon.guild",
-                    "version": "1.0.0",
-                },
-            },
-        )
-        await _call(
-            server,
-            "content_pack",
-            {
-                "action": "activate",
-                "payload": {
-                    "kind": "rule",
-                    "campaign_id": campaign["id"],
-                    "pack_id": "dnd5e.addon.guild",
-                    "version": "1.0.0",
-                },
-                "principal_id": "system:local",
-                "expected_revision": profile["campaign_revision"],
-                "idempotency_key": "background-activate",
-            },
+            artifacts=[
+                artifact,
+                reprinted_aid,
+                species_artifact,
+                species_feat_artifact,
+                subclass_artifact,
+            ],
+            mechanics=[],
+            expected_revision=profile["campaign_revision"],
+            request_key="background",
         )
         catalog = await _call(
             server,
-            "content_pack",
+            "character_query",
             {
-                "action": "list",
+                "view": "catalog",
                 "payload": {
                     "campaign_id": campaign["id"],
-                    "kind": "catalog",
-                    "content_kind": "background",
+                    "kind": "background",
                     "query": "Guild Agent",
                 },
                 "principal_id": "system:local",
@@ -1522,13 +1398,12 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
         ]
         species_catalog = await _call(
             server,
-            "content_pack",
+            "character_query",
             {
-                "action": "list",
+                "view": "catalog",
                 "payload": {
                     "campaign_id": campaign["id"],
-                    "kind": "catalog",
-                    "content_kind": "species",
+                    "kind": "species",
                     "query": "Marked Human",
                 },
                 "principal_id": "system:local",
@@ -1803,13 +1678,12 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
 
         dragonborn_catalog = await _call(
             server,
-            "content_pack",
+            "character_query",
             {
-                "action": "list",
+                "view": "catalog",
                 "payload": {
                     "campaign_id": campaign["id"],
-                    "kind": "catalog",
-                    "content_kind": "species",
+                    "kind": "species",
                     "query": "Dragonborn",
                 },
                 "principal_id": "system:local",
@@ -2051,39 +1925,24 @@ def test_subclass_spell_prefers_exact_reviewed_dependency_over_bundled_duplicate
             status="ready",
             references=["book:dependency:p1"],
         )
-        dependency_draft = await _call(
+        dependency_pack = await import_and_activate_addon_fixture(
+            _call,
             server,
-            "content_pack",
-            {
-                "action": "build",
-                "payload": {
-                    "kind": "rule",
-                    "manifest": {
-                        "id": "dnd5e.addon.reviewed-dependency",
-                        "version": "1.0.0",
-                        "title": "Reviewed dependency",
-                        "namespace": "dnd5e.addon.reviewed-dependency",
-                        "system_id": "dnd5e",
-                        "editions": ["2014"],
-                        "capabilities": [],
-                    },
-                    "artifacts": [dependency_spell],
-                    "mechanics": [],
-                },
+            campaign["id"],
+            config.home,
+            manifest={
+                "id": "dnd5e.addon.reviewed-dependency",
+                "version": "1.0.0",
+                "title": "Reviewed dependency",
+                "namespace": "dnd5e.addon.reviewed-dependency",
+                "system_id": "dnd5e",
+                "editions": ["2014"],
+                "capabilities": [],
             },
-        )
-        assert dependency_draft["status"] == "validated", str(dependency_draft)
-        await _call(
-            server,
-            "content_pack",
-            {
-                "action": "install",
-                "payload": {
-                    "kind": "rule",
-                    "pack_id": "dnd5e.addon.reviewed-dependency",
-                    "version": "1.0.0",
-                },
-            },
+            artifacts=[dependency_spell],
+            mechanics=[],
+            expected_revision=profile["campaign_revision"],
+            request_key="dependency-spell",
         )
 
         subclass = {
@@ -2132,78 +1991,48 @@ def test_subclass_spell_prefers_exact_reviewed_dependency_over_bundled_duplicate
             status="ready",
             references=["book:dependent-domain:p2"],
         )
-        source_draft = await _call(
+        await import_and_activate_addon_fixture(
+            _call,
             server,
-            "content_pack",
-            {
-                "action": "build",
-                "payload": {
-                    "kind": "rule",
-                    "manifest": {
-                        "id": "dnd5e.addon.dependent-domain",
+            campaign["id"],
+            config.home,
+            manifest={
+                "id": "dnd5e.addon.dependent-domain",
+                "version": "1.0.0",
+                "title": "Dependent domain",
+                "namespace": "dnd5e.addon.dependent-domain",
+                "system_id": "dnd5e",
+                "editions": ["2014"],
+                "capabilities": [],
+                "dependencies": [
+                    {
+                        "id": "dnd5e.addon.reviewed-dependency",
                         "version": "1.0.0",
-                        "title": "Dependent domain",
-                        "namespace": "dnd5e.addon.dependent-domain",
-                        "system_id": "dnd5e",
-                        "editions": ["2014"],
-                        "capabilities": [],
-                        "dependencies": [
-                            {
-                                "id": "dnd5e.addon.reviewed-dependency",
-                                "version": "1.0.0",
-                            }
+                        "checksum": dependency_pack["package"]["checksum"],
+                        "rule_checksum": dependency_pack["imported"]["components"][0][
+                            "checksum"
                         ],
-                    },
-                    "artifacts": [subclass],
-                    "mechanics": [],
-                },
+                    }
+                ],
             },
+            artifacts=[subclass],
+            mechanics=[],
+            expected_revision=dependency_pack["campaign_revision"],
+            request_key="dependent-domain",
         )
-        assert source_draft["status"] == "validated", str(source_draft)
-        await _call(
+        identify_catalog = await _call(
             server,
-            "content_pack",
+            "character_query",
             {
-                "action": "install",
+                "view": "catalog",
                 "payload": {
-                    "kind": "rule",
-                    "pack_id": "dnd5e.addon.dependent-domain",
-                    "version": "1.0.0",
-                },
-            },
-        )
-        dependency_enabled = await _call(
-            server,
-            "content_pack",
-            {
-                "action": "activate",
-                "payload": {
-                    "kind": "rule",
                     "campaign_id": campaign["id"],
-                    "pack_id": "dnd5e.addon.reviewed-dependency",
-                    "version": "1.0.0",
+                    "kind": "spell",
+                    "query": "Identify",
                 },
-                "principal_id": "system:local",
-                "expected_revision": profile["campaign_revision"],
-                "idempotency_key": "dependency-spell-enable",
             },
         )
-        await _call(
-            server,
-            "content_pack",
-            {
-                "action": "activate",
-                "payload": {
-                    "kind": "rule",
-                    "campaign_id": campaign["id"],
-                    "pack_id": "dnd5e.addon.dependent-domain",
-                    "version": "1.0.0",
-                },
-                "principal_id": "system:local",
-                "expected_revision": dependency_enabled["campaign_revision"],
-                "idempotency_key": "dependent-domain-enable",
-            },
-        )
+        assert identify_catalog, "the active dependency must expose Identify"
 
         sheet = default_character_sheet()
         sheet["progression"]["level"] = 1
@@ -2247,6 +2076,7 @@ def test_subclass_spell_prefers_exact_reviewed_dependency_over_bundled_duplicate
                 "idempotency_key": "dependency-domain-apply",
             },
         )
+        assert "sheet" in applied, str(applied)
 
         identify = next(
             item for item in applied["sheet"]["content"]["spells"] if item["name"] == "Identify"
@@ -2493,60 +2323,24 @@ def test_reviewed_addon_base_class_uses_bound_level_one_materializer(tmp_path: P
             status="ready",
             references=["book:addon:artificer:p4"],
         )
-        draft = await _call(
+        await import_and_activate_addon_fixture(
+            _call,
             server,
-            "content_pack",
-            {
-                "action": "build",
-                "payload": {
-                    "kind": "rule",
-                    "manifest": {
-                        "id": "dnd5e.addon.artificer",
-                        "version": "1.0.0",
-                        "title": "Reviewed Artificer",
-                        "namespace": "dnd5e.addon.artificer",
-                        "system_id": "dnd5e",
-                        "editions": ["2014"],
-                        "capabilities": [],
-                    },
-                    "artifacts": [
-                        artifact,
-                        tool_feature,
-                        infusion_feature,
-                        infusion_option,
-                    ],
-                    "mechanics": [],
-                },
+            campaign["id"],
+            config.home,
+            manifest={
+                "id": "dnd5e.addon.artificer",
+                "version": "1.0.0",
+                "title": "Reviewed Artificer",
+                "namespace": "dnd5e.addon.artificer",
+                "system_id": "dnd5e",
+                "editions": ["2014"],
+                "capabilities": [],
             },
-        )
-        assert draft["status"] == "validated", str(draft)
-        await _call(
-            server,
-            "content_pack",
-            {
-                "action": "install",
-                "payload": {
-                    "kind": "rule",
-                    "pack_id": "dnd5e.addon.artificer",
-                    "version": "1.0.0",
-                },
-            },
-        )
-        await _call(
-            server,
-            "content_pack",
-            {
-                "action": "activate",
-                "payload": {
-                    "kind": "rule",
-                    "campaign_id": campaign["id"],
-                    "pack_id": "dnd5e.addon.artificer",
-                    "version": "1.0.0",
-                },
-                "principal_id": "system:local",
-                "expected_revision": profile["campaign_revision"],
-                "idempotency_key": "addon-class-activate",
-            },
+            artifacts=[artifact, tool_feature, infusion_feature, infusion_option],
+            mechanics=[],
+            expected_revision=profile["campaign_revision"],
+            request_key="addon-class",
         )
         sheet = default_character_sheet()
         sheet["abilities"]["constitution"]["score"] = 14
