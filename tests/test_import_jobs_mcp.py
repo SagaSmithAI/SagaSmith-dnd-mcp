@@ -862,12 +862,13 @@ def test_rulebook_draft_agent_can_add_only_source_bound_catalog_entities(tmp_pat
         )
         chunks = await _call(
             server,
-            "content_pack",
+            "rulebook_draft",
             {
-                "action": "get",
+                "campaign_id": campaign["id"],
+                "action": "evidence",
                 "payload": {
-                    "kind": "source",
-                    "source_id": extracted["job"]["source_id"],
+                    "job_id": job_id,
+                    "kind": "chunks",
                     "query": "gunsmith",
                 },
             },

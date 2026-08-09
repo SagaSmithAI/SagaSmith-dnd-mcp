@@ -258,12 +258,13 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
         )
         chunks = await _call(
             server,
-            "content_pack",
+            "rulebook_draft",
             {
-                "action": "get",
+                "campaign_id": campaign["id"],
+                "action": "evidence",
                 "payload": {
-                    "kind": "source",
-                    "source_id": ingested["source_id"],
+                    "job_id": job_id,
+                    "kind": "chunks",
                     "query": "commoner",
                 },
             },
@@ -633,12 +634,13 @@ def test_rule_statblock_recovers_split_text_layout_without_images(tmp_path: Path
         )
         chunks = await _call(
             server,
-            "content_pack",
+            "rulebook_draft",
             {
-                "action": "get",
+                "campaign_id": campaign["id"],
+                "action": "evidence",
                 "payload": {
-                    "kind": "source",
-                    "source_id": ingested["source_id"],
+                    "job_id": job_id,
+                    "kind": "chunks",
                     "limit": 200,
                 },
             },
