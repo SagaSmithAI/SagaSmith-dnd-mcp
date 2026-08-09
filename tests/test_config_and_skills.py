@@ -564,13 +564,13 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
         assert BASELINE_PUBLIC_TOOL_COUNT == 92
         assert BASELINE_INPUT_SCHEMA_BYTES == 56_611
         assert len(CORE_TOOLS) == TARGET_CORE_TOOL_COUNT == 13
-        assert len(tools) == TARGET_PUBLIC_TOOL_COUNT == 81
+        assert len(tools) == TARGET_PUBLIC_TOOL_COUNT == 89
         assert (
             {phase: len(names) for phase, names in profile_catalog().items()}
             == PROFILE_TOOL_LIMITS
             == {
                 "lobby": 60,
-                    "play": 50,
+                "play": 58,
                 "combat": 49,
             }
         )

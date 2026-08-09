@@ -478,7 +478,6 @@ from sagasmith_dnd_mcp.facade_contracts import (
 )
 from sagasmith_dnd_mcp.npc_conversations import (
     ACTIVE_CONVERSATION_STATUSES,
-    NPC_CONVERSATION_CONTRACT,
     ConversationStore,
     normalize_conversation_proposal,
 )
@@ -29540,29 +29539,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         ]
         context["commitments"] = commitments
         return context
-
-    @public_tool()
-    def npc_runtime_capabilities() -> dict[str, Any]:
-        """Describe the host-side subagent contract for multi-turn NPC conversations."""
-
-        return {
-            "schema_version": 1,
-            "contract": NPC_CONVERSATION_CONTRACT,
-            "execution_mode": "client_subagents_required",
-            "proposal_contract": "npc-conversation-proposal.v2",
-            "actor_scoped_worker_handles": True,
-            "incremental_actor_context": True,
-            "durable_semantic_journal": True,
-            "server_managed_inference": False,
-            "server_managed_kv": False,
-            "minimum_host_capabilities": [
-                "isolated_actor_workers",
-                "persistent_worker_context",
-                "structured_output",
-                "actor_scoped_dispatch",
-                "worker_disposal",
-            ],
-        }
 
     @public_tool()
     def conversation_open(

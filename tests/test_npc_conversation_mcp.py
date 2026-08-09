@@ -81,10 +81,6 @@ def test_multi_turn_conversation_keeps_private_capsules_out_of_director_and_comm
     async def exercise() -> None:
         server = create_server(_config(tmp_path))
         campaign, npc, pc = await _campaign_with_actors(server)
-        capabilities = await _call(server, "npc_runtime_capabilities", {})
-        assert capabilities["execution_mode"] == "client_subagents_required"
-        assert capabilities["server_managed_inference"] is False
-
         opened = await _call(
             server,
             "conversation_open",
@@ -118,6 +114,16 @@ def test_multi_turn_conversation_keeps_private_capsules_out_of_director_and_comm
         assert activation["actor_id"] == npc["id"]
         assert activation["response_required"] is True
         assert "context" not in activation
+        with pytest.raises(Exception, match="unfinished NPC activations"):
+            await _call(
+                server,
+                "conversation_close",
+                {
+                    "campaign_id": campaign["id"],
+                    "conversation_id": conversation_id,
+                    "idempotency_key": "premature-close",
+                },
+            )
 
         capsule = await _call(
             server,

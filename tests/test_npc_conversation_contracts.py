@@ -189,3 +189,74 @@ def test_worker_handle_cannot_checkout_another_activation(tmp_path) -> None:
             cursor=0,
             include_bootstrap=True,
         )
+
+
+def test_resolution_event_resumes_a_suspended_conversation(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    opened = store.open(
+        campaign_id="campaign",
+        branch_id="branch",
+        principal_id="dm",
+        scope_id="party",
+        scene_id="scene",
+        authority={"campaign_revision": 5},
+        participants=[
+            {"actor_id": "npc", "name": "Mara", "kind": "npc"},
+            {"actor_id": "pc", "name": "Aria", "kind": "pc"},
+        ],
+        actor_contexts={"npc": _context()},
+    )
+    session = store.get(opened["conversation_id"])
+    ingested = store.append_event(
+        session,
+        event={"type": "action", "speaker_actor_id": "pc", "content": "Grab the ledger."},
+        perceived_by=["npc", "pc"],
+        understood_by=["npc", "pc"],
+        activate_actor_ids=["npc"],
+        response_required_actor_ids={"npc"},
+    )
+    activation = ingested["activations"][0]
+    capsule = store.checkout(
+        store.get(opened["conversation_id"]),
+        activation_id=activation["activation_id"],
+        worker_handle=activation["worker_handle"],
+        cursor=0,
+        include_bootstrap=True,
+    )
+    proposal = _proposal(
+        conversation_id=opened["conversation_id"],
+        activation_id=activation["activation_id"],
+        actor_runtime_id=activation["actor_runtime_id"],
+        utterance_segments=[],
+        proposed_action={
+            "kind": "other",
+            "target_ref": "actor:pc",
+            "summary": "Resist the grab.",
+        },
+        resolution_requests=[
+            {
+                "kind": "contest",
+                "reason": "Resolve possession of the ledger.",
+                "actor_ids": ["npc", "pc"],
+            }
+        ],
+        visible_cues=[],
+    )
+    submitted = store.submit(
+        store.get(opened["conversation_id"]),
+        activation_id=activation["activation_id"],
+        worker_handle=activation["worker_handle"],
+        lease_id=capsule["lease_id"],
+        proposal=normalize_conversation_proposal(proposal),
+    )
+    assert submitted["status"] == "resolution_required"
+    resumed = store.append_event(
+        store.get(opened["conversation_id"]),
+        event={"type": "resolution", "content": "Mara keeps the ledger."},
+        perceived_by=["npc", "pc"],
+        understood_by=["npc", "pc"],
+        activate_actor_ids=["npc"],
+        response_required_actor_ids={"npc"},
+    )
+    assert resumed["activations"]
+    assert store.get(opened["conversation_id"])["status"] == "open"

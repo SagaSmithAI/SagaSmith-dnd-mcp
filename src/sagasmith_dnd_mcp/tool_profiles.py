@@ -65,7 +65,6 @@ CORE_TOOLS = frozenset(
         "campaign_query",
         "game_phase",
         "skill_query",
-        "npc_runtime_capabilities",
     }
 )
 

@@ -574,7 +574,9 @@ class ConversationStore:
         activate_actor_ids: list[str],
         response_required_actor_ids: set[str],
     ) -> dict[str, Any]:
-        if session["status"] != "open":
+        if session["status"] == "suspended" and event.get("type") == "resolution":
+            session["status"] = "open"
+        elif session["status"] != "open":
             raise ValueError(f"conversation is not open: {session['status']}")
         sequence = len(session["events"]) + 1
         saved = {
