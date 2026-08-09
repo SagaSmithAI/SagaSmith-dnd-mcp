@@ -6,12 +6,13 @@ The public authoring surface is exactly three facades:
 
 - `rulebook_draft(start/get/evidence/edit/finalize)`;
 - `module_draft(start/get/evidence/edit/finalize)`;
-- `content_pack(list/get/test/build/import/export/install/activate/deactivate/remove)`.
+- `content_pack(list/get/import/export/activate/deactivate/remove)`.
 
 The seven former import/review/Pack facades are not registered and have no
 compatibility aliases. Core and D&D perform the mechanical pass; Agent decisions
-remain revisioned with the editable draft and Skill, and only a completed draft
-may be finalized.
+remain revisioned with the editable draft and finalized Pack, while the Skill
+stores the review method and permissions. Only an Agent-confirmed draft may be
+finalized.
 
 The strict handover target is complete for the current parser implementation.
 The earlier version of this report incorrectly treated retirement of the first
@@ -99,8 +100,9 @@ The post-extraction lifecycle is now deliberately simpler:
    `rulebook_draft(finalize)` is the only transition to `reviewed`; it requires the
    latest revision, a complete disposition set, zero deterministic blockers,
    valid source-bound contracts, and an explicit completion note.
-5. Finalization compiles and saves the immutable Pack atomically. Pack testing,
-   installation, and activation remain separate `content_pack` operations.
+5. Finalization compiles, validates, and saves the immutable Pack atomically.
+   There is no public Pack test or install stage. Activation remains a separate,
+   explicit `content_pack` operation.
 
 The mandatory primary/critic state-machine gate was removed from draft
 authoring. A critic remains an optional review method, but one source-bound
@@ -188,10 +190,10 @@ The following are not parser failures and must not trigger new general rules:
 - ambiguous dependent actor ownership;
 - malformed visual statblocks requiring OCR or Agent review.
 
-Future promotion requires three distinct source layouts, one explicit
-counterexample, unchanged unrelated counts, non-decreasing source coverage, no
-silent drop, no review auto-promotion, and deterministic replay. A single-book
-failure remains fixture/review work.
+Future promotion requires evidence that the behavior is a deterministic
+cross-source invariant, explicit counterexample coverage, no silent drop or
+review auto-promotion, and deterministic replay. A single-book failure remains
+draft/Pack review work.
 
 ## Execution constraints
 
@@ -199,5 +201,5 @@ failure remains fixture/review work.
 - `standalone/` was not changed.
 - Original documents and source content were not rewritten.
 - No content pack was rebuilt or published.
-- No Git commit was created because the touched parser files already contained
-  substantial pre-existing user changes.
+- Changes are committed in focused phases so each boundary can be reviewed and
+  reverted independently.
