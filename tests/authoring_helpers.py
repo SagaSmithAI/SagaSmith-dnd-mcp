@@ -110,7 +110,7 @@ async def finalize_and_activate_module(
                 "payload": {
                     "campaign_id": campaign_id,
                     "kind": "module",
-                    "artifact": finalized["artifact"],
+                    "module_id": finalized["job"]["module_id"],
                     **({"progress_remaps": progress_remaps} if progress_remaps else {}),
                 },
                 "expected_revision": campaign["revision"],

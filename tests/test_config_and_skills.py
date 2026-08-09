@@ -461,11 +461,8 @@ def test_server_tool_profiles_are_complete_and_attached_to_tool_metadata(tmp_pat
         tools = await server.list_tools()
         by_name = {tool.name: tool for tool in tools}
         assert set(by_name) == set().union(*map(set, profile_catalog().values()))
-        assert by_name["module_draft"].meta["sagasmith_tool_profiles"] == ["lobby", "play"]
-        assert by_name["module_draft"].meta["sagasmith_tool_groups"] == [
-            "lobby.modules",
-            "play.scene_control",
-        ]
+        assert by_name["module_draft"].meta["sagasmith_tool_profiles"] == ["lobby"]
+        assert by_name["module_draft"].meta["sagasmith_tool_groups"] == ["lobby.modules"]
         assert by_name["rulebook_draft"].meta["sagasmith_tool_profiles"] == ["lobby"]
         assert by_name["content_pack"].meta["sagasmith_tool_profiles"] == ["lobby"]
         assert by_name["character_check"].meta["sagasmith_tool_profiles"] == ["play"]
@@ -569,7 +566,7 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
             == PROFILE_TOOL_LIMITS
             == {
                 "lobby": 60,
-                "play": 50,
+                "play": 49,
                 "combat": 49,
             }
         )
@@ -612,11 +609,8 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
         assert by_name["content_pack"].inputSchema["properties"]["action"]["enum"] == [
             "list",
             "get",
-            "test",
-            "build",
             "import",
             "export",
-            "install",
             "activate",
             "deactivate",
             "remove",
@@ -799,7 +793,8 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
         assert "rulebook_draft(start)" in capabilities["rulebook_import"]["stages"]
         assert "rulebook_draft(edit)" in capabilities["rulebook_import"]["stages"]
         assert "rulebook_draft(finalize)" in capabilities["rulebook_import"]["stages"]
-        assert "content_pack(install)" in capabilities["rulebook_import"]["stages"]
+        assert "content_pack(import)" in capabilities["rulebook_import"]["stages"]
+        assert "content_pack(install)" not in capabilities["rulebook_import"]["stages"]
         assert capabilities["rulebook_import"]["text_review"] == {
             "actions": [
                 "rulebook_draft(evidence)",

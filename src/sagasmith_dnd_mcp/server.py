@@ -11229,6 +11229,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "combat_target_mechanics_redacted": True,
                 "combat_active_state_guard": True,
                 "combat_spatial_reactions": True,
+                "combat_agent_spatial_facts": True,
                 "class_aware_prepared_spells": True,
                 "structured_activity_accounting": True,
                 "campaign_effect_timeline": True,
@@ -11292,10 +11293,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "rulebook_draft(finalize)",
                     "rule_search",
                     "rule_expand",
-                    "content_pack(test)",
                     "content_pack(import)",
                     "content_pack(export)",
-                    "content_pack(install)",
                     "content_pack(activate)",
                 ],
                 "normalizer": f"sagasmith-core/pdf-layout-v{DOCUMENT_NORMALIZER_VERSION}",
@@ -11370,8 +11369,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "page_end",
                 ],
                 "portable_package_lifecycle": {
-                    "import_result": "validated_inactive_draft",
-                    "installation": "content_pack(install)",
+                    "import_result": "installed_inactive_pack",
+                    "installation": "rulebook_draft(finalize) or content_pack(import)",
                     "activation": "content_pack(activate)",
                     "release_manifest_authority": "none",
                 },
@@ -41549,10 +41548,21 @@ Useful bounded guidance:
         data = facade_payload(payload)
         if not idempotency_key:
             raise ValueError("idempotency_key is required to finalize a rulebook draft")
+        confirmation = data.get("confirmation")
+        if not isinstance(confirmation, dict) or set(confirmation) != {"confirmed", "note"}:
+            raise ValueError("rulebook draft confirmation requires exactly confirmed and note")
+        if confirmation.get("confirmed") is not True:
+            raise ValueError("the Agent must explicitly confirm rulebook finalization")
+        confirmation_note = str(confirmation.get("note") or "").strip()
+        if not confirmation_note or len(confirmation_note) > 2000:
+            raise ValueError("rulebook draft confirmation.note must contain 1 to 2000 characters")
+        job = require_import_job(campaign_id, job_id, "rulebook")
+        if dict(job.result or {}).get("finalized_package"):
+            raise ValueError("a finalized rulebook draft is immutable")
         finalized = import_job_finalize_candidates(
             campaign_id,
             job_id,
-            str(data["note"]),
+            confirmation_note,
             principal_id,
             expected_revision,
             f"{idempotency_key}:freeze",
@@ -41566,11 +41576,69 @@ Useful bounded guidance:
             principal_id,
             f"{idempotency_key}:compile",
         )
+        if str(dict(compiled.get("draft") or {}).get("status") or "") != "validated":
+            raise ValueError("rulebook draft did not produce a valid immutable Pack")
+        pack_id = str(required(data["manifest"], "id"))
+        version = str(required(data["manifest"], "version"))
+        installed = rule_pack_install(pack_id, version)
+        archived = _content_pack_export_rule(
+            {
+                "campaign_id": campaign_id,
+                "pack_id": pack_id,
+                "version": version,
+                "metadata": {
+                    **dict(data.get("metadata") or {}),
+                    "agent_finalization": {
+                        "confirmed": True,
+                        "reviewer": principal_id,
+                        "note": confirmation_note,
+                    },
+                },
+                "include_package": data.get("include_package") is True,
+            },
+            principal_id,
+        )
+        compiled_job = require_import_job(campaign_id, job_id, "rulebook")
+        finalized_package = {
+            "artifact": archived["artifact"],
+            "summary": archived["summary"],
+            **({"package": archived["package"]} if "package" in archived else {}),
+            "confirmation": {
+                "confirmed": True,
+                "reviewer": principal_id,
+                "note": confirmation_note,
+            },
+        }
+        package_record_payload = {
+            "operation": "finalize_rulebook_package",
+            "job_id": job_id,
+            "pack_id": pack_id,
+            "version": version,
+            "artifact": archived["artifact"],
+        }
+        updated = import_jobs.record_result(
+            job_id,
+            {**dict(compiled_job.result or {}), "finalized_package": finalized_package},
+            state="compiled",
+            source_id=compiled_job.source_id,
+            expected_revision=compiled_job.revision,
+            idempotency_key=f"{idempotency_key}:package",
+            idempotency_write=IdempotencyWrite(
+                scope=f"import-job:{campaign_id}:{job_id}:{principal_id}",
+                payload=package_record_payload,
+                response=lambda value: {
+                    "job": import_job_view(value),
+                    **finalized_package,
+                },
+            ),
+        )
         return facade_result(
             action,
             {
-                "job": compiled["job"],
+                "job": import_job_view(updated),
                 "draft": compiled["draft"],
+                "installed": installed,
+                **finalized_package,
                 "finalization": finalized.get("finalization"),
             },
         )
@@ -41586,8 +41654,7 @@ Useful bounded guidance:
     ) -> dict[str, Any]:
         """Create, inspect, edit, and finalize one source-bound module draft."""
 
-        if action != "evidence":
-            require_facade_phase(campaign_id, f"module_draft({action})", PROFILE_LOBBY)
+        require_facade_phase(campaign_id, f"module_draft({action})", PROFILE_LOBBY)
         if action == "get":
             data = facade_payload(payload)
             result = (
@@ -42054,11 +42121,8 @@ Useful bounded guidance:
         action: Literal[
             "list",
             "get",
-            "test",
-            "build",
             "import",
             "export",
-            "install",
             "activate",
             "deactivate",
             "remove",
@@ -42068,146 +42132,70 @@ Useful bounded guidance:
         expected_revision: Annotated[int | None, Field(title="Revision")] = None,
         idempotency_key: Annotated[str | None, Field(title="Request Key")] = None,
     ) -> dict[str, Any]:
-        """Build and manage finalized rule, addon, preset, and module packs."""
+        """Inspect and manage finalized core-rules, addon, module, and preset Packs."""
 
         data = facade_payload(payload)
+        campaign_id = str(required(data, "campaign_id"))
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        require_facade_phase(campaign_id, f"content_pack({action})", PROFILE_LOBBY)
         kind = str(required(data, "kind"))
-        routing_kinds = {
-            "actor_preset",
-            "addon",
-            "archive",
-            "catalog",
-            "module",
-            "preset",
-            "rule",
-            "rule_archive",
-            "source",
-            "source_rule",
-        }
+        routing_kinds = {"core_rules", "addon", "module", "preset"}
         if kind not in routing_kinds:
-            raise ValueError("payload.kind must explicitly name a supported Pack or content route")
+            raise ValueError(
+                "payload.kind must be core_rules, addon, module, or preset"
+            )
         if action == "list":
-            if kind == "rule":
+            if kind == "core_rules":
                 result = rule_pack_list(data.get("pack_id"))
-            elif kind == "source":
-                result = rules.sources(
-                    system_id=data.get("system_id", DND5E.id),
-                    edition=data.get("edition"),
-                )
             elif kind == "addon":
-                if data.get("campaign_id"):
-                    result = _content_pack_addons(
-                        {key: value for key, value in data.items() if key != "kind"},
-                        principal_id,
-                    )
-                else:
-                    result = [asdict(item) for item in addons.list_versions(data.get("addon_id"))]
-            elif kind == "catalog":
-                catalog_payload = {key: value for key, value in data.items() if key != "kind"}
-                if "content_kind" in catalog_payload:
-                    catalog_payload["kind"] = catalog_payload.pop("content_kind")
-                result = content_catalog_list(
-                    str(required(catalog_payload, "campaign_id")),
-                    catalog_payload.get("kind"),
-                    str(catalog_payload.get("query") or ""),
-                    principal_id,
-                    catalog_payload.get("branch_id"),
-                    include_context=bool(catalog_payload.get("include_context", False)),
-                )
-            elif kind == "actor_preset":
-                result = _content_pack_actor_presets(
-                    {key: value for key, value in data.items() if key != "kind"},
-                    principal_id,
-                )
+                result = _content_pack_addons(data, principal_id)
             elif kind == "module":
-                result = module_list(str(required(data, "campaign_id")), principal_id)
+                result = module_list(campaign_id, principal_id)
             else:
-                raise ValueError(
-                    "payload.kind must be rule, source, addon, catalog, actor_preset, or module"
-                )
+                result = _content_pack_actor_presets(data, principal_id)
             return facade_result(action, result)
 
         if action == "get":
-            if kind == "rule":
+            archive_inputs = [
+                name for name in ("artifact", "source_path") if data.get(name) is not None
+            ]
+            if archive_inputs:
+                if len(archive_inputs) != 1:
+                    raise ValueError(
+                        "provide exactly one of payload.artifact or payload.source_path"
+                    )
+                package, _blobs = storage.read_content_archive(
+                    artifact=(str(data["artifact"]) if archive_inputs[0] == "artifact" else None),
+                    source_path=(
+                        data.get("source_path") if archive_inputs[0] == "source_path" else None
+                    ),
+                )
+                if str(package.get("kind") or "") != kind:
+                    raise ValueError("payload.kind does not match the finalized Pack archive")
+                result = package
+            elif kind == "core_rules":
                 result = rule_pack_inspect(
                     str(required(data, "pack_id")), str(required(data, "version"))
                 )
-            elif kind == "archive":
-                package, _blobs = storage.read_content_archive(
-                    artifact=(str(data["artifact"]) if data.get("artifact") else None),
-                    source_path=(data.get("source_path") if data.get("source_path") else None),
-                )
-                result = package
             elif kind == "addon":
-                result = _content_pack_addon(
-                    {key: value for key, value in data.items() if key != "kind"},
-                    principal_id,
-                )
-            elif kind == "source":
-                result = _content_pack_source_chunks(
-                    {key: value for key, value in data.items() if key != "kind"},
-                    principal_id,
-                )
-            elif kind == "actor_preset":
-                result = _content_pack_actor_presets(
-                    {key: value for key, value in data.items() if key != "kind"},
-                    principal_id,
-                )
+                result = _content_pack_addon(data, principal_id)
+            elif kind == "module":
+                module_id = str(required(data, "module_id"))
+                matches = [
+                    item
+                    for item in module_list(campaign_id, principal_id)
+                    if str(item.get("id") or item.get("module_id") or "") == module_id
+                ]
+                if len(matches) != 1:
+                    raise LookupError(module_id)
+                result = matches[0]
             else:
-                raise ValueError(
-                    "payload.kind must be rule, source, addon, actor_preset, or archive"
-                )
-            return facade_result(action, result)
-
-        if action == "test":
-            if kind != "rule":
-                raise ValueError("only rule packs expose declarative mechanic tests")
-            return facade_result(
-                action,
-                rule_pack_test(str(required(data, "pack_id")), str(required(data, "version"))),
-            )
-
-        if action == "build":
-            if kind == "rule":
-                result = rule_pack_draft(
-                    required(data, "manifest"),
-                    data.get("artifacts"),
-                    data.get("mechanics"),
-                    data.get("provenance"),
-                )
-            elif kind == "source_rule":
-                result = rule_pack_draft_from_source(
-                    str(required(data, "source_id")),
-                    required(data, "manifest"),
-                    data.get("artifacts"),
-                    data.get("mechanics"),
-                    data.get("provenance"),
-                )
-            elif kind == "preset":
-                result = _content_pack_build_preset(
-                    {key: value for key, value in data.items() if key != "kind"}, principal_id
-                )
-            elif kind == "addon":
-                result = _content_pack_build_addon(
-                    {key: value for key, value in data.items() if key != "kind"}, principal_id
-                )
-            elif kind == "rule_archive":
-                result = _content_pack_export_rule(
-                    {key: value for key, value in data.items() if key != "kind"}, principal_id
-                )
-            else:
-                raise ValueError(
-                    "payload.kind must be rule, source_rule, preset, addon, or rule_archive"
-                )
+                result = _content_pack_actor_presets(data, principal_id)
             return facade_result(action, result)
 
         if action == "import":
-            campaign_id = str(required(data, "campaign_id"))
             if not idempotency_key:
                 raise ValueError("idempotency_key is required for Pack import")
-            activate = data.get("activate", False)
-            if not isinstance(activate, bool):
-                raise ValueError("payload.activate must be a boolean")
             choices = [name for name in ("artifact", "source_path") if data.get(name) is not None]
             if len(choices) != 1:
                 raise ValueError("provide exactly one of payload.artifact or payload.source_path")
@@ -42219,10 +42207,8 @@ Useful bounded guidance:
                 "module": {"module"},
                 "addon": {"addon"},
                 "preset": {"preset"},
-                "rule": {"core_rules"},
+                "core_rules": {"core_rules"},
             }
-            if kind not in accepted_archive_kinds:
-                raise ValueError("Pack import kind must be module, addon, preset, or rule")
             package_kind = str(package.get("kind") or "")
             if package_kind not in accepted_archive_kinds[kind]:
                 raise ValueError(
@@ -42235,7 +42221,7 @@ Useful bounded guidance:
                     blobs,
                     principal_id=principal_id,
                     idempotency_key=idempotency_key,
-                    activate=activate,
+                    activate=False,
                     progress_remaps=data.get("progress_remaps"),
                 )
             else:
@@ -42249,40 +42235,25 @@ Useful bounded guidance:
             return facade_result(action, result)
 
         if action == "export":
-            if kind == "rule":
-                result = _content_pack_export_rule(
-                    {key: value for key, value in data.items() if key != "kind"},
-                    principal_id,
-                )
+            if kind == "core_rules":
+                result = _content_pack_export_rule(data, principal_id)
             elif kind == "module":
                 result = _facade_value(
                     module_query(
-                        str(required(data, "campaign_id")),
+                        campaign_id,
                         "package",
-                        {key: value for key, value in data.items() if key != "kind"},
+                        data,
                         principal_id,
                     )
                 )
             elif kind == "addon":
-                result = _content_pack_addon(
-                    {key: value for key, value in data.items() if key != "kind"},
-                    principal_id,
-                )
+                result = _content_pack_addon(data, principal_id)
             else:
-                raise ValueError("payload.kind must be rule, addon, or module")
-            return facade_result(action, result)
-
-        if action == "install":
-            if kind != "rule":
-                raise ValueError("portable addon and module packs are installed with import")
-            result = rule_pack_install(
-                str(required(data, "pack_id")), str(required(data, "version"))
-            )
+                result = _content_pack_actor_presets(data, principal_id)
             return facade_result(action, result)
 
         if action in {"activate", "deactivate"}:
-            campaign_id = str(required(data, "campaign_id"))
-            if kind == "rule":
+            if kind == "core_rules":
                 if action == "activate":
                     result = campaign_rule_pack_set(
                         campaign_id,
@@ -42307,26 +42278,86 @@ Useful bounded guidance:
             elif kind == "module" and action == "activate":
                 if not idempotency_key:
                     raise ValueError("idempotency_key is required for module activation")
-                choices = [
-                    name for name in ("artifact", "source_path") if data.get(name) is not None
-                ]
-                if len(choices) != 1:
-                    raise ValueError(
-                        "module activation requires exactly one Pack artifact or source_path"
+                module_id = str(required(data, "module_id"))
+                scene_map = {
+                    str(item.get("stable_key") or ""): str(item.get("scene_id") or "")
+                    for item in modules.scene_index(campaign_id, module_id=module_id)
+                }
+                normalized_remaps: list[dict[str, str]] = []
+                remap_targets: dict[str, str] = {}
+                raw_remaps = data.get("progress_remaps") or []
+                if not isinstance(raw_remaps, list):
+                    raise ValueError("payload.progress_remaps must be an array")
+                for index, raw in enumerate(raw_remaps):
+                    if not isinstance(raw, dict) or set(raw) != {
+                        "from_scene_id",
+                        "to_scene_key",
+                        "reason",
+                    }:
+                        raise ValueError(
+                            f"progress_remaps[{index}] requires exactly from_scene_id, "
+                            "to_scene_key, and reason"
+                        )
+                    source_scene_id = str(raw.get("from_scene_id") or "").strip()
+                    target_scene_key = str(raw.get("to_scene_key") or "").strip()
+                    reason = str(raw.get("reason") or "").strip()
+                    if (
+                        not source_scene_id
+                        or not target_scene_key
+                        or target_scene_key not in scene_map
+                        or not reason
+                        or len(reason) > 1000
+                        or source_scene_id in remap_targets
+                    ):
+                        raise ValueError(f"progress_remaps[{index}] is not a valid Agent remap")
+                    target_scene_id = scene_map[target_scene_key]
+                    remap_targets[source_scene_id] = target_scene_id
+                    normalized_remaps.append(
+                        {
+                            "from_scene_id": source_scene_id,
+                            "to_scene_key": target_scene_key,
+                            "to_scene_id": target_scene_id,
+                            "reason": reason,
+                            "resolver": "agent",
+                        }
                     )
-                package, blobs = storage.read_content_archive(
-                    artifact=(str(data["artifact"]) if choices[0] == "artifact" else None),
-                    source_path=(data.get("source_path") if choices[0] == "source_path" else None),
+                activation_payload = {
+                    "operation": "activate_module_pack",
+                    "module_id": module_id,
+                    "progress_remaps": normalized_remaps,
+                }
+                activation_scope = f"content-module-activation:{campaign_id}"
+                replay = idempotency.lookup(
+                    activation_scope,
+                    idempotency_key,
+                    activation_payload,
                 )
-                result = import_content_module_package(
-                    campaign_id,
-                    package,
-                    blobs,
-                    principal_id=principal_id,
-                    idempotency_key=idempotency_key,
-                    activate=True,
-                    progress_remaps=data.get("progress_remaps"),
+                activation = (
+                    dict(replay.response or {}).get("activation")
+                    if replay is not None
+                    else modules.activate_candidate(
+                        campaign_id,
+                        module_id,
+                        progress_remaps=remap_targets,
+                        idempotency_key=idempotency_key,
+                        idempotency_write=IdempotencyWrite(
+                            scope=activation_scope,
+                            payload=activation_payload,
+                            response=lambda value: {
+                                "activation": {
+                                    **dict(value),
+                                    "progress_remap_rulings": normalized_remaps,
+                                }
+                            },
+                        ),
+                    )
                 )
+                if replay is None:
+                    activation = {
+                        **dict(activation),
+                        "progress_remap_rulings": normalized_remaps,
+                    }
+                result = {"activation": activation}
             elif kind == "addon":
                 result = campaign_addon_set(
                     campaign_id,
@@ -42343,12 +42374,32 @@ Useful bounded guidance:
                 raise ValueError("this Pack kind does not support the requested activation action")
             return facade_result(action, result)
 
-        if kind != "rule":
-            raise ValueError("only unreferenced rule-pack versions support direct removal")
-        return facade_result(
-            action,
-            rule_pack_remove(str(required(data, "pack_id")), str(required(data, "version"))),
-        )
+        if kind in {"core_rules", "preset"}:
+            result = rule_pack_remove(
+                str(required(data, "pack_id")), str(required(data, "version"))
+            )
+        elif kind == "addon":
+            addon_id = str(required(data, "addon_id"))
+            version = str(required(data, "version"))
+            addons.remove_version(addon_id, version)
+            result = {"status": "removed", "addon_id": addon_id, "version": version}
+        else:
+            module_id = str(required(data, "module_id"))
+            module = next(
+                (
+                    item
+                    for item in module_list(campaign_id, principal_id)
+                    if str(item.get("id") or item.get("module_id") or "") == module_id
+                ),
+                None,
+            )
+            if module is None:
+                raise LookupError(module_id)
+            if bool(module.get("active")):
+                raise ValueError("an active module Pack cannot be removed")
+            modules.delete(campaign_id, module_id)
+            result = {"status": "removed", "module_id": module_id}
+        return facade_result(action, result)
 
     @public_tool()
     def campaign_rules(
@@ -42417,13 +42468,24 @@ Useful bounded guidance:
             "rest",
             "advancement",
             "content_package",
+            "catalog",
         ] = "list",
         payload: dict[str, Any] | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Read characters or inspect an allowlisted character document without inventing data."""
         data = facade_payload(payload)
-        if view == "get":
+        if view == "catalog":
+            campaign_id = str(required(data, "campaign_id"))
+            result = content_catalog_list(
+                campaign_id,
+                data.get("kind"),
+                str(data.get("query") or ""),
+                principal_id,
+                data.get("branch_id"),
+                include_context=bool(data.get("include_context", False)),
+            )
+        elif view == "get":
             result = character_get(required(data, "character_id"), principal_id)
         elif view == "content_package":
             data = facade_payload(payload)

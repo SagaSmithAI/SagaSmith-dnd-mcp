@@ -132,8 +132,16 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
         ],
         "finalize": [
             _variant(
-                ("job_id", "manifest", "mechanics", "note", "provenance"),
-                ("job_id", "note", "manifest"),
+                (
+                    "confirmation",
+                    "include_package",
+                    "job_id",
+                    "manifest",
+                    "mechanics",
+                    "metadata",
+                    "provenance",
+                ),
+                ("job_id", "confirmation", "manifest"),
             )
         ],
     },
@@ -299,16 +307,12 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                     "artifact_id",
                     "branch_id",
                     "campaign_id",
-                    "content_kind",
                     "edition",
-                    "include_context",
                     "include_package",
                     "kind",
                     "pack_id",
-                    "query",
-                    "system_id",
                 ),
-                ("kind",),
+                ("campaign_id", "kind"),
             )
         ],
         "get": [
@@ -316,53 +320,22 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                 (
                     "addon_id",
                     "artifact",
+                    "artifact_id",
                     "campaign_id",
+                    "edition",
                     "include_package",
                     "kind",
-                    "limit",
-                    "offset",
+                    "module_id",
                     "pack_id",
-                    "page",
-                    "query",
-                    "source_id",
                     "source_path",
                     "version",
                 ),
-                ("kind",),
-            ),
-            _variant(
-                ("kind", "limit", "offset", "page", "query", "source_id"),
-                ("kind", "source_id"),
-                when="source_id is present",
-            ),
-        ],
-        "test": [_variant(("kind", "pack_id", "version"), ("kind", "pack_id", "version"))],
-        "build": [
-            _variant(
-                (
-                    "allow_partial",
-                    "artifacts",
-                    "campaign_id",
-                    "catalog_review_decisions",
-                    "component_artifacts",
-                    "include_package",
-                    "kind",
-                    "manifest",
-                    "mechanics",
-                    "metadata",
-                    "pack_id",
-                    "portable_id",
-                    "provenance",
-                    "source_id",
-                    "version",
-                ),
-                ("kind",),
+                ("campaign_id", "kind"),
             )
         ],
         "import": [
             _variant(
                 (
-                    "activate",
                     "artifact",
                     "campaign_id",
                     "kind",
@@ -387,25 +360,25 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                     "narrative",
                     "pack_id",
                     "portable_id",
+                    "artifact_id",
+                    "edition",
                     "version",
                 ),
-                ("kind",),
+                ("campaign_id", "kind"),
             )
         ],
-        "install": [_variant(("kind", "pack_id", "version"), ("kind", "pack_id", "version"))],
         "activate": [
             _variant(
                 (
                     "addon_id",
-                    "artifact",
                     "branch_id",
                     "campaign_id",
                     "enabled",
                     "kind",
+                    "module_id",
                     "options",
                     "pack_id",
                     "progress_remaps",
-                    "source_path",
                     "version",
                 ),
                 ("campaign_id", "kind"),
@@ -418,6 +391,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                     "branch_id",
                     "campaign_id",
                     "kind",
+                    "module_id",
                     "options",
                     "pack_id",
                     "version",
@@ -425,7 +399,12 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                 ("campaign_id", "kind"),
             )
         ],
-        "remove": [_variant(("kind", "pack_id", "version"), ("kind", "pack_id", "version"))],
+        "remove": [
+            _variant(
+                ("addon_id", "campaign_id", "kind", "module_id", "pack_id", "version"),
+                ("campaign_id", "kind"),
+            )
+        ],
     },
     "campaign_query": {
         "list": [_variant(("status",))],
@@ -523,6 +502,12 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
         "receipts": [_variant(("limit", "mechanic_id"))],
     },
     "character_query": {
+        "catalog": [
+            _variant(
+                ("branch_id", "campaign_id", "include_context", "kind", "query"),
+                ("campaign_id",),
+            )
+        ],
         "get": [_variant(("character_id",), ("character_id",))],
         "batch": [
             _variant(

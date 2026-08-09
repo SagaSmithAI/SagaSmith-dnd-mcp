@@ -236,7 +236,6 @@ TOOL_GROUPS = (
         "Advance scenes, time, world effects, objective memory, actor knowledge, and saves.",
         "write",
         "campaign_change",
-        "module_draft",
         "module_set_progress",
         "memory_change",
         "memory_query",

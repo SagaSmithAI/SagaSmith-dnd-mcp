@@ -11,8 +11,6 @@ from typing import Any, Awaitable, Callable
 
 from aiohttp import web
 from sagasmith_core.access import LOCAL_SYSTEM_PRINCIPAL_ID
-from sagasmith_dnd.system import DND5E
-
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
 
@@ -220,19 +218,22 @@ class DndGateway:
         return await self.envelope(request, result, campaign_id)
 
     async def rule_sources(self, request: web.Request) -> web.Response:
+        campaign_id = request.query.get("campaign_id", "")
+        if not campaign_id:
+            raise web.HTTPBadRequest(text="campaign_id is required")
         result = await self.call(
             "content_pack",
             {
                 "action": "list",
                 "payload": {
-                    "kind": "source",
-                    "system_id": request.query.get("system_id", DND5E.id),
-                    "edition": request.query.get("edition"),
+                    "kind": "core_rules",
+                    "campaign_id": campaign_id,
+                    "pack_id": request.query.get("pack_id"),
                 },
                 "principal_id": self.principal(request),
             },
         )
-        return await self.envelope(request, result)
+        return await self.envelope(request, result, campaign_id)
 
     async def rule_search(self, request: web.Request) -> web.Response:
         result = await self.call(

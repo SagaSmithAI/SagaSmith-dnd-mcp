@@ -112,7 +112,10 @@ def test_rulebook_start_edit_finalize_builds_an_immutable_pack(tmp_path: Path) -
                 "action": "finalize",
                 "payload": {
                     "job_id": job["id"],
-                    "note": "All mechanically extracted candidates were explicitly reviewed.",
+                    "confirmation": {
+                        "confirmed": True,
+                        "note": "All mechanically extracted candidates were explicitly reviewed.",
+                    },
                     "manifest": {
                         "id": "dnd5e.three-tool-rules",
                         "version": "1.0.0",
@@ -128,6 +131,8 @@ def test_rulebook_start_edit_finalize_builds_an_immutable_pack(tmp_path: Path) -
         )
         assert finalized["job"]["state"] == "compiled"
         assert finalized["draft"]["status"] == "validated"
+        assert finalized["installed"]["status"] == "installed"
+        assert finalized["confirmation"]["reviewer"] == "system:local"
 
     asyncio.run(exercise())
 
@@ -297,7 +302,11 @@ def test_module_start_finalize_writes_a_portable_module_pack(tmp_path: Path) -> 
             "content_pack",
             {
                 "action": "get",
-                "payload": {"kind": "archive", "artifact": finalized["artifact"]},
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "kind": "module",
+                    "artifact": finalized["artifact"],
+                },
             },
         )
         assert inspected["id"] == "dnd5e.module.three-tool"
@@ -307,7 +316,10 @@ def test_module_start_finalize_writes_a_portable_module_pack(tmp_path: Path) -> 
                 "content_pack",
                 {
                     "action": "get",
-                    "payload": {"artifact": finalized["artifact"]},
+                    "payload": {
+                        "campaign_id": campaign["id"],
+                        "artifact": finalized["artifact"],
+                    },
                 },
             )
         with pytest.raises(Exception, match="does not match archive kind module"):

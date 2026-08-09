@@ -16,6 +16,6 @@ MAX_INPUT_SCHEMA_BYTES = BASELINE_INPUT_SCHEMA_BYTES
 
 PROFILE_TOOL_LIMITS = {
     "lobby": 60,
-    "play": 50,
+    "play": 49,
     "combat": 49,
 }
