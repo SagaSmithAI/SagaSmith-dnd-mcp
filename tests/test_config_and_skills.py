@@ -70,7 +70,7 @@ def test_config_can_share_only_content_addressed_document_cache(tmp_path: Path) 
     assert first.normalized_rulebooks_dir == second.normalized_rulebooks_dir
     assert first.normalized_modules_dir == second.normalized_modules_dir
     assert first.database_path != second.database_path
-    assert first.portable_packages_dir != second.portable_packages_dir
+    assert first.content_packages_dir != second.content_packages_dir
 
 
 def test_storage_accepts_only_the_unified_content_archive_extension(tmp_path: Path) -> None:

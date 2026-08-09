@@ -63,7 +63,7 @@ class SagaSmithStorage:
                 "modules": self._collection_status("modules"),
             },
             "artifacts_dir": str(self.config.artifacts_dir),
-            "portable_packages_dir": str(self.config.portable_packages_dir),
+            "content_packages_dir": str(self.config.content_packages_dir),
             "rules": {
                 "auto_seed": self.config.auto_seed_rules,
                 "seed_root": str(self.config.dnd_skills_dir / "full" / "skills" / "dnd-dm" / "srd"),
@@ -375,8 +375,8 @@ class SagaSmithStorage:
         checksum = str(package["checksum"])
         safe_id = re.sub(r"[^A-Za-z0-9._-]+", "-", str(package["id"])).strip("-.")
         filename = f"{checksum[:12]}-{safe_id}.sagasmith-pack"
-        target = (self.config.portable_packages_dir / filename).resolve()
-        if target.parent != self.config.portable_packages_dir.resolve():
+        target = (self.config.content_packages_dir / filename).resolve()
+        if target.parent != self.config.content_packages_dir.resolve():
             raise ValueError("invalid content package archive artifact name")
         if not target.exists():
             target.write_bytes(content)
@@ -400,8 +400,8 @@ class SagaSmithStorage:
         if (artifact is None) == (source_path is None):
             raise ValueError("provide exactly one of artifact or source_path")
         if artifact is not None:
-            target = (self.config.portable_packages_dir / artifact).resolve()
-            if target.parent != self.config.portable_packages_dir.resolve():
+            target = (self.config.content_packages_dir / artifact).resolve()
+            if target.parent != self.config.content_packages_dir.resolve():
                 raise ValueError("invalid managed content package artifact")
         else:
             target = Path(source_path or "").expanduser().resolve()
@@ -417,7 +417,7 @@ class SagaSmithStorage:
             raise ValueError("content package exceeds the 4 GiB safety limit")
         return loads_content_archive(target.read_bytes())
 
-    def store_portable_module_asset(
+    def store_content_module_asset(
         self, module_id: str, asset: dict[str, Any], content: bytes
     ) -> str:
         """Materialize one checksum-verified archive blob beneath module storage."""
@@ -426,19 +426,19 @@ class SagaSmithStorage:
             raise ValueError("invalid module id for portable asset")
         checksum = hashlib.sha256(content).hexdigest()
         if checksum != asset.get("checksum") or len(content) != asset.get("size"):
-            raise ValueError("portable module asset checksum or size mismatch")
+            raise ValueError("content module asset checksum or size mismatch")
         safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", str(asset.get("name") or "asset")).strip("-.")
         directory = (self.config.module_assets_dir / module_id).resolve()
         if directory.parent != self.config.module_assets_dir.resolve():
-            raise ValueError("invalid portable module asset directory")
+            raise ValueError("invalid content module asset directory")
         directory.mkdir(parents=True, exist_ok=True)
         target = (directory / f"{checksum[:12]}-{safe_name or 'asset'}").resolve()
         if target.parent != directory:
-            raise ValueError("invalid portable module asset name")
+            raise ValueError("invalid content module asset name")
         if not target.exists():
             target.write_bytes(content)
         elif file_sha256(target) != checksum:
-            raise RuntimeError("managed portable module asset checksum mismatch")
+            raise RuntimeError("managed content module asset checksum mismatch")
         return str(target)
 
     def store_rendered_module_page(

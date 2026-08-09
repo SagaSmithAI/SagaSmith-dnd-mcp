@@ -4167,16 +4167,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         artifacts: list[dict[str, Any]] | None,
         mechanics: list[dict[str, Any]] | None,
         provenance: dict[str, Any] | None,
-        allow_portable_package_provenance: bool = False,
     ) -> dict[str, Any]:
-        if not allow_portable_package_provenance and any(
-            "portable_package" in candidate
-            for candidate in (
-                dict(provenance or {}),
-                dict(manifest.get("provenance") or {}),
-            )
-        ):
-            raise ValueError("portable_package provenance is reserved for validated package import")
         artifact_values = list(artifacts or [])
         mechanic_values = list(mechanics or [])
         manifest_value, native_errors = bind_native_mechanic_contract(
@@ -4503,7 +4494,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             operation="portable rule-pack export",
         )
         definition["provenance"].pop("import_job_id", None)
-        definition["provenance"].pop("portable_package", None)
         source_ids: set[str] = set()
         chunk_ids: set[str] = set()
         uuid_pattern = re.compile(
@@ -4810,7 +4800,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             normalized,
             blobs,
             activate=False,
-            asset_writer=storage.store_portable_module_asset,
+            asset_writer=storage.store_content_module_asset,
         )
         actor_map: dict[str, str] = {}
         binding_ids = []
@@ -11160,7 +11150,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "page_start",
                     "page_end",
                 ],
-                "portable_source_citation_fields": [
+                "archived_source_citation_fields": [
                     "source_key",
                     "source_checksum",
                     "chunk_key",
@@ -11168,7 +11158,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "page_start",
                     "page_end",
                 ],
-                "portable_package_lifecycle": {
+                "content_package_lifecycle": {
                     "import_result": "installed_inactive_pack",
                     "installation": "rulebook_draft(finalize) or content_pack(import)",
                     "activation": "content_pack(activate)",

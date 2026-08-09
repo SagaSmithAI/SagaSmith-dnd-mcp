@@ -163,8 +163,8 @@ class McpConfig:
         return self.artifacts_dir / "module-assets"
 
     @property
-    def portable_packages_dir(self) -> Path:
-        return self.artifacts_dir / "portable-packages"
+    def content_packages_dir(self) -> Path:
+        return self.artifacts_dir / "content-packages"
 
     def prepare(self) -> None:
         for directory in (
@@ -172,7 +172,7 @@ class McpConfig:
             self.chroma_path,
             self.modules_dir,
             self.module_assets_dir,
-            self.portable_packages_dir,
+            self.content_packages_dir,
             self.rulebooks_dir,
             self.normalized_rulebooks_dir,
             self.normalized_modules_dir,
