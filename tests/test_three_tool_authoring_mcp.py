@@ -124,6 +124,7 @@ def test_rulebook_start_edit_finalize_builds_an_immutable_pack(tmp_path: Path) -
                         "system_id": "dnd5e",
                         "editions": ["2014"],
                     },
+                    "include_package": True,
                 },
                 "expected_revision": edited["job"]["revision"],
                 "idempotency_key": "draft-finalize",
@@ -131,13 +132,23 @@ def test_rulebook_start_edit_finalize_builds_an_immutable_pack(tmp_path: Path) -
         )
         assert finalized["job"]["state"] == "compiled"
         assert finalized["draft"]["status"] == "validated"
-        assert finalized["installed"]["status"] == "installed"
+        assert finalized["stored"]["status"] == "stored"
+        assert "installed" not in finalized
         assert finalized["confirmation"]["reviewer"] == "system:local"
+        authoring_review = finalized["package"]["metadata"]["authoring_review"]
+        assert authoring_review["draft_kind"] == "rulebook"
+        assert authoring_review["candidate_set_fingerprint"]
+        assert [item["id"] for item in authoring_review["candidate_decisions"]] == [
+            item["id"] for item in job["candidates"]
+        ]
+        assert {
+            item["disposition"] for item in authoring_review["candidate_decisions"]
+        } == {"exclude"}
 
     asyncio.run(exercise())
 
 
-def test_module_start_finalize_writes_a_portable_module_pack(tmp_path: Path) -> None:
+def test_module_start_finalize_writes_a_finalized_module_pack(tmp_path: Path) -> None:
     import_root = tmp_path / "imports"
     import_root.mkdir()
     source = import_root / "module.md"
@@ -296,6 +307,12 @@ def test_module_start_finalize_writes_a_portable_module_pack(tmp_path: Path) -> 
         assert finalized["job"]["state"] == "compiled"
         assert finalized["confirmation"]["reviewer"] == "system:local"
         assert finalized["package"]["metadata"]["agent_finalization"] == finalized["confirmation"]
+        assert finalized["package"]["metadata"]["authoring_review"] == {
+            "schema_version": 1,
+            "draft_kind": "module",
+            "draft_revision": edited["job"]["revision"],
+            "package_edit_history": edited["job"]["result"]["pack_edit_history"],
+        }
         assert finalized["package"]["kind"] == "module"
         inspected = await _call(
             server,

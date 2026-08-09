@@ -12654,7 +12654,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if replay is not None:
             return replay
         job = require_import_job(campaign_id, job_id, "rulebook")
-        if job.state != "review_required":
+        if job.state not in {"extracted", "review_required"} or (
+            job.state == "extracted" and bool(job.candidates)
+        ):
             raise ValueError("only an editable rulebook draft may be finalized")
         if not job.source_id:
             raise ValueError("rulebook candidates need an indexed source before finalization")
@@ -41440,6 +41442,41 @@ boundary.
             expected_revision,
             f"{idempotency_key}:freeze",
         )
+        finalized_job = dict(finalized["job"])
+        review_finalization = dict(
+            dict(finalized_job.get("result") or {}).get("review_finalization") or {}
+        )
+        authoring_review = {
+            "schema_version": 1,
+            "draft_kind": "rulebook",
+            "source_checksum": str(review_finalization.get("source_checksum") or ""),
+            "parser_profile": str(review_finalization.get("parser_profile") or ""),
+            "parser_version": str(review_finalization.get("parser_version") or ""),
+            "candidate_set_fingerprint": str(
+                review_finalization.get("candidate_set_fingerprint") or ""
+            ),
+            "candidate_decisions": [
+                {
+                    "id": str(candidate.get("id") or ""),
+                    "review_status": str(candidate.get("review_status") or ""),
+                    "disposition": str(
+                        candidate.get("disposition")
+                        or (
+                            "include"
+                            if candidate.get("review_status") == "accepted"
+                            else "exclude"
+                        )
+                    ),
+                    "original_fingerprint": str(
+                        candidate.get("original_fingerprint") or ""
+                    ),
+                    "review_note": str(candidate.get("review_note") or ""),
+                    "draft_issues": deepcopy(candidate.get("draft_issues") or []),
+                    "edit_history": deepcopy(candidate.get("edit_history") or []),
+                }
+                for candidate in finalized_job.get("candidates") or []
+            ],
+        }
         compiled = rule_import_job_compile(
             campaign_id,
             job_id,
@@ -41453,7 +41490,8 @@ boundary.
             raise ValueError("rulebook draft did not produce a valid immutable Pack")
         pack_id = str(required(data["manifest"], "id"))
         version = str(required(data["manifest"], "version"))
-        installed = rule_pack_install(pack_id, version)
+        stored_pack = rule_pack_install(pack_id, version)
+        stored = {**dict(stored_pack), "status": "stored"}
         archived = _content_pack_export_rule(
             {
                 "campaign_id": campaign_id,
@@ -41466,6 +41504,7 @@ boundary.
                         "reviewer": principal_id,
                         "note": confirmation_note,
                     },
+                    "authoring_review": authoring_review,
                 },
                 "include_package": data.get("include_package") is True,
             },
@@ -41510,7 +41549,7 @@ boundary.
             {
                 "job": import_job_view(updated),
                 "draft": compiled["draft"],
-                "installed": installed,
+                "stored": stored,
                 **finalized_package,
                 "finalization": finalized.get("finalization"),
             },
@@ -41883,6 +41922,14 @@ boundary.
         final_data["metadata"] = {
             **dict(final_data.get("metadata") or {}),
             "agent_finalization": agent_confirmation,
+            "authoring_review": {
+                "schema_version": 1,
+                "draft_kind": "module",
+                "draft_revision": int(job.revision),
+                "package_edit_history": deepcopy(
+                    dict(job.result or {}).get("pack_edit_history") or []
+                ),
+            },
         }
         packaged = export_module_pack(
             campaign_id,
