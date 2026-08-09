@@ -2,11 +2,12 @@ import asyncio
 from pathlib import Path
 
 import pytest
-
 from sagasmith_dnd.character_schema import default_character_sheet
 from sagasmith_dnd.random_stream import CampaignRandomStream, use_random_stream
+
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
+
 
 async def _call(server, name: str, arguments: dict):
     _, result = await server.call_tool(name, arguments)
