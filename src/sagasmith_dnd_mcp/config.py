@@ -166,6 +166,10 @@ class McpConfig:
     def content_packages_dir(self) -> Path:
         return self.artifacts_dir / "content-packages"
 
+    @property
+    def npc_conversations_dir(self) -> Path:
+        return self.home / "runtime" / "npc-conversations"
+
     def prepare(self) -> None:
         for directory in (
             self.database_path.parent,
@@ -173,6 +177,7 @@ class McpConfig:
             self.modules_dir,
             self.module_assets_dir,
             self.content_packages_dir,
+            self.npc_conversations_dir,
             self.rulebooks_dir,
             self.normalized_rulebooks_dir,
             self.normalized_modules_dir,

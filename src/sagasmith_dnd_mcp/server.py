@@ -476,6 +476,12 @@ from sagasmith_dnd_mcp.facade_contracts import (
     action_payload_contract,
     validate_action_payload,
 )
+from sagasmith_dnd_mcp.npc_conversations import (
+    ACTIVE_CONVERSATION_STATUSES,
+    NPC_CONVERSATION_CONTRACT,
+    ConversationStore,
+    normalize_conversation_proposal,
+)
 from sagasmith_dnd_mcp.npc_turns import (
     NPC_NARRATIVE_ACTION_KINDS,
     NPC_TURN_BUNDLE_SCHEMA_VERSION,
@@ -3630,6 +3636,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     )
     skill_read_tracker = SkillReadTracker()
     native_rule_providers = load_native_rule_providers()
+    npc_conversations = ConversationStore(config.npc_conversations_dir)
 
     def rule_document_options(
         checksum: str | None = None,
@@ -29455,6 +29462,577 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             context=result,
         )
         return result
+
+    def npc_conversation_require_fresh(session: dict[str, Any]) -> None:
+        if session.get("status") == "stale":
+            raise ValueError("SESSION_STALE: close or abort and open a new conversation")
+        if session.get("status") not in ACTIVE_CONVERSATION_STATUSES:
+            raise ValueError(f"conversation is not active: {session.get('status')}")
+        campaign = campaigns.get(str(session["campaign_id"]))
+        authority = dict(session["authority"])
+        reasons = []
+        if campaign.revision != int(authority["campaign_revision"]):
+            reasons.append("campaign_revision")
+        current_branch_id = readable_branch(
+            str(session["campaign_id"]), str(session["branch_id"]), str(session["principal_id"])
+        )
+        if current_branch_id != session["branch_id"]:
+            reasons.append("branch_id")
+        if npc_turn_latest_event_sequence(
+            str(session["campaign_id"]), str(session["branch_id"])
+        ) != int(authority["latest_event_sequence"]):
+            reasons.append("latest_event_sequence")
+        for actor_id, expected_revision in dict(authority["actor_revisions"]).items():
+            try:
+                actor = characters.get(str(actor_id))
+            except LookupError:
+                reasons.append(f"actor:{actor_id}:missing")
+                continue
+            if actor.revision != int(expected_revision):
+                reasons.append(f"actor:{actor_id}:revision")
+        if reasons:
+            session["status"] = "stale"
+            session["stale_reasons"] = reasons
+            session["updated_at_ns"] = time.time_ns()
+            npc_conversations.save(session)
+            raise ValueError(
+                "SESSION_STALE: authoritative state changed: " + ", ".join(reasons)
+            )
+
+    def npc_conversation_participant_languages(actor: Any) -> set[str]:
+        sheet = validate_character_sheet(actor.sheet)
+        return {
+            str(item).strip().casefold()
+            for item in list(dict(sheet.get("traits") or {}).get("languages") or [])
+            if str(item).strip()
+        }
+
+    def npc_conversation_private_context(bundle: dict[str, Any]) -> dict[str, Any]:
+        context = {
+            key: deepcopy(value) for key, value in bundle.items() if key != "bundle_receipt"
+        }
+        context["purpose"] = "npc_conversation"
+        context["constraints"] = {
+            **dict(context["constraints"]),
+            "output_contract": "npc-conversation-proposal.v2",
+        }
+        context["delegation"] = {
+            "schema_version": 1,
+            "contract": "sagasmith.delegation.v1",
+            "task": "propose_npc_conversation_turn",
+            "execution": "persistent_actor_worker",
+            "inherit_agent_history": False,
+            "tools_exposed": False,
+            "persist_worker_session": True,
+            "authoritative_result": False,
+            "output_contract": "npc-conversation-proposal.v2",
+        }
+        actor_id = str(dict(context["actor"])["id"])
+        commitments = [
+            asdict(item)
+            for item in memories.list_for_subject_refs(
+                str(dict(context["authority"])["campaign_id"]),
+                subject_refs={f"actor:{actor_id}"},
+                predicates={"commitment"},
+                kinds={"actor_state"},
+                branch_id=str(dict(context["authority"])["branch_id"]),
+            )
+        ]
+        context["commitments"] = commitments
+        return context
+
+    @public_tool()
+    def npc_runtime_capabilities() -> dict[str, Any]:
+        """Describe the host-side subagent contract for multi-turn NPC conversations."""
+
+        return {
+            "schema_version": 1,
+            "contract": NPC_CONVERSATION_CONTRACT,
+            "execution_mode": "client_subagents_required",
+            "proposal_contract": "npc-conversation-proposal.v2",
+            "actor_scoped_worker_handles": True,
+            "incremental_actor_context": True,
+            "durable_semantic_journal": True,
+            "server_managed_inference": False,
+            "server_managed_kv": False,
+            "minimum_host_capabilities": [
+                "isolated_actor_workers",
+                "persistent_worker_context",
+                "structured_output",
+                "actor_scoped_dispatch",
+                "worker_disposal",
+            ],
+        }
+
+    @public_tool()
+    def conversation_open(
+        campaign_id: str,
+        participant_actor_ids: list[str],
+        scope_id: str = "party",
+        query: str = "",
+        branch_id: str | None = None,
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+    ) -> dict[str, Any]:
+        """Open one Play conversation and materialize each NPC's private runtime once."""
+
+        membership = access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        require_facade_phase(campaign_id, "conversation_open", PROFILE_PLAY)
+        branch_id = require_current_branch(campaign_id, branch_id)
+        actor_ids = [str(item).strip() for item in participant_actor_ids]
+        if not actor_ids or any(not item for item in actor_ids):
+            raise ValueError("participant_actor_ids must contain at least one actor")
+        if len(actor_ids) != len(set(actor_ids)):
+            raise ValueError("participant_actor_ids must be unique")
+        if len(actor_ids) > 20:
+            raise ValueError("a conversation supports at most 20 participants")
+        actors = []
+        for actor_id in actor_ids:
+            actor = characters.get(actor_id)
+            if actor.campaign_id != campaign_id:
+                raise ValueError("every conversation participant must belong to the campaign")
+            actors.append(actor)
+        npc_actors = [
+            actor for actor in actors if actor.character_type in NON_PLAYER_CHARACTER_TYPES
+        ]
+        if not npc_actors:
+            raise ValueError("conversation requires at least one NPC or monster")
+
+        actor_contexts: dict[str, dict[str, Any]] = {}
+        first_bundle: dict[str, Any] | None = None
+        for actor in npc_actors:
+            bundle = continuity_context(
+                campaign_id=campaign_id,
+                query=query,
+                actor_id=actor.id,
+                scope_id=scope_id,
+                audience="dm",
+                purpose="npc_turn",
+                interlocutor_actor_ids=[item for item in actor_ids if item != actor.id],
+                stimulus=None,
+                branch_id=branch_id,
+                principal_id=principal_id,
+            )
+            first_bundle = first_bundle or bundle
+            actor_contexts[actor.id] = npc_conversation_private_context(bundle)
+        assert first_bundle is not None
+        first_authority = dict(first_bundle["authority"])
+        scene = dict(first_bundle.get("scene") or {})
+        authority = {
+            "campaign_revision": int(first_authority["campaign_revision"]),
+            "head_snapshot_id": first_authority.get("head_snapshot_id"),
+            "latest_event_sequence": int(first_authority["latest_event_sequence"]),
+            "scene_state_version": int(first_authority.get("scene_state_version") or 0),
+            "actor_revisions": {actor.id: actor.revision for actor in actors},
+            "principal_fingerprint": dict(first_authority["host_context_binding"])[
+                "principal_fingerprint"
+            ],
+        }
+        opened = npc_conversations.open(
+            campaign_id=campaign_id,
+            branch_id=branch_id,
+            principal_id=principal_id,
+            scope_id=scope_id,
+            scene_id=str(scene.get("scene_id") or ""),
+            authority=authority,
+            participants=[
+                {
+                    "actor_id": actor.id,
+                    "name": actor.name,
+                    "kind": actor.character_type,
+                    "npc_runtime": actor.id in actor_contexts,
+                }
+                for actor in actors
+            ],
+            actor_contexts=actor_contexts,
+        )
+        opened["role"] = membership.role
+        opened["next_step"] = (
+            "Append a player-observable event with conversation_ingest, then dispatch each "
+            "returned activation to an isolated NPC worker."
+        )
+        return opened
+
+    @public_tool()
+    def conversation_status(
+        campaign_id: str,
+        conversation_id: str,
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+    ) -> dict[str, Any]:
+        """Read public orchestration state without exposing any NPC private capsule."""
+
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        session = npc_conversations.require_owner(
+            conversation_id, campaign_id=campaign_id, principal_id=principal_id
+        )
+        if session.get("status") in {"open", "suspended"}:
+            npc_conversation_require_fresh(session)
+        result = npc_conversations.public_status(session)
+        if session.get("status") == "stale":
+            result["stale_reasons"] = list(session.get("stale_reasons") or [])
+        return result
+
+    @public_tool()
+    def conversation_ingest(
+        campaign_id: str,
+        conversation_id: str,
+        event: dict[str, Any],
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+    ) -> dict[str, Any]:
+        """Append one public stimulus and derive hearing, understanding, and activations."""
+
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        session = npc_conversations.require_owner(
+            conversation_id, campaign_id=campaign_id, principal_id=principal_id
+        )
+        npc_conversation_require_fresh(session)
+        raw = dict(event or {})
+        allowed_fields = {
+            "type",
+            "speaker_actor_id",
+            "content",
+            "language",
+            "delivery",
+            "declared_target_actor_ids",
+        }
+        if unknown := set(raw) - allowed_fields:
+            raise ValueError(f"conversation event has unknown fields: {sorted(unknown)}")
+        event_type = str(raw.get("type") or "speech").strip()
+        if event_type not in {"speech", "action", "scene_prompt", "resolution"}:
+            raise ValueError(
+                "conversation event type must be speech, action, scene_prompt, or resolution"
+            )
+        speaker_actor_id = str(raw.get("speaker_actor_id") or "").strip()
+        if speaker_actor_id and speaker_actor_id not in session["participant_ids"]:
+            raise ValueError("conversation speaker must be a participant")
+        if event_type in {"speech", "action"} and not speaker_actor_id:
+            raise ValueError("speech and action events require a participant speaker")
+        content = str(raw.get("content") or "").strip()
+        if not content or len(content) > 6_000:
+            raise ValueError("conversation event content must contain 1 to 6000 characters")
+        target_actor_ids = [
+            str(item).strip() for item in raw.get("declared_target_actor_ids") or []
+        ]
+        if len(target_actor_ids) != len(set(target_actor_ids)) or any(
+            item not in session["participant_ids"] for item in target_actor_ids
+        ):
+            raise ValueError("declared conversation targets must be unique participants")
+        language = str(raw.get("language") or "").strip()
+        delivery = str(raw.get("delivery") or "normal").strip()
+        if delivery not in {"normal", "quiet", "whisper", "shout"}:
+            raise ValueError("conversation delivery must be normal, quiet, whisper, or shout")
+        perceived_by = (
+            sorted({speaker_actor_id, *target_actor_ids})
+            if delivery == "whisper"
+            else list(session["participant_ids"])
+        )
+        perceived_by = [item for item in perceived_by if item]
+        understood_by = []
+        for actor_id in perceived_by:
+            actor = characters.get(actor_id)
+            languages = npc_conversation_participant_languages(actor)
+            if (
+                event_type != "speech"
+                or not language
+                or language.casefold() in languages
+                or (language.casefold() == "common" and not languages)
+            ):
+                understood_by.append(actor_id)
+        npc_ids = set(session["actor_runtimes"])
+        activate_actor_ids = sorted((set(perceived_by) & npc_ids) - {speaker_actor_id})
+        result = npc_conversations.append_event(
+            session,
+            event={
+                "type": event_type,
+                "speaker_actor_id": speaker_actor_id,
+                "content": content,
+                "language": language,
+                "delivery": delivery,
+                "declared_target_actor_ids": target_actor_ids,
+            },
+            perceived_by=perceived_by,
+            understood_by=understood_by,
+            activate_actor_ids=activate_actor_ids,
+            response_required_actor_ids=set(target_actor_ids) & npc_ids,
+        )
+        result["conversation_id"] = conversation_id
+        return result
+
+    @public_tool()
+    def conversation_activations(
+        campaign_id: str,
+        conversation_id: str,
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+    ) -> dict[str, Any]:
+        """List pending actor-scoped work without exposing private character context."""
+
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        session = npc_conversations.require_owner(
+            conversation_id, campaign_id=campaign_id, principal_id=principal_id
+        )
+        npc_conversation_require_fresh(session)
+        return {
+            "conversation_id": conversation_id,
+            "activations": npc_conversations.list_activations(session),
+        }
+
+    @public_tool()
+    def npc_activation_checkout(
+        campaign_id: str,
+        conversation_id: str,
+        activation_id: str,
+        worker_handle: str,
+        cursor: int = 0,
+        include_bootstrap: bool = True,
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+    ) -> dict[str, Any]:
+        """Lease one private actor capsule to the matching isolated NPC subagent."""
+
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        session = npc_conversations.require_owner(
+            conversation_id, campaign_id=campaign_id, principal_id=principal_id
+        )
+        npc_conversation_require_fresh(session)
+        return npc_conversations.checkout(
+            session,
+            activation_id=activation_id,
+            worker_handle=worker_handle,
+            cursor=cursor,
+            include_bootstrap=include_bootstrap,
+        )
+
+    @public_tool()
+    def npc_activation_submit(
+        campaign_id: str,
+        conversation_id: str,
+        activation_id: str,
+        worker_handle: str,
+        lease_id: str,
+        proposal: dict[str, Any],
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+    ) -> dict[str, Any]:
+        """Validate one NPC proposal and return only a server-derived publication."""
+
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        session = npc_conversations.require_owner(
+            conversation_id, campaign_id=campaign_id, principal_id=principal_id
+        )
+        npc_conversation_require_fresh(session)
+        return npc_conversations.submit(
+            session,
+            activation_id=activation_id,
+            worker_handle=worker_handle,
+            lease_id=lease_id,
+            proposal=normalize_conversation_proposal(proposal),
+        )
+
+    def npc_conversation_select_indexes(
+        values: list[dict[str, Any]], indexes: Any, field: str
+    ) -> list[dict[str, Any]]:
+        if not isinstance(indexes, list) or len(indexes) != len(set(indexes)):
+            raise ValueError(f"{field} must be a unique integer list")
+        selected = []
+        for index in indexes:
+            if type(index) is not int or not 0 <= index < len(values):
+                raise ValueError(f"{field} contains an invalid index: {index}")
+            selected.append(deepcopy(values[index]))
+        return selected
+
+    @public_tool()
+    def conversation_close(
+        campaign_id: str,
+        conversation_id: str,
+        accepted_working_deltas: dict[str, Any] | None = None,
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically commit the exact public transcript and accepted long-term deltas."""
+
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for conversation_close")
+        session = npc_conversations.require_owner(
+            conversation_id, campaign_id=campaign_id, principal_id=principal_id
+        )
+        if session.get("status") == "closed":
+            if session.get("close_idempotency_key") != idempotency_key:
+                raise ValueError("conversation is already closed with another idempotency key")
+            return deepcopy(session["commit_result"])
+        npc_conversation_require_fresh(session)
+        if session.get("status") != "open":
+            raise ValueError("conversation must resolve suspended work before closing")
+        if any(
+            item.get("status") in {"pending", "claimed"}
+            for item in session["activations"].values()
+        ):
+            raise ValueError("conversation has unfinished NPC activations")
+        selections = dict(accepted_working_deltas or {})
+        if unknown := set(selections) - set(session["actor_runtimes"]):
+            raise ValueError(f"accepted deltas include actors outside the conversation: {unknown}")
+        facts_data: list[dict[str, Any]] = []
+        knowledge_data: list[dict[str, Any]] = []
+        accepted_commitments: list[dict[str, Any]] = []
+        for actor_id, raw_selection in selections.items():
+            selection = dict(raw_selection or {})
+            allowed_fields = {"fact_indexes", "actor_knowledge_indexes", "commitment_indexes"}
+            if unknown := set(selection) - allowed_fields:
+                raise ValueError(f"accepted delta selection has unknown fields: {sorted(unknown)}")
+            working = session["actor_runtimes"][actor_id]["working_deltas"]
+            facts_data.extend(
+                npc_conversation_select_indexes(
+                    working["facts"], selection.get("fact_indexes") or [], "fact_indexes"
+                )
+            )
+            knowledge_data.extend(
+                npc_conversation_select_indexes(
+                    working["actor_knowledge"],
+                    selection.get("actor_knowledge_indexes") or [],
+                    "actor_knowledge_indexes",
+                )
+            )
+            commitments = npc_conversation_select_indexes(
+                working["commitments"],
+                selection.get("commitment_indexes") or [],
+                "commitment_indexes",
+            )
+            for commitment in commitments:
+                commitment_key = str(commitment["commitment_key"])
+                facts_data.append(
+                    {
+                        "action": "upsert",
+                        "fact_key": f"actor:{actor_id}:commitment:{commitment_key}",
+                        "content": str(commitment["content"]),
+                        "kind": "actor_state",
+                        "subject": actor_id,
+                        "subject_ref": f"actor:{actor_id}",
+                        "predicate": "commitment",
+                        "metadata": dict(commitment.get("metadata") or {}),
+                        "importance": int(commitment.get("importance", 3)),
+                        "disclosure_scope": "dm",
+                    }
+                )
+                accepted_commitments.append(deepcopy(commitment))
+        participants = {str(item) for item in session["participant_ids"]}
+        current_facts = {
+            item.fact_key: item
+            for item in memories.list(
+                campaign_id, branch_id=session["branch_id"], include_inactive=True
+            )
+        }
+        for index, fact in enumerate(facts_data):
+            actor_ref = str(fact.get("subject_ref") or "")
+            if actor_ref.removeprefix("actor:") not in participants:
+                raise ValueError(f"accepted fact[{index}] belongs outside the conversation")
+            if str(fact.get("kind") or "") != "actor_state" or str(
+                fact.get("predicate") or ""
+            ) not in {"relationship_to", "goal", "commitment"}:
+                raise ValueError("accepted conversation facts must be actor-state continuity")
+            fact["disclosure_scope"] = "dm"
+            current = current_facts.get(str(fact.get("fact_key") or ""))
+            if current is not None and str(fact.get("action") or "upsert") == "upsert":
+                fact.setdefault("expected_revision_id", current.revision_id)
+        for index, item in enumerate(knowledge_data):
+            if str(item.get("actor_id") or "") not in participants:
+                raise ValueError(
+                    f"accepted ActorKnowledge[{index}] belongs outside the conversation"
+                )
+            item["disclosure_scope"] = str(item.get("disclosure_scope") or "dm")
+
+        transcript = [
+            {
+                key: deepcopy(event.get(key))
+                for key in (
+                    "event_id",
+                    "sequence",
+                    "type",
+                    "speaker_actor_id",
+                    "content",
+                    "language",
+                    "delivery",
+                    "declared_target_actor_ids",
+                    "publication_id",
+                    "utterance_segments",
+                    "visible_cues",
+                    "visible_action",
+                    "perceived_by",
+                    "understood_by",
+                )
+                if key in event
+            }
+            for event in session["events"]
+        ]
+        names = {str(item["actor_id"]): str(item["name"]) for item in session["participants"]}
+        retrieval_lines = []
+        for event in transcript[-12:]:
+            content = str(event.get("content") or "").strip()
+            if content:
+                retrieval_lines.append(
+                    f"{names.get(str(event.get('speaker_actor_id')), 'Scene')}: {content[:300]}"
+                )
+        event_summary = (
+            f"Conversation among {', '.join(names.values())}; "
+            f"{len(transcript)} public events and {len(session['publications'])} NPC publications."
+        )
+        commit = continuity_commit(
+            campaign_id,
+            {
+                "branch_id": session["branch_id"],
+                "event": {
+                    "event_type": "npc_conversation",
+                    "summary": event_summary,
+                    "audience_scope": "dm",
+                    "participants": [
+                        {"actor_id": actor_id, "role": "witness"}
+                        for actor_id in session["participant_ids"]
+                    ],
+                    "payload": {
+                        "schema_version": 1,
+                        "conversation_id": conversation_id,
+                        "scene_id": session["scene_id"],
+                        "scope_id": session["scope_id"],
+                        "transcript": transcript,
+                        "retrieval_summary": "\n".join(retrieval_lines),
+                        "accepted_commitments": accepted_commitments,
+                        "authority_at_open": deepcopy(session["authority"]),
+                    },
+                },
+                "facts": facts_data,
+                "actor_knowledge": knowledge_data,
+            },
+            principal_id,
+            int(session["authority"]["campaign_revision"]),
+            idempotency_key,
+        )
+        session["status"] = "closed"
+        session["close_idempotency_key"] = idempotency_key
+        session["commit_result"] = deepcopy(commit)
+        session["updated_at_ns"] = time.time_ns()
+        for runtime in session["actor_runtimes"].values():
+            runtime["status"] = "closed"
+            runtime["context"] = {}
+            runtime["working_deltas"] = {
+                "facts": [],
+                "actor_knowledge": [],
+                "commitments": [],
+            }
+        npc_conversations.save(session)
+        return commit
+
+    @public_tool()
+    def conversation_abort(
+        campaign_id: str,
+        conversation_id: str,
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+    ) -> dict[str, Any]:
+        """Discard an uncommitted conversation draft and every private actor capsule."""
+
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        session = npc_conversations.require_owner(
+            conversation_id, campaign_id=campaign_id, principal_id=principal_id
+        )
+        if session.get("status") == "closed":
+            raise ValueError("a committed conversation cannot be aborted")
+        npc_conversations.delete(conversation_id)
+        return {"conversation_id": conversation_id, "status": "aborted", "recoverable": False}
 
     @public_tool()
     def bounded_evaluation(

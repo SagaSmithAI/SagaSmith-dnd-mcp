@@ -65,6 +65,7 @@ CORE_TOOLS = frozenset(
         "campaign_query",
         "game_phase",
         "skill_query",
+        "npc_runtime_capabilities",
     }
 )
 
@@ -246,6 +247,22 @@ TOOL_GROUPS = (
         "campaign_rules",
         "content_solution",
         "playthrough_manifest",
+        roles=CAMPAIGN_DM_ROLE_ORDER,
+    ),
+    _group(
+        "play.npc_conversation",
+        PROFILE_PLAY,
+        "NPC conversation runtime",
+        "Run actor-isolated, multi-turn NPC conversations and commit them atomically.",
+        "write",
+        "conversation_open",
+        "conversation_status",
+        "conversation_ingest",
+        "conversation_activations",
+        "npc_activation_checkout",
+        "npc_activation_submit",
+        "conversation_close",
+        "conversation_abort",
         roles=CAMPAIGN_DM_ROLE_ORDER,
     ),
     _group(

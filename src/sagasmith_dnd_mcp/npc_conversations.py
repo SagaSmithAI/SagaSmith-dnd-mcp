@@ -329,15 +329,37 @@ def validate_conversation_proposal(
             raise ValueError(f"working_deltas.facts[{index}] must belong to the speaking actor")
         if str(item.get("kind") or "") != "actor_state":
             raise ValueError(f"working_deltas.facts[{index}] must use kind='actor_state'")
-        if str(item.get("predicate") or "") not in {"relationship_to", "goal"}:
+        if str(item.get("predicate") or "") not in {
+            "relationship_to",
+            "goal",
+            "commitment",
+        }:
             raise ValueError(
-                f"working_deltas.facts[{index}] may update only relationships or goals"
+                f"working_deltas.facts[{index}] may update only relationships, goals, "
+                "or commitments"
             )
     for index, item in enumerate(proposal["working_deltas"]["actor_knowledge"]):
         if str(item.get("actor_id") or "") not in allowed_actor_ids:
             raise ValueError(
                 f"working_deltas.actor_knowledge[{index}] targets an actor outside the conversation"
             )
+    for index, item in enumerate(proposal["working_deltas"]["commitments"]):
+        if str(item.get("actor_id") or "") != actor_id:
+            raise ValueError(
+                f"working_deltas.commitments[{index}] must belong to the speaking actor"
+            )
+        _text(
+            item.get("commitment_key"),
+            f"working_deltas.commitments[{index}].commitment_key",
+            required=True,
+            maximum=200,
+        )
+        _text(
+            item.get("content"),
+            f"working_deltas.commitments[{index}].content",
+            required=True,
+            maximum=2_000,
+        )
 
 
 def derive_publication(proposal: dict[str, Any], *, publication_id: str) -> dict[str, Any]:
