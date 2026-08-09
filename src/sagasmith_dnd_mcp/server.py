@@ -81,9 +81,7 @@ from sagasmith_core.modules import (
 from sagasmith_core.portable import (
     PortableContentError,
     build_rule_pack,
-    portable_rule_definition_checksum,
     validate_addon_validation,
-    validate_rule_pack,
 )
 from sagasmith_core.rule_packs import RulePackError, RulesetUnavailableError
 from sagasmith_core.systems import SystemRegistry
@@ -232,11 +230,12 @@ from sagasmith_dnd.content_import import (
     validate_selection_ready_artifacts,
 )
 from sagasmith_dnd.content_packages import (
-    build_addon_content_package,
     build_module_content_package,
     build_preset_content_package,
+    build_rule_content_package,
     compose_addon_content_package,
     content_actor_catalog_definition,
+    content_definition_checksum,
     validate_dnd_content_package,
 )
 from sagasmith_dnd.content_solution import (
@@ -4475,14 +4474,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
         return refresh_references(refresh(value))
 
-    def portable_rule_pack_definition(
+    def rule_content_descriptor(
         pack_id: str,
         version: str,
         *,
         metadata: dict[str, Any] | None = None,
         _dependency_stack: tuple[tuple[str, str], ...] = (),
     ) -> dict[str, Any]:
-        """Replace local rule-source identities with stable portable locators."""
+        """Export one rule definition with stable source locators for a v2 Pack."""
 
         identity = (pack_id, version)
         if identity in _dependency_stack:
@@ -4686,42 +4685,33 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         for dependency in portable_manifest.get("dependencies", []):
             if not isinstance(dependency, dict) or not dependency.get("version"):
                 raise ValueError(
-                    "portable rule packs require every rule dependency to pin a version"
+                    "rule Pack dependencies must pin a version"
                 )
             dependency_id = str(dependency.get("id") or "")
             dependency_version = str(dependency.get("version") or "")
             dependency_pack = rule_packs.get_version(dependency_id, dependency_version)
             dependency_provenance = rule_packs.provenance(dependency_id, dependency_version)
-            imported_dependency = dict(dependency_provenance.get("portable_package") or {})
             content_dependency = dict(dependency_provenance.get("content_definition") or {})
             stored_definition_checksum = str(
                 content_dependency.get("definition_checksum")
-                or imported_dependency.get("definition_checksum")
                 or ""
             )
-            try:
-                dependency_package = portable_rule_pack_definition(
-                    dependency_id,
-                    dependency_version,
-                    _dependency_stack=dependency_stack,
-                )
-            except PortableContentError as error:
-                if "rule_pack.sources must be a non-empty array" not in str(error):
-                    raise
-                # Bundled/native packs contain no detached rulebook source and
-                # therefore retain their already deterministic core checksum.
-                dependency_definition_checksum = dependency_pack.checksum
-            else:
-                dependency_definition_checksum = portable_rule_definition_checksum(
-                    dependency_package
-                )
+            dependency_descriptor = rule_content_descriptor(
+                dependency_id,
+                dependency_version,
+                _dependency_stack=dependency_stack,
+            )
+            dependency_definition_checksum = content_definition_checksum(
+                manifest=dependency_descriptor["manifest"],
+                artifacts=dependency_descriptor["artifacts"],
+                mechanics=dependency_descriptor["mechanics"],
+            )
             if stored_definition_checksum:
                 dependency_definition_checksum = stored_definition_checksum
             expected_checksum = str(dependency.get("checksum") or "")
             accepted_existing_checksums = {
                 dependency_pack.checksum,
                 dependency_definition_checksum,
-                str(imported_dependency.get("definition_checksum") or ""),
                 str(content_dependency.get("definition_checksum") or ""),
             }
             if expected_checksum and expected_checksum not in accepted_existing_checksums:
@@ -4736,7 +4726,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             pinned_dependencies.append(pinned)
             package_dependencies.append(
                 {
-                    "kind": "rule_pack",
+                    "kind": "core_rules",
                     "id": dependency_id,
                     "version": dependency_version,
                     "checksum": dependency_definition_checksum,
@@ -4771,282 +4761,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             or not str(package_metadata.get("attribution") or "").strip()
         ):
             raise ValueError("shareable rule packs require explicit license and attribution")
-        return build_rule_pack(
-            portable_id=pack_id,
-            version=version,
-            system_id=DND5E.id,
-            manifest=portable_manifest,
-            artifacts=portable_definition["artifacts"],
-            mechanics=portable_definition["mechanics"],
-            provenance=portable_definition["provenance"],
-            sources=portable_sources,
-            metadata=package_metadata,
-            dependencies=package_dependencies,
-        )
-
-    def import_portable_rule_pack(
-        campaign_id: str,
-        package: dict[str, Any],
-        *,
-        principal_id: str,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        """Rebind portable evidence and create an inactive validated draft."""
-
-        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
-        require_facade_phase(campaign_id, "content_pack(import)", PROFILE_LOBBY)
-        normalized = validate_rule_pack(package, expected_system_id=DND5E.id)
-        imported_manifest = dict(normalized["payload"]["manifest"])
-        imported_validation = audit_release_semantic_validation(
-            list(normalized["payload"]["artifacts"]),
-            settled_mechanic_ids=_rule_payload_settled_mechanic_ids(dict(normalized["payload"])),
-        )
-        if (
-            imported_manifest.get("resolution_policy") != "build_time_complete"
-            or imported_manifest.get("semantic_validation") != imported_validation
-            or not imported_validation["complete"]
-        ):
-            raise ValueError(
-                "portable D&D rule pack must carry an exact build-time-complete "
-                "semantic resolution audit"
-            )
-        payload = {
-            "operation": "import_rule_package",
-            "package_checksum": normalized["checksum"],
+        return {
+            "id": pack_id,
+            "version": version,
+            "system_id": DND5E.id,
+            "manifest": portable_manifest,
+            "artifacts": portable_definition["artifacts"],
+            "mechanics": portable_definition["mechanics"],
+            "provenance": portable_definition["provenance"],
+            "sources": portable_sources,
+            "metadata": package_metadata,
+            "dependencies": package_dependencies,
         }
-        scope = f"portable-rule-import:{campaign_id}:{principal_id}"
-        replay = replay_idempotent(scope, idempotency_key, payload)
-        if replay is not None:
-            return replay
-        pack_payload = normalized["payload"]
-        _require_valid_content_attestations(
-            list(pack_payload["artifacts"]),
-            operation="portable rule-pack import",
-        )
-        try:
-            existing_version = rule_packs.get_version(normalized["id"], normalized["version"])
-        except LookupError:
-            pass
-        else:
-            if existing_version.status == "installed":
-                raise ValueError(
-                    "the exact rule-pack version is already installed; portable "
-                    "import cannot replace it with an inactive draft"
-                )
-        campaign_edition = campaign_rules_edition(campaign_id)
-        if campaign_edition not in {
-            str(item) for item in pack_payload["manifest"].get("editions", [])
-        }:
-            raise ValueError("portable rule pack does not support the campaign edition")
-        supported_editions = {str(item) for item in pack_payload["manifest"].get("editions", [])}
-        incompatible_sources = sorted(
-            source["source_key"]
-            for source in pack_payload["sources"]
-            if str(source.get("edition") or "") and str(source["edition"]) not in supported_editions
-        )
-        if incompatible_sources:
-            raise ValueError(
-                "portable rule sources use editions not declared by the pack: "
-                + ", ".join(incompatible_sources)
-            )
-
-        manifest_dependencies = list(pack_payload["manifest"].get("dependencies", []))
-        if any(
-            not isinstance(item, dict) or set(item) != {"id", "version", "checksum"}
-            for item in manifest_dependencies
-        ):
-            raise ValueError(
-                "portable rule pack manifest dependencies must contain exactly "
-                "id, version, and checksum"
-            )
-        expected_dependencies = {
-            (
-                str(item.get("id") or ""),
-                str(item.get("version") or ""),
-                str(item.get("checksum") or ""),
-            )
-            for item in manifest_dependencies
-        }
-        if len(expected_dependencies) != len(manifest_dependencies):
-            raise ValueError("portable rule pack dependencies must be unique")
-        package_dependencies = {
-            (item["id"], item["version"], str(item.get("checksum") or ""))
-            for item in normalized["dependencies"]
-            if item["kind"] == "rule_pack"
-        }
-        if expected_dependencies != package_dependencies or any(
-            not all(identity) for identity in expected_dependencies
-        ):
-            raise ValueError("portable rule pack dependency manifest is not exact")
-        dependency_status: list[dict[str, Any]] = []
-        for dependency_id, dependency_version, dependency_checksum in sorted(expected_dependencies):
-            try:
-                local = rule_packs.get_version(dependency_id, dependency_version)
-            except LookupError:
-                dependency_status.append(
-                    {
-                        "pack_id": dependency_id,
-                        "version": dependency_version,
-                        "checksum": dependency_checksum,
-                        "status": "missing",
-                    }
-                )
-                continue
-            local_provenance = rule_packs.provenance(dependency_id, dependency_version)
-            local_portable_package = dict(local_provenance.get("portable_package") or {})
-            local_content_definition = dict(local_provenance.get("content_definition") or {})
-            accepted_local_checksums = {
-                local.checksum,
-                str(local_portable_package.get("definition_checksum") or ""),
-                str(local_content_definition.get("definition_checksum") or ""),
-            }
-            if dependency_checksum not in accepted_local_checksums:
-                raise ValueError(
-                    f"local dependency checksum mismatch for {dependency_id}@{dependency_version}"
-                )
-            dependency_status.append(
-                {
-                    "pack_id": dependency_id,
-                    "version": dependency_version,
-                    "checksum": dependency_checksum,
-                    "status": local.status,
-                }
-            )
-
-        embedder, _vectors = storage.dense_components()
-        pending_sources = {source["source_key"]: source for source in pack_payload["sources"]}
-        known_sources = {
-            item["source_key"]: item["id"]
-            for item in rules.sources(system_id=DND5E.id, include_retired=False)
-        }
-        source_map: dict[str, str] = {}
-        chunk_map: dict[str, str] = {}
-        source_results: list[dict[str, Any]] = []
-        while pending_sources:
-            progressed = False
-            for source_key, source in list(pending_sources.items()):
-                canonical_key = source.get("canonical_source_key")
-                canonical_id = (
-                    source_map.get(str(canonical_key)) or known_sources.get(str(canonical_key))
-                    if canonical_key
-                    else None
-                )
-                if canonical_key and canonical_id is None:
-                    continue
-                imported = rules.import_portable_source(
-                    source,
-                    system_id=DND5E.id,
-                    canonical_source_id=canonical_id,
-                    embedder=embedder,
-                )
-                source_map[source_key] = imported["source_id"]
-                known_sources[source_key] = imported["source_id"]
-                chunk_map.update(imported["chunk_map"])
-                source_results.append(
-                    {key: value for key, value in imported.items() if key != "chunk_map"}
-                )
-                del pending_sources[source_key]
-                progressed = True
-            if not progressed:
-                raise ValueError(
-                    "portable rule sources have unresolved canonical dependencies: "
-                    + ", ".join(sorted(pending_sources))
-                )
-
-        def make_local(item: Any) -> Any:
-            if isinstance(item, list):
-                return [make_local(child) for child in item]
-            if isinstance(item, str):
-                if item in chunk_map:
-                    return chunk_map[item]
-                result = item
-                for stable_key, local_id in chunk_map.items():
-                    result = result.replace(f"#chunk:{stable_key}", f"#chunk:{local_id}")
-                return result
-            if not isinstance(item, dict):
-                return deepcopy(item)
-            result = {
-                key: make_local(child)
-                for key, child in item.items()
-                if key not in {"source_key", "chunk_key"}
-            }
-            source_key = item.get("source_key")
-            source_locator = (
-                item.get("chunk_key") is not None
-                or "source_checksum" in item
-                or "normalized_checksum" in item
-                or str(item.get("source") or "").startswith("rule-source:")
-            )
-            if source_key is not None and str(source_key) in source_map and source_locator:
-                result["source_key"] = str(source_key)
-                result["source_id"] = source_map[str(source_key)]
-            elif source_key is not None:
-                result["source_key"] = make_local(source_key)
-            chunk_key = item.get("chunk_key")
-            if chunk_key is not None:
-                local_chunk = chunk_map.get(str(chunk_key))
-                if local_chunk is None:
-                    raise ValueError(f"portable citation references unknown chunk {chunk_key}")
-                result["chunk_id"] = local_chunk
-            return result
-
-        localized = refresh_portable_resolution_plans(
-            make_local(
-                {
-                    "artifacts": pack_payload["artifacts"],
-                    "mechanics": pack_payload["mechanics"],
-                    "provenance": pack_payload["provenance"],
-                }
-            )
-        )
-        localized["artifacts"] = _rebind_transported_content_attestations(
-            list(localized["artifacts"])
-        )
-        if localized["mechanics"] and pack_payload["sources"]:
-            validate_source_bound_mechanics(localized["mechanics"])
-        imported_provenance = {
-            **dict(localized["provenance"]),
-            "portable_package": {
-                "id": normalized["id"],
-                "version": normalized["version"],
-                "checksum": normalized["checksum"],
-                "definition_checksum": portable_rule_definition_checksum(normalized),
-                "license": normalized["metadata"].get("license"),
-                "attribution": normalized["metadata"].get("attribution"),
-                "distribution": normalized["metadata"].get("distribution"),
-            },
-        }
-        draft = save_rule_pack_draft(
-            manifest=deepcopy(pack_payload["manifest"]),
-            artifacts=localized["artifacts"],
-            mechanics=localized["mechanics"],
-            provenance=imported_provenance,
-            allow_portable_package_provenance=True,
-        )
-        response = {
-            "status": "imported" if draft["status"] == "validated" else "rejected",
-            "package": {
-                "id": normalized["id"],
-                "version": normalized["version"],
-                "checksum": normalized["checksum"],
-            },
-            "draft": draft,
-            "sources": source_results,
-            "dependencies": dependency_status,
-            "installed": False,
-            "activated": False,
-            "next_actions": [
-                "content_pack(action='install', kind='rule')",
-                "content_pack(action='activate', kind='rule')",
-            ],
-        }
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            payload,
-            response,
-            campaign_id=campaign_id,
-        )
 
     def import_content_module_package(
         campaign_id: str,
@@ -5316,10 +5042,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         or ""
                     )
                     if not recorded:
-                        legacy = portable_rule_pack_definition(
-                            definition_id, str(definition["version"])
+                        recorded = content_definition_checksum(
+                            manifest=existing.manifest,
+                            artifacts=existing.artifacts,
+                            mechanics=existing.mechanics,
                         )
-                        recorded = portable_rule_definition_checksum(legacy)
                     if recorded != str(definition["definition_checksum"]):
                         raise ValueError(f"content rule definition conflict: {definition_id}")
                     local = existing
@@ -41158,15 +40885,15 @@ Useful bounded guidance:
             "content_pack(export:rule)",
             PROFILE_LOBBY,
         )
-        rule_component = portable_rule_pack_definition(
+        rule_descriptor = rule_content_descriptor(
             str(data["pack_id"]),
             str(data["version"]),
             metadata=dict(data.get("metadata") or {}),
         )
-        component_manifest = dict(rule_component["payload"]["manifest"])
-        package, package_blobs = build_addon_content_package(
-            package_id=str(rule_component["id"]),
-            version=str(rule_component["version"]),
+        component_manifest = dict(rule_descriptor["manifest"])
+        package, package_blobs = build_rule_content_package(
+            package_id=str(rule_descriptor["id"]),
+            version=str(rule_descriptor["version"]),
             system_id=DND5E.id,
             manifest={
                 **component_manifest,
@@ -41177,7 +40904,7 @@ Useful bounded guidance:
                     "module_policy": "none",
                 },
             },
-            rule_components=[rule_component],
+            rule_descriptors=[rule_descriptor],
             metadata={
                 "distribution": "private",
                 "license": "user-supplied",

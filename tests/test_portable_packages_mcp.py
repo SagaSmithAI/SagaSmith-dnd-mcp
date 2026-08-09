@@ -11,7 +11,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from sagasmith_core.content_pack import dumps_content_archive
 from sagasmith_core.portable import build_rule_pack, portable_rule_chunk_key
 from sagasmith_dnd.character_schema import default_character_notes, default_character_sheet
-from sagasmith_dnd.content_packages import build_addon_content_package
+from sagasmith_dnd.content_packages import build_rule_content_package
 from sagasmith_dnd.content_validation import (
     build_catalog_review,
     build_selection_contract,
@@ -966,6 +966,14 @@ def test_unified_addon_archive_import_reexport_and_actor_creation(tmp_path: Path
         ],
         metadata={"distribution": "private"},
     )
+    component = {
+        "id": component["id"],
+        "version": component["version"],
+        "system_id": component["system_id"],
+        **component["payload"],
+        "metadata": component["metadata"],
+        "dependencies": component["dependencies"],
+    }
     notes = default_character_notes()
     notes["profile"]["summary"] = "A source-backed archive actor."
     card = build_dnd_actor_card(
@@ -976,7 +984,7 @@ def test_unified_addon_archive_import_reexport_and_actor_creation(tmp_path: Path
         sheet=default_character_sheet(),
         notes=notes,
     )
-    package, blobs = build_addon_content_package(
+    package, blobs = build_rule_content_package(
         package_id="dnd5e.example.archive-addon",
         version="2.0.0",
         system_id="dnd5e",
@@ -993,7 +1001,7 @@ def test_unified_addon_archive_import_reexport_and_actor_creation(tmp_path: Path
                 "module_policy": "none",
             },
         },
-        rule_components=[component],
+        rule_descriptors=[component],
         preset_cards=[card],
         metadata={
             "distribution": "private",
