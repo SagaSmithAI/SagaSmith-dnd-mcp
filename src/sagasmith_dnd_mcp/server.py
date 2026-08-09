@@ -36686,8 +36686,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "artifact_id": artifact_id,
             "pack_id": pack_id,
             "version": version,
-            "selection": selection,
-            "grant": play_grant,
+            "selection": deepcopy(selection),
+            **(
+                {"grant": deepcopy(play_grant)}
+                if operation != "character.spellbook.copy"
+                else {}
+            ),
         }
         replay = replay_idempotent(
             f"character-write:{current.campaign_id}:{branch_id}:{principal_id}:{current.id}",
@@ -42732,8 +42736,9 @@ boundary.
         )
         response = {
             "activation": asdict(activation),
-            "effective_ruleset": asdict(
-                rule_packs.effective_ruleset(campaign_id, branch_id=branch_id)
+            "effective_ruleset": effective_ruleset_view(
+                campaign_id,
+                branch_id=branch_id,
             ),
         }
         return remember_idempotent(

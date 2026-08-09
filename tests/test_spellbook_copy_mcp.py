@@ -58,13 +58,12 @@ def test_discovered_spellbook_copy_is_source_bound_paid_timed_and_atomic(
         )
         spells = await call(
             server,
-            "content_pack",
+            "character_query",
             {
-                "action": "list",
+                "view": "catalog",
                 "payload": {
                     "campaign_id": created["id"],
-                    "kind": "catalog",
-                    "content_kind": "spell",
+                    "kind": "spell",
                     "query": "Burning Hands",
                 },
                 "principal_id": "system:local",
@@ -188,7 +187,7 @@ def test_discovered_spellbook_copy_is_source_bound_paid_timed_and_atomic(
             },
         )
 
-        with pytest.raises(Exception, match="only source-bound spellbook_copy"):
+        with pytest.raises(Exception, match="play-time content grants require"):
             await call(
                 server,
                 "character_content_apply",
