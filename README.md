@@ -164,16 +164,11 @@ Snapshot 是可独立恢复的全量 checkpoint，`recap` 才是父子节点差�
 用户规则书的完整路径是：
 
 ```text
-discover an allowlisted file
-→ staged content-addressed artifact
-→ shared document parse + quality/OCR report
-→ explicit warning acknowledgement
-→ indexed source
-→ source-scoped search + review-only candidates
-→ inactive source-bound rule pack
-→ schema/mechanic validation
-→ install
-→ DM pins exact version to campaign
+rulebook_draft(start): Core+D&D 机械首轮
+→ Agent 读取精确 evidence 并反复 edit
+→ Agent 检查当前 revision 并显式 finalize
+→ 原子生成不可变 v2 Pack
+→ content_pack 显式 activate（若战役需要）
 ```
 
 公开创作入口只有三个：`rulebook_draft`、`module_draft`、`content_pack`。规则书使用
@@ -200,69 +195,39 @@ coverage。商业 PHB/DMG/MM 与扩展书只从用户白名单目录生成 priva
 
 ### 模组与战斗空间
 
-模组生成先形成可编辑 artifact，再经 staged inspect/import。导入生成 scene index 和保守的 location/room 证据；系统不会从散文中凭空画精确战术地图。战斗开始时才为 encounter 创建临时五尺方格 combat map，随后由 DM/Agent 在证据和裁决基础上补充位置与世界变化。地图背景不具机械意义；墙体、视线、掩体、高度、体型占位和困难地形消耗在引擎实现前继续由 DM 裁决。
+模组书使用 `module_draft(start/get/evidence/edit/finalize)`：Core+D&D 完成机械首轮，
+Agent 从精确来源证据中发现问题、反复修改，并在确认当前 revision 后定稿。单书的切分、
+归属、合并、缺项与 OCR 决策随草稿和最终 Pack 保存，不进入 Core/D&D 的全局启发式。
+
+战斗在开始时固定一种 `positioning_mode`。`grid` 模式必须有编译后的临时地图和每名
+参与者的坐标；引擎据此处理距离、阻挡、移动与反应窗口。`agent` 模式没有地图或坐标，
+Agent 根据当前叙事判断范围、命中条件、视线、阻挡和友军波及，并为每次动作提交结构化
+`spatial_facts`；引擎仍负责行动经济、资源、掷骰、伤害和事务。两种模式不会互相猜测或
+静默降级。
 
 ### 统一 Content Package
 
-PC、NPC、怪物统一使用 `sagasmith.actor-card.v3`，并只通过
-`.sagasmith-pack` 中的 `actors` 交换。Lobby 用
-`character_query(view="content_package")` 导出单角色 preset 包，用
-`character_create_from(mode="content_actor")` 从托管 artifact 或白名单归档按
-`actor_id` 导入。服务验证整包 checksum、D&D sheet 与 campaign edition 后创建新的
-Character identity；图片留在卡和归档中，campaign id、revision、权限、actor
-knowledge 与 Snapshot 状态不会迁移。
+PC、NPC 与怪物统一使用 `sagasmith.actor-card.v3`，并只在最终 `preset` 或 `module`
+Pack 的 `actors` 中跨安装迁移。任意运行中 Character 不再有单卡导出旁路；导入 Pack 后，
+再按精确 artifact/card identity 创建新的 Character。图片留在卡和归档中，campaign id、
+revision、权限、ActorKnowledge、progress、world state、random stream、branch 与 Snapshot
+均不迁移。
 
-服务器启动时把 SRD 2014/2024 角色目录安装为内置 preset 内容。Host 不维护怪物
-名称表，也没有怪物硬编码导入旁路。Addon、Module、Preset 与 Core Rules 全部使用
-`sagasmith.content-package` v2：共同封装 manifest、结构化内容、actors、来源索引及
-`blobs/sha256/` 中的原始文档、标准化全文和角色图，同时保留各自的激活与权限语义。
+Addon、Module、Preset 与 Core Rules 全部使用 `sagasmith.content-package` v2，共享
+manifest、结构化内容、actors、来源索引与内容寻址 blobs，同时保留各自的权限和激活语义。
+`content_pack` 只管理已定稿的不可变 Pack：`list/get/import/export/activate/deactivate/remove`。
+它没有 build、test 或 install 动作，也不接受 loose JSON、release manifest、
+`.sagasmith-module`、inline descriptor 或旧 envelope。
 
-`content_pack(action="export", kind="module")` 导出 module 包；`content_pack(action="import")`
-只读取托管 artifact 或白名单 `.sagasmith-pack`，验证全部 blob、依赖、内容证据和 Agent 定稿记录，
-重建本地来源及新 actor identity 后才允许激活。内容包不是 Snapshot，不包含 progress、
-world state、memory、actor knowledge、random stream 或 branch DAG。旧 portable、
-release manifest、`.sagasmith-module` 和 inline 含资产对象均无兼容路由。
+`rulebook_draft(finalize)` 与 `module_draft(finalize)` 已完成编译、验证和归档。最终 Pack
+携带精确来源绑定、审查 disposition、修订来源与 Agent confirmation；`content_pack(import)`
+会复算 descriptor/blob checksum、依赖和 D&D 语义，再用新的本地 source/actor identity
+重放内容。导入本身不授予战役权限；Addon、Core Rules 与 Module 仍需 Owner/DM 显式激活。
+依赖锁定精确 version 与 checksum，冲突或缺失依赖会在对应导入/激活操作局部失败。
 
-扩展规则包通过同一归档跨安装迁移：在 Lobby 由 DM 调用
-`content_pack(action="export", kind="rule")` 导出；包内包含 manifest、catalog artifacts、
-mechanic IR、actors、provenance、完整索引来源及来源文件。本地 `source_id`/`chunk_id` 会改写为
-稳定 `source_key`/`chunk_key`，接收端再通过
-`content_pack(action="import")` 创建新本地来源 id 并重绑所有引用及
-resolution-plan fingerprint。导入会安装内容定义但不会修改 campaign rule profile；
-addon 仍需 `content_pack(action="activate", kind="addon")` 显式启用。依赖必须固定精确 version
-与 definition checksum。Core Rules 与 Addon 一样必须携带
-`resolution_policy=build_time_complete` 及与接收端复算完全一致的 `semantic_validation`；导出、
-导入和安装三个入口都会拒绝缺失、过期或仍含 deferred 语义的包。缺失依赖会显式
-返回，checksum 冲突则拒绝导入。
-
-整书构建通过 `rulebook_draft(action="edit", operation="statblock_recovery")` 恢复可证明的角色卡，
-再将已审核 statblock 作为统一包的 actor records 发布。部分恢复只允许某个
-source-bound 角色模板留在显式待审清单；
-完整来源、全部机械候选和每个延迟原因仍必须进入 rule pack/report，不能把 OCR
-失败伪装成完整卡。启用 addon 后，catalog-only statblock 的
-`selection_requirements` 会明确指向
-`character_create_from(mode="statblock")`，由引擎从本地重绑后的 source citation
-和 chunk ids 做确定性恢复。
-
-整书预设构建会在发布前消除版式歧义。显式 `Actions for Type …` 会拆成多张
-独立 actor card，禁止把不同变体的动作合进一张卡；只在 `edition=2014`、
-`publication_id=mm2014` 与唯一名称同时成立时，Monster Manual 条目才可复用
-同一身份的内置 SRD 卡，并把被复用卡的 version/checksum 写入审计元数据。
-OCR 可由清晰能力分数恢复损坏的冗余 modifier，也可在六个分数完整且其余五个
-标签唯一确定列位时补一个标签；它不能补缺失分数或改变范围。受损标题仅可由
-同页唯一的既有审核卡取代。所有这类结果都在 preset/addon 导出前固定，不能留到
-角色第一次行动时由 Agent 猜测。
-如果整书没有任何专用候选，驱动器也不会只抽一个“描述性样本”：每个非空 chunk
-分别生成来源绑定的构建期 Agent ruling。候选提取器还会把掷骰流程、编号随机效果表
-和裁定指导列入机械审核队列，因此像大规模随机魔法效果表不会再以 descriptive
-状态绕过发布门禁。
-
-一个扩展若同时含规则、角色和素材，直接发布一个 Addon content package；若含可独立
-运行的冒险，则另发 Module content package，并以精确 dependency 相连，不再生成
-release manifest。`metadata.distribution="shareable"` 的包必须明确提供 license 与
-attribution；默认导出是 `private`。
-Addon 激活事务不再接收模组 receipts，也不会改变模组 active 状态；模组始终通过
-独立导入、release validation 和自身激活事务处理。
+规则书或模组中的特殊版式错误由 Agent 在未定稿 draft 中修正。重复标题、邻近归属、
+重叠片段、依赖 statblock 或泛化标题都不能单独触发全局推断；只有经过证明的跨书确定性
+不变量才进入 Core 或 D&D。完整审查方法由 D&D Skill 提供，MCP 不再为每类个案增加恢复工具。
 
 ### Skills、resources 与 prompts
 
@@ -273,7 +238,7 @@ Addon 激活事务不再接收模组 receipts，也不会改变模组 active 状
 - Prompts：`dnd_dm`、`module_generator`
 
 读取计划来自 Skills 仓库的 `full/data/skill-plan.v1.json`，服务端校验其
-21 个工具组覆盖、依赖 DAG、真实工具成员、文档 checksum 和字符预算。
+24 个工具组覆盖、依赖 DAG、真实工具成员、文档 checksum 和字符预算。
 成功读取计划 fragment 后会返回 read receipt；checksum 未变化时同一 session
 无需重复装载。Skill plan 只管理 Agent 上下文，不替代 MCP 权限和事务校验。
 
