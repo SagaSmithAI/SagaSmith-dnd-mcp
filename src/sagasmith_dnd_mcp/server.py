@@ -23213,6 +23213,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         save_disadvantage: bool,
         mechanic_source_excerpt: str,
         agent_ruling: dict[str, Any],
+        spatial_facts: dict[str, Any] | None,
         principal_id: str,
         expected_revision: int | None,
         branch_id: str | None,
@@ -23248,6 +23249,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "save_disadvantage": save_disadvantage,
             "mechanic_source_excerpt": mechanic_source_excerpt,
             "agent_ruling": deepcopy(agent_ruling),
+            "spatial_facts": deepcopy(spatial_facts),
             "branch_id": resolved_branch_id,
         }
         scope = f"combat-save-damage:{campaign_id}:{resolved_branch_id}:{principal_id}"
@@ -23264,6 +23266,72 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 f"expected {expected_revision}, found {campaign.revision}"
             )
         require_no_blocking_pending(encounter)
+        positioning_mode = str(encounter.get("positioning_mode") or "grid")
+        normalized_spatial_facts: dict[str, Any] | None = None
+        if positioning_mode == "agent":
+            if not isinstance(spatial_facts, dict):
+                raise NeedsRulingError(
+                    "agent-positioned area effects require an Agent spatial decision",
+                    missing=("area.spatial_facts",),
+                    ruling_kind="agent_dm_adjudication",
+                )
+            required_spatial_fields = {
+                "decision_id",
+                "reason",
+                "affected_target_ids",
+                "excluded_actor_ids",
+                "line_of_effect_clear",
+                "friendly_fire_included",
+            }
+            if set(spatial_facts) != required_spatial_fields:
+                raise CombatEngineError(
+                    "Agent area spatial facts must contain the complete area fact set"
+                )
+            decision_id = str(spatial_facts.get("decision_id") or "").strip()
+            reason = " ".join(str(spatial_facts.get("reason") or "").split())
+            affected_ids = spatial_facts.get("affected_target_ids")
+            excluded_ids = spatial_facts.get("excluded_actor_ids")
+            participant_ids = {
+                str(item.get("actor_id") or "") for item in encounter.get("combatants", [])
+            }
+            for field, actor_ids in (
+                ("affected_target_ids", affected_ids),
+                ("excluded_actor_ids", excluded_ids),
+            ):
+                if (
+                    not isinstance(actor_ids, list)
+                    or any(not isinstance(item, str) for item in actor_ids)
+                    or len(set(actor_ids)) != len(actor_ids)
+                    or set(actor_ids) - participant_ids
+                ):
+                    raise CombatEngineError(
+                        f"Agent area spatial fact {field} must contain unique current "
+                        "combatant IDs"
+                    )
+            if (
+                not decision_id
+                or not reason
+                or affected_ids != normalized_target_ids
+                or set(affected_ids) & set(excluded_ids)
+                or not isinstance(spatial_facts.get("line_of_effect_clear"), bool)
+                or not isinstance(spatial_facts.get("friendly_fire_included"), bool)
+            ):
+                raise CombatEngineError(
+                    "Agent area spatial facts must exactly justify the declared targets"
+                )
+            if spatial_facts["line_of_effect_clear"] is not True:
+                raise CombatEngineError("the Agent ruled that the area lacks line of effect")
+            normalized_spatial_facts = {
+                **dict(spatial_facts),
+                "decision_id": decision_id,
+                "reason": reason,
+                "affected_target_ids": list(affected_ids),
+                "excluded_actor_ids": list(excluded_ids),
+            }
+        elif spatial_facts is not None:
+            raise CombatEngineError(
+                "grid area effects derive spatial targets from encounter coordinates"
+            )
         require_encounter_combatant(
             encounter,
             source_actor_id,
@@ -23422,6 +23490,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "source_card_kind": normalized_card_kind,
             "agent_ruling": normalized_ruling,
             "action_payment": payment_entry,
+            "spatial_ruling": normalized_spatial_facts,
         }
         next_encounter = deepcopy(encounter)
         updated_sheets = {
@@ -23457,6 +23526,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "source_actor_id": source_actor_id,
                 "target_ids": normalized_target_ids,
                 "result": result,
+                "spatial_ruling": normalized_spatial_facts,
             },
         ][-100:]
         current_records = {
@@ -45573,6 +45643,7 @@ Useful bounded guidance:
                     "mechanic_source_excerpt",
                 ),
                 agent_ruling=required(data, "agent_ruling"),
+                spatial_facts=data.get("spatial_facts"),
                 principal_id=principal_id,
                 expected_revision=expected_revision,
                 branch_id=branch_id,

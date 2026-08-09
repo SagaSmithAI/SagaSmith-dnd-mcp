@@ -272,6 +272,14 @@ def test_agent_save_damage_requires_one_paid_immutable_action_and_replays(
             "half_on_success": True,
             "mechanic_source_excerpt": mechanic_excerpt,
             "agent_ruling": agent_ruling,
+            "spatial_facts": {
+                "decision_id": "spatial:poison-cloud",
+                "reason": "Both heroes are inside the cone and no obstruction blocks it.",
+                "affected_target_ids": [agile["id"], clumsy["id"]],
+                "excluded_actor_ids": [dragon["id"]],
+                "line_of_effect_clear": True,
+                "friendly_fire_included": False,
+            },
         }
         with pytest.raises(Exception, match="unsupported.*unexpected"):
             await _call(
@@ -371,6 +379,11 @@ def test_agent_save_damage_requires_one_paid_immutable_action_and_replays(
                     "payload": {
                         **payload,
                         "target_ids": [agile["id"]],
+                        "spatial_facts": {
+                            **payload["spatial_facts"],
+                            "affected_target_ids": [agile["id"]],
+                            "excluded_actor_ids": [dragon["id"], clumsy["id"]],
+                        },
                     },
                     "expected_revision": paid["campaign_revision"],
                     "idempotency_key": "changed-targets",

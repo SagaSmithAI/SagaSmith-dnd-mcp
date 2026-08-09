@@ -1225,6 +1225,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                     "source_actor_id",
                     "source_card_id",
                     "source_card_kind",
+                    "spatial_facts",
                     "target_ids",
                 ),
                 (
