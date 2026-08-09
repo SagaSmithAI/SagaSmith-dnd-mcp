@@ -1280,7 +1280,34 @@ def test_rulebook_import_source_bound_pack_and_noncombat_settlement(tmp_path: Pa
         citation = draft["mechanics"][0]["citations"][0]
         assert citation["source_id"] == imported["source_id"]
         assert citation["source_checksum"] == staged["checksum"]
-        assert finalized["installed"]["status"] == "installed"
+        assert finalized["stored"]["status"] == "stored"
+        stored = await call(
+            server,
+            "content_pack",
+            {
+                "action": "get",
+                "payload": {
+                    "kind": "core_rules",
+                    "campaign_id": campaign["id"],
+                    "pack_id": "dnd5e.xgte.tool_synergy",
+                    "version": "1.0.0",
+                },
+            },
+        )
+        assert stored["status"] == "stored"
+        listed = await call(
+            server,
+            "content_pack",
+            {
+                "action": "list",
+                "payload": {
+                    "kind": "core_rules",
+                    "campaign_id": campaign["id"],
+                    "pack_id": "dnd5e.xgte.tool_synergy",
+                },
+            },
+        )
+        assert listed[0]["status"] == "stored"
         profile = await call(
             server,
             "campaign_rules",

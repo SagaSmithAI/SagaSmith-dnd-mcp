@@ -5042,7 +5042,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         )
                     if recorded != str(definition["definition_checksum"]):
                         raise ValueError(f"content rule definition conflict: {definition_id}")
-                    local = existing
                 else:
                     artifacts = [
                         {
@@ -5087,14 +5086,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     )
                     if draft["status"] != "validated":
                         raise ValueError(f"content rule definition was rejected: {definition_id}")
-                    local = rule_packs.install(definition_id, str(definition["version"]))
+                    rule_packs.install(definition_id, str(definition["version"]))
                 component_results.append(
                     {
                         "kind": "rule_pack",
                         "id": definition_id,
                         "version": definition["version"],
                         "checksum": definition["definition_checksum"],
-                        "status": local.status,
+                        "status": "stored",
                     }
                 )
                 del pending[definition_id]
@@ -5133,7 +5132,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "id": actor_manifest["id"],
                 "version": actor_manifest["version"],
                 "actors": len(actor_artifacts),
-                "status": actor_pack.status,
+                "status": "stored",
             }
 
         addon_result = None
@@ -5145,7 +5144,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "content_archive_artifact": managed_archive["artifact"],
                 },
             )
-            addon_result = asdict(addons.install(imported_addon.addon_id, imported_addon.version))
+            installed_addon = asdict(
+                addons.install(imported_addon.addon_id, imported_addon.version)
+            )
+            addon_result = {**installed_addon, "status": "stored"}
         response = {
             "package": {
                 "kind": value["kind"],
@@ -5158,7 +5160,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "actor_catalog": actor_result,
             "addon": addon_result,
             "artifact": managed_archive,
-            "installed": True,
+            "stored": True,
             "activated": False,
         }
         return remember_idempotent(
@@ -41008,7 +41010,14 @@ boundary.
                 branch_id=(str(data["branch_id"]) if data.get("branch_id") else None),
             )
         }
-        result = [{**asdict(item), "activation": active.get(item.addon_id)} for item in versions]
+        result = [
+            {
+                **asdict(item),
+                "status": "stored" if item.status == "installed" else item.status,
+                "activation": active.get(item.addon_id),
+            }
+            for item in versions
+        ]
         return result
 
     def _content_pack_addon(
@@ -41028,9 +41037,19 @@ boundary.
         archived_package, archived_blobs = storage.read_content_archive(artifact=archive_name)
         if archived_package != package:
             raise ValueError("installed addon descriptor differs from its content archive")
+        component_status = addons.component_status(addon_id, version)
         result = {
-            "addon": asdict(info),
-            "components": addons.component_status(addon_id, version),
+            "addon": {
+                **asdict(info),
+                "status": "stored" if info.status == "installed" else info.status,
+            },
+            "components": [
+                {
+                    **item,
+                    "status": "stored" if item.get("status") == "installed" else item.get("status"),
+                }
+                for item in component_status
+            ],
             "artifact": storage.write_content_archive(package, archived_blobs),
             **({"package": package} if data.get("include_package") is True else {}),
         }
@@ -42064,7 +42083,15 @@ boundary.
             )
         if action == "list":
             if kind == "core_rules":
-                result = rule_pack_list(data.get("pack_id"))
+                result = [
+                    {
+                        **item,
+                        "status": (
+                            "stored" if item.get("status") == "installed" else item.get("status")
+                        ),
+                    }
+                    for item in rule_pack_list(data.get("pack_id"))
+                ]
             elif kind == "addon":
                 result = _content_pack_addons(data, principal_id)
             elif kind == "module":
@@ -42092,9 +42119,17 @@ boundary.
                     raise ValueError("payload.kind does not match the finalized Pack archive")
                 result = package
             elif kind == "core_rules":
-                result = rule_pack_inspect(
+                inspected = rule_pack_inspect(
                     str(required(data, "pack_id")), str(required(data, "version"))
                 )
+                result = {
+                    **inspected,
+                    "status": (
+                        "stored"
+                        if inspected.get("status") == "installed"
+                        else inspected.get("status")
+                    ),
+                }
             elif kind == "addon":
                 result = _content_pack_addon(data, principal_id)
             elif kind == "module":

@@ -20,9 +20,9 @@ class _FakeServer:
             1: {"id": "campaign"},
             2: {
                 "result": {
-                    "installed": True,
+                    "stored": True,
                     "activated": False,
-                    "components": [{"kind": "rule_pack", "status": "installed"}],
+                    "components": [{"kind": "rule_pack", "status": "stored"}],
                 }
             },
             3: {"result": {"package": self.package}},

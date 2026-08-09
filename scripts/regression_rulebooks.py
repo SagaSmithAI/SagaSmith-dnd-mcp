@@ -2342,9 +2342,9 @@ async def _import_dependency_addons(
                 ),
             },
         )
-        if imported["result"]["installed"] is not True:
+        if imported["result"]["stored"] is not True:
             raise RuntimeError(
-                f"dependency addon did not install on {receiver} through the public MCP facade"
+                f"dependency addon was not stored on {receiver} through the public MCP facade"
             )
 
 
@@ -3518,10 +3518,10 @@ async def _content_roundtrip(
         },
     )
     imported = import_response["result"]
-    if imported["installed"] is not True or imported["activated"] is not False:
-        raise RuntimeError("addon import did not stop at the installed/inactive boundary")
-    if any(item["status"] != "installed" for item in imported["components"]):
-        raise RuntimeError("addon global components were not installed")
+    if imported["stored"] is not True or imported["activated"] is not False:
+        raise RuntimeError("addon import did not stop at the stored/inactive boundary")
+    if any(item["status"] != "stored" for item in imported["components"]):
+        raise RuntimeError("addon global components were not stored")
     profile_response = await _call(
         target_server,
         "campaign_rules",
@@ -3791,7 +3791,7 @@ async def _content_roundtrip(
         "fresh_source_ids": True,
         "_generated_addon": {**addon, "_local_archive_path": str(addon_archive_path)},
         "draft_status": "validated",
-        "installed": True,
+        "stored": True,
         "activated": True,
         "deactivated": True,
         "addon_reexport_identical": True,

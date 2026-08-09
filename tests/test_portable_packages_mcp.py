@@ -994,8 +994,11 @@ def test_unified_addon_archive_import_reexport_and_actor_creation(tmp_path: Path
                 "idempotency_key": "import-addon",
             },
         )
-        assert imported["installed"] is True
+        assert imported["stored"] is True
         assert imported["activated"] is False
+        assert {item["status"] for item in imported["components"]} == {"stored"}
+        assert imported["actor_catalog"]["status"] == "stored"
+        assert imported["addon"]["status"] == "stored"
         detail = await _call(
             server,
             "content_pack",
@@ -1011,6 +1014,21 @@ def test_unified_addon_archive_import_reexport_and_actor_creation(tmp_path: Path
             },
         )
         assert detail["package"] == package
+        assert detail["addon"]["status"] == "stored"
+        assert {item["status"] for item in detail["components"]} == {"stored"}
+        listed = await _call(
+            server,
+            "content_pack",
+            {
+                "action": "list",
+                "payload": {
+                    "kind": "addon",
+                    "campaign_id": campaign["id"],
+                    "addon_id": package["id"],
+                },
+            },
+        )
+        assert listed[0]["status"] == "stored"
         created = await _call(
             server,
             "character_create_from",

@@ -485,7 +485,7 @@ def test_dependency_addons_require_exact_review_selection(tmp_path, monkeypatch)
         )
 
 
-def test_dependency_addons_are_installed_on_each_roundtrip_receiver(tmp_path) -> None:
+def test_dependency_addons_are_stored_on_each_roundtrip_receiver(tmp_path) -> None:
     dependency_path = tmp_path / "dependencies" / "phb.sagasmith-pack"
     dependency_path.parent.mkdir()
     dependency_path.write_bytes(b"dependency")
@@ -495,7 +495,7 @@ def test_dependency_addons_are_installed_on_each_roundtrip_receiver(tmp_path) ->
         "checksum": "b" * 64,
         "_local_archive_path": str(dependency_path),
     }
-    server = _FakeServer([("content_pack", {"result": {"installed": True}})])
+    server = _FakeServer([("content_pack", {"result": {"stored": True}})])
 
     asyncio.run(
         driver._import_dependency_addons(
@@ -2201,9 +2201,9 @@ def test_content_roundtrip_uses_public_facades_and_preserves_package() -> None:
                 "content_pack",
                 {
                     "result": {
-                        "installed": True,
+                        "stored": True,
                         "activated": False,
-                        "components": [{"status": "installed"}],
+                        "components": [{"status": "stored"}],
                     }
                 },
             ),
@@ -2244,7 +2244,7 @@ def test_content_roundtrip_uses_public_facades_and_preserves_package() -> None:
 
     assert result["reexport_identical"] is True
     assert result["fresh_source_ids"] is True
-    assert result["installed"] is True
+    assert result["stored"] is True
     assert result["activated"] is True
     assert result["deactivated"] is True
     assert [name for name, _arguments in source.calls] == [
@@ -2393,9 +2393,9 @@ def test_content_roundtrip_rejects_deferred_actor_presets() -> None:
                 "content_pack",
                 {
                     "result": {
-                        "installed": True,
+                        "stored": True,
                         "activated": False,
-                        "components": [{"status": "installed"}],
+                        "components": [{"status": "stored"}],
                     }
                 },
             ),

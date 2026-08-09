@@ -119,15 +119,15 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 },
             )
             value = imported["result"]
-            if value["installed"] is not True or value["activated"] is not False:
-                raise RuntimeError("addon import crossed the inactive install boundary")
+            if value["stored"] is not True or value["activated"] is not False:
+                raise RuntimeError("addon import crossed the stored/inactive boundary")
             invalid_components = [
                 item
                 for item in value["components"]
-                if item["status"] not in {"installed", "campaign_import_required"}
+                if item["status"] not in {"stored", "campaign_import_required"}
             ]
             if invalid_components:
-                raise RuntimeError("addon contains components that were not installed")
+                raise RuntimeError("addon contains components that were not stored")
             detail = await _call(
                 server,
                 "content_pack",
@@ -211,7 +211,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     "validation": "accepted by content_pack(import)",
                     "components": value["components"],
                     "catalog_artifacts_while_active": len(catalog["result"]),
-                    "installed": True,
+                    "stored": True,
                     "activated": True,
                     "deactivated": True,
                     "reexport_identical": True,
