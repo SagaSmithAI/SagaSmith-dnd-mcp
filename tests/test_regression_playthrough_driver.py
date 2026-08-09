@@ -7765,11 +7765,6 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
                 actor_id = arguments["payload"]["character_id"]
                 if arguments["view"] == "rest":
                     assert arguments["payload"]["duration_minutes"] == 60
-                    assert arguments["payload"]["rest_schedule"] == {
-                        "sleep_minutes": 0,
-                        "light_activity_minutes": 60,
-                        "strenuous_activity_minutes": 0,
-                    }
                     if actor_id == "fighter":
                         assert arguments["payload"]["hit_dice_spends"] == [
                             {"key": "fighter:d10", "count": 1}
@@ -7810,21 +7805,11 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
                             "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
                             "song_of_rest_source_actor_id": "wizard",
                             "rest_activity_minutes": {"meditation": 30},
-                            "rest_schedule": {
-                                "sleep_minutes": 0,
-                                "light_activity_minutes": 60,
-                                "strenuous_activity_minutes": 0,
-                            },
                         },
                         {
                             "character_id": "wizard",
                             "expected_revision": 2,
                             "arcane_recovery": {"1": 1},
-                            "rest_schedule": {
-                                "sleep_minutes": 0,
-                                "light_activity_minutes": 60,
-                                "strenuous_activity_minutes": 0,
-                            },
                         },
                     ],
                 }
@@ -7894,11 +7879,6 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
 
 def test_short_rest_recovers_the_atomic_random_receipt_without_rerolling() -> None:
     rest_key = _mutation_key("run-1", "short-rest-party", "recovered-short-rest-1")
-    schedule = {
-        "sleep_minutes": 0,
-        "light_activity_minutes": 60,
-        "strenuous_activity_minutes": 0,
-    }
     response = {
         "status": "committed",
         "rest_type": "short_rest",
@@ -7987,7 +7967,6 @@ def test_short_rest_recovers_the_atomic_random_receipt_without_rerolling() -> No
                             "character_id": "fighter",
                             "expected_revision": 2,
                             "rest_activity_minutes": {},
-                            "rest_schedule": schedule,
                             "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
                             "arcane_recovery": {},
                             "natural_recovery": {},
@@ -9628,21 +9607,11 @@ def test_long_rest_uses_atomic_party_rest_and_unique_occurrence_knowledge() -> N
                         "expected_revision": 2,
                         "food_and_drink": True,
                         "rest_activity_minutes": {"meditation": 30},
-                        "rest_schedule": {
-                            "sleep_minutes": 360,
-                            "light_activity_minutes": 120,
-                            "strenuous_activity_minutes": 0,
-                        },
                     },
                     {
                         "character_id": "cleric",
                         "expected_revision": 2,
                         "food_and_drink": False,
-                        "rest_schedule": {
-                            "sleep_minutes": 360,
-                            "light_activity_minutes": 120,
-                            "strenuous_activity_minutes": 0,
-                        },
                         "prepared_spell_ids": ["cure-wounds"],
                     },
                 ]
@@ -9810,11 +9779,6 @@ def test_long_rest_recovers_committed_receipt_without_advancing_time_twice(
                                 "prepared_spell_ids": None,
                                 "hit_dice_recovery": None,
                                 "rest_activity_minutes": {},
-                                "rest_schedule": {
-                                    "sleep_minutes": 360,
-                                    "light_activity_minutes": 120,
-                                    "strenuous_activity_minutes": 0,
-                                },
                                 "food_and_drink": True,
                             },
                             {
@@ -9823,11 +9787,6 @@ def test_long_rest_recovers_committed_receipt_without_advancing_time_twice(
                                 "prepared_spell_ids": ["cure-wounds"],
                                 "hit_dice_recovery": None,
                                 "rest_activity_minutes": {},
-                                "rest_schedule": {
-                                    "sleep_minutes": 360,
-                                    "light_activity_minutes": 120,
-                                    "strenuous_activity_minutes": 0,
-                                },
                                 "food_and_drink": False,
                             },
                         ],

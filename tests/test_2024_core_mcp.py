@@ -395,11 +395,6 @@ def test_2024_class_resource_cards_materialize_and_scale_through_public_mcp(
                 "idempotency_key": "spend-sorcery-points",
             },
         )
-        rest_schedule = {
-            "sleep_minutes": 0,
-            "light_activity_minutes": 60,
-            "strenuous_activity_minutes": 0,
-        }
         preflight = await _call(
             server,
             "character_query",
@@ -409,7 +404,6 @@ def test_2024_class_resource_cards_materialize_and_scale_through_public_mcp(
                     "character_id": sorcerer["id"],
                     "rest_type": "short_rest",
                     "duration_minutes": 60,
-                    "rest_schedule": rest_schedule,
                     "sorcerous_restoration_points": 4,
                 },
             },
@@ -439,7 +433,6 @@ def test_2024_class_resource_cards_materialize_and_scale_through_public_mcp(
                             "character_id": sorcerer["id"],
                             "expected_revision": sorcerer["revision"],
                             "sorcerous_restoration_points": 4,
-                            "rest_schedule": rest_schedule,
                         }
                     ],
                 },

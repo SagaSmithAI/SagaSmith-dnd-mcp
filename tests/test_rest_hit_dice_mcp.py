@@ -29,14 +29,6 @@ def _config(tmp_path: Path) -> McpConfig:
     )
 
 
-def _short_rest_schedule() -> dict[str, int]:
-    return {
-        "sleep_minutes": 0,
-        "light_activity_minutes": 60,
-        "strenuous_activity_minutes": 0,
-    }
-
-
 async def _ensure_rest_clock(server, campaign_id: str, key: str) -> dict:
     campaign = await _call(
         server,
@@ -356,7 +348,6 @@ def test_attunement_requires_a_short_rest_during_play(tmp_path: Path) -> None:
                             "character_id": actor["id"],
                             "expected_revision": equipped_actor["revision"],
                             "attune_item_id": "staff",
-                            "rest_schedule": _short_rest_schedule(),
                         }
                     ],
                 },
@@ -378,7 +369,6 @@ def test_attunement_requires_a_short_rest_during_play(tmp_path: Path) -> None:
                     "expected_revision": equipped_actor["revision"],
                     "attune_item_id": "staff",
                     "attunement_prerequisite_confirmed": True,
-                    "rest_schedule": _short_rest_schedule(),
                 }
             ],
         )
@@ -419,7 +409,6 @@ def test_short_rest_rolls_requested_hit_dice_inside_the_mcp(tmp_path: Path) -> N
             {
                 "character_id": actor["id"],
                 "expected_revision": actor["revision"],
-                "rest_schedule": _short_rest_schedule(),
                 "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
             }
         ]
@@ -485,7 +474,6 @@ def test_short_rest_applies_source_bound_song_of_rest_inside_the_mcp(
                     "character_id": target["id"],
                     "rest_type": "short_rest",
                     "duration_minutes": 60,
-                    "rest_schedule": _short_rest_schedule(),
                     "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
                     "song_of_rest_source_actor_id": bard["id"],
                 },
@@ -504,7 +492,6 @@ def test_short_rest_applies_source_bound_song_of_rest_inside_the_mcp(
                     {
                         "character_id": target["id"],
                         "expected_revision": target["revision"],
-                        "rest_schedule": _short_rest_schedule(),
                         "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
                         "song_of_rest_source_actor_id": bard["id"],
                     }
@@ -518,14 +505,12 @@ def test_short_rest_applies_source_bound_song_of_rest_inside_the_mcp(
                 {
                     "character_id": target["id"],
                     "expected_revision": target["revision"],
-                    "rest_schedule": _short_rest_schedule(),
                     "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
                     "song_of_rest_source_actor_id": bard["id"],
                 },
                 {
                     "character_id": bard["id"],
                     "expected_revision": bard["revision"],
-                    "rest_schedule": _short_rest_schedule(),
                 },
             ],
         )
@@ -592,7 +577,6 @@ def test_short_rest_applies_natural_and_sorcerous_recovery_inside_the_mcp(
                     "character_id": druid["id"],
                     "rest_type": "short_rest",
                     "duration_minutes": 60,
-                    "rest_schedule": _short_rest_schedule(),
                     "natural_recovery": {"2": 1},
                     "rest_activity_minutes": {"meditation": 60},
                 },
@@ -608,14 +592,12 @@ def test_short_rest_applies_natural_and_sorcerous_recovery_inside_the_mcp(
                 {
                     "character_id": druid["id"],
                     "expected_revision": druid["revision"],
-                    "rest_schedule": _short_rest_schedule(),
                     "natural_recovery": {"2": 1},
                     "rest_activity_minutes": {"meditation": 60},
                 },
                 {
                     "character_id": sorcerer["id"],
                     "expected_revision": sorcerer["revision"],
-                    "rest_schedule": _short_rest_schedule(),
                 },
             ],
         )
@@ -678,7 +660,6 @@ def test_short_rest_query_preflights_choices_without_mutation(tmp_path: Path) ->
                         "character_id": actor["id"],
                         "rest_type": "short_rest",
                         "duration_minutes": 60,
-                        "rest_schedule": _short_rest_schedule(),
                         "hit_dice_spends": [{"key": "d10", "count": 1}],
                     },
                 },
@@ -692,7 +673,6 @@ def test_short_rest_query_preflights_choices_without_mutation(tmp_path: Path) ->
                     "character_id": actor["id"],
                     "rest_type": "short_rest",
                     "duration_minutes": 60,
-                    "rest_schedule": _short_rest_schedule(),
                     "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
                 },
             },
@@ -746,7 +726,6 @@ def test_short_rest_recovers_ki_only_after_declared_meditation(tmp_path: Path) -
                 {
                     "character_id": actor["id"],
                     "expected_revision": actor["revision"],
-                    "rest_schedule": _short_rest_schedule(),
                 }
             ],
         )
@@ -761,7 +740,6 @@ def test_short_rest_recovers_ki_only_after_declared_meditation(tmp_path: Path) -
                 {
                     "character_id": actor["id"],
                     "expected_revision": no_meditation["character"]["revision"],
-                    "rest_schedule": _short_rest_schedule(),
                     "rest_activity_minutes": {"meditation": 30},
                 }
             ],
@@ -808,7 +786,6 @@ def test_short_rest_atomically_applies_arcane_recovery_choice(tmp_path: Path) ->
             {
                 "character_id": actor["id"],
                 "expected_revision": actor["revision"],
-                "rest_schedule": _short_rest_schedule(),
                 "arcane_recovery": {"1": 1},
             }
         ]
@@ -870,7 +847,6 @@ def test_rest_rejects_stale_revision_before_hit_die_rng(tmp_path: Path, monkeypa
                     {
                         "character_id": actor["id"],
                         "expected_revision": actor["revision"] + 1,
-                        "rest_schedule": _short_rest_schedule(),
                         "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
                     }
                 ],
@@ -909,7 +885,6 @@ def test_rest_rejects_client_supplied_hit_die_results(tmp_path: Path) -> None:
                     {
                         "character_id": actor["id"],
                         "expected_revision": actor["revision"],
-                        "rest_schedule": _short_rest_schedule(),
                         "hit_dice_spends": [{"key": "fighter:d10", "roll": 10}],
                     }
                 ],

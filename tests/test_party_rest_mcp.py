@@ -2,23 +2,11 @@ import asyncio
 from pathlib import Path
 
 import pytest
+
 from sagasmith_dnd.character_schema import default_character_sheet
 from sagasmith_dnd.random_stream import CampaignRandomStream, use_random_stream
-
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
-
-LONG_REST_SCHEDULE = {
-    "sleep_minutes": 360,
-    "light_activity_minutes": 120,
-    "strenuous_activity_minutes": 0,
-}
-SHORT_REST_SCHEDULE = {
-    "sleep_minutes": 0,
-    "light_activity_minutes": 60,
-    "strenuous_activity_minutes": 0,
-}
-
 
 async def _call(server, name: str, arguments: dict):
     _, result = await server.call_tool(name, arguments)
@@ -131,10 +119,7 @@ def test_party_long_rest_advances_once_and_settles_members_atomically(tmp_path: 
                 {
                     "character_id": first["id"],
                     "action": "rest",
-                    "payload": {
-                        "rest_type": "short_rest",
-                        "rest_schedule": SHORT_REST_SCHEDULE,
-                    },
+                    "payload": {"rest_type": "short_rest"},
                     "expected_revision": first["revision"],
                     "idempotency_key": "unsafe-individual-short-rest",
                 },
@@ -305,11 +290,6 @@ def test_party_short_rest_advances_and_settles_every_member_atomically(
                 "idempotency_key": "clock",
             },
         )
-        schedule = {
-            "sleep_minutes": 0,
-            "light_activity_minutes": 60,
-            "strenuous_activity_minutes": 0,
-        }
         arguments = {
             "campaign_id": campaign["id"],
             "action": "party_rest",
@@ -322,12 +302,10 @@ def test_party_short_rest_advances_and_settles_every_member_atomically(
                         "expected_revision": first["revision"],
                         "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
                         "rest_activity_minutes": {"meditation": 30},
-                        "rest_schedule": schedule,
                     },
                     {
                         "character_id": second["id"],
                         "expected_revision": second["revision"],
-                        "rest_schedule": schedule,
                     },
                 ],
             },
@@ -391,7 +369,7 @@ def test_party_short_rest_advances_and_settles_every_member_atomically(
             "campaign_query",
             {"view": "get", "payload": {"campaign_id": campaign["id"]}},
         )
-        with pytest.raises(Exception, match="strenuous"):
+        with pytest.raises(Exception, match="at least 60"):
             await _call(
                 server,
                 "campaign_change",
@@ -400,21 +378,15 @@ def test_party_short_rest_advances_and_settles_every_member_atomically(
                     "action": "party_rest",
                     "payload": {
                         "rest_type": "short_rest",
-                        "duration_minutes": 60,
+                        "duration_minutes": 30,
                         "members": [
                             {
                                 "character_id": updated[0]["id"],
                                 "expected_revision": updated[0]["revision"],
-                                "rest_schedule": schedule,
                             },
                             {
                                 "character_id": updated[1]["id"],
                                 "expected_revision": updated[1]["revision"],
-                                "rest_schedule": {
-                                    **schedule,
-                                    "light_activity_minutes": 0,
-                                    "strenuous_activity_minutes": 60,
-                                },
                             },
                         ],
                     },
@@ -476,7 +448,6 @@ def test_party_rest_uses_game_time_without_requiring_a_calendar(tmp_path: Path) 
                         {
                             "character_id": actor["id"],
                             "expected_revision": actor["revision"],
-                            "rest_schedule": SHORT_REST_SCHEDULE,
                         }
                     ],
                 },
@@ -560,12 +531,6 @@ def test_party_long_rest_honors_source_granted_elf_trance(tmp_path: Path) -> Non
                 "idempotency_key": "clock",
             },
         )
-        schedule = {
-            "sleep_minutes": 0,
-            "trance_minutes": 240,
-            "light_activity_minutes": 0,
-            "strenuous_activity_minutes": 0,
-        }
         with pytest.raises(Exception, match="at least 480"):
             await _call(
                 server,
@@ -579,7 +544,6 @@ def test_party_long_rest_honors_source_granted_elf_trance(tmp_path: Path) -> Non
                             {
                                 "character_id": human["id"],
                                 "expected_revision": human["revision"],
-                                "rest_schedule": schedule,
                             }
                         ],
                     },
@@ -600,7 +564,6 @@ def test_party_long_rest_honors_source_granted_elf_trance(tmp_path: Path) -> Non
                         {
                             "character_id": elf["id"],
                             "expected_revision": elf["revision"],
-                            "rest_schedule": schedule,
                         }
                     ],
                 },
@@ -720,35 +683,6 @@ def test_party_long_rest_accounts_for_2014_preparation_time(tmp_path: Path) -> N
             },
         )
 
-        with pytest.raises(Exception, match="requires 3 minutes"):
-            await _call(
-                server,
-                "campaign_change",
-                {
-                    "campaign_id": campaign["id"],
-                    "action": "party_rest",
-                    "payload": {
-                        "members": [
-                            {
-                                "character_id": cleric["id"],
-                                "expected_revision": cleric["revision"],
-                                "prepared_spell_ids": [
-                                    "dnd5e.content.srd2014.spell.bless",
-                                    "dnd5e.content.srd2014.spell.lesser-restoration",
-                                ],
-                                "rest_schedule": {
-                                    "sleep_minutes": 479,
-                                    "light_activity_minutes": 1,
-                                    "strenuous_activity_minutes": 0,
-                                },
-                            }
-                        ]
-                    },
-                    "expected_revision": clock["campaign_revision"],
-                    "idempotency_key": "too-little-preparation",
-                },
-            )
-
         rested = await _call(
             server,
             "campaign_change",
@@ -764,11 +698,6 @@ def test_party_long_rest_accounts_for_2014_preparation_time(tmp_path: Path) -> N
                                 "dnd5e.content.srd2014.spell.bless",
                                 "dnd5e.content.srd2014.spell.lesser-restoration",
                             ],
-                            "rest_schedule": {
-                                "sleep_minutes": 477,
-                                "light_activity_minutes": 3,
-                                "strenuous_activity_minutes": 0,
-                            },
                         }
                     ]
                 },

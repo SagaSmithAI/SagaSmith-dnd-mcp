@@ -318,11 +318,6 @@ def test_2024_prepared_spell_changes_follow_phase_and_long_rest_rules(tmp_path: 
                                 "character_id": ranger["id"],
                                 "expected_revision": ranger["revision"],
                                 "prepared_spell_ids": ["a", "missing"],
-                                "rest_schedule": {
-                                    "sleep_minutes": 360,
-                                    "light_activity_minutes": 120,
-                                    "strenuous_activity_minutes": 0,
-                                },
                             }
                         ]
                     },
@@ -342,11 +337,6 @@ def test_2024_prepared_spell_changes_follow_phase_and_long_rest_rules(tmp_path: 
                             "character_id": ranger["id"],
                             "expected_revision": ranger["revision"],
                             "prepared_spell_ids": ["a", "c"],
-                            "rest_schedule": {
-                                "sleep_minutes": 360,
-                                "light_activity_minutes": 120,
-                                "strenuous_activity_minutes": 0,
-                            },
                         }
                     ]
                 },

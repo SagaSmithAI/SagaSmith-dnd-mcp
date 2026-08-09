@@ -45,12 +45,7 @@ from sagasmith_dnd.game_time import (
     game_time_ticks,
     validate_calendar_minute_point,
 )
-from sagasmith_dnd.lifecycle import (
-    LONG_REST_LIGHT_ACTIVITY_MAX_MINUTES,
-    LONG_REST_SLEEP_MINUTES,
-    allows_trance_rest,
-    minimum_rest_minutes,
-)
+from sagasmith_dnd.lifecycle import allows_trance_rest, minimum_rest_minutes
 from sagasmith_dnd.module_profile import DndModuleProfile
 from sagasmith_dnd.playthrough import (
     PARTY_MEMBER_SOURCES,
@@ -6306,7 +6301,6 @@ async def _short_rest(
         "attunement_prerequisite_confirmed",
         "hit_dice_spends",
         "rest_activity_minutes",
-        "rest_schedule",
     }
     normalized: list[dict[str, Any]] = []
     for index, member in enumerate(members):
@@ -6323,7 +6317,6 @@ async def _short_rest(
         attunement_prerequisite_confirmed = member.get("attunement_prerequisite_confirmed")
         hit_dice_spends = member.get("hit_dice_spends")
         rest_activity_minutes = member.get("rest_activity_minutes")
-        rest_schedule = member.get("rest_schedule")
         if (
             unexpected
             or not actor_id
@@ -6335,15 +6328,13 @@ async def _short_rest(
             )
             or (hit_dice_spends is not None and not isinstance(hit_dice_spends, list))
             or (rest_activity_minutes is not None and not isinstance(rest_activity_minutes, dict))
-            or (rest_schedule is not None and not isinstance(rest_schedule, dict))
         ):
             raise ValueError(
                 "short-rest members accept actor_id, optional arcane_recovery, "
                 "optional natural_recovery, "
                 "optional song_of_rest_source_actor_id, "
                 "optional attune_item_id with attunement_prerequisite_confirmed, "
-                "optional hit_dice_spends, optional rest_activity_minutes, and "
-                "optional rest_schedule only"
+                "optional hit_dice_spends and optional rest_activity_minutes only"
             )
         if attune_item_id and attunement_prerequisite_confirmed is not True:
             raise ValueError(
@@ -6374,15 +6365,6 @@ async def _short_rest(
                 "song_of_rest_source_actor_id": song_of_rest_source_actor_id,
                 "hit_dice_spends": normalized_spends,
                 "rest_activity_minutes": deepcopy(rest_activity_minutes or {}),
-                "rest_schedule": deepcopy(
-                    rest_schedule
-                    if rest_schedule is not None
-                    else {
-                        "sleep_minutes": 0,
-                        "light_activity_minutes": duration_minutes,
-                        "strenuous_activity_minutes": 0,
-                    }
-                ),
                 **({"attune_item_id": attune_item_id} if attune_item_id is not None else {}),
                 **(
                     {"attunement_prerequisite_confirmed": True}
@@ -6441,7 +6423,6 @@ async def _short_rest(
                         "attunement_prerequisite_confirmed"
                     ),
                     "rest_activity_minutes": member["rest_activity_minutes"],
-                    "rest_schedule": member["rest_schedule"],
                     "duration_minutes": duration_minutes,
                 },
             },
@@ -6493,7 +6474,6 @@ async def _short_rest(
         party_member: dict[str, Any] = {
             "character_id": member["actor_id"],
             "expected_revision": actor_by_id[member["actor_id"]]["revision"],
-            "rest_schedule": member["rest_schedule"],
         }
         if member["arcane_recovery"]:
             party_member["arcane_recovery"] = member["arcane_recovery"]
@@ -6590,7 +6570,6 @@ async def _short_rest(
                     "character_id": member["actor_id"],
                     "expected_revision": revision_row["before_revision"],
                     "rest_activity_minutes": member["rest_activity_minutes"],
-                    "rest_schedule": member["rest_schedule"],
                     "hit_dice_spends": member["hit_dice_spends"],
                     "arcane_recovery": member["arcane_recovery"],
                     "natural_recovery": member["natural_recovery"],
@@ -7624,7 +7603,6 @@ async def _long_rest(
         "prepared_spell_ids",
         "hit_dice_recovery",
         "rest_activity_minutes",
-        "rest_schedule",
         "food_and_drink",
     }
     normalized: list[dict[str, Any]] = []
@@ -7638,7 +7616,6 @@ async def _long_rest(
         hit_dice_recovery = member.get("hit_dice_recovery")
         food_and_drink = member.get("food_and_drink", False)
         rest_activity_minutes = member.get("rest_activity_minutes")
-        rest_schedule = member.get("rest_schedule")
         if (
             unexpected
             or not actor_id
@@ -7646,12 +7623,11 @@ async def _long_rest(
             or (hit_dice_recovery is not None and not isinstance(hit_dice_recovery, dict))
             or not isinstance(food_and_drink, bool)
             or (rest_activity_minutes is not None and not isinstance(rest_activity_minutes, dict))
-            or (rest_schedule is not None and not isinstance(rest_schedule, dict))
         ):
             raise ValueError(
                 "long-rest members accept actor_id, optional prepared_spell_ids, "
                 "optional hit_dice_recovery, optional rest_activity_minutes, "
-                "optional rest_schedule, and optional food_and_drink only"
+                "and optional food_and_drink only"
             )
         actor = await client.domain(
             "character_query",
@@ -7665,32 +7641,12 @@ async def _long_rest(
             raise ValueError(
                 f"long-rest member {actor_id} requires at least {standard_minimum} minutes"
             )
-        default_schedule = (
-            {
-                "sleep_minutes": max(duration_minutes - LONG_REST_SLEEP_MINUTES, 0),
-                "trance_minutes": trance_minimum,
-                "light_activity_minutes": min(
-                    max(duration_minutes - trance_minimum, 0),
-                    LONG_REST_LIGHT_ACTIVITY_MAX_MINUTES,
-                ),
-                "strenuous_activity_minutes": 0,
-            }
-            if uses_trance
-            else {
-                "sleep_minutes": duration_minutes - LONG_REST_LIGHT_ACTIVITY_MAX_MINUTES,
-                "light_activity_minutes": LONG_REST_LIGHT_ACTIVITY_MAX_MINUTES,
-                "strenuous_activity_minutes": 0,
-            }
-        )
         normalized.append(
             {
                 "actor_id": actor_id,
                 "prepared_spell_ids": (list(prepared_ids) if prepared_ids is not None else None),
                 "hit_dice_recovery": deepcopy(hit_dice_recovery),
                 "rest_activity_minutes": deepcopy(rest_activity_minutes or {}),
-                "rest_schedule": deepcopy(
-                    rest_schedule if rest_schedule is not None else default_schedule
-                ),
                 "food_and_drink": food_and_drink,
             }
         )
@@ -7748,7 +7704,6 @@ async def _long_rest(
             "character_id": member["actor_id"],
             "expected_revision": actor_by_id[member["actor_id"]]["revision"],
             "food_and_drink": member["food_and_drink"],
-            "rest_schedule": member["rest_schedule"],
         }
         if member["rest_activity_minutes"]:
             party_member["rest_activity_minutes"] = member["rest_activity_minutes"]
@@ -7846,7 +7801,6 @@ async def _long_rest(
                     "prepared_spell_ids": member["prepared_spell_ids"],
                     "hit_dice_recovery": member["hit_dice_recovery"],
                     "rest_activity_minutes": member["rest_activity_minutes"],
-                    "rest_schedule": member["rest_schedule"],
                     "food_and_drink": member["food_and_drink"],
                 }
             )
@@ -8401,7 +8355,6 @@ async def _recover_stable_party(
         "attunement_prerequisite_confirmed",
         "hit_dice_spends",
         "rest_activity_minutes",
-        "rest_schedule",
     }
     normalized_resting: list[dict[str, Any]] = []
     for index, member in enumerate(resting_members):
