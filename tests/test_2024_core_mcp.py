@@ -34,6 +34,90 @@ def _config(tmp_path: Path, *, bundled_skills: bool = False) -> McpConfig:
     )
 
 
+def test_selection_ready_item_can_be_granted_during_play_with_evidence(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path, bundled_skills=True))
+        sheet = default_character_sheet()
+        sheet["edition"] = "2024"
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Play reward", "edition": "2024", "idempotency_key": "campaign"},
+        )
+        character = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Rewarded hero",
+                    "sheet": sheet,
+                },
+                "idempotency_key": "character",
+            },
+        )
+        catalog = await _call(
+            server,
+            "character_query",
+            {
+                "view": "catalog",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "kind": "item",
+                    "query": "Longsword",
+                },
+            },
+        )
+        longsword = next(item for item in catalog if item["name"] == "Longsword")
+        current = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        await _call(
+            server,
+            "game_phase",
+            {
+                "campaign_id": campaign["id"],
+                "action": "set",
+                "tool_profile": "play",
+                "expected_revision": current["revision"],
+                "idempotency_key": "play",
+            },
+        )
+        granted = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": character["id"],
+                "artifact_id": longsword["id"],
+                "selection": {},
+                "grant": {
+                    "kind": "story_reward",
+                    "reason": "The party received the weapon after completing the scene.",
+                    "source_ref": longsword["rule_refs"][0],
+                },
+                "expected_revision": character["revision"],
+                "idempotency_key": "grant",
+            },
+        )
+
+        assert granted["play_grant"]["kind"] == "story_reward"
+        applied = next(
+            item
+            for item in granted["sheet"]["content"]["selections"]
+            if item["artifact_id"] == longsword["id"]
+        )
+        assert applied["selection"]["inventory_item_id"] in {
+            item["id"] for item in granted["sheet"]["inventory"]["items"]
+        }
+
+    asyncio.run(exercise())
+
+
 def test_2024_campaign_uses_only_the_source_linked_2024_catalog(tmp_path: Path) -> None:
     async def exercise() -> None:
         server = create_server(_config(tmp_path, bundled_skills=True))

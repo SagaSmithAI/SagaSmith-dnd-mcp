@@ -35871,6 +35871,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         character_id: str,
         artifact_id: str,
         selection: dict[str, Any] | None = None,
+        grant: dict[str, Any] | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
@@ -35953,6 +35954,51 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             else "character.content.apply"
         )
         branch_id = require_current_branch(current.campaign_id, None)
+        play_grant: dict[str, Any] | None = None
+        if phase == PROFILE_PLAY and requested_method != "spellbook_copy":
+            if kind not in {"activity", "feat", "feature", "item", "spell"}:
+                raise CombatEngineError(
+                    f"{kind or 'this content'} cannot be granted during play"
+                )
+            if not is_dm(current.campaign_id, principal_id):
+                raise PermissionError("play-time content grants require the campaign DM")
+            if not isinstance(grant, dict) or set(grant) != {"kind", "reason", "source_ref"}:
+                raise CombatEngineError(
+                    "play-time content grants require exactly kind, reason, and source_ref"
+                )
+            grant_kind = str(grant.get("kind") or "").strip().casefold().replace("-", "_")
+            reason = " ".join(str(grant.get("reason") or "").split())
+            if grant_kind not in {"story_reward", "training", "module_reward"}:
+                raise CombatEngineError(
+                    "play-time grant kind must be story_reward, training, or module_reward"
+                )
+            if not reason or len(reason) > 1000:
+                raise CombatEngineError(
+                    "play-time grant reason must contain 1 to 1000 characters"
+                )
+            source_ref_value = grant.get("source_ref")
+            artifact_rule_refs = {
+                str(reference).strip()
+                for reference in artifact.get("rule_refs") or []
+                if str(reference).strip()
+            }
+            normalized_source_ref = str(source_ref_value or "").strip()
+            if normalized_source_ref not in artifact_rule_refs:
+                normalized_source_ref = advancement_source_ref(
+                    current.campaign_id,
+                    source_ref_value,
+                    branch_id=branch_id,
+                )
+            play_grant = {
+                "kind": grant_kind,
+                "reason": reason,
+                "source_ref": normalized_source_ref,
+                "authorized_by": principal_id,
+            }
+        elif grant is not None:
+            raise CombatEngineError(
+                "grant authorization is used only for non-spellbook content during play"
+            )
         request_payload = {
             "operation": operation,
             "character_id": current.id,
@@ -35960,6 +36006,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "pack_id": pack_id,
             "version": version,
             "selection": selection,
+            "grant": play_grant,
         }
         replay = replay_idempotent(
             f"character-write:{current.campaign_id}:{branch_id}:{principal_id}:{current.id}",
@@ -36707,7 +36754,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 if phase != PROFILE_PLAY:
                     raise CombatEngineError("spellbook copying is available only during play")
                 spellbook_copy = {"level": level}
-            elif phase != PROFILE_LOBBY:
+            elif phase != PROFILE_LOBBY and play_grant is None:
                 raise CombatEngineError(
                     "content grants belong to lobby setup or level advancement; "
                     "only source-bound spellbook_copy is legal during play"
@@ -39512,7 +39559,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 content_context=runtime_context,
                 content_receipt=content_receipt,
             )
-        if phase != PROFILE_LOBBY and not replacing_feature_selection:
+        if (
+            phase != PROFILE_LOBBY
+            and not replacing_feature_selection
+            and spellbook_copy is None
+            and play_grant is None
+        ):
             raise CombatEngineError("content grants belong to lobby setup or level advancement")
         response_extra = {
             **({"subclass_spell_grants": subclass_spell_grants} if subclass_spell_grants else {}),
@@ -39526,6 +39578,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 else {}
             ),
             "content_context": runtime_context,
+            **({"play_grant": play_grant} if play_grant is not None else {}),
             **(
                 {"rule_receipts": [deepcopy(content_receipt)]}
                 if content_receipt is not None
@@ -39544,6 +39597,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "pack_id": pack_id,
                 "version": version,
                 "selection": selection,
+                "grant": play_grant,
             },
             response_extra=response_extra,
             flatten_response_extra=True,
@@ -43860,6 +43914,7 @@ Useful bounded guidance:
         character_id: str,
         artifact_id: str,
         selection: dict[str, Any] | None = None,
+        grant: dict[str, Any] | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
@@ -43871,6 +43926,7 @@ Useful bounded guidance:
                 character_id,
                 artifact_id,
                 selection,
+                grant,
                 principal_id,
                 expected_revision,
                 idempotency_key,
