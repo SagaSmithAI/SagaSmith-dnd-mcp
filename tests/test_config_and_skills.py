@@ -683,6 +683,25 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
     async def inspect_capabilities() -> None:
         server = create_server(config)
         _, capabilities = await server.call_tool("server_capabilities", {})
+        assert capabilities["npc_conversations"] == {
+            "schema_version": 1,
+            "contract": "npc-conversation.v1",
+            "phase": "play",
+            "execution_mode": "client_subagents_required",
+            "proposal_contract": "npc-conversation-proposal.v2",
+            "actor_scoped_worker_handles": True,
+            "incremental_actor_context": True,
+            "durable_semantic_journal": True,
+            "server_managed_inference": False,
+            "server_managed_kv": False,
+            "minimum_host_capabilities": [
+                "isolated_actor_message_contexts",
+                "persistent_subagent_workers",
+                "zero_tool_npc_workers",
+                "structured_json_output",
+                "private_host_side_mcp_routing",
+            ],
+        }
         assert capabilities["features"]["structured_rulebook_import"] is True
         assert capabilities["features"]["source_bound_rule_packs"] is True
         assert capabilities["features"]["structured_content_selection_requirements"] is True

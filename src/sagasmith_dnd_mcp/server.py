@@ -478,6 +478,7 @@ from sagasmith_dnd_mcp.facade_contracts import (
 )
 from sagasmith_dnd_mcp.npc_conversations import (
     ACTIVE_CONVERSATION_STATUSES,
+    NPC_CONVERSATION_CONTRACT,
     ConversationStore,
     normalize_conversation_proposal,
 )
@@ -10989,6 +10990,25 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "and injects the authenticated principal. Never let the model choose "
                     "an authorization identity."
                 ),
+            },
+            "npc_conversations": {
+                "schema_version": 1,
+                "contract": NPC_CONVERSATION_CONTRACT,
+                "phase": "play",
+                "execution_mode": "client_subagents_required",
+                "proposal_contract": "npc-conversation-proposal.v2",
+                "actor_scoped_worker_handles": True,
+                "incremental_actor_context": True,
+                "durable_semantic_journal": True,
+                "server_managed_inference": False,
+                "server_managed_kv": False,
+                "minimum_host_capabilities": [
+                    "isolated_actor_message_contexts",
+                    "persistent_subagent_workers",
+                    "zero_tool_npc_workers",
+                    "structured_json_output",
+                    "private_host_side_mcp_routing",
+                ],
             },
             "features": {
                 "mutation_groups": True,
