@@ -40131,6 +40131,67 @@ Useful bounded guidance:
             )
         return facade_result(view, import_job_list(campaign_id, kind, principal_id))
 
+    def export_module_pack(
+        campaign_id: str,
+        data: dict[str, Any],
+        principal_id: str,
+    ) -> dict[str, Any]:
+        """Build one finalized module Pack without exposing an authoring side door."""
+
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        module_blobs: dict[str, bytes] = {}
+        descriptor = modules.export_content_descriptor(
+            campaign_id,
+            str(required(data, "module_id")),
+            portable_id=str(required(data, "pack_id")),
+            version=str(data.get("version") or "1.0.0"),
+            metadata=dict(data.get("metadata") or {}),
+            dependencies=list(data.get("dependencies") or []),
+            asset_loader=managed_module_asset_bytes,
+            blob_sink=module_blobs.__setitem__,
+            manifest=(dict(data["manifest"]) if data.get("manifest") else None),
+            catalogs=(dict(data["catalogs"]) if data.get("catalogs") else None),
+            narrative=(dict(data["narrative"]) if data.get("narrative") else None),
+        )
+        finalized_actors = []
+        for actor_card in descriptor["actors"]:
+            card = validate_dnd_actor_card(actor_card)
+            card_payload = card["payload"]
+            finalized_actors.append(
+                build_dnd_actor_card(
+                    portable_id=card["id"],
+                    version=card["version"],
+                    actor_type=card_payload["actor_type"],
+                    name=card_payload["name"],
+                    player_name=card_payload["player_name"],
+                    summary=card_payload["summary"],
+                    sheet=finalize_actor_sheet_rulings(card_payload["sheet"], campaign_id),
+                    notes=card_payload["notes"],
+                    provenance=card_payload.get("provenance") or {},
+                    bindings=card_payload.get("bindings") or [],
+                    metadata=card.get("metadata") or {},
+                    dependencies=card.get("dependencies") or [],
+                )
+            )
+        descriptor["actors"] = finalized_actors
+        package, module_blobs = build_module_content_package(descriptor, module_blobs)
+        artifact = storage.write_content_archive(package, module_blobs)
+        return {
+            **artifact,
+            "summary": {
+                "scenes": len(package["content"]["scene_atlas"]),
+                "assets": len(package["assets"]),
+                "content_reviews": len(package["content_reviews"]),
+                "actors": len(package["actors"]),
+                "catalog_entries": sum(
+                    len(items) for items in package["content"]["catalogs"].values()
+                ),
+                "dossiers": len(package["content"]["narrative"]["dossiers"]),
+                "endings": len(package["content"]["narrative"]["endings"]),
+            },
+            **({"package": package} if data.get("include_package") is True else {}),
+        }
+
     @public_tool()
     def module_query(
         campaign_id: str,
@@ -40145,7 +40206,6 @@ Useful bounded guidance:
             "content",
             "candidates",
             "actors",
-            "package",
         ] = "list",
         payload: dict[str, Any] | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
@@ -40200,67 +40260,6 @@ Useful bounded guidance:
                 scene_id=(str(data["scene_id"]) if data.get("scene_id") else None),
                 binding_kind=(str(data["binding_kind"]) if data.get("binding_kind") else None),
             )
-        elif view == "package":
-            data = facade_payload(payload)
-            access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
-            module_blobs: dict[str, bytes] = {}
-            descriptor = modules.export_content_descriptor(
-                campaign_id,
-                str(required(data, "module_id")),
-                portable_id=str(required(data, "portable_id")),
-                version=str(data.get("version") or "1.0.0"),
-                metadata=dict(data.get("metadata") or {}),
-                dependencies=list(data.get("dependencies") or []),
-                asset_loader=managed_module_asset_bytes,
-                blob_sink=module_blobs.__setitem__,
-                manifest=(dict(data["manifest"]) if data.get("manifest") else None),
-                catalogs=(dict(data["catalogs"]) if data.get("catalogs") else None),
-                narrative=(dict(data["narrative"]) if data.get("narrative") else None),
-            )
-            finalized_actors = []
-            for actor_card in descriptor["actors"]:
-                card = validate_dnd_actor_card(actor_card)
-                card_payload = card["payload"]
-                finalized_actors.append(
-                    build_dnd_actor_card(
-                        portable_id=card["id"],
-                        version=card["version"],
-                        actor_type=card_payload["actor_type"],
-                        name=card_payload["name"],
-                        player_name=card_payload["player_name"],
-                        summary=card_payload["summary"],
-                        sheet=finalize_actor_sheet_rulings(
-                            card_payload["sheet"],
-                            campaign_id,
-                        ),
-                        notes=card_payload["notes"],
-                        provenance=card_payload.get("provenance") or {},
-                        bindings=card_payload.get("bindings") or [],
-                        metadata=card.get("metadata") or {},
-                        dependencies=card.get("dependencies") or [],
-                    )
-                )
-            descriptor["actors"] = finalized_actors
-            package, module_blobs = build_module_content_package(
-                descriptor,
-                module_blobs,
-            )
-            artifact = storage.write_content_archive(package, module_blobs)
-            result = {
-                **artifact,
-                "summary": {
-                    "scenes": len(package["content"]["scene_atlas"]),
-                    "assets": len(package["assets"]),
-                    "content_reviews": len(package["content_reviews"]),
-                    "actors": len(package["actors"]),
-                    "catalog_entries": sum(
-                        len(items) for items in package["content"]["catalogs"].values()
-                    ),
-                    "dossiers": len(package["content"]["narrative"]["dossiers"]),
-                    "endings": len(package["content"]["narrative"]["endings"]),
-                },
-                **({"package": package} if data.get("include_package") is True else {}),
-            }
         else:
             result = module_progress_index(
                 campaign_id,
@@ -41833,7 +41832,7 @@ Useful bounded guidance:
                     campaign_id=campaign_id,
                     module_id=str(job.module_id or required(value, "module_id")),
                     character_id=str(required(value, "character_id")),
-                    portable_actor_id=str(required(value, "portable_actor_id")),
+                    portable_actor_id=str(required(value, "actor_card_id")),
                     binding_kind=str(required(value, "binding_kind")),
                     role=str(value.get("role") or ""),
                     scene_id=(str(value["scene_id"]) if value.get("scene_id") else None),
@@ -41968,18 +41967,15 @@ Useful bounded guidance:
             **dict(final_data.get("metadata") or {}),
             "agent_finalization": agent_confirmation,
         }
-        packaged = _facade_value(
-            module_query(
-                campaign_id,
-                "package",
-                {
-                    key: value
-                    for key, value in final_data.items()
-                    if key not in {"confirmation", "job_id"}
-                }
-                | {"module_id": job.module_id, "include_package": True},
-                principal_id,
-            )
+        packaged = export_module_pack(
+            campaign_id,
+            {
+                key: value
+                for key, value in final_data.items()
+                if key not in {"confirmation", "job_id"}
+            }
+            | {"module_id": job.module_id, "include_package": True},
+            principal_id,
         )
         finalized_package = {
             "artifact": packaged["artifact"],
@@ -42195,14 +42191,7 @@ Useful bounded guidance:
             if kind == "core_rules":
                 result = _content_pack_export_rule(data, principal_id)
             elif kind == "module":
-                result = _facade_value(
-                    module_query(
-                        campaign_id,
-                        "package",
-                        data,
-                        principal_id,
-                    )
-                )
+                result = export_module_pack(campaign_id, data, principal_id)
             elif kind == "addon":
                 result = _content_pack_addon(data, principal_id)
             else:
@@ -42424,7 +42413,6 @@ Useful bounded guidance:
             "document",
             "rest",
             "advancement",
-            "content_package",
             "catalog",
         ] = "list",
         payload: dict[str, Any] | None = None,
@@ -42444,69 +42432,6 @@ Useful bounded guidance:
             )
         elif view == "get":
             result = character_get(required(data, "character_id"), principal_id)
-        elif view == "content_package":
-            data = facade_payload(payload)
-            character = characters.get(str(required(data, "character_id")))
-            if character.campaign_id is not None:
-                require_character_control(character, principal_id)
-            elif principal_id != LOCAL_SYSTEM_PRINCIPAL_ID:
-                raise PermissionError(
-                    "exporting a library actor card requires the local system principal"
-                )
-            portable_id = str(data.get("portable_id") or "").strip() or (
-                f"dnd5e.shared.{ascii_slug(character.name) or 'actor'}"
-            )
-            package_version = str(data.get("version") or "2.0.0")
-            legacy_card = build_dnd_actor_card(
-                portable_id=f"{portable_id}.actor",
-                version=package_version,
-                actor_type=character.character_type,
-                name=character.name,
-                player_name=character.player_name,
-                summary=character.summary,
-                sheet=finalize_actor_sheet_rulings(
-                    character.sheet,
-                    character.campaign_id,
-                ),
-                notes=character.notes,
-                provenance=dict(data.get("provenance") or {}),
-                bindings=list(data.get("bindings") or []),
-                image=(dict(data["image"]) if data.get("image") is not None else None),
-                metadata=dict(data.get("metadata") or {}),
-                dependencies=list(data.get("dependencies") or []),
-            )
-            package, package_blobs = build_preset_content_package(
-                package_id=portable_id,
-                version=package_version,
-                system_id=DND5E.id,
-                title=f"{character.name} Actor Card",
-                cards=[legacy_card],
-                metadata={
-                    **dict(data.get("metadata") or {}),
-                    "title": f"{character.name} Actor Card",
-                    "distribution": "private",
-                    "license": "private",
-                    "attribution": "User supplied actor",
-                },
-            )
-            result = {
-                "actor": package["actors"][0],
-                "package": {
-                    "id": package["id"],
-                    "version": package["version"],
-                    "checksum": package["checksum"],
-                },
-                "artifact": storage.write_content_archive(package, package_blobs),
-                "excluded_runtime_state": [
-                    "database_id",
-                    "campaign_id",
-                    "template_id",
-                    "revision",
-                    "actor_knowledge",
-                    "snapshots",
-                    "actor_image_blob",
-                ],
-            }
         elif view == "batch":
             campaign_id = str(required(data, "campaign_id"))
             actor_ids_value = data.get("character_ids")

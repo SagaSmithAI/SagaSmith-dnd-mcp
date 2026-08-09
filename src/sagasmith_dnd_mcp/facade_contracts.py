@@ -257,11 +257,11 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                     "metadata",
                     "module_id",
                     "operation",
-                    "portable_actor_id",
+                    "actor_card_id",
                     "role",
                     "scene_id",
                 ),
-                ("operation", "character_id", "portable_actor_id", "binding_kind"),
+                ("operation", "character_id", "actor_card_id", "binding_kind"),
                 when="operation=actor",
             ),
             _variant(
@@ -292,10 +292,10 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                     "manifest",
                     "metadata",
                     "narrative",
-                    "portable_id",
+                    "pack_id",
                     "version",
                 ),
-                ("job_id", "portable_id", "confirmation"),
+                ("job_id", "pack_id", "confirmation"),
             )
         ],
     },
@@ -359,7 +359,6 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                     "module_id",
                     "narrative",
                     "pack_id",
-                    "portable_id",
                     "artifact_id",
                     "edition",
                     "version",
@@ -459,22 +458,6 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                 ("module_id",),
             )
         ],
-        "package": [
-            _variant(
-                (
-                    "catalogs",
-                    "dependencies",
-                    "include_package",
-                    "manifest",
-                    "metadata",
-                    "module_id",
-                    "narrative",
-                    "portable_id",
-                    "version",
-                ),
-                ("module_id", "portable_id"),
-            )
-        ],
     },
     "campaign_rules": {
         "get_profile": [_variant(())],
@@ -545,21 +528,6 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
             _variant(
                 ("character_id", "class_name"),
                 ("character_id", "class_name"),
-            )
-        ],
-        "content_package": [
-            _variant(
-                (
-                    "bindings",
-                    "character_id",
-                    "dependencies",
-                    "image",
-                    "metadata",
-                    "portable_id",
-                    "provenance",
-                    "version",
-                ),
-                ("character_id",),
             )
         ],
     },

@@ -177,7 +177,7 @@ def test_module_start_finalize_writes_a_portable_module_pack(tmp_path: Path) -> 
                     "action": "finalize",
                     "payload": {
                         "job_id": started["job"]["id"],
-                        "portable_id": "dnd5e.module.old-readiness",
+                        "pack_id": "dnd5e.module.old-readiness",
                         "confirmation": {
                             "confirmed": True,
                             "note": "This request must fail before finalization.",
@@ -196,7 +196,7 @@ def test_module_start_finalize_writes_a_portable_module_pack(tmp_path: Path) -> 
                     "action": "finalize",
                     "payload": {
                         "job_id": started["job"]["id"],
-                        "portable_id": "dnd5e.module.incomplete",
+                        "pack_id": "dnd5e.module.incomplete",
                         "confirmation": {
                             "confirmed": False,
                             "note": "The Agent has not completed review.",
@@ -283,7 +283,7 @@ def test_module_start_finalize_writes_a_portable_module_pack(tmp_path: Path) -> 
                 "action": "finalize",
                 "payload": {
                     "job_id": started["job"]["id"],
-                    "portable_id": "dnd5e.module.three-tool",
+                    "pack_id": "dnd5e.module.three-tool",
                     "include_package": True,
                     "confirmation": {
                         "confirmed": True,

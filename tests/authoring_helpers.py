@@ -50,7 +50,7 @@ async def finalize_and_activate_module(
             "action": "finalize",
             "payload": {
                 "job_id": started["job"]["id"],
-                "portable_id": portable_id,
+                "pack_id": portable_id,
                 "version": "1.0.0",
                 "confirmation": {
                     "confirmed": True,
