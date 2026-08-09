@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-TOOL_BUDGET_VERSION = "2026-08-architecture-simplification-v1"
+TOOL_BUDGET_VERSION = "2026-08-architecture-simplification-v2"
 
 # Captured before facade consolidation. Tool counts are exact interface
 # contracts; schema bytes are bounded because harmless serializer and
@@ -16,6 +16,6 @@ MAX_INPUT_SCHEMA_BYTES = BASELINE_INPUT_SCHEMA_BYTES
 
 PROFILE_TOOL_LIMITS = {
     "lobby": 60,
-    "play": 49,
+    "play": 50,
     "combat": 49,
 }

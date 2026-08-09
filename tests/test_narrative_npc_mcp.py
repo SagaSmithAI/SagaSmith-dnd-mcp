@@ -95,6 +95,22 @@ async def _campaign_with_narrative_module(tmp_path: Path):
         "heading_path": expanded["heading_path"],
         "content_sha256": hashlib.sha256(expanded["content"].encode("utf-8")).hexdigest(),
     }
+    current = await _call(
+        server,
+        "campaign_query",
+        {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+    )
+    await _call(
+        server,
+        "game_phase",
+        {
+            "campaign_id": campaign["id"],
+            "action": "set",
+            "tool_profile": "play",
+            "expected_revision": current["revision"],
+            "idempotency_key": "begin-play",
+        },
+    )
     return server, campaign["id"], source_ref
 
 

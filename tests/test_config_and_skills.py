@@ -566,7 +566,7 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
             == PROFILE_TOOL_LIMITS
             == {
                 "lobby": 60,
-                "play": 49,
+                    "play": 50,
                 "combat": 49,
             }
         )

@@ -42938,6 +42938,14 @@ Useful bounded guidance:
     ) -> dict[str, Any]:
         """Create directly, by build/template, or from source-bound module evidence."""
         data = facade_payload(payload)
+        scoped_campaign_id = str(data.get("campaign_id") or "").strip()
+        if mode == "narrative_npc":
+            if authoritative_phase(scoped_campaign_id) != PROFILE_PLAY:
+                raise CombatEngineError("narrative NPCs can be created only during play")
+        elif scoped_campaign_id and authoritative_phase(scoped_campaign_id) != PROFILE_LOBBY:
+            raise CombatEngineError(
+                "character authoring and content import are available only in lobby"
+            )
         if mode == "content_actor":
             data = facade_payload(payload)
             artifact_id = str(data.get("artifact_id") or "").strip()
@@ -43125,8 +43133,6 @@ Useful bounded guidance:
                 raise ValueError("narrative NPC summary must contain 1 to 2000 characters")
             access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
             campaign = campaigns.get(campaign_id)
-            if authoritative_phase(campaign_id) != PROFILE_LOBBY:
-                raise CombatEngineError("narrative NPCs can be created only in lobby")
             _, normalized_source_ref, expanded = managed_module_source_ref(
                 campaign_id,
                 source_ref,
