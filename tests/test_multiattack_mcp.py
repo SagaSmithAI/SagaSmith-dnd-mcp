@@ -152,6 +152,8 @@ def test_public_combat_attack_enforces_monster_multiattack_sequence(tmp_path: Pa
             server,
             "combat_start",
             {
+                "positioning_mode": "grid",
+                "battle_map": {"width_cells": 12, "height_cells": 12},
                 "campaign_id": campaign["id"],
                 "participant_ids": [captain["id"], target["id"]],
                 "participant_config": [

@@ -911,6 +911,7 @@ def test_two_five_round_combats_share_one_minute_clock_and_elapsed_effects(
             server,
             "combat_start",
             {
+                "positioning_mode": "agent",
                 "campaign_id": campaign["id"],
                 "participant_ids": [actors[0]["id"], actors[1]["id"]],
                 "participant_config": [
@@ -964,6 +965,7 @@ def test_two_five_round_combats_share_one_minute_clock_and_elapsed_effects(
             server,
             "combat_start",
             {
+                "positioning_mode": "agent",
                 "campaign_id": campaign["id"],
                 "participant_ids": [actors[0]["id"], actors[1]["id"]],
                 "participant_config": [

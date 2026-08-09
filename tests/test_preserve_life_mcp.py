@@ -148,6 +148,8 @@ def test_preserve_life_is_a_combat_transaction_with_engine_measured_range(
             server,
             "combat_start",
             {
+                "positioning_mode": "grid",
+                "battle_map": {"width_cells": 40, "height_cells": 40},
                 "campaign_id": campaign["id"],
                 "participant_ids": [cleric["id"], near["id"], far["id"]],
                 "participant_config": [

@@ -104,6 +104,7 @@ def test_generic_damage_uses_encounter_death_save_policy_and_skips_dead_turn(
             server,
             "combat_start",
             {
+                "positioning_mode": "agent",
                 "campaign_id": campaign["id"],
                 "participant_ids": [acting["id"], target["id"]],
                 "participant_config": [

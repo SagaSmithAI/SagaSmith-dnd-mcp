@@ -14343,6 +14343,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def combat_start(
         campaign_id: str,
         participant_ids: list[str],
+        positioning_mode: Literal["grid", "agent"],
         participant_config: list[dict[str, Any]] | None = None,
         participant_manifest: dict[str, Any] | None = None,
         name: str = "Combat",
@@ -14368,6 +14369,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         payload = {
             "participant_ids": list(participant_ids),
+            "positioning_mode": positioning_mode,
             "participant_config": participant_config,
             "participant_manifest": participant_manifest,
             "name": name,
@@ -14486,7 +14488,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     + ", ".join(premature)
                 )
         compiled_map = None
-        if scene_context is not None:
+        if positioning_mode == "grid" and scene_context is not None:
             try:
                 battle_map_request = deepcopy(battle_map or {})
                 progress_context = scene_context
@@ -14554,7 +14556,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     validate_position(compiled_map, entry.get("position"))
             except BattleMapError as error:
                 raise NeedsRulingError(str(error), missing=("battle_map",)) from error
-        elif battle_map is not None:
+        elif positioning_mode == "grid" and battle_map is not None:
             try:
                 compiled_map = compile_battle_map(
                     {
@@ -14567,6 +14569,37 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     validate_position(compiled_map, entry.get("position"))
             except BattleMapError as error:
                 raise NeedsRulingError(str(error), missing=("battle_map",)) from error
+        elif positioning_mode == "agent":
+            if battle_map is not None:
+                raise CombatEngineError(
+                    "agent-positioned combat does not accept a battle_map"
+                )
+            positioned_actor_ids = sorted(
+                actor_id_value
+                for actor_id_value, entry in config_by_actor.items()
+                if entry.get("position") is not None
+            )
+            if positioned_actor_ids:
+                raise CombatEngineError(
+                    "agent-positioned combat does not accept participant coordinates: "
+                    + ", ".join(positioned_actor_ids)
+                )
+        if positioning_mode == "grid":
+            if compiled_map is None:
+                raise CombatEngineError("grid combat requires a compiled battle map")
+            missing_positions = sorted(
+                actor_id_value
+                for actor_id_value in participant_ids
+                if not isinstance(
+                    dict(config_by_actor.get(actor_id_value) or {}).get("position"),
+                    dict,
+                )
+            )
+            if missing_positions:
+                raise CombatEngineError(
+                    "grid combat requires positions for every participant: "
+                    + ", ".join(missing_positions)
+                )
         participants = [characters.get(item) for item in participant_ids]
         if any(char.campaign_id != campaign_id for char in participants):
             raise ValueError("all participants must belong to the campaign")
@@ -14610,6 +14643,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             scene_id=resolved_scene_id,
             name=name,
             battle_map=compiled_map,
+            positioning_mode=positioning_mode,
         )
         if preflight is not None:
             encounter["participant_manifest"] = preflight

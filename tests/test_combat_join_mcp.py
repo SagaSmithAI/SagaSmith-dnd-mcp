@@ -76,6 +76,7 @@ def test_combat_join_queues_actor_until_next_round(tmp_path: Path) -> None:
             server,
             "combat_start",
             {
+                "positioning_mode": "agent",
                 "campaign_id": campaign["id"],
                 "participant_ids": [actors[0]["id"], actors[1]["id"]],
                 "participant_config": [
@@ -303,6 +304,7 @@ def test_combat_end_accepts_source_surrender_outcome(tmp_path: Path) -> None:
             server,
             "combat_start",
             {
+                "positioning_mode": "agent",
                 "campaign_id": campaign["id"],
                 "participant_ids": [actor["id"]],
                 "expected_revision": phase["campaign_revision"],

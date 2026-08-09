@@ -894,6 +894,7 @@ def test_readied_spell_lifecycle_is_atomic_and_rule_complete(tmp_path: Path) -> 
             server,
             "combat_start",
             {
+                "positioning_mode": "agent",
                 "campaign_id": campaign["id"],
                 "participant_ids": [caster["id"], target["id"]],
                 "participant_config": [
@@ -1413,6 +1414,7 @@ def test_structured_combat_is_atomic_and_player_filtered(tmp_path: Path) -> None
             server,
             "combat_start",
             {
+                "positioning_mode": "agent",
                 "campaign_id": campaign["id"],
                 "participant_ids": [first["id"], second["id"]],
                 "participant_config": [
@@ -1615,6 +1617,8 @@ def test_combat_sneak_attack_persists_the_once_per_turn_token(
             server,
             "combat_start",
             {
+                "positioning_mode": "grid",
+                "battle_map": {"width_cells": 12, "height_cells": 12},
                 "campaign_id": campaign["id"],
                 "participant_ids": [rogue["id"], ally["id"], target["id"]],
                 "participant_config": [
@@ -1792,6 +1796,8 @@ def test_module_scene_creates_a_temporary_battle_map(tmp_path: Path) -> None:
             server,
             "combat_start",
             {
+                "positioning_mode": "grid",
+                "battle_map": {"width_cells": 12, "height_cells": 12},
                 "campaign_id": campaign["id"],
                 "participant_ids": [mover["id"], threat["id"]],
                 "participant_config": [
@@ -1919,6 +1925,8 @@ def test_positioned_movement_opens_and_resolves_an_owned_reaction(tmp_path: Path
             server,
             "combat_start",
             {
+                "positioning_mode": "grid",
+                "battle_map": {"width_cells": 12, "height_cells": 12},
                 "campaign_id": campaign["id"],
                 "participant_ids": [mover["id"], threat["id"]],
                 "participant_config": [
@@ -2088,6 +2096,7 @@ def test_combat_boundaries_and_private_knowledge_filter(tmp_path: Path) -> None:
             server,
             "combat_start",
             {
+                "positioning_mode": "agent",
                 "campaign_id": campaign["id"],
                 "participant_ids": [first["id"], second["id"]],
                 "expected_revision": campaign["revision"],

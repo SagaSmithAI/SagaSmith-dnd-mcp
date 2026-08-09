@@ -292,6 +292,8 @@ def test_public_magic_item_spell_cast_hydrates_card_and_pays_action_and_charges(
             server,
             "combat_start",
             {
+                "positioning_mode": "grid",
+                "battle_map": {"width_cells": 4, "height_cells": 4},
                 "campaign_id": campaign["id"],
                 "participant_ids": [caster["id"]],
                 "participant_config": [
@@ -301,20 +303,6 @@ def test_public_magic_item_spell_cast_hydrates_card_and_pays_action_and_charges(
                         "position": {"x": 0, "y": 0},
                     }
                 ],
-                "map": {
-                    "width": 4,
-                    "height": 4,
-                    "cell_ft": 5,
-                    "terrain": [],
-                    "walls": [],
-                    "doors": [],
-                    "objects": [],
-                    "metadata": {
-                        "temporary": True,
-                        "encounter_local": True,
-                        "provenance": "test",
-                    },
-                },
                 "expected_revision": phase["campaign_revision"],
                 "idempotency_key": "start",
             },
@@ -419,6 +407,8 @@ def test_public_magic_item_spell_cast_hydrates_card_and_pays_action_and_charges(
             server,
             "combat_start",
             {
+                "positioning_mode": "grid",
+                "battle_map": {"width_cells": 4, "height_cells": 4},
                 "campaign_id": campaign["id"],
                 "participant_ids": [caster["id"]],
                 "participant_config": [
@@ -428,20 +418,6 @@ def test_public_magic_item_spell_cast_hydrates_card_and_pays_action_and_charges(
                         "position": {"x": 0, "y": 0},
                     }
                 ],
-                "map": {
-                    "width": 4,
-                    "height": 4,
-                    "cell_ft": 5,
-                    "terrain": [],
-                    "walls": [],
-                    "doors": [],
-                    "objects": [],
-                    "metadata": {
-                        "temporary": True,
-                        "encounter_local": True,
-                        "provenance": "test:last-charge",
-                    },
-                },
                 "expected_revision": current_campaign["revision"],
                 "idempotency_key": "start-last-charge",
             },

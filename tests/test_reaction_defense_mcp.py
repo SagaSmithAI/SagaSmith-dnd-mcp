@@ -250,6 +250,8 @@ def test_public_attack_pauses_for_parry_before_damage(tmp_path: Path, monkeypatc
             server,
             "combat_start",
             {
+                "positioning_mode": "grid",
+                "battle_map": {"width_cells": 12, "height_cells": 12},
                 "campaign_id": campaign["id"],
                 "participant_ids": [attacker["id"], target["id"]],
                 "participant_config": [
@@ -468,6 +470,8 @@ def test_shield_reaction_atomically_pays_and_expires_at_next_turn_start(
             server,
             "combat_start",
             {
+                "positioning_mode": "grid",
+                "battle_map": {"width_cells": 12, "height_cells": 12},
                 "campaign_id": campaign["id"],
                 "participant_ids": [attacker["id"], target["id"]],
                 "participant_config": [

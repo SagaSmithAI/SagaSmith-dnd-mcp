@@ -604,6 +604,7 @@ def test_scene_preflight_blocks_only_missing_or_invalid_combatants(tmp_path: Pat
                 server,
                 "combat_start",
                 {
+                    "positioning_mode": "agent",
                     "campaign_id": campaign["id"],
                     "participant_ids": [
                         actors["hero"]["id"],
@@ -627,6 +628,7 @@ def test_scene_preflight_blocks_only_missing_or_invalid_combatants(tmp_path: Pat
             server,
             "combat_start",
             {
+                "positioning_mode": "grid",
                 "campaign_id": campaign["id"],
                 "participant_ids": participant_ids,
                 "participant_config": [

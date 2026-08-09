@@ -198,6 +198,7 @@ def test_narrative_npc_is_source_bound_and_explicitly_noncombat(
                 server,
                 "combat_start",
                 {
+                    "positioning_mode": "agent",
                     "campaign_id": campaign_id,
                     "participant_ids": [created["character"]["id"]],
                     "expected_revision": campaign["revision"],

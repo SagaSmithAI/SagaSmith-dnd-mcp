@@ -352,6 +352,7 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
             server,
             "combat_start",
             {
+                "positioning_mode": "grid",
                 "campaign_id": campaign["id"],
                 "participant_ids": [
                     beast["id"],
@@ -1226,6 +1227,7 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
             server,
             "combat_start",
             {
+                "positioning_mode": "grid",
                 "campaign_id": campaign["id"],
                 "participant_ids": [wielder["id"], target["id"]],
                 "participant_config": [

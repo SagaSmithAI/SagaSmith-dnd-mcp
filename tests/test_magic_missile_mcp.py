@@ -112,6 +112,8 @@ async def _campaign_with_combat(
         server,
         "combat_start",
         {
+            "positioning_mode": "grid",
+            "battle_map": {"width_cells": 20, "height_cells": 20},
             "campaign_id": campaign["id"],
             "participant_ids": [item["id"] for item in actors],
             "participant_config": [

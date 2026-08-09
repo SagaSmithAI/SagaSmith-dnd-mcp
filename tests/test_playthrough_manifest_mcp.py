@@ -393,6 +393,7 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
             server,
             "combat_start",
             {
+                "positioning_mode": "agent",
                 "campaign_id": campaign_id,
                 "participant_ids": [actor["id"]],
                 "participant_config": [

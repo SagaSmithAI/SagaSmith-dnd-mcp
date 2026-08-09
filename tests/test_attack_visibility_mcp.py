@@ -80,6 +80,8 @@ def test_hidden_attack_reveals_attacker_to_its_target(tmp_path: Path) -> None:
         started = await raw(
             "combat_start",
             {
+                "positioning_mode": "grid",
+                "battle_map": {"width_cells": 12, "height_cells": 12},
                 "campaign_id": campaign["id"],
                 "participant_ids": [attacker["id"], target["id"]],
                 "participant_config": [

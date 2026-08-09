@@ -176,6 +176,8 @@ def test_dm_two_players_restart_and_combat_projection(tmp_path: Path) -> None:
             first_server,
             "combat_start",
             {
+                "positioning_mode": "grid",
+                "battle_map": {"width_cells": 12, "height_cells": 12},
                 "campaign_id": campaign["id"],
                 "participant_ids": [alice["id"], bob["id"], stalker["id"]],
                 "participant_config": [

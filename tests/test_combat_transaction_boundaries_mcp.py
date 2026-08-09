@@ -147,6 +147,7 @@ def test_end_turn_does_not_revision_unchanged_character_documents(tmp_path: Path
             server,
             "combat_start",
             {
+                "positioning_mode": "agent",
                 "campaign_id": campaign["id"],
                 "participant_ids": [item["id"] for item in actors],
                 "participant_config": [
@@ -230,6 +231,7 @@ def test_available_actions_explicitly_discovers_required_death_save(
             server,
             "combat_start",
             {
+                "positioning_mode": "agent",
                 "campaign_id": campaign["id"],
                 "participant_ids": [actor["id"]],
                 "participant_config": [
@@ -463,6 +465,7 @@ def test_jack_of_all_trades_is_applied_and_receipted_by_public_tools(
             server,
             "combat_start",
             {
+                "positioning_mode": "agent",
                 "campaign_id": campaign["id"],
                 "participant_ids": [actor["id"]],
                 "expected_revision": campaign["revision"],
@@ -546,6 +549,7 @@ def test_action_surge_is_settled_without_a_manual_ruling(tmp_path: Path) -> None
             server,
             "combat_start",
             {
+                "positioning_mode": "agent",
                 "campaign_id": campaign["id"],
                 "participant_ids": [actor["id"]],
                 "participant_config": [{"actor_id": actor["id"], "initiative": 10}],
@@ -670,6 +674,8 @@ def test_recharge_weapon_use_is_committed_on_attack_declaration(
             server,
             "combat_start",
             {
+                "positioning_mode": "grid",
+                "battle_map": {"width_cells": 12, "height_cells": 12},
                 "campaign_id": campaign["id"],
                 "participant_ids": [attacker["id"], target["id"]],
                 "participant_config": [
@@ -820,6 +826,8 @@ def test_locked_dragonborn_breath_uses_generic_area_and_save_primitives(
             server,
             "combat_start",
             {
+                "positioning_mode": "grid",
+                "battle_map": {"width_cells": 12, "height_cells": 12},
                 "campaign_id": campaign["id"],
                 "participant_ids": [source["id"], target["id"]],
                 "participant_config": [
@@ -962,6 +970,7 @@ def test_second_wind_heals_and_pays_bonus_action_atomically(
             server,
             "combat_start",
             {
+                "positioning_mode": "agent",
                 "campaign_id": campaign["id"],
                 "participant_ids": [actor["id"]],
                 "participant_config": [{"actor_id": actor["id"], "initiative": 10}],
@@ -1190,6 +1199,7 @@ def test_cunning_action_dash_uses_bonus_action_and_doubles_movement(tmp_path: Pa
             server,
             "combat_start",
             {
+                "positioning_mode": "agent",
                 "campaign_id": campaign["id"],
                 "participant_ids": [actor["id"]],
                 "participant_config": [{"actor_id": actor["id"], "initiative": 10}],
@@ -1268,6 +1278,7 @@ def test_combat_move_charges_reviewed_difficult_cells_and_records_core_receipt(
             server,
             "combat_start",
             {
+                "positioning_mode": "grid",
                 "campaign_id": campaign["id"],
                 "participant_ids": [mover["id"], other["id"]],
                 "participant_config": [

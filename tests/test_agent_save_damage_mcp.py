@@ -219,6 +219,7 @@ def test_agent_save_damage_requires_one_paid_immutable_action_and_replays(
             server,
             "combat_start",
             {
+                "positioning_mode": "agent",
                 "campaign_id": campaign["id"],
                 "participant_ids": [
                     dragon["id"],

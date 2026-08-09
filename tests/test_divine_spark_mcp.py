@@ -168,6 +168,8 @@ def test_divine_spark_combat_measures_visibility_and_range_then_commits_atomical
             server,
             "combat_start",
             {
+                "positioning_mode": "grid",
+                "battle_map": {"width_cells": 12, "height_cells": 12},
                 "campaign_id": campaign["id"],
                 "participant_ids": [cleric["id"], target["id"]],
                 "participant_config": [

@@ -182,6 +182,7 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
             },
         }
         start_arguments = {
+            "positioning_mode": "agent",
             "campaign_id": campaign["id"],
             "participant_ids": [ruffian["id"], hero["id"]],
             "participant_config": [
@@ -207,6 +208,7 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
                 server,
                 "combat_start",
                 {
+                    "positioning_mode": "agent",
                     **start_arguments,
                     "ruleset": "2024",
                     "idempotency_key": "wrong-ruleset",
@@ -217,6 +219,7 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
                 server,
                 "combat_start",
                 {
+                    "positioning_mode": "agent",
                     **start_arguments,
                     "participant_config": [
                         {
