@@ -661,7 +661,7 @@ def test_real_skill_plan_manifest_is_valid_and_within_budgets() -> None:
     assert SKILL_PLAN_ASSET_ID.endswith("skill-plan.v1.json")
     assert plans.available is True, plans.load_error
     assert plans.summary()["group_count"] == 39
-    assert plans.summary()["tool_group_count"] == 23
+    assert plans.summary()["tool_group_count"] == 24
     assert plans.summary()["operation_binding_count"] == 23
     assert len(skills.read("dnd.full.skills.dnd-dm")) < 12_000
     assert len(
@@ -766,7 +766,7 @@ def test_stdio_cold_start_uses_real_phase_skill_plan(tmp_path: Path) -> None:
                 ]
                 assert summary["available"] is True
                 assert summary["group_count"] == 39
-                assert summary["tool_group_count"] == 23
+                assert summary["tool_group_count"] == 24
                 assert summary["operation_binding_count"] == 23
 
                 planned = await session.call_tool(
