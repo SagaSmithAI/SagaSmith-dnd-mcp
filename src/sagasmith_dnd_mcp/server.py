@@ -39979,6 +39979,15 @@ boundary.
     ) -> dict[str, Any]:
         """Resolve an individual, group, or contested check in the Play phase."""
         require_facade_phase(campaign_id, f"character_check({action})", PROFILE_PLAY)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        if npc_conversations.active_ids(
+            campaign_id=campaign_id,
+            branch_id=resolved_branch_id,
+        ):
+            raise CombatEngineError(
+                "close or abort the active NPC conversation before resolving "
+                "an authoritative character check"
+            )
         if action == "reroll":
             data = facade_payload(payload)
             return character_heroic_inspiration_reroll(

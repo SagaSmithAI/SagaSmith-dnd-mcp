@@ -180,6 +180,24 @@ def test_active_conversation_blocks_combat_and_leaving_play(tmp_path: Path) -> N
             {"view": "get", "payload": {"campaign_id": campaign["id"]}},
         )
 
+        with pytest.raises(Exception, match="before resolving an authoritative character check"):
+            await _call(
+                server,
+                "character_check",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "check",
+                    "payload": {
+                        "actor_id": pc["id"],
+                        "kind": "ability",
+                        "ability": "dexterity",
+                        "dc": 10,
+                    },
+                    "expected_revision": current["revision"],
+                    "idempotency_key": "check-with-open-conversation",
+                },
+            )
+
         with pytest.raises(Exception, match="close or abort the active NPC conversation"):
             await _call(
                 server,
