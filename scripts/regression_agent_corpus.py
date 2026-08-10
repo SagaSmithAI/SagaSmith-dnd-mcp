@@ -497,6 +497,96 @@ def _manifest_party_ids(calls: list[dict[str, Any]]) -> set[str]:
     return set()
 
 
+def _party_character_views(calls: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    party_ids = _manifest_party_ids(calls)
+    latest: dict[str, dict[str, Any]] = {}
+    for call in calls:
+        if not call.get("ok"):
+            continue
+        for node in _walk(call.get("result")):
+            if not isinstance(node, dict):
+                continue
+            actor_id = str(node.get("id") or "")
+            if (
+                actor_id in party_ids
+                and node.get("character_type") == "pc"
+                and isinstance(node.get("sheet"), dict)
+            ):
+                latest[actor_id] = node
+    return latest
+
+
+def _party_mechanical_readiness(calls: list[dict[str, Any]]) -> dict[str, list[str]]:
+    party_ids = _manifest_party_ids(calls)
+    views = _party_character_views(calls)
+    gaps: dict[str, list[str]] = {}
+    for actor_id in sorted(party_ids):
+        character = views.get(actor_id)
+        if character is None:
+            gaps[actor_id] = ["authoritative_character_view_missing"]
+            continue
+        sheet = dict(character.get("sheet") or {})
+        notes = dict(character.get("notes") or {})
+        progression = dict(sheet.get("progression") or {})
+        combat = dict(sheet.get("combat") or {})
+        ability_generation = dict(sheet.get("ability_generation") or {})
+        classes = [item for item in progression.get("classes") or [] if isinstance(item, dict)]
+        selections = [
+            item
+            for item in dict(sheet.get("content") or {}).get("selections") or []
+            if isinstance(item, dict)
+        ]
+        selection_kinds = {str(item.get("kind") or "") for item in selections}
+        hit_dice = dict(combat.get("hit_dice") or {})
+        profile = dict(notes.get("profile") or {})
+        actor_gaps: list[str] = []
+        if sheet.get("schema_version") != 2:
+            actor_gaps.append("sheet_v2_missing")
+        if str(ability_generation.get("method") or "") in {
+            "",
+            "unrecorded",
+            "roll_4d6_drop_lowest_pending",
+        }:
+            actor_gaps.append("ability_generation_incomplete")
+        level = progression.get("level")
+        if not isinstance(level, int) or isinstance(level, bool) or level < 1:
+            actor_gaps.append("level_missing")
+        if not classes or any(
+            not str(item.get("name") or "")
+            or not isinstance(item.get("level"), int)
+            or int(item.get("level") or 0) < 1
+            or not isinstance(item.get("hit_die"), int)
+            or int(item.get("hit_die") or 0) < 1
+            for item in classes
+        ):
+            actor_gaps.append("class_progression_incomplete")
+        if not str(progression.get("species") or ""):
+            actor_gaps.append("species_missing")
+        if not str(progression.get("background") or ""):
+            actor_gaps.append("background_missing")
+        for kind in ("class", "species", "background"):
+            if kind not in selection_kinds:
+                actor_gaps.append(f"{kind}_catalog_provenance_missing")
+        hp = dict(combat.get("hp") or {})
+        if int(hp.get("max", 0) or 0) < 1 or int(hp.get("value", 0) or 0) < 1:
+            actor_gaps.append("hit_points_incomplete")
+        if not any(
+            isinstance(pool, dict)
+            and int(pool.get("max", 0) or 0) >= 1
+            and int(pool.get("value", 0) or 0) >= 1
+            for pool in hit_dice.values()
+        ):
+            actor_gaps.append("hit_dice_incomplete")
+        if not list(dict(sheet.get("inventory") or {}).get("items") or []):
+            actor_gaps.append("starting_equipment_missing")
+        for field in ("personality_traits", "ideals", "bonds", "flaws"):
+            if not list(profile.get(field) or []):
+                actor_gaps.append(f"background_{field}_missing")
+        if actor_gaps:
+            gaps[actor_id] = actor_gaps
+    return gaps
+
+
 def _source_combat_actor_ids(calls: list[dict[str, Any]]) -> set[str]:
     authoritative_modes = {
         "statblock",
@@ -670,6 +760,9 @@ def _coverage_audit(
         gaps.append("preparation:player_membership_or_actor_grant_missing")
     if not _manifest_party_ready(calls):
         gaps.append("preparation:manifest_party_not_ready")
+    party_mechanical_gaps = _party_mechanical_readiness(calls)
+    if party_mechanical_gaps:
+        gaps.append("preparation:party_mechanics_not_ready")
     if list_changed_count < 1:
         gaps.append("host:list_changed_not_observed")
     if _has_exposure_reopen_after_transition(calls):
@@ -679,6 +772,7 @@ def _coverage_audit(
         "gaps": sorted(set(gaps)),
         "scenarios": scenarios,
         "ending_completed": _ending_completed(calls),
+        "party_mechanical_gaps": party_mechanical_gaps,
     }
 
 
@@ -871,6 +965,12 @@ missing campaign/actor grants and never authorizes rebuilding the Pack or party.
 `preparation:manifest_party_not_ready` requires only creating any source-sized
 missing PCs, replacing the complete manifest with full member records, and
 syncing it to `ready`; it also never authorizes rebuilding the Pack.
+`preparation:party_mechanics_not_ready` requires completing the existing party,
+not creating replacements. Read the exact
+`dnd:full/skills/dnd-dm/references/CHAR_CREATION.md` asset, follow its bootstrap,
+ability, full-sheet review, catalog-application, and final re-read sequence for
+every manifest PC, then sync the refreshed member records. Do not enter Play
+until the coverage audit no longer reports this gap.
 Before that work, read
 `dnd:full/skills/dnd-dm/references/CAMPAIGN_REGRESSION.md` through
 `skill_query(kind="asset", action="read", identifier=...)`. This gap is not

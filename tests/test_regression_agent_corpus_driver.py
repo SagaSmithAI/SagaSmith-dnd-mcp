@@ -80,6 +80,47 @@ def _ready_manifest_call() -> dict[str, object]:
     )
 
 
+def _ready_pc_call() -> dict[str, object]:
+    return _call(
+        "character_query",
+        arguments={"view": "get", "payload": {"character_id": "pc-1"}},
+        result={
+            "id": "pc-1",
+            "character_type": "pc",
+            "sheet": {
+                "schema_version": 2,
+                "ability_generation": {"method": "standard_array"},
+                "progression": {
+                    "level": 1,
+                    "classes": [{"name": "Fighter", "level": 1, "hit_die": 10}],
+                    "species": "Human",
+                    "background": "Soldier",
+                },
+                "combat": {
+                    "hp": {"value": 12, "max": 12, "temp": 0},
+                    "hit_dice": {"d10": {"value": 1, "max": 1}},
+                },
+                "content": {
+                    "selections": [
+                        {"kind": "class", "artifact_id": "fighter"},
+                        {"kind": "species", "artifact_id": "human"},
+                        {"kind": "background", "artifact_id": "soldier"},
+                    ]
+                },
+                "inventory": {"items": [{"id": "sword", "name": "Longsword"}]},
+            },
+            "notes": {
+                "profile": {
+                    "personality_traits": ["Steady"],
+                    "ideals": ["Duty"],
+                    "bonds": ["Company"],
+                    "flaws": ["Stubborn"],
+                }
+            },
+        },
+    )
+
+
 def test_wrapped_mcp_text_is_decoded_without_losing_artifacts() -> None:
     value = _decode_tool_content(
         json.dumps(
@@ -368,6 +409,7 @@ def test_coverage_requires_real_ordered_boundaries_retries_and_recovery() -> Non
         ),
         *_player_grants(),
         _ready_manifest_call(),
+        _ready_pc_call(),
         _call("campaign_query", principal="player"),
     ]
     audit = _coverage_audit(route, calls, process_count=4, list_changed_count=3)
@@ -415,6 +457,7 @@ def test_preparation_requires_finalize_import_activate_order() -> None:
         bypassed[3],
         *_player_grants(),
         _ready_manifest_call(),
+        _ready_pc_call(),
     ]
 
     bypassed_audit = _coverage_audit(
@@ -428,6 +471,44 @@ def test_preparation_requires_finalize_import_activate_order() -> None:
     ] is True
 
 
+def test_preparation_rejects_manifest_ready_skeletal_party() -> None:
+    route = {"scenarios": []}
+    skeletal = _call(
+        "character_create_from",
+        arguments={"mode": "build"},
+        result={
+            "instance": {
+                "id": "pc-1",
+                "character_type": "pc",
+                "sheet": {
+                    "schema_version": 2,
+                    "ability_generation": {"method": "unrecorded"},
+                    "progression": {"level": 0, "classes": [], "species": "", "background": ""},
+                    "combat": {"hp": {"value": 0, "max": 0}, "hit_dice": {}},
+                    "content": {"selections": []},
+                    "inventory": {"items": []},
+                },
+                "notes": {"profile": {}},
+            }
+        },
+    )
+    calls = [
+        _call("skill_query"),
+        _call("exposure", arguments={"action": "open"}),
+        *_player_grants(),
+        skeletal,
+        _ready_manifest_call(),
+    ]
+
+    audit = _coverage_audit(route, calls, process_count=1, list_changed_count=1)
+
+    assert "preparation:manifest_party_not_ready" not in audit["gaps"]
+    assert "preparation:party_mechanics_not_ready" in audit["gaps"]
+    assert "ability_generation_incomplete" in audit["party_mechanical_gaps"]["pc-1"]
+    assert "class_catalog_provenance_missing" in audit["party_mechanical_gaps"]["pc-1"]
+    assert "starting_equipment_missing" in audit["party_mechanical_gaps"]["pc-1"]
+
+
 def test_preparation_requires_explicit_source_matching_campaign_profile() -> None:
     route = {"scenarios": []}
     shared = [
@@ -435,6 +516,7 @@ def test_preparation_requires_explicit_source_matching_campaign_profile() -> Non
         _call("exposure", arguments={"action": "open"}),
         *_player_grants(),
         _ready_manifest_call(),
+        _ready_pc_call(),
     ]
     omitted = [*shared, _call("campaign_create", arguments={"name": "campaign"})]
     wrong_edition = [
