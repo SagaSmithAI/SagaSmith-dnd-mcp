@@ -112,6 +112,41 @@ def test_rolled_ability_generation_is_two_phase_engine_owned_and_idempotent(
     asyncio.run(exercise())
 
 
+def test_character_build_rejects_silently_ignored_catalog_shortcuts(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Strict character build", "edition": "2014", "idempotency_key": "campaign"},
+        )
+
+        with pytest.raises(
+            Exception,
+            match=(
+                "unsupported fields: background_id, class_id, species_id; "
+                "bootstrap .* character_ability_apply .* character_content_apply"
+            ),
+        ):
+            await _call(
+                server,
+                "character_create_from",
+                {
+                    "mode": "build",
+                    "payload": {
+                        "campaign_id": campaign["id"],
+                        "name": "Not Yet Built",
+                        "class_id": "fighter",
+                        "species_id": "human",
+                        "background_id": "soldier",
+                    },
+                    "idempotency_key": "actor",
+                },
+            )
+
+    asyncio.run(exercise())
+
+
 def test_ability_roll_rejects_stale_revision_and_caller_roll_payload(
     tmp_path: Path, monkeypatch
 ) -> None:

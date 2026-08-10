@@ -42424,6 +42424,24 @@ boundary.
                 raise ValueError("idempotency_key is required for narrative NPC creation")
             if authoritative_phase(scoped_campaign_id) != PROFILE_PLAY:
                 raise CombatEngineError("narrative NPCs can be created only during play")
+        elif mode == "build":
+            allowed_build_fields = {
+                "campaign_id",
+                "name",
+                "player_name",
+                "summary",
+                "sheet",
+                "notes",
+            }
+            unsupported_build_fields = sorted(set(data) - allowed_build_fields)
+            if unsupported_build_fields:
+                raise ValueError(
+                    "character build payload contains unsupported fields: "
+                    + ", ".join(unsupported_build_fields)
+                    + "; bootstrap with campaign_id/name/summary, then use "
+                    "character_ability_apply and exact character_content_apply "
+                    "catalog artifacts"
+                )
         elif scoped_campaign_id and authoritative_phase(scoped_campaign_id) != PROFILE_LOBBY:
             raise CombatEngineError(
                 "character authoring and content import are available only in lobby"
