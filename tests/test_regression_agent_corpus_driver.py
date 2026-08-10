@@ -86,6 +86,7 @@ def _ready_pc_call() -> dict[str, object]:
         arguments={"view": "get", "payload": {"character_id": "pc-1"}},
         result={
             "id": "pc-1",
+            "campaign_id": "campaign-1",
             "character_type": "pc",
             "sheet": {
                 "schema_version": 2,
@@ -507,6 +508,35 @@ def test_preparation_rejects_manifest_ready_skeletal_party() -> None:
     assert "ability_generation_incomplete" in audit["party_mechanical_gaps"]["pc-1"]
     assert "class_catalog_provenance_missing" in audit["party_mechanical_gaps"]["pc-1"]
     assert "starting_equipment_missing" in audit["party_mechanical_gaps"]["pc-1"]
+
+
+def test_preparation_rejects_extra_campaign_pc_builds() -> None:
+    route = {"scenarios": []}
+    extra_pc = _call(
+        "character_create_from",
+        arguments={"mode": "build"},
+        result={
+            "instance": {
+                "id": "pc-2",
+                "campaign_id": "campaign-1",
+                "character_type": "pc",
+                "sheet": {},
+            }
+        },
+    )
+    calls = [
+        _call("skill_query"),
+        _call("exposure", arguments={"action": "open"}),
+        *_player_grants(),
+        _ready_manifest_call(),
+        _ready_pc_call(),
+        extra_pc,
+    ]
+
+    audit = _coverage_audit(route, calls, process_count=1, list_changed_count=1)
+
+    assert "preparation:extra_campaign_pcs_created" in audit["gaps"]
+    assert audit["campaign_pc_ids"] == ["pc-1", "pc-2"]
 
 
 def test_preparation_requires_explicit_source_matching_campaign_profile() -> None:

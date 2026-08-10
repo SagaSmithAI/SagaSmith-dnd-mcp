@@ -497,6 +497,35 @@ def _manifest_party_ids(calls: list[dict[str, Any]]) -> set[str]:
     return set()
 
 
+def _manifest_selected_size(calls: list[dict[str, Any]]) -> int | None:
+    for call in reversed(calls):
+        if call.get("tool") != "playthrough_manifest" or not call.get("ok"):
+            continue
+        for node in _walk(call.get("result")):
+            if not isinstance(node, dict) or not isinstance(node.get("manifest"), dict):
+                continue
+            selected_size = dict(node["manifest"].get("party") or {}).get("selected_size")
+            if isinstance(selected_size, int) and not isinstance(selected_size, bool):
+                return selected_size
+    return None
+
+
+def _campaign_pc_ids(calls: list[dict[str, Any]]) -> set[str]:
+    actor_ids: set[str] = set()
+    for call in calls:
+        if not call.get("ok"):
+            continue
+        for node in _walk(call.get("result")):
+            if (
+                isinstance(node, dict)
+                and node.get("character_type") == "pc"
+                and str(node.get("campaign_id") or "")
+                and str(node.get("id") or "")
+            ):
+                actor_ids.add(str(node["id"]))
+    return actor_ids
+
+
 def _party_character_views(calls: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     party_ids = _manifest_party_ids(calls)
     latest: dict[str, dict[str, Any]] = {}
@@ -760,6 +789,10 @@ def _coverage_audit(
         gaps.append("preparation:player_membership_or_actor_grant_missing")
     if not _manifest_party_ready(calls):
         gaps.append("preparation:manifest_party_not_ready")
+    selected_size = _manifest_selected_size(calls)
+    campaign_pc_ids = _campaign_pc_ids(calls)
+    if selected_size is not None and len(campaign_pc_ids) > selected_size:
+        gaps.append("preparation:extra_campaign_pcs_created")
     party_mechanical_gaps = _party_mechanical_readiness(calls)
     if party_mechanical_gaps:
         gaps.append("preparation:party_mechanics_not_ready")
@@ -773,6 +806,7 @@ def _coverage_audit(
         "scenarios": scenarios,
         "ending_completed": _ending_completed(calls),
         "party_mechanical_gaps": party_mechanical_gaps,
+        "campaign_pc_ids": sorted(campaign_pc_ids),
     }
 
 
@@ -965,6 +999,11 @@ missing campaign/actor grants and never authorizes rebuilding the Pack or party.
 `preparation:manifest_party_not_ready` requires only creating any source-sized
 missing PCs, replacing the complete manifest with full member records, and
 syncing it to `ready`; it also never authorizes rebuilding the Pack.
+An empty manifest does not mean the campaign has no PCs. Before any build, call
+`character_query(view="list")`, count the distinct campaign-bound PC instances,
+and calculate the exact shortfall from source-confirmed `selected_size`. If that
+shortfall is zero, make no build call and register the existing actors. Never
+create a reserve/bench PC in this fresh regression campaign.
 `preparation:party_mechanics_not_ready` requires completing the existing party,
 not creating replacements. Read the exact
 `dnd:full/skills/dnd-dm/references/CHAR_CREATION.md` asset, follow its bootstrap,
