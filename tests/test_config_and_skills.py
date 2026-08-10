@@ -189,12 +189,26 @@ def test_bundled_rule_seed_reports_complete_multilingual_corpus(tmp_path: Path) 
                 "top_k": 3,
             },
         )
+        _, response_with_empty_optional_filters = await server.call_tool(
+            "rule_search",
+            {
+                "campaign_id": campaign["id"],
+                "query": "Tarrasque",
+                "edition": "2014",
+                "locale": "en",
+                "publications": [],
+                "source_ids": [],
+                "source_keys": [],
+                "top_k": 3,
+            },
+        )
         monster_source_id = next(
             item["id"]
             for item in status["sources"]
             if item["source_key"] == "bundled:srd2014:en:10-monsters"
         )
         assert any(item["source_id"] == monster_source_id for item in response["result"])
+        assert response_with_empty_optional_filters["result"] == response["result"]
 
     asyncio.run(inspect_seed())
 

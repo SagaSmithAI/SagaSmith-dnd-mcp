@@ -30957,7 +30957,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if page is not None and page < 1:
             raise ValueError("rule_search page must be positive")
         allowed_source_ids = campaign_rule_source_ids(campaign_id)
-        if source_ids is not None:
+        if source_ids:
             requested = {str(item) for item in source_ids}
             if unknown := sorted(requested - allowed_source_ids):
                 raise ValueError(
