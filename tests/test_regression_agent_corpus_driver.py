@@ -569,6 +569,7 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     )
     assert source_path.replace("\\", "\\\\") in prompt
     assert "coverage evidence and route intent, not a story answer" in prompt
+    assert "A prefix-only asset read is not proof" in prompt
     assert "never a campaign UUID" in prompt
     assert "Open exposure without a campaign" in prompt
     assert '"decision"' not in prompt

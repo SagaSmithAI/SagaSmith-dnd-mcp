@@ -757,7 +757,9 @@ or narration as a substitute for a committed result.
 For the regression reference use `skill_query(kind="asset")` with identifier
 `dnd:full/skills/dnd-dm/references/CAMPAIGN_REGRESSION.md`; search/outline it and
 read the bounded section relevant to the first current gap. Do not treat that
-asset id as a `kind="skill"` document id.
+asset id as a `kind="skill"` document id. A prefix-only asset read is not proof
+that the relevant workflow was consulted: before declaring a gap blocked, search
+the asset using that gap's mechanism and read the matching bounded section.
 
 This runner gives each campaign line a fresh MCP home. On the first cycle,
 `campaign_query(view="list")` normally returns no campaign. Do not pass the

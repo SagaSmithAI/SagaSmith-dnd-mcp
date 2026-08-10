@@ -393,7 +393,14 @@ def test_campaign_resume_bundle_reloads_branch_scene_and_continuity(
         assert result["current_branch"]["is_current"] is True
         assert result["manifest"] is None
         assert result["continuity"]["context_receipt"]["campaign_id"] == created["id"]
-        assert result["resume_invariants"]["discard_pre_restore_context"] is True
+        assert result["resume_invariants"] == {
+            "discard_pre_restore_context": True,
+            "context_receipt_revision": result["continuity"]["context_receipt"][
+                "campaign_revision"
+            ],
+            "reuse_bound_exposure_after_restore": True,
+            "refresh_tools_after_phase_or_checkout_change": True,
+        }
 
     asyncio.run(exercise_server())
 

@@ -10732,9 +10732,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 if str(effect.get("visibility") or "party") in PLAYER_GAMEPLAY_VISIBILITY_SCOPES
             ],
         }
-        combat = combat_view(campaign_id, principal_id)
-        if combat is not None:
-            safe_state["combat"] = combat
+        combat_state = dict(state.get("combat") or {})
+        if bool(combat_state.get("active", False)):
+            combat = combat_view(campaign_id, principal_id)
+            if combat is not None:
+                safe_state["combat"] = combat
+        elif combat_state:
+            # A finished encounter remains useful to the DM as an audit snapshot,
+            # but its participants, source refs, initiative, and map are not part
+            # of the player's general campaign/resume projection.
+            safe_state["combat"] = {"active": False}
         value["state"] = safe_state
         value["state_redacted"] = True
         return value
@@ -43727,8 +43734,8 @@ boundary.
                 "resume_invariants": {
                     "discard_pre_restore_context": True,
                     "context_receipt_revision": context["context_receipt"]["campaign_revision"],
-                    "reopen_exposure_for_campaign": True,
-                    "refresh_tools_after_phase_change": True,
+                    "reuse_bound_exposure_after_restore": True,
+                    "refresh_tools_after_phase_or_checkout_change": True,
                 },
             }
         elif view == "get":

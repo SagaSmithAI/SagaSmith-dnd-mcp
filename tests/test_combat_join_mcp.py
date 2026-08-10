@@ -233,6 +233,37 @@ def test_combat_join_queues_actor_until_next_round(tmp_path: Path) -> None:
         assert ended["combat"]["combatant_state_is_current"] is False
         assert ended["combat"]["current_character_state_source"] == "character_query"
 
+        await _call(
+            server,
+            "access_grant",
+            {
+                "scope": "campaign",
+                "campaign_id": campaign["id"],
+                "principal_id": "player:historian",
+                "payload": {"role": "player"},
+            },
+        )
+        player_campaign = await _call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "player:historian",
+            },
+        )
+        player_resume = await _call(
+            server,
+            "campaign_query",
+            {
+                "view": "resume",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "player:historian",
+            },
+        )
+        assert player_campaign["state"]["combat"] == {"active": False}
+        assert player_resume["campaign"]["state"]["combat"] == {"active": False}
+
         status = await _call(
             server,
             "combat_query",
