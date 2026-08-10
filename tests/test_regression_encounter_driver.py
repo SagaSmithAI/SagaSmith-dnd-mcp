@@ -3015,7 +3015,7 @@ def test_party_spell_tactics_choose_safe_hypnotic_pattern_cube() -> None:
     ) == ["ogre-1", "ogre-2"]
 
 
-def test_party_spell_tactics_hydrate_legacy_lightning_bolt_line() -> None:
+def test_party_spell_tactics_use_exact_srd_lightning_bolt_contract() -> None:
     spell_id = "dnd5e.content.srd2014.spell.lightning-bolt"
     wizard = _spell_actor(spell_id)
     wizard["sheet"]["content"]["spells"][0].update(

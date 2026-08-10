@@ -1506,7 +1506,7 @@ def test_fireball_settles_saves_and_area_enumeration(tmp_path: Path, monkeypatch
     asyncio.run(exercise())
 
 
-def test_legacy_lightning_bolt_card_hydrates_and_settles_exact_line(
+def test_exact_srd_lightning_bolt_id_uses_engine_contract_for_line(
     tmp_path: Path, monkeypatch
 ) -> None:
     _deterministic_rolls(monkeypatch)
@@ -1572,7 +1572,7 @@ def test_legacy_lightning_bolt_card_hydrates_and_settles_exact_line(
                     ],
                 },
                 "expected_revision": revision,
-                "idempotency_key": "legacy-lightning-bolt",
+                "idempotency_key": "srd-lightning-bolt",
             },
         )
 
