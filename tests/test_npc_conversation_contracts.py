@@ -197,11 +197,14 @@ def test_submit_validation_keeps_lease_and_success_waits_for_publication(tmp_pat
         store.get(opened["conversation_id"]),
         publication_id=submitted["publication"]["publication_id"],
         audience_facts=publication_audience,
+        segment_audience_facts=None,
         expected_revision=3,
         idempotency_key="publish-1",
     )
     assert published["status"] == "published"
     assert len(store.get(opened["conversation_id"])["events"]) == 2
+    candidates = store.get(opened["conversation_id"])["listener_knowledge_candidates"]
+    assert candidates["pc"][0]["metadata"]["statement_truth_not_implied"] is True
 
 
 def test_every_mutation_requires_current_revision_and_replays_identically(tmp_path) -> None:

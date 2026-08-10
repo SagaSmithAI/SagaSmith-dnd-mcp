@@ -633,6 +633,9 @@ class ConversationStore:
                 "activations": {},
                 "publications": [],
                 "pending_resolutions": [],
+                "listener_knowledge_candidates": {
+                    actor_id: [] for actor_id in participant_ids
+                },
                 "audience_decision_ids": [],
                 "idempotency": {},
                 "open_idempotency_key": idempotency_key,
@@ -1042,6 +1045,7 @@ class ConversationStore:
         *,
         publication_id: str,
         audience_facts: dict[str, Any],
+        segment_audience_facts: list[dict[str, Any]] | None,
         expected_revision: int,
         idempotency_key: str,
     ) -> dict[str, Any]:
@@ -1050,7 +1054,11 @@ class ConversationStore:
             expected_revision=expected_revision,
             idempotency_key=idempotency_key,
             operation="publish",
-            payload={"publication_id": publication_id, "audience_facts": audience_facts},
+            payload={
+                "publication_id": publication_id,
+                "audience_facts": audience_facts,
+                "segment_audience_facts": segment_audience_facts or [],
+            },
         )
         if replay is not None:
             return replay
@@ -1062,9 +1070,18 @@ class ConversationStore:
             raise LookupError(publication_id)
         if publication.get("status") != "pending_audience":
             raise ValueError("publication is not awaiting audience facts")
-        decision_id = str(audience_facts["decision_id"])
-        if decision_id in session["audience_decision_ids"]:
-            raise ValueError("audience_facts.decision_id must be unique in the conversation")
+        segments = list(publication.get("utterance_segments") or [])
+        segment_facts = list(segment_audience_facts or [])
+        if segment_facts and len(segment_facts) != len(segments):
+            raise ValueError("segment_audience_facts must contain one ruling per utterance segment")
+        if not segment_facts:
+            segment_facts = [deepcopy(audience_facts) for _ in segments]
+        decision_ids = {
+            str(audience_facts["decision_id"]),
+            *(str(item["decision_id"]) for item in segment_facts),
+        }
+        if decision_ids & set(session["audience_decision_ids"]):
+            raise ValueError("audience decision ids must be unique in the conversation")
         sequence = len(session["events"]) + 1
         event = {
             "event_id": f"conversation-event:{session['conversation_id']}:{sequence}",
@@ -1077,14 +1094,47 @@ class ConversationStore:
             "visible_cues": deepcopy(publication["visible_cues"]),
             "visible_action": publication["visible_action"],
             "audience_facts": deepcopy(audience_facts),
+            "segment_audience_facts": deepcopy(segment_facts),
         }
-        event["actor_inboxes"] = self._actor_inboxes(event, audience_facts)
+        event["actor_inboxes"] = self._publication_actor_inboxes(
+            event, audience_facts, segment_facts
+        )
         session["events"].append(event)
-        session["audience_decision_ids"].append(decision_id)
+        session["audience_decision_ids"].extend(sorted(decision_ids))
         publication["status"] = "published"
-        publication["audience_decision_id"] = decision_id
+        publication["audience_decision_id"] = str(audience_facts["decision_id"])
+        speaker_id = str(publication["speaker_actor_id"])
+        for index, (segment, facts) in enumerate(zip(segments, segment_facts, strict=True)):
+            for actor_id in facts["understood_actor_ids"]:
+                if actor_id == speaker_id:
+                    continue
+                session["listener_knowledge_candidates"][actor_id].append(
+                    {
+                        "action": "add",
+                        "actor_id": actor_id,
+                        "knowledge_key": (
+                            f"conversation:{session['conversation_id']}:publication:"
+                            f"{publication_id}:segment:{index}"
+                        ),
+                        "proposition": f"{speaker_id} said: {segment['text']}",
+                        "subject_ref": f"actor:{speaker_id}",
+                        "epistemic_status": "known",
+                        "confidence": 3,
+                        "cause": event["event_id"],
+                        "disclosure_scope": "owner",
+                        "metadata": {
+                            "claim_kind": "heard_statement",
+                            "audience_decision_id": facts["decision_id"],
+                            "statement_truth_not_implied": True,
+                        },
+                    }
+                )
         activations = []
-        for actor_id in audience_facts["response_actor_ids"]:
+        response_ids = {
+            *audience_facts["response_actor_ids"],
+            *(actor_id for facts in segment_facts for actor_id in facts["response_actor_ids"]),
+        }
+        for actor_id in sorted(response_ids):
             if actor_id == publication["speaker_actor_id"]:
                 continue
             runtime = session["actor_runtimes"].get(actor_id)
@@ -1117,3 +1167,57 @@ class ConversationStore:
                 "activations": activations,
             },
         )
+
+    @staticmethod
+    def _publication_actor_inboxes(
+        event: dict[str, Any],
+        overall: dict[str, Any],
+        segment_facts: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        perceived = {
+            *overall["perceived_actor_ids"],
+            *(actor_id for facts in segment_facts for actor_id in facts["perceived_actor_ids"]),
+        }
+        result: dict[str, Any] = {}
+        for actor_id in perceived:
+            rendered_segments = []
+            for segment, facts in zip(
+                event.get("utterance_segments") or [], segment_facts, strict=True
+            ):
+                if actor_id in facts["understood_actor_ids"]:
+                    rendered_segments.append({**deepcopy(segment), "comprehension": "full"})
+                elif actor_id in facts["partial_renditions"]:
+                    rendered_segments.append(
+                        {
+                            "text": facts["partial_renditions"][actor_id],
+                            "comprehension": "partial",
+                            "audience_decision_id": facts["decision_id"],
+                        }
+                    )
+                elif actor_id in facts["perceived_actor_ids"]:
+                    rendered_segments.append(
+                        {
+                            "text": "Speech was perceived, but its content was not understood.",
+                            "comprehension": "perceived_only",
+                            "audience_decision_id": facts["decision_id"],
+                        }
+                    )
+            result[actor_id] = {
+                "event_id": event["event_id"],
+                "sequence": event["sequence"],
+                "type": event["type"],
+                "speaker_actor_id": event["speaker_actor_id"],
+                "utterance_segments": rendered_segments,
+                "visible_cues": (
+                    deepcopy(event.get("visible_cues") or [])
+                    if actor_id in overall["perceived_actor_ids"]
+                    else []
+                ),
+                "visible_action": (
+                    event.get("visible_action", "")
+                    if actor_id in overall["understood_actor_ids"]
+                    else ""
+                ),
+                "audience_decision_id": overall["decision_id"],
+            }
+        return result

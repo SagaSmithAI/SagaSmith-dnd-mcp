@@ -63,6 +63,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                     "expected_conversation_revision",
                     "idempotency_key",
                     "publication_id",
+                    "segment_audience_facts",
                 ),
                 (
                     "conversation_id",

@@ -29726,6 +29726,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if item.get("status") == "pending_audience"
         ]
         result["pending_resolutions"] = deepcopy(session.get("pending_resolutions") or [])
+        result["listener_knowledge_candidates"] = {
+            actor_id: deepcopy(values)
+            for actor_id, values in dict(
+                session.get("listener_knowledge_candidates") or {}
+            ).items()
+            if values
+        }
         result["refreshed_actor_ids"] = list(session.get("refreshed_actor_ids") or [])
         return result
 
@@ -29900,6 +29907,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         conversation_id: str,
         publication_id: str,
         audience_facts: dict[str, Any],
+        segment_audience_facts: list[dict[str, Any]] | None,
         expected_conversation_revision: int,
         idempotency_key: str,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
@@ -29914,10 +29922,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             participant_ids=set(session["participant_ids"]),
             response_actor_ids=set(session["actor_runtimes"]),
         )
+        segment_audience = [
+            normalize_audience_facts(
+                item,
+                participant_ids=set(session["participant_ids"]),
+                response_actor_ids=set(session["actor_runtimes"]),
+            )
+            for item in list(segment_audience_facts or [])
+        ]
         return npc_conversations.publish(
             session,
             publication_id=publication_id,
             audience_facts=audience,
+            segment_audience_facts=segment_audience,
             expected_revision=expected_conversation_revision,
             idempotency_key=idempotency_key,
         )
@@ -29969,17 +29986,27 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         ):
             raise ValueError("conversation has unfinished NPC activations")
         selections = dict(accepted_working_deltas or {})
-        if unknown := set(selections) - set(session["actor_runtimes"]):
+        if unknown := set(selections) - set(session["participant_ids"]):
             raise ValueError(f"accepted deltas include actors outside the conversation: {unknown}")
         facts_data: list[dict[str, Any]] = []
         knowledge_data: list[dict[str, Any]] = []
         accepted_commitments: list[dict[str, Any]] = []
         for actor_id, raw_selection in selections.items():
             selection = dict(raw_selection or {})
-            allowed_fields = {"fact_indexes", "actor_knowledge_indexes", "commitment_indexes"}
+            allowed_fields = {
+                "fact_indexes",
+                "actor_knowledge_indexes",
+                "commitment_indexes",
+                "listener_knowledge_indexes",
+            }
             if unknown := set(selection) - allowed_fields:
                 raise ValueError(f"accepted delta selection has unknown fields: {sorted(unknown)}")
-            working = session["actor_runtimes"][actor_id]["working_deltas"]
+            runtime = session["actor_runtimes"].get(actor_id)
+            working = (
+                runtime["working_deltas"]
+                if runtime is not None
+                else {"facts": [], "actor_knowledge": [], "commitments": []}
+            )
             facts_data.extend(
                 npc_conversation_select_indexes(
                     working["facts"], selection.get("fact_indexes") or [], "fact_indexes"
@@ -30175,6 +30202,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 branch_id=data.get("branch_id"),
                 principal_id=principal_id,
             )
+            knowledge_data.extend(
+                npc_conversation_select_indexes(
+                    list(
+                        dict(session.get("listener_knowledge_candidates") or {}).get(
+                            actor_id, []
+                        )
+                    ),
+                    selection.get("listener_knowledge_indexes") or [],
+                    "listener_knowledge_indexes",
+                )
+            )
         conversation_id = str(data["conversation_id"])
         if action == "get":
             return conversation_status(campaign_id, conversation_id, principal_id)
@@ -30194,6 +30232,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 conversation_id,
                 str(data["publication_id"]),
                 dict(data["audience_facts"]),
+                [dict(item) for item in data.get("segment_audience_facts") or []],
                 int(data["expected_conversation_revision"]),
                 str(data["idempotency_key"]),
                 principal_id,
