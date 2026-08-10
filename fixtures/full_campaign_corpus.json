@@ -90,13 +90,12 @@
             "asset_path": "Lost Mine of Phandelver/Lost Mine of Phandelver.pdf",
             "asset_sha256": "c3095b66e2f690d8a16b43a6b73c0aa6209c2e913714df5a65b3d2d0481aec07",
             "page_start": 4,
-            "page_end": 5,
+            "page_end": 4,
             "heading_path": [
               "Front Matter",
-              "THE FORGOTTEN REALMS",
-              "ROLEPLAYING AND INSPIRATION"
+              "ADVENTURE HOOK"
             ],
-            "content_sha256": "d660f9a6a25e98b854950a9210b03f7a356ae23ddf245d0a7a71f5dfb9ab1585"
+            "content_sha256": "da820348aedd25359b62bdf2e75193487929bb878ec8222a9b601e830c6c62a9"
           }
         ]
       }

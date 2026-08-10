@@ -416,7 +416,10 @@ def test_playthrough_manifest_builder_preserves_unknown_party_size_review() -> N
 
     assert manifest["party"]["selected_size"] is None
     assert manifest["party"]["party_size_status"] == "dm_review_required"
-    assert manifest["party"]["party_size_review"] == {}
+    assert manifest["party"]["party_size_review"] == {
+        "default_resolver": "agent",
+        "ruling_kind": "source_or_scene_fact",
+    }
     assert manifest["party"]["use_pregenerated_first"] is True
     assert manifest["review_blocks"] == review
 

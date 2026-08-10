@@ -21,6 +21,7 @@ from typing import Any
 from mcp import ClientSession
 from mcp.client.stdio import stdio_client
 from sagasmith_dnd.editions import SUPPORTED_DND_EDITIONS
+from sagasmith_dnd.playthrough import new_playthrough_manifest, validate_playthrough_manifest
 from sagasmith_dnd.vocabulary import ADVANCEMENT_MODES
 
 from scripts.regression_modules import (
@@ -309,66 +310,32 @@ def _build_playthrough_manifest(
 ) -> dict[str, Any]:
     requirements = dict(line["play_requirements"])
     party_size = dict(requirements["recommended_party_size"])
-    return {
-        "schema_version": 1,
-        "run_id": run_id,
-        "campaign_line_id": str(line["id"]),
-        "module_ids": list(module_ids),
-        "status": "lobby",
-        "source_refs": deepcopy(
+    manifest = new_playthrough_manifest(
+        run_id=run_id,
+        campaign_line_id=str(line["id"]),
+        module_ids=list(module_ids),
+        recommended_party_minimum=party_size.get("minimum"),
+        recommended_party_maximum=party_size.get("maximum"),
+        selected_party_size=party_size.get("selected"),
+        source_refs=deepcopy(
             list(source_refs if source_refs is not None else requirements.get("source_refs") or [])
         ),
-        "current": {
-            "module_id": module_ids[0],
-            "chapter_id": "",
-            "chapter_title": "",
-            "scene_id": "",
-            "scene_title": "",
-            "objective": "Complete the lobby quality gate and establish the legal party.",
-        },
-        "traversal": {
-            "reachable_scene_ids": [],
-            "visited_scene_ids": [],
-            "excluded_scenes": [],
-            "branch_decisions": [],
-        },
-        "party": {
-            "party_size_status": party_size.get("status"),
-            "recommended_minimum": party_size.get("minimum"),
-            "recommended_maximum": party_size.get("maximum"),
-            "selected_size": party_size.get("selected"),
-            "party_size_review": deepcopy(dict(party_size.get("review") or {})),
-            "use_pregenerated_first": True,
-            "members": [],
-            "replacements": [],
-        },
-        "npcs": [],
-        "quests": [],
-        "clues": [],
-        "world_state": {
-            "continuation": deepcopy(dict(requirements.get("continuity") or {})),
-            "pregenerated_characters": deepcopy(
-                dict(requirements.get("pregenerated_characters") or {})
-            ),
-        },
-        "snapshot_dag": {
-            "active_branch_id": "",
-            "head_snapshot_id": "",
-            "nodes": [],
-        },
-        "random_stream": {
-            "algorithm": "",
-            "seed_fingerprint": "",
-            "position": 0,
-        },
-        "ending": {
-            "status": "pending",
-            "conditions": [],
-            "achieved_condition_id": "",
-            "verification": [],
-        },
-        "review_blocks": deepcopy(review_blocks),
+        review_blocks=deepcopy(review_blocks),
+        party_size_status=str(party_size.get("status") or ""),
+        party_size_review=deepcopy(dict(party_size.get("review") or {})),
+    )
+    manifest["current"] = {
+        **dict(manifest["current"]),
+        "module_id": module_ids[0],
+        "objective": "Complete the lobby quality gate and establish the legal party.",
     }
+    manifest["world_state"] = {
+        "continuation": deepcopy(dict(requirements.get("continuity") or {})),
+        "pregenerated_characters": deepcopy(
+            dict(requirements.get("pregenerated_characters") or {})
+        ),
+    }
+    return validate_playthrough_manifest(manifest)
 
 
 async def _resolve_playthrough_source_refs(
