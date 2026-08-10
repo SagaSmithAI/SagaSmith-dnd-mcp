@@ -41003,6 +41003,7 @@ boundary.
                 return facade_result(
                     action,
                     {
+                        "job_id": str(dict(validated["job"])["id"]),
                         "job": validated["job"],
                         "inspection": inspected.get("preview"),
                         "validation": validated.get("validation"),
@@ -41015,6 +41016,7 @@ boundary.
             return facade_result(
                 action,
                 {
+                    "job_id": str(dict(imported["job"])["id"]),
                     "job": imported["job"],
                     "inspection": inspected.get("preview"),
                     "validation": validated.get("validation"),

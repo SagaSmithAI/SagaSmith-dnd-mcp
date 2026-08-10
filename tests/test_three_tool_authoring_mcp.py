@@ -177,6 +177,7 @@ def test_module_start_finalize_writes_a_finalized_module_pack(tmp_path: Path) ->
             },
         )
         assert started["job"]["state"] == "imported"
+        assert started["job_id"] == started["job"]["id"]
         with pytest.raises(Exception, match="explicitly confirm"):
             await _call(
                 server,
