@@ -628,6 +628,9 @@ evidence={json.dumps(_evidence_summary(route), ensure_ascii=False)}
 scenarios={json.dumps(route.get("scenarios") or [], ensure_ascii=False)}
 
 Prepare/finalize/import/activate the current Pack through the public lifecycle;
+before any module authoring write, read the current
+`dnd:full/references/skill-groups/lobby/modules-import.md` asset and follow its
+public request shapes exactly;
 create or resume one reproducibly seeded campaign; create the source-sized legal
 party; grant the named player principal one PC; then progress the source-backed
 route to one legal verified ending. Exercise the listed Play, NPC, chase,

@@ -342,6 +342,7 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
         gaps=[],
     )
     assert "Retrieve and expand the exact managed source before deciding" in prompt
+    assert "dnd:full/references/skill-groups/lobby/modules-import.md" in prompt
     source_path = str(
         (Path(__file__).resolve().parents[2] / "reference/module.pdf").resolve()
     )
