@@ -30118,6 +30118,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "utterance_segments",
                     "visible_cues",
                     "visible_action",
+                    "resolved_resolution_ids",
                     "audience_facts",
                     "segment_audience_facts",
                 )

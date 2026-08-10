@@ -334,6 +334,7 @@ def test_conversation_facade_private_transport_and_commit(tmp_path: Path) -> Non
         assert committed["event"]["payload"]["unresolved_resolution_requests"] == []
         transcript = committed["event"]["payload"]["transcript"]
         assert all("audience_facts" in event for event in transcript)
+        assert transcript[-1]["resolved_resolution_ids"] == [resolution_id]
         heard = await _call(
             server,
             "actor_knowledge_query",

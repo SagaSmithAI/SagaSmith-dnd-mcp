@@ -394,6 +394,7 @@ def test_mechanical_action_waits_locally_without_blocking_public_speech(tmp_path
     assert resolved["event"]["resolved_resolution_ids"] == [resolution_id]
     assert final["pending_resolutions"][0]["status"] == "resolved"
     assert final["pending_resolutions"][0]["resolution_event_id"] == resolved["event"]["event_id"]
+    assert final["events"][-1]["actor_inboxes"]["pc"]["resolved_resolution_ids"] == [resolution_id]
 
 
 def test_retired_conversation_journal_is_rejected_instead_of_migrated(tmp_path) -> None:

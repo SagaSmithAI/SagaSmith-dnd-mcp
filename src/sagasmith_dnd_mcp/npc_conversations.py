@@ -801,6 +801,7 @@ class ConversationStore:
                         "utterance_segments": deepcopy(event.get("utterance_segments") or []),
                         "visible_cues": deepcopy(event.get("visible_cues") or []),
                         "visible_action": event.get("visible_action", ""),
+                        "resolved_resolution_ids": list(event.get("resolved_resolution_ids") or []),
                     }
                 )
             elif actor_id in partial:
