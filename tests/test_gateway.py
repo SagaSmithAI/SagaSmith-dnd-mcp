@@ -2,6 +2,7 @@ import asyncio
 from pathlib import Path
 
 from aiohttp.test_utils import TestClient, TestServer
+from sagasmith_core.idempotency import IdempotencyConflictError
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.gateway import GATEWAY_KEY, GatewayConfig, create_app
@@ -135,5 +136,32 @@ def test_gateway_requires_configured_bearer_token(tmp_path: Path) -> None:
             assert allowed.status == 200
         finally:
             await client.close()
+
+    asyncio.run(exercise())
+
+
+def test_gateway_exposes_known_errors_and_hides_unknown_failures(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        cases = [
+            (ValueError("bad request"), 400, "bad request"),
+            (IdempotencyConflictError("request key conflict"), 409, "request key conflict"),
+            (RuntimeError("database secret"), 500, "internal gateway error"),
+        ]
+        for error, expected_status, expected_message in cases:
+            app = create_app(config(tmp_path), GatewayConfig())
+            gateway = app[GATEWAY_KEY]
+
+            async def fail(_tool_id, _arguments, *, raised=error):
+                raise raised
+
+            gateway.call = fail
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                response = await client.get("/api/health")
+                assert response.status == expected_status
+                assert await response.json() == {"error": expected_message}
+            finally:
+                await client.close()
 
     asyncio.run(exercise())

@@ -5,17 +5,20 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import logging
 import os
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from aiohttp import web
 from sagasmith_core.access import LOCAL_SYSTEM_PRINCIPAL_ID
+from sagasmith_core.idempotency import IdempotencyConflictError
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
 
 JsonHandler = Callable[[web.Request], Awaitable[web.StreamResponse]]
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -348,10 +351,13 @@ def create_app(
                 response = await handler(request)
             except web.HTTPException:
                 raise
+            except IdempotencyConflictError as exc:
+                response = web.json_response({"error": str(exc)}, status=409)
             except (KeyError, TypeError, ValueError, PermissionError) as exc:
                 response = web.json_response({"error": str(exc)}, status=400)
-            except Exception as exc:  # MCP errors remain typed only inside the trusted process.
-                response = web.json_response({"error": str(exc)}, status=409)
+            except Exception:
+                LOGGER.exception("unhandled D&D gateway request failure")
+                response = web.json_response({"error": "internal gateway error"}, status=500)
         if origin and origin in config.allowed_origins:
             response.headers["Access-Control-Allow-Origin"] = origin
             response.headers["Vary"] = "Origin"
