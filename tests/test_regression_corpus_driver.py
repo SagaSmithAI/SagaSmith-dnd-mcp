@@ -7,10 +7,70 @@ from pathlib import Path
 
 from scripts.regression_corpus import (
     CORE_TOOLS,
+    _build_coverage_matrix,
+    _coverage_routes,
     _declared_records,
     _pack_record,
     _raw_records,
 )
+
+
+def _complete_route(line_id: str, source_sha256: str) -> dict[str, object]:
+    evidence = {
+        "id": "source",
+        "source_sha256": source_sha256,
+        "heading_path": ["Chapter 1", "Ending"],
+        "content_sha256": "a" * 64,
+        "page_start": 1,
+        "page_end": 2,
+    }
+    shared_mechanisms = [
+        "preparation",
+        "play_scene",
+        "noncombat_check",
+        "resource_settlement",
+        "npc_conversation",
+        "conversation_to_mechanic",
+        "conversation_to_combat",
+        "combat",
+        "combat_render",
+        "ending",
+        "save_restore",
+        "idempotent_retry",
+        "revision_conflict_refresh",
+        "phase_exposure_refresh",
+    ]
+    return {
+        "campaign_line_id": line_id,
+        "evidence": [evidence],
+        "scenarios": [
+            {
+                "id": "normal-grid-dm",
+                "chapter_or_scene": "Chapter 1",
+                "evidence_id": "source",
+                "mechanisms": shared_mechanisms,
+                "positioning_mode": "grid",
+                "audience": "dm",
+                "path": "normal",
+                "ending_status": "legal_complete",
+            },
+            {
+                "id": "recovery-agent-player",
+                "chapter_or_scene": "Ending",
+                "evidence_id": "source",
+                "mechanisms": [],
+                "positioning_mode": "agent",
+                "audience": "player",
+                "path": "recovery",
+                "recovery_operations": [
+                    "process_restart",
+                    "snapshot_restore",
+                    "branch_checkout",
+                    "undo_redo",
+                ],
+            },
+        ],
+    }
 
 
 def test_native_cold_start_contract_is_exactly_six_tools() -> None:
@@ -138,3 +198,117 @@ def test_finalized_module_pack_requires_a_source_defined_ending(tmp_path: Path) 
 
     assert record["disposition"] == "excluded"
     assert record["reason_code"] == "module_pack_missing_source_defined_ending"
+
+
+def test_coverage_matrix_joins_any_dynamically_discovered_runnable_unit() -> None:
+    checksum = "1" * 64
+    units = [
+        {
+            "id": "future-module-not-in-code",
+            "status": "runnable",
+            "module_sha256": [checksum],
+        }
+    ]
+    routes = _coverage_routes(
+        {"coverage_routes": [_complete_route("future-module-not-in-code", checksum)]}
+    )
+
+    matrix, coverage = _build_coverage_matrix(units, routes)
+
+    assert {row["campaign_line_id"] for row in matrix} == {
+        "future-module-not-in-code"
+    }
+    assert coverage[0]["status"] == "complete"
+
+
+def test_missing_route_is_a_machine_readable_coverage_gap() -> None:
+    units = [{"id": "new-module", "status": "runnable", "module_sha256": ["2" * 64]}]
+
+    matrix, coverage = _build_coverage_matrix(units, {})
+
+    assert matrix == []
+    assert coverage == [
+        {
+            "campaign_line_id": "new-module",
+            "status": "incomplete",
+            "gaps": ["coverage_route_missing"],
+            "scenario_count": 0,
+        }
+    ]
+
+
+def test_orphan_route_is_rejected_instead_of_becoming_a_runnable_whitelist() -> None:
+    route = _complete_route("stale-module", "3" * 64)
+
+    try:
+        _build_coverage_matrix([], {"stale-module": route})
+    except ValueError as exc:
+        assert "dynamically discovered runnable units" in str(exc)
+    else:
+        raise AssertionError("orphan route was accepted")
+
+
+def test_route_evidence_must_reference_a_discovered_source_checksum() -> None:
+    units = [{"id": "module", "status": "runnable", "module_sha256": ["4" * 64]}]
+    route = _complete_route("module", "5" * 64)
+
+    try:
+        _build_coverage_matrix(units, {"module": route})
+    except ValueError as exc:
+        assert "source checksum is not part of discovered unit" in str(exc)
+    else:
+        raise AssertionError("foreign source checksum was accepted")
+
+
+def test_coverage_gaps_report_missing_dimensions_mechanisms_and_recovery() -> None:
+    checksum = "6" * 64
+    route = _complete_route("module", checksum)
+    route["scenarios"] = [route["scenarios"][0]]
+
+    _, coverage = _build_coverage_matrix(
+        [{"id": "module", "status": "runnable", "module_sha256": [checksum]}],
+        {"module": route},
+    )
+
+    assert coverage[0]["status"] == "incomplete"
+    assert "missing_positioning_mode:agent" in coverage[0]["gaps"]
+    assert "missing_audience:player" in coverage[0]["gaps"]
+    assert "missing_path:recovery" in coverage[0]["gaps"]
+    assert "missing_recovery_operation:snapshot_restore" in coverage[0]["gaps"]
+
+
+def test_checked_in_routes_cover_every_fixture_declared_runnable_unit() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    corpus = json.loads(
+        (repo / "fixtures" / "full_campaign_corpus.json").read_text(encoding="utf-8")
+    )
+    decisions = json.loads(
+        (repo / "fixtures" / "module_corpus_decisions.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    units = [
+        {
+            "id": line["id"],
+            "status": "runnable",
+            "module_sha256": [entry["sha256"] for entry in line["modules"]],
+        }
+        for line in corpus["campaign_lines"]
+    ]
+    units.extend(
+        {
+            "id": decision["campaign_line_id"],
+            "status": decision["disposition"],
+            "module_sha256": [checksum],
+        }
+        for checksum, decision in decisions["decisions_by_sha256"].items()
+        if decision.get("disposition") == "runnable_installed_pack_required"
+    )
+
+    matrix, coverage = _build_coverage_matrix(units, _coverage_routes(decisions))
+
+    assert len(matrix) == 4 * len(units)
+    assert {item["campaign_line_id"] for item in coverage} == {
+        item["id"] for item in units
+    }
+    assert all(item["status"] == "complete" for item in coverage)

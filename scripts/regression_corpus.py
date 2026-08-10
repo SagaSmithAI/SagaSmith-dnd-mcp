@@ -33,6 +33,34 @@ CORE_TOOLS = {
     "storage_status",
 }
 PACK_SUFFIX = ".sagasmith-pack"
+RUNNABLE_STATUSES = {"runnable", "runnable_installed_pack_required"}
+REQUIRED_DIMENSIONS = {
+    "positioning_mode": {"grid", "agent"},
+    "audience": {"dm", "player"},
+    "path": {"normal", "recovery"},
+}
+REQUIRED_MECHANISMS = {
+    "preparation",
+    "play_scene",
+    "noncombat_check",
+    "resource_settlement",
+    "npc_conversation",
+    "conversation_to_mechanic",
+    "conversation_to_combat",
+    "combat",
+    "combat_render",
+    "ending",
+    "save_restore",
+    "idempotent_retry",
+    "revision_conflict_refresh",
+    "phase_exposure_refresh",
+}
+REQUIRED_RECOVERY_OPERATIONS = {
+    "process_restart",
+    "snapshot_restore",
+    "branch_checkout",
+    "undo_redo",
+}
 
 
 def _arguments() -> argparse.Namespace:
@@ -62,6 +90,7 @@ def _arguments() -> argparse.Namespace:
         help="MCP home to inspect through campaign_query/module_query; repeatable",
     )
     parser.add_argument("--fail-on-pending", action="store_true")
+    parser.add_argument("--fail-on-incomplete-coverage", action="store_true")
     return parser.parse_args()
 
 
@@ -83,6 +112,200 @@ def _load_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"expected JSON object: {path}")
     return value
+
+
+def _coverage_routes(decisions: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    routes = decisions.get("coverage_routes") or []
+    if not isinstance(routes, list):
+        raise ValueError("coverage_routes must be a list")
+    indexed: dict[str, dict[str, Any]] = {}
+    for route in routes:
+        if not isinstance(route, dict):
+            raise ValueError("coverage route must be an object")
+        line_id = str(route.get("campaign_line_id") or "")
+        if not line_id:
+            raise ValueError("coverage route is missing campaign_line_id")
+        if line_id in indexed:
+            raise ValueError(f"duplicate coverage route: {line_id}")
+        indexed[line_id] = route
+    return indexed
+
+
+def _build_coverage_matrix(
+    units: list[dict[str, Any]], routes: dict[str, dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Join route evidence onto dynamically discovered runnable units."""
+
+    discovered_ids = {str(unit["id"]) for unit in units}
+    runnable = {
+        str(unit["id"]): unit
+        for unit in units
+        if unit.get("status") in RUNNABLE_STATUSES
+    }
+    orphaned = sorted(set(routes) - discovered_ids)
+    if orphaned:
+        raise ValueError(
+            "coverage routes do not match dynamically discovered runnable units: "
+            + ", ".join(orphaned)
+        )
+
+    matrix: list[dict[str, Any]] = []
+    coverage: list[dict[str, Any]] = []
+    for line_id, unit in runnable.items():
+        route = routes.get(line_id)
+        if route is None:
+            coverage.append(
+                {
+                    "campaign_line_id": line_id,
+                    "status": "incomplete",
+                    "gaps": ["coverage_route_missing"],
+                    "scenario_count": 0,
+                }
+            )
+            continue
+
+        source_checksums = {str(value) for value in unit.get("module_sha256") or []}
+        evidence_by_id: dict[str, dict[str, Any]] = {}
+        for evidence in route.get("evidence") or []:
+            if not isinstance(evidence, dict):
+                raise ValueError(f"{line_id}: evidence must be an object")
+            evidence_id = str(evidence.get("id") or "")
+            if not evidence_id or evidence_id in evidence_by_id:
+                raise ValueError(f"{line_id}: evidence id must be unique and non-empty")
+            source_sha256 = str(evidence.get("source_sha256") or "")
+            content_sha256 = str(evidence.get("content_sha256") or "")
+            heading_path = evidence.get("heading_path")
+            page_start = evidence.get("page_start")
+            page_end = evidence.get("page_end", page_start)
+            if source_sha256 not in source_checksums:
+                raise ValueError(
+                    f"{line_id}/{evidence_id}: source checksum is not part of discovered unit"
+                )
+            if len(content_sha256) != 64 or any(
+                character not in "0123456789abcdef" for character in content_sha256
+            ):
+                raise ValueError(f"{line_id}/{evidence_id}: invalid content_sha256")
+            if not isinstance(heading_path, list) or not heading_path or not all(
+                isinstance(value, str) and value.strip() for value in heading_path
+            ):
+                raise ValueError(f"{line_id}/{evidence_id}: heading_path is required")
+            if (
+                not isinstance(page_start, int)
+                or not isinstance(page_end, int)
+                or page_start < 1
+                or page_end < page_start
+            ):
+                raise ValueError(f"{line_id}/{evidence_id}: invalid page range")
+            evidence_by_id[evidence_id] = evidence
+
+        scenarios = route.get("scenarios") or []
+        if not isinstance(scenarios, list):
+            raise ValueError(f"{line_id}: scenarios must be a list")
+        seen_scenarios: set[str] = set()
+        dimensions = {name: set() for name in REQUIRED_DIMENSIONS}
+        mechanisms: set[str] = set()
+        recovery_operations: set[str] = set()
+        has_legal_ending = False
+        for scenario in scenarios:
+            if not isinstance(scenario, dict):
+                raise ValueError(f"{line_id}: scenario must be an object")
+            scenario_id = str(scenario.get("id") or "")
+            if not scenario_id or scenario_id in seen_scenarios:
+                raise ValueError(f"{line_id}: scenario id must be unique and non-empty")
+            seen_scenarios.add(scenario_id)
+            evidence_id = str(scenario.get("evidence_id") or "")
+            if evidence_id not in evidence_by_id:
+                raise ValueError(f"{line_id}/{scenario_id}: unknown evidence_id {evidence_id!r}")
+            chapter_or_scene = str(scenario.get("chapter_or_scene") or "")
+            if not chapter_or_scene:
+                raise ValueError(f"{line_id}/{scenario_id}: chapter_or_scene is required")
+            scenario_mechanisms = scenario.get("mechanisms") or []
+            if not isinstance(scenario_mechanisms, list) or not all(
+                isinstance(value, str) and value for value in scenario_mechanisms
+            ):
+                raise ValueError(f"{line_id}/{scenario_id}: mechanisms must be strings")
+            for name, allowed in REQUIRED_DIMENSIONS.items():
+                value = scenario.get(name)
+                if value not in allowed:
+                    raise ValueError(
+                        f"{line_id}/{scenario_id}: invalid {name} {value!r}"
+                    )
+                dimensions[name].add(str(value))
+            scenario_recovery = scenario.get("recovery_operations") or []
+            if not isinstance(scenario_recovery, list) or not all(
+                isinstance(value, str) and value for value in scenario_recovery
+            ):
+                raise ValueError(
+                    f"{line_id}/{scenario_id}: recovery_operations must be strings"
+                )
+            if scenario["path"] == "recovery" and not scenario_recovery:
+                raise ValueError(
+                    f"{line_id}/{scenario_id}: recovery path requires recovery_operations"
+                )
+            ending_status = scenario.get("ending_status", "not_applicable")
+            if ending_status not in {"legal_complete", "not_applicable"}:
+                raise ValueError(
+                    f"{line_id}/{scenario_id}: invalid ending_status {ending_status!r}"
+                )
+            unknown_recovery = set(scenario_recovery) - REQUIRED_RECOVERY_OPERATIONS
+            if unknown_recovery:
+                raise ValueError(
+                    f"{line_id}/{scenario_id}: unknown recovery operations "
+                    + ", ".join(sorted(unknown_recovery))
+                )
+            mechanisms.update(scenario_mechanisms)
+            recovery_operations.update(scenario_recovery)
+            if (
+                scenario["path"] == "normal"
+                and ending_status == "legal_complete"
+            ):
+                has_legal_ending = True
+            evidence = evidence_by_id[evidence_id]
+            matrix.append(
+                {
+                    "campaign_line_id": line_id,
+                    "scenario_id": scenario_id,
+                    "chapter_or_scene": chapter_or_scene,
+                    "key_mechanisms": scenario_mechanisms,
+                    "positioning_mode": scenario["positioning_mode"],
+                    "audience": scenario["audience"],
+                    "path": scenario["path"],
+                    "recovery_operations": scenario_recovery,
+                    "ending_status": ending_status,
+                    "source_ref": {
+                        "source_sha256": evidence["source_sha256"],
+                        "heading_path": evidence["heading_path"],
+                        "content_sha256": evidence["content_sha256"],
+                        "page_start": evidence["page_start"],
+                        "page_end": evidence.get("page_end", evidence["page_start"]),
+                    },
+                }
+            )
+
+        gaps: list[str] = []
+        for name, required in REQUIRED_DIMENSIONS.items():
+            for missing in sorted(required - dimensions[name]):
+                gaps.append(f"missing_{name}:{missing}")
+        for missing in sorted(REQUIRED_MECHANISMS - mechanisms):
+            gaps.append(f"missing_mechanism:{missing}")
+        for missing in sorted(REQUIRED_RECOVERY_OPERATIONS - recovery_operations):
+            gaps.append(f"missing_recovery_operation:{missing}")
+        if not has_legal_ending:
+            gaps.append("missing_normal_legal_ending")
+        coverage.append(
+            {
+                "campaign_line_id": line_id,
+                "status": "complete" if not gaps else "incomplete",
+                "gaps": gaps,
+                "scenario_count": len(scenarios),
+                "covered_dimensions": {
+                    name: sorted(values) for name, values in dimensions.items()
+                },
+                "covered_mechanisms": sorted(mechanisms),
+                "covered_recovery_operations": sorted(recovery_operations),
+            }
+        )
+    return matrix, coverage
 
 
 def _declared_records(
@@ -420,7 +643,9 @@ async def build_report(args: argparse.Namespace) -> dict[str, Any]:
         path.resolve() for path in (args.installed_home or defaults[3]) if path.is_dir()
     ]
     declared, units = _declared_records(args.declared_corpus.resolve(), workspace)
-    decisions = dict(_load_json(args.decisions.resolve()).get("decisions_by_sha256") or {})
+    decision_fixture = _load_json(args.decisions.resolve())
+    decisions = dict(decision_fixture.get("decisions_by_sha256") or {})
+    coverage_routes = _coverage_routes(decision_fixture)
     pack_records = [
         _pack_record(path, workspace)
         for root in pack_roots
@@ -488,30 +713,18 @@ async def build_report(args: argparse.Namespace) -> dict[str, Any]:
     candidates = [*declared, *pack_records, *catalogs, *raw, *installed]
     pending = [item for item in candidates if item.get("disposition") in {"pending", "candidate"}]
     exclusions = [item for item in candidates if item.get("disposition") == "excluded"]
-    runnable_statuses = {"runnable", "runnable_installed_pack_required"}
-    runnable = [unit for unit in units if unit.get("status") in runnable_statuses]
-    matrix = [
-        {
-            "campaign_line_id": unit["id"],
-            "scenes_or_chapters": "route_fixture_required",
-            "key_mechanisms": [
-                "play_scene",
-                "noncombat_check",
-                "npc_conversation",
-                "combat",
-                "ending",
-                "save_restore",
-            ],
-            "positioning_modes": [],
-            "audiences": ["dm", "player"],
-            "paths": ["normal", "restore"],
-            "ending_status": "route_fixture_required",
-        }
-        for unit in runnable
-    ]
+    runnable = [unit for unit in units if unit.get("status") in RUNNABLE_STATUSES]
+    matrix, coverage = _build_coverage_matrix(units, coverage_routes)
+    incomplete_coverage = [item for item in coverage if item["status"] != "complete"]
     return {
-        "schema_version": 1,
-        "status": "pending_review" if pending else "inventoried",
+        "schema_version": 2,
+        "status": (
+            "pending_review"
+            if pending
+            else "coverage_incomplete"
+            if incomplete_coverage
+            else "inventoried"
+        ),
         "workspace": workspace.as_posix(),
         "discovery": {
             "source_roots": [_relative(path, workspace) for path in source_roots],
@@ -526,9 +739,12 @@ async def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "runnable_units": len(runnable),
             "excluded_records": len(exclusions),
             "pending_records": len(pending),
+            "coverage_scenarios": len(matrix),
+            "incomplete_coverage_units": len(incomplete_coverage),
         },
         "coverage_units": units,
         "coverage_matrix": matrix,
+        "coverage_validation": coverage,
         "exclusions": exclusions,
         "pending": pending,
         "records": candidates,
@@ -542,7 +758,14 @@ async def _run(args: argparse.Namespace) -> int:
         json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     print(json.dumps(report["summary"], ensure_ascii=False))
-    return 2 if args.fail_on_pending and report["pending"] else 0
+    if args.fail_on_pending and report["pending"]:
+        return 2
+    if (
+        args.fail_on_incomplete_coverage
+        and report["summary"]["incomplete_coverage_units"]
+    ):
+        return 3
+    return 0
 
 
 def main() -> None:
