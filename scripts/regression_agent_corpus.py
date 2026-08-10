@@ -754,6 +754,10 @@ core tools, open exposure, consume native list changes, and call only exposed
 native tools. Resume authoritative state if the campaign already exists. Never
 use shell, direct database access, an internal service, invented tool results,
 or narration as a substitute for a committed result.
+For the regression reference use `skill_query(kind="asset")` with identifier
+`dnd:full/skills/dnd-dm/references/CAMPAIGN_REGRESSION.md`; search/outline it and
+read the bounded section relevant to the first current gap. Do not treat that
+asset id as a `kind="skill"` document id.
 
 This runner gives each campaign line a fresh MCP home. On the first cycle,
 `campaign_query(view="list")` normally returns no campaign. Do not pass the
@@ -805,7 +809,8 @@ missing PCs, replacing the complete manifest with full member records, and
 syncing it to `ready`; it also never authorizes rebuilding the Pack.
 Before that work, read
 `dnd:full/skills/dnd-dm/references/CAMPAIGN_REGRESSION.md` through
-`skill_query`. This gap is not satisfied by `module_set_progress` state or by a
+`skill_query(kind="asset", action="read", identifier=...)`. This gap is not
+satisfied by `module_set_progress` state or by a
 successful `sync` that still returns an empty member list. Do not stop after
 either result: source-confirmed `selected_size` remains the recommended maximum,
 so create any missing PCs, register every full member record with manifest
