@@ -318,6 +318,25 @@ def _has_revision_refresh(calls: list[dict[str, Any]]) -> bool:
     )
 
 
+def _has_exposure_reopen_after_transition(calls: list[dict[str, Any]]) -> bool:
+    transitioned = False
+    for call in calls:
+        arguments = call.get("arguments") or {}
+        tool = call.get("tool")
+        action = arguments.get("action")
+        if call.get("ok") and (
+            tool in {"combat_start", "combat_end", "snapshot_restore"}
+            or (tool == "game_phase" and action == "set")
+            or (tool == "branch_change" and action == "checkout")
+            or (tool == "state_revision" and action in {"undo", "redo"})
+        ):
+            transitioned = True
+            continue
+        if transitioned and tool == "exposure" and action == "open" and call.get("ok"):
+            return True
+    return False
+
+
 def _ordered_success(
     calls: list[dict[str, Any]], requirements: list[tuple[str, str | None]]
 ) -> bool:
@@ -483,6 +502,8 @@ def _coverage_audit(
         gaps.append("cold_start:exposure_open_missing")
     if list_changed_count < 1:
         gaps.append("host:list_changed_not_observed")
+    if _has_exposure_reopen_after_transition(calls):
+        gaps.append("exposure:reopened_after_transition")
     return {
         "complete": not gaps,
         "gaps": sorted(set(gaps)),

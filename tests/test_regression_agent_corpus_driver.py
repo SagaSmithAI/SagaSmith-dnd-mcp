@@ -298,6 +298,20 @@ def test_preparation_requires_finalize_import_activate_order() -> None:
     ] is True
 
 
+def test_phase_transition_rejects_exposure_reopen_as_refresh() -> None:
+    route = {"scenarios": []}
+    calls = [
+        _call("skill_query"),
+        _call("exposure", arguments={"action": "open"}),
+        _call("game_phase", arguments={"action": "set"}),
+        _call("exposure", arguments={"action": "open"}),
+    ]
+
+    audit = _coverage_audit(route, calls, process_count=1, list_changed_count=1)
+
+    assert "exposure:reopened_after_transition" in audit["gaps"]
+
+
 def test_dynamic_inventory_is_the_only_source_of_runnable_units() -> None:
     future = {"campaign_line_id": "future-module"}
     assert _runnable_units({"coverage_units": [future]}) == [future]
