@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 import pytest
-from mcp.types import CallToolResult, ImageContent, TextContent
+from mcp.types import ImageContent, TextContent
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 from sagasmith_core import OcrPageLayout, OcrTextBlock, RapidOcrProvider
@@ -172,45 +172,6 @@ def test_pdf_page_review_becomes_snapshot_managed_scene_atlas(
         assert render_metadata["transcription"]["ocr"]["model"] == "medium"
         assert rendered.structuredContent == render_metadata
         assert rendered.content[1].mimeType == "image/png"
-
-        opened = await _call(
-            server,
-            "exposure_open",
-            {"campaign_id": campaign["id"], "principal_id": "system:local"},
-        )
-        await _call(
-            server,
-            "exposure_load",
-            {"exposure_id": opened["exposure_id"], "group_id": "lobby.modules"},
-        )
-        fallback = await server.call_tool(
-            "exposure_call",
-            {
-                "exposure_id": opened["exposure_id"],
-                "tool_id": "module_draft",
-                "arguments": {
-                    "campaign_id": campaign["id"],
-                    "action": "evidence",
-                    "payload": {
-                        "kind": "page",
-                        "module_id": module_id,
-                        "page_number": 1,
-                    },
-                },
-            },
-        )
-        assert isinstance(fallback, CallToolResult)
-        assert isinstance(fallback.content[0], TextContent)
-        assert isinstance(fallback.content[1], ImageContent)
-        fallback_envelope = json.loads(fallback.content[0].text)
-        assert fallback_envelope["tool_id"] == "module_draft"
-        assert fallback_envelope["result"]["page_number"] == 1
-        assert (
-            fallback_envelope["result"]["transcription"]["ocr"]
-            == render_metadata["transcription"]["ocr"]
-        )
-        assert fallback.structuredContent == fallback_envelope
-        assert fallback.content[1].mimeType == "image/png"
 
         index = await _call(
             server,

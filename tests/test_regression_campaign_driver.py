@@ -789,7 +789,7 @@ def test_prepare_rule_statblock_can_defer_scene_batch_checkpoint(
         scope == "domain" and tool_id == "snapshot_create"
         for scope, tool_id, _arguments in client.calls
     )
-    assert ("play.scene", "play.scene_control", "play.characters") in client.loaded
+    assert client.loaded and all(item == () for item in client.loaded)
     phase_sets = [
         arguments["tool_profile"]
         for scope, tool_id, arguments in client.calls

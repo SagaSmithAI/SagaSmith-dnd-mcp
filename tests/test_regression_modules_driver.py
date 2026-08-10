@@ -108,7 +108,7 @@ def test_campaign_baseline_reuses_existing_public_snapshot() -> None:
             assert campaign_id == "campaign-1"
 
         async def load(self, *group_ids: str) -> None:
-            assert group_ids == ("lobby.campaign",)
+            assert group_ids == ()
 
         async def core(self, tool_id: str, arguments: dict):
             assert tool_id == "campaign_query"

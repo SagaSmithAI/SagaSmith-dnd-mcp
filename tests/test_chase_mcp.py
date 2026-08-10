@@ -10,7 +10,7 @@ from sagasmith_dnd.character_schema import default_character_sheet
 import sagasmith_dnd_mcp.server as server_module
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
-from sagasmith_dnd_mcp.tool_profiles import GROUP_BY_ID
+from sagasmith_dnd_mcp.tool_profiles import policy_for_tool
 from tests.authoring_helpers import finalize_and_activate_module
 
 
@@ -42,10 +42,8 @@ def _config(tmp_path: Path, import_root: Path) -> McpConfig:
     )
 
 
-def test_chase_facade_is_a_play_phase_group() -> None:
-    group = GROUP_BY_ID["play.chase"]
-    assert group.phase == "play"
-    assert group.tools == {"chase"}
+def test_chase_facade_is_play_only() -> None:
+    assert policy_for_tool("chase").phases == frozenset({"play"})
 
 
 def test_public_chase_uses_exact_module_source_and_no_combat_map(

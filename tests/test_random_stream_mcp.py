@@ -252,14 +252,16 @@ def test_stdio_character_roll_persists_and_replays_its_stream_receipt(tmp_path: 
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 principal_id = "test:random-stream"
-                opened = await session.call_tool(
-                    "exposure_open",
-                    {"principal_id": principal_id},
+                await session.call_tool(
+                    "exposure", {"action": "open", "principal_id": principal_id}
                 )
-                exposure_id = json.loads(opened.content[0].text)["exposure_id"]
                 loaded = await session.call_tool(
-                    "exposure_load",
-                    {"exposure_id": exposure_id, "group_id": "lobby.bootstrap"},
+                    "exposure",
+                    {
+                        "action": "set",
+                        "add_tool_ids": ["campaign_create"],
+                        "principal_id": principal_id,
+                    },
                 )
                 assert not loaded.isError, loaded.content[0].text
                 created = await session.call_tool(
@@ -276,14 +278,24 @@ def test_stdio_character_roll_persists_and_replays_its_stream_receipt(tmp_path: 
                 campaign = json.loads(created.content[0].text)
                 campaign_id = campaign["id"]
 
-                opened = await session.call_tool(
-                    "exposure_open",
-                    {"campaign_id": campaign_id, "principal_id": principal_id},
-                )
-                exposure_id = json.loads(opened.content[0].text)["exposure_id"]
                 await session.call_tool(
-                    "exposure_load",
-                    {"exposure_id": exposure_id, "group_id": "lobby.characters"},
+                    "exposure",
+                    {
+                        "action": "open",
+                        "campaign_id": campaign_id,
+                        "principal_id": principal_id,
+                    },
+                )
+                await session.call_tool(
+                    "exposure",
+                    {
+                        "action": "set",
+                        "add_tool_ids": [
+                            "character_create_from",
+                            "character_ability_apply",
+                        ],
+                        "principal_id": principal_id,
+                    },
                 )
                 actor_result = await session.call_tool(
                     "character_create_from",

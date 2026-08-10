@@ -10,22 +10,13 @@ from typing import Any
 
 REQUIRED_DND_CORE_TOOLS = {
     "campaign_query",
-    "exposure_call",
-    "exposure_inspect",
-    "exposure_load",
-    "exposure_open",
-    "exposure_search",
-    "exposure_status",
-    "exposure_unload",
+    "exposure",
     "game_phase",
     "server_capabilities",
-    "server_tool_profiles",
     "skill_query",
     "storage_status",
 }
 REQUIRED_DND_SKILLS = ("dnd-dm", "dnd-campaign-manager")
-REQUIRED_DND_PHASES = {"lobby", "play", "combat"}
-SKILL_PLAN_RELATIVE_PATH = Path("full") / "data" / "skill-plan.v1.json"
 
 
 def _resolve_config_path(agent_root: Path, value: str) -> Path:
@@ -44,145 +35,6 @@ def _resolve_config_roots(agent_root: Path, value: str) -> list[Path]:
 
 def _mapping(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
-
-
-def _validate_skill_plan(skill_root: Path) -> list[str]:
-    plan_path = skill_root / SKILL_PLAN_RELATIVE_PATH
-    try:
-        plan = json.loads(plan_path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return [
-            "SAGASMITH_DND_SKILLS_DIR does not contain "
-            "full/data/skill-plan.v1.json."
-        ]
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        return [f"Cannot read the Full D&D skill plan as UTF-8 JSON: {exc}"]
-
-    if not isinstance(plan, dict):
-        return ["The Full D&D skill plan root must be a JSON object."]
-    errors: list[str] = []
-    if plan.get("schema_version") != 1:
-        errors.append("The Full D&D skill plan schema_version must equal 1.")
-
-    groups = _mapping(plan.get("groups"))
-    core_groups = plan.get("core_groups")
-    if not groups:
-        errors.append("The Full D&D skill plan must declare skill groups.")
-    if (
-        not isinstance(core_groups, list)
-        or not core_groups
-        or any(not isinstance(group_id, str) for group_id in core_groups)
-    ):
-        errors.append("The Full D&D skill plan must declare non-empty core_groups.")
-    elif any(group_id not in groups for group_id in core_groups):
-        errors.append("The Full D&D skill plan core_groups reference unknown groups.")
-
-    for group_id, raw_group in groups.items():
-        group = _mapping(raw_group)
-        dependencies = group.get("depends_on", [])
-        if not isinstance(dependencies, list) or any(
-            not isinstance(dependency, str) or dependency not in groups
-            for dependency in dependencies
-        ):
-            errors.append(
-                f"The Full D&D skill group {group_id!r} has invalid dependencies."
-            )
-        documents = group.get("documents")
-        if not isinstance(documents, list) or not documents:
-            errors.append(
-                f"The Full D&D skill group {group_id!r} must declare documents."
-            )
-            continue
-        for document in documents:
-            value = _mapping(document)
-            kind = value.get("kind")
-            identifier = value.get("identifier")
-            max_chars = value.get("max_chars")
-            if (
-                kind not in {"asset", "skill"}
-                or not isinstance(identifier, str)
-                or not identifier
-                or not isinstance(max_chars, int)
-                or isinstance(max_chars, bool)
-                or max_chars < 256
-            ):
-                errors.append(
-                    f"The Full D&D skill group {group_id!r} has an invalid document."
-                )
-                continue
-            if kind != "asset":
-                continue
-            source, separator, relative_value = identifier.partition(":")
-            relative = Path(relative_value.replace("/", os.sep))
-            asset_path = (skill_root / relative).resolve()
-            try:
-                asset_path.relative_to(skill_root.resolve())
-            except ValueError:
-                errors.append(
-                    f"The Full D&D skill group {group_id!r} escapes the Skills root."
-                )
-                continue
-            if (
-                source != "dnd"
-                or not separator
-                or relative.is_absolute()
-                or ".." in relative.parts
-                or not asset_path.is_file()
-            ):
-                errors.append(
-                    f"The Full D&D skill group {group_id!r} references a missing asset."
-                )
-                continue
-            try:
-                chars = len(asset_path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeError) as exc:
-                errors.append(
-                    f"Cannot read a Full D&D skill-plan asset as UTF-8: {exc}"
-                )
-            else:
-                if chars > max_chars:
-                    errors.append(
-                        f"The Full D&D skill group {group_id!r} exceeds max_chars."
-                    )
-
-    phase_baselines = _mapping(plan.get("phase_baselines"))
-    if set(phase_baselines) != REQUIRED_DND_PHASES:
-        errors.append(
-            "The Full D&D skill plan must declare exactly lobby, play, and combat "
-            "phase baselines."
-        )
-    else:
-        for phase, group_ids in phase_baselines.items():
-            if (
-                not isinstance(group_ids, list)
-                or not group_ids
-                or any(
-                    not isinstance(group_id, str) or group_id not in groups
-                    for group_id in group_ids
-                )
-            ):
-                errors.append(
-                    f"The Full D&D skill plan {phase} baseline references invalid groups."
-                )
-
-    bindings = _mapping(plan.get("tool_group_bindings"))
-    if not bindings:
-        errors.append("The Full D&D skill plan must declare tool_group_bindings.")
-    for tool_group_id, binding in bindings.items():
-        required = _mapping(binding).get("required")
-        if (
-            not isinstance(required, list)
-            or not required
-            or any(
-                not isinstance(group_id, str) or group_id not in groups
-                for group_id in required
-            )
-        ):
-            errors.append(
-                "The Full D&D skill plan tool-group binding "
-                f"{tool_group_id!r} references invalid skill groups."
-            )
-    return errors
 
 
 def validate_runtime(config_path: Path, agent_root: Path) -> list[str]:
@@ -250,13 +102,11 @@ def validate_runtime(config_path: Path, agent_root: Path) -> list[str]:
         expected = (mcp_skill_root / "full" / "skills").resolve()
         if not expected.is_dir():
             errors.append("SAGASMITH_DND_SKILLS_DIR does not contain full/skills.")
-        else:
-            errors.extend(_validate_skill_plan(mcp_skill_root))
-            if dnd_skill_roots and expected not in dnd_skill_roots:
-                errors.append(
-                    "Agent externalSkillsDirs and SAGASMITH_DND_SKILLS_DIR do not point "
-                    "to the same Full D&D skill pack."
-                )
+        elif dnd_skill_roots and expected not in dnd_skill_roots:
+            errors.append(
+                "Agent externalSkillsDirs and SAGASMITH_DND_SKILLS_DIR do not point "
+                "to the same Full D&D skill pack."
+            )
 
     raw_rule_root = env.get("SAGASMITH_DND_MCP_RULE_IMPORT_ROOTS")
     rule_roots = (

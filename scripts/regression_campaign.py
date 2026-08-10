@@ -544,53 +544,36 @@ class CampaignMcp:
     def __init__(self, session: ClientSession, campaign_id: str) -> None:
         self.session = session
         self.campaign_id = campaign_id
-        self.exposure_id = ""
 
     async def core(self, tool_id: str, arguments: dict[str, Any]) -> Any:
         return decode_mcp_result(await self.session.call_tool(tool_id, arguments))
 
     async def open(self) -> dict[str, Any]:
-        opened = await self.core(
-            "exposure_open",
-            {"campaign_id": self.campaign_id, "principal_id": PRINCIPAL_ID},
-        )
-        self.exposure_id = str(opened["exposure_id"])
-        return opened
-
-    async def load(self, *group_ids: str) -> dict[str, Any]:
-        status: dict[str, Any] = {}
-        for group_id in group_ids:
-            status = await self.core(
-                "exposure_load",
-                {"exposure_id": self.exposure_id, "group_id": group_id},
-            )
-        return status
-
-    async def domain(self, tool_id: str, arguments: dict[str, Any]) -> Any:
-        wrapped = await self.core(
-            "exposure_call",
+        return await self.core(
+            "exposure",
             {
-                "exposure_id": self.exposure_id,
-                "tool_id": tool_id,
-                "arguments": arguments,
+                "action": "open",
+                "campaign_id": self.campaign_id,
+                "principal_id": PRINCIPAL_ID,
             },
         )
-        return wrapped["result"]
 
-
-def _phase_groups(phase: str) -> tuple[str, ...]:
-    if phase == "lobby":
-        return (
-            "lobby.campaign",
-            "lobby.rules",
-            "lobby.modules",
-            "lobby.characters",
-            "lobby.memory",
-            "lobby.memory_control",
+    async def load(self) -> dict[str, Any]:
+        searched = await self.core(
+            "exposure",
+            {"action": "search", "principal_id": PRINCIPAL_ID},
         )
-    if phase == "combat":
-        return ("combat.observe", "combat.save", "combat.maintenance")
-    return ("play.scene", "play.scene_control", "play.characters")
+        return await self.core(
+            "exposure",
+            {
+                "action": "set",
+                "add_tool_ids": [item["tool_id"] for item in searched["matches"]],
+                "principal_id": PRINCIPAL_ID,
+            },
+        )
+
+    async def domain(self, tool_id: str, arguments: dict[str, Any]) -> Any:
+        return await self.core(tool_id, arguments)
 
 
 def _module_summary(module: dict[str, Any]) -> dict[str, Any]:
@@ -834,8 +817,7 @@ async def _audit(args: argparse.Namespace) -> dict[str, Any]:
             )
             campaign = _facade_value(campaign_payload)
             opened = await client.open()
-            groups = _phase_groups(phase)
-            exposure = await client.load(*groups)
+            exposure = await client.load()
             visible_tools = sorted(tool.name for tool in (await session.list_tools()).tools)
 
             rules = _facade_value(
@@ -1054,12 +1036,12 @@ async def _audit(args: argparse.Namespace) -> dict[str, Any]:
                 "initial_tool_count": len(initial_tools),
                 "initial_tools": initial_tools,
                 "phase": phase,
-                "loaded_groups": list(groups),
+                "loaded_tools": exposure.get("loaded_tools", []),
                 "visible_tool_count": len(visible_tools),
                 "visible_tools": visible_tools,
                 "exposure": {
                     "phase": exposure.get("phase"),
-                    "loaded_groups": exposure.get("loaded_groups"),
+                    "loaded_tools": exposure.get("loaded_tools"),
                 },
                 "native_dynamic_tools": opened.get("native_dynamic_tools"),
                 "capabilities": {
@@ -1102,7 +1084,7 @@ async def _discover_scenes(args: argparse.Namespace) -> dict[str, Any]:
             if phase == "combat":
                 raise RuntimeError("discover-scenes cannot run during active combat")
             await client.open()
-            await client.load(*_phase_groups(phase))
+            await client.load()
             selected_scene: dict[str, Any] | None = None
             if args.scene_id:
                 scene = _facade_value(
@@ -1216,7 +1198,7 @@ async def _walk_scenes(args: argparse.Namespace) -> dict[str, Any]:
             if initial_phase == "combat":
                 raise RuntimeError("walk-scenes cannot run during active combat")
             await client.open()
-            await client.load(*_phase_groups(initial_phase))
+            await client.load()
 
             branches = _facade_value(
                 await client.domain(
@@ -1300,7 +1282,7 @@ async def _walk_scenes(args: argparse.Namespace) -> dict[str, Any]:
                     },
                 )
             await client.open()
-            await client.load("lobby.campaign", "lobby.modules", "lobby.memory_control")
+            await client.load()
             campaign_lobby = _facade_value(
                 await client.core(
                     "campaign_query",
@@ -1354,7 +1336,7 @@ async def _walk_scenes(args: argparse.Namespace) -> dict[str, Any]:
                 },
             )
             await client.open()
-            await client.load("play.scene", "play.scene_control")
+            await client.load()
             branch_progress_values = _facade_value(
                 await client.domain(
                     "module_query", {"campaign_id": args.campaign_id, "view": "progress"}
@@ -1570,7 +1552,7 @@ async def _walk_scenes(args: argparse.Namespace) -> dict[str, Any]:
                 },
             )
             await client.open()
-            await client.load("lobby.campaign", "lobby.modules", "lobby.memory_control")
+            await client.load()
             campaign_regression_lobby = _facade_value(
                 await client.core(
                     "campaign_query",
@@ -1631,7 +1613,7 @@ async def _walk_scenes(args: argparse.Namespace) -> dict[str, Any]:
                     },
                 )
             await client.open()
-            await client.load(*_phase_groups(initial_phase))
+            await client.load()
             source_current_after = _facade_value(
                 await client.domain(
                     "module_query", {"campaign_id": args.campaign_id, "view": "current"}
@@ -1761,7 +1743,7 @@ async def _restore_regression(args: argparse.Namespace) -> dict[str, Any]:
             if initial_phase == "combat":
                 raise RuntimeError("end the active combat before restoring a regression branch")
             await client.open()
-            await client.load(*_phase_groups(initial_phase))
+            await client.load()
             branches = _facade_value(
                 await client.domain(
                     "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
@@ -1803,7 +1785,7 @@ async def _restore_regression(args: argparse.Namespace) -> dict[str, Any]:
                     },
                 )
             await client.open()
-            await client.load("lobby.campaign", "lobby.memory_control")
+            await client.load()
             campaign_lobby = _facade_value(
                 await client.core(
                     "campaign_query",
@@ -1860,7 +1842,7 @@ async def _restore_regression(args: argparse.Namespace) -> dict[str, Any]:
                     },
                 )
             await client.open()
-            await client.load(*_phase_groups(initial_phase))
+            await client.load()
             campaign_source = _facade_value(
                 await client.core(
                     "campaign_query",
@@ -1920,7 +1902,7 @@ async def _relock_core(args: argparse.Namespace) -> dict[str, Any]:
             )
             phase = str(_facade_value(phase_payload)["tool_profile"])
             await client.open()
-            await client.load(*_phase_groups(phase))
+            await client.load()
 
             rules_before = _facade_value(
                 await client.domain(
@@ -2211,7 +2193,7 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
             if initial_phase == "combat":
                 raise RuntimeError("prepare-statblock cannot run during active combat")
             await client.open()
-            await client.load(*_phase_groups(initial_phase))
+            await client.load()
             branches = _facade_value(
                 await client.domain(
                     "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
@@ -2249,7 +2231,7 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 )
                 phase_changes.append(changed)
             await client.open()
-            await client.load("lobby.campaign", "lobby.rules", "lobby.modules", "lobby.characters")
+            await client.load()
             if args.isolate_branch:
                 campaign_lobby = _facade_value(
                     await client.core(
@@ -2285,9 +2267,7 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                     )
                 )
                 await client.open()
-                await client.load(
-                    "lobby.campaign", "lobby.rules", "lobby.modules", "lobby.characters"
-                )
+                await client.load()
             rules = _facade_value(
                 await client.domain(
                     "campaign_rules",
@@ -2562,7 +2542,7 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
             )
             phase_changes.append(returned_to_play)
             await client.open()
-            await client.load("play.scene", "play.scene_control", "play.characters")
+            await client.load()
             branches_after = _facade_value(
                 await client.domain(
                     "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
@@ -2651,7 +2631,7 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 )
                 phase_changes.append(entered_lobby)
                 await client.open()
-                await client.load("lobby.campaign", "lobby.characters")
+                await client.load()
                 campaign_working_lobby = _facade_value(
                     await client.core(
                         "campaign_query",
@@ -2704,7 +2684,7 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 )
                 phase_changes.append(source_play)
                 await client.open()
-                await client.load("play.scene", "play.scene_control", "play.characters")
+                await client.load()
                 source_characters = _facade_value(
                     await client.domain(
                         "character_query",
@@ -2809,7 +2789,7 @@ async def _statblock_preparation_context(
     )
     phase = str(_facade_value(phase_payload)["tool_profile"])
     await client.open()
-    await client.load(*_phase_groups(phase))
+    await client.load()
     branches = _facade_value(
         await client.domain(
             "branch_query",
@@ -2869,7 +2849,7 @@ async def _restore_statblock_preparation_context(
             )
             phase_changes.append(entered_lobby)
         await client.open()
-        await client.load("lobby.campaign")
+        await client.load()
         campaign = _facade_value(
             await client.core(
                 "campaign_query",
@@ -3130,7 +3110,7 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
             if initial_phase == "combat":
                 raise RuntimeError("prepare-rule-statblock cannot run during active combat")
             await client.open()
-            await client.load(*_phase_groups(initial_phase))
+            await client.load()
             branches = _facade_value(
                 await client.domain(
                     "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
@@ -3161,7 +3141,7 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                     },
                 )
             await client.open()
-            await client.load("lobby.campaign", "lobby.rules", "lobby.characters")
+            await client.load()
 
             import_report: dict[str, Any] | None = None
             source_import_job: dict[str, Any] | None = None
@@ -3520,7 +3500,7 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 )
             )
             await client.open()
-            await client.load("play.scene", "play.scene_control", "play.characters")
+            await client.load()
             branches_after = _facade_value(
                 await client.domain(
                     "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
@@ -3618,7 +3598,7 @@ async def _discover_rule_chunks(args: argparse.Namespace) -> dict[str, Any]:
             )
             initial_phase = str(_facade_value(phase_payload)["tool_profile"])
             await client.open()
-            await client.load(*_phase_groups(initial_phase))
+            await client.load()
             branches = _facade_value(
                 await client.domain(
                     "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
@@ -3653,7 +3633,7 @@ async def _discover_rule_chunks(args: argparse.Namespace) -> dict[str, Any]:
                     )
                 )
             await client.open()
-            await client.load("lobby.campaign", "lobby.rules")
+            await client.load()
             query_payload: dict[str, Any] = {
                 "kind": "source",
                 "source_id": str(args.source_id),
@@ -3719,7 +3699,7 @@ async def _discover_rule_sources(args: argparse.Namespace) -> dict[str, Any]:
             )
             initial_phase = str(_facade_value(phase_payload)["tool_profile"])
             await client.open()
-            await client.load(*_phase_groups(initial_phase))
+            await client.load()
             branches = _facade_value(
                 await client.domain(
                     "branch_query",
@@ -3763,7 +3743,7 @@ async def _discover_rule_sources(args: argparse.Namespace) -> dict[str, Any]:
                     )
                 )
             await client.open()
-            await client.load("lobby.campaign", "lobby.rules")
+            await client.load()
             query_payload = {"kind": "source", "system_id": "dnd5e", "edition": "2014"}
             sources = list(
                 _facade_value(
@@ -3884,7 +3864,7 @@ async def _prepare_core_wizard(args: argparse.Namespace) -> dict[str, Any]:
             if initial_phase == "combat":
                 raise RuntimeError("prepare-core-wizard cannot run during active combat")
             await client.open()
-            await client.load(*_phase_groups(initial_phase))
+            await client.load()
             branches = _facade_value(
                 await client.domain(
                     "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
@@ -3914,7 +3894,7 @@ async def _prepare_core_wizard(args: argparse.Namespace) -> dict[str, Any]:
                     },
                 )
             await client.open()
-            await client.load("lobby.campaign", "lobby.rules", "lobby.characters")
+            await client.load()
 
             built = _facade_value(
                 await client.domain(
@@ -4417,7 +4397,7 @@ async def _noncombat_check(args: argparse.Namespace) -> dict[str, Any]:
             if initial_phase == "combat":
                 raise RuntimeError("noncombat-check cannot run during active combat")
             await client.open()
-            await client.load(*_phase_groups(initial_phase))
+            await client.load()
             branches = _facade_value(
                 await client.domain(
                     "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
@@ -4479,7 +4459,7 @@ async def _noncombat_check(args: argparse.Namespace) -> dict[str, Any]:
                     },
                 )
             await client.open()
-            await client.load("lobby.campaign", "lobby.memory_control")
+            await client.load()
             campaign_lobby = _facade_value(
                 await client.core(
                     "campaign_query",
@@ -4533,12 +4513,7 @@ async def _noncombat_check(args: argparse.Namespace) -> dict[str, Any]:
                 },
             )
             await client.open()
-            await client.load(
-                "play.scene",
-                "play.scene_control",
-                "play.characters",
-                "play.resolution",
-            )
+            await client.load()
             progress_values = _facade_value(
                 await client.domain(
                     "module_query", {"campaign_id": args.campaign_id, "view": "progress"}
@@ -4696,7 +4671,7 @@ async def _noncombat_check(args: argparse.Namespace) -> dict[str, Any]:
                 },
             )
             await client.open()
-            await client.load("lobby.campaign", "lobby.memory_control")
+            await client.load()
             campaign_regression_lobby = _facade_value(
                 await client.core(
                     "campaign_query",
@@ -4753,7 +4728,7 @@ async def _noncombat_check(args: argparse.Namespace) -> dict[str, Any]:
                     },
                 )
             await client.open()
-            await client.load(*_phase_groups(initial_phase))
+            await client.load()
             campaign_source_after = _facade_value(
                 await client.core(
                     "campaign_query",
@@ -4873,7 +4848,7 @@ async def _branch_continuity(args: argparse.Namespace) -> dict[str, Any]:
             if initial_phase == "combat":
                 raise RuntimeError("branch-continuity cannot run during active combat")
             await client.open()
-            await client.load(*_phase_groups(initial_phase))
+            await client.load()
             branches = _facade_value(
                 await client.domain(
                     "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
@@ -4955,7 +4930,7 @@ async def _branch_continuity(args: argparse.Namespace) -> dict[str, Any]:
                 # preserve that contract when resuming from this known branch name.
                 initial_phase = "play"
                 await client.open()
-                await client.load("lobby.campaign", "lobby.modules", "lobby.memory_control")
+                await client.load()
 
             source_current_before = _facade_value(
                 await client.domain(
@@ -5029,7 +5004,7 @@ async def _branch_continuity(args: argparse.Namespace) -> dict[str, Any]:
                     },
                 )
             await client.open()
-            await client.load("lobby.campaign", "lobby.modules", "lobby.memory_control")
+            await client.load()
             campaign_lobby = _facade_value(
                 await client.core(
                     "campaign_query",
@@ -5083,7 +5058,7 @@ async def _branch_continuity(args: argparse.Namespace) -> dict[str, Any]:
                 },
             )
             await client.open()
-            await client.load("play.scene", "play.scene_control")
+            await client.load()
             scene = _facade_value(
                 await client.domain(
                     "module_query",
@@ -5209,7 +5184,7 @@ async def _branch_continuity(args: argparse.Namespace) -> dict[str, Any]:
                 },
             )
             await client.open()
-            await client.load("lobby.campaign", "lobby.modules", "lobby.memory_control")
+            await client.load()
             campaign_regression_lobby = _facade_value(
                 await client.core(
                     "campaign_query",
@@ -5269,7 +5244,7 @@ async def _branch_continuity(args: argparse.Namespace) -> dict[str, Any]:
                 },
             )
             await client.open()
-            await client.load("play.scene", "play.scene_control")
+            await client.load()
             source_facts = _facade_value(
                 await client.domain(
                     "memory_query",
@@ -5411,7 +5386,7 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
             if initial_phase == "combat":
                 raise RuntimeError("campaign already has active combat")
             await client.open()
-            await client.load(*_phase_groups(initial_phase))
+            await client.load()
             initial_branches = _facade_value(
                 await client.domain(
                     "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
@@ -5480,7 +5455,7 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
                         },
                     )
                 await client.open()
-                await client.load("lobby.campaign", "lobby.characters")
+                await client.load()
                 campaign_lobby = _facade_value(
                     await client.core(
                         "campaign_query",
@@ -5535,12 +5510,7 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
                     },
                 )
             await client.open()
-            await client.load(
-                "play.scene",
-                "play.scene_control",
-                "play.characters",
-                "play.combat_control",
-            )
+            await client.load()
 
             manifest = {
                 "schema_version": 1,
@@ -5622,14 +5592,7 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
                 },
             )
             await client.open()
-            await client.load(
-                "combat.observe",
-                "combat.actions",
-                "combat.turn",
-                "combat.control",
-                "combat.save",
-                "combat.map",
-            )
+            await client.load()
             combat_tools = sorted(tool.name for tool in (await session.list_tools()).tools)
             cast = await client.domain(
                 "combat_cast_spell",
@@ -5704,7 +5667,7 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
             )
 
             await client.open()
-            await client.load("play.scene", "play.scene_control", "play.characters")
+            await client.load()
             caster_name = str(source_actors[args.caster_id].get("name") or args.caster_id)
             witness_name = str(source_actors[args.target_id[0]].get("name") or args.target_id[0])
             witness_key = f"regression.{token}.witnessed-spell"
@@ -5839,7 +5802,7 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
                 },
             )
             await client.open()
-            await client.load("lobby.campaign", "lobby.characters")
+            await client.load()
             campaign_regression_lobby = _facade_value(
                 await client.core(
                     "campaign_query",
@@ -5889,7 +5852,7 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
                 },
             )
             await client.open()
-            await client.load("play.scene", "play.scene_control", "play.characters")
+            await client.load()
             campaign_final = _facade_value(
                 await client.core(
                     "campaign_query",

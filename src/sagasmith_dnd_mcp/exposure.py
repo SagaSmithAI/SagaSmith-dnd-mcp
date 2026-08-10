@@ -1,26 +1,20 @@
-"""Session-scoped progressive tool exposure for the D&D MCP server.
-
-This is intentionally independent of a particular agent framework. Native MCP
-clients receive a filtered ``tools/list`` response, while clients that cannot
-refresh tool schemas can use ``exposure_call`` as a protocol-preserving
-fallback.
-"""
+"""Ephemeral, session-scoped native MCP tool exposure."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 from uuid import uuid4
 
 from sagasmith_core.access import LOCAL_SYSTEM_PRINCIPAL_ID
 from sagasmith_core.clock import operational_utcnow
 
-from .tool_profiles import CORE_TOOLS, GROUP_BY_ID, TOOL_GROUPS
+from .tool_profiles import CORE_TOOLS, policy_for_tool, tools_for_phase
 
 
 class ExposureError(ValueError):
-    """Raised when a session attempts to use an unexposed capability."""
+    """Raised when a session attempts to expose or call an unavailable tool."""
 
 
 @dataclass
@@ -33,11 +27,12 @@ class Exposure:
     created_at: datetime
     updated_at: datetime
     expires_at: datetime
-    loaded_groups: set[str] = field(default_factory=set)
+    revision: int = 0
+    loaded_tools: set[str] = field(default_factory=set)
 
 
 class ExposureRegistry:
-    """Own session exposure state; storage and agent prompts never own it."""
+    """Own mutable tool lists without making them campaign authority."""
 
     def __init__(
         self,
@@ -58,10 +53,9 @@ class ExposureRegistry:
 
     def _prune(self) -> None:
         now = self._now()
-        expired = [
-            exposure_id for exposure_id, item in self._by_id.items() if item.expires_at <= now
-        ]
-        for exposure_id in expired:
+        for exposure_id in [
+            key for key, item in self._by_id.items() if item.expires_at <= now
+        ]:
             exposure = self._by_id.pop(exposure_id)
             if self._active_by_session.get(exposure.session_key) == exposure_id:
                 self._active_by_session.pop(exposure.session_key, None)
@@ -120,126 +114,80 @@ class ExposureRegistry:
 
     def active_items(self, campaign_id: str | None = None) -> tuple[tuple[str, Exposure], ...]:
         self._prune()
-        items: list[tuple[str, Exposure]] = []
-        for session_key, exposure_id in self._active_by_session.items():
-            exposure = self._by_id.get(exposure_id)
-            if exposure is not None and (
-                campaign_id is None or exposure.campaign_id == campaign_id
-            ):
-                items.append((session_key, exposure))
-        return tuple(items)
+        return tuple(
+            (session_key, exposure)
+            for session_key, exposure_id in self._active_by_session.items()
+            if (exposure := self._by_id.get(exposure_id)) is not None
+            and (campaign_id is None or exposure.campaign_id == campaign_id)
+        )
 
     def refresh_phase(self, exposure: Exposure, phase: str) -> bool:
-        if exposure.phase == phase:
-            return False
-        exposure.phase = phase
-        # A phase transition must never carry writable combat/lobby tools over.
-        exposure.loaded_groups = {
-            group_id for group_id in exposure.loaded_groups if GROUP_BY_ID[group_id].phase == phase
-        }
-        self.touch(exposure)
-        return True
+        allowed = tools_for_phase(phase)
+        retained = exposure.loaded_tools & allowed
+        changed = exposure.phase != phase or retained != exposure.loaded_tools
+        if changed:
+            exposure.phase = phase
+            exposure.loaded_tools = retained
+            exposure.revision += 1
+            self.touch(exposure)
+        return changed
 
-    def load(self, exposure: Exposure, group_id: str) -> Exposure:
-        group = GROUP_BY_ID.get(group_id)
-        if group is None:
-            raise ExposureError(f"Unknown tool group: {group_id}")
-        if group.phase != exposure.phase:
-            raise ExposureError(
-                f"Tool group {group_id!r} is valid only during {group.phase!r}; "
-                f"this session is in {exposure.phase!r}."
-            )
-        if group.requires_campaign and exposure.campaign_id is None:
-            raise ExposureError(
-                f"Tool group {group_id!r} requires a campaign-bound exposure. "
-                "Open a new exposure with campaign_id first."
-            )
-        if group.local_only and exposure.principal_id != LOCAL_SYSTEM_PRINCIPAL_ID:
-            raise ExposureError(
-                f"Tool group {group_id!r} is restricted to {LOCAL_SYSTEM_PRINCIPAL_ID}."
-            )
-        exposure.loaded_groups.add(group_id)
-        self.touch(exposure)
-        return exposure
-
-    def unload(self, exposure: Exposure, group_id: str) -> Exposure:
-        exposure.loaded_groups.discard(group_id)
-        self.touch(exposure)
-        return exposure
+    def set_tools(
+        self,
+        exposure: Exposure,
+        *,
+        add: Iterable[str] = (),
+        remove: Iterable[str] = (),
+    ) -> bool:
+        add_set = {str(item).strip() for item in add if str(item).strip()}
+        remove_set = {str(item).strip() for item in remove if str(item).strip()}
+        if add_set & remove_set:
+            raise ExposureError("the same tool cannot be added and removed in one request")
+        for tool_id in sorted(add_set):
+            policy = policy_for_tool(tool_id)
+            if policy is None:
+                raise ExposureError(f"Unknown loadable tool: {tool_id}")
+            if exposure.phase not in policy.phases:
+                raise ExposureError(
+                    f"Tool {tool_id!r} is unavailable during {exposure.phase!r}."
+                )
+            if policy.requires_campaign and exposure.campaign_id is None:
+                raise ExposureError(
+                    f"Tool {tool_id!r} requires a campaign-bound exposure."
+                )
+            if policy.local_only and exposure.principal_id != LOCAL_SYSTEM_PRINCIPAL_ID:
+                raise ExposureError(
+                    f"Tool {tool_id!r} is restricted to {LOCAL_SYSTEM_PRINCIPAL_ID}."
+                )
+        updated = (exposure.loaded_tools | add_set) - remove_set
+        changed = updated != exposure.loaded_tools
+        if changed:
+            exposure.loaded_tools = updated
+            exposure.revision += 1
+            self.touch(exposure)
+        return changed
 
     def visible_tools(self, exposure: Exposure | None) -> set[str]:
-        if exposure is None:
-            return set(CORE_TOOLS)
-        tools = set(CORE_TOOLS)
-        for group_id in exposure.loaded_groups:
-            tools.update(GROUP_BY_ID[group_id].tools)
-        return tools
+        return set(CORE_TOOLS) if exposure is None else set(CORE_TOOLS) | exposure.loaded_tools
 
     def require_tool(self, exposure: Exposure, tool_id: str) -> None:
-        if tool_id in CORE_TOOLS:
-            return
-        groups = [
-            group_id
-            for group_id in exposure.loaded_groups
-            if tool_id in GROUP_BY_ID[group_id].tools
-        ]
-        if not groups:
+        if tool_id not in CORE_TOOLS and tool_id not in exposure.loaded_tools:
             raise ExposureError(
                 f"Tool {tool_id!r} is not exposed for this session. "
-                "Use exposure_search and exposure_load first."
+                "Use exposure(action='search') and exposure(action='set') first."
             )
         self.touch(exposure)
 
     def status(self, exposure: Exposure) -> dict[str, Any]:
         return {
             "exposure_id": exposure.id,
+            "revision": exposure.revision,
             "campaign_id": exposure.campaign_id,
             "principal_id": exposure.principal_id,
             "phase": exposure.phase,
-            "loaded_groups": sorted(exposure.loaded_groups),
+            "loaded_tools": sorted(exposure.loaded_tools),
             "visible_tools": sorted(self.visible_tools(exposure)),
             "created_at": exposure.created_at.isoformat(),
             "updated_at": exposure.updated_at.isoformat(),
             "expires_at": exposure.expires_at.isoformat(),
-        }
-
-    def search(self, query: str, phase: str | None = None) -> list[dict[str, Any]]:
-        terms = {term.lower() for term in query.split() if term.strip()}
-        candidates = [group for group in TOOL_GROUPS if phase is None or group.phase == phase]
-        scored: list[tuple[int, Any]] = []
-        for group in candidates:
-            haystack = " ".join((group.id, group.title, group.description, *group.tools)).lower()
-            score = sum(term in haystack for term in terms)
-            if score:
-                scored.append((score, group))
-        if not scored and not terms:
-            scored = [(0, group) for group in candidates]
-        return [
-            {
-                "id": group.id,
-                "phase": group.phase,
-                "title": group.title,
-                "description": group.description,
-                "risk": group.risk,
-                "requires_campaign": group.requires_campaign,
-                "local_only": group.local_only,
-                "roles": sorted(group.roles),
-            }
-            for _, group in sorted(scored, key=lambda item: (-item[0], item[1].id))
-        ]
-
-    def inspect(self, group_id: str) -> dict[str, Any]:
-        group = GROUP_BY_ID.get(group_id)
-        if group is None:
-            raise ExposureError(f"Unknown tool group: {group_id}")
-        return {
-            "id": group.id,
-            "phase": group.phase,
-            "title": group.title,
-            "description": group.description,
-            "risk": group.risk,
-            "requires_campaign": group.requires_campaign,
-            "local_only": group.local_only,
-            "roles": sorted(group.roles),
-            "tools": sorted(group.tools),
         }

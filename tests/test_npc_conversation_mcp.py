@@ -5,7 +5,7 @@ import pytest
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
-from sagasmith_dnd_mcp.tool_profiles import GROUP_BY_ID, HOST_PRIVATE_TOOLS
+from sagasmith_dnd_mcp.tool_profiles import HOST_PRIVATE_TOOLS, policy_for_tool
 
 HOST_TOKEN = "test-host-token-with-sufficient-entropy"
 
@@ -89,10 +89,8 @@ def _audience(decision_id, *, perceived, understood, response):
 
 
 def test_public_surface_is_one_facade_and_host_transport_is_unloadable() -> None:
-    group = GROUP_BY_ID["play.npc_conversation"]
-    assert group.tools == frozenset({"npc_conversation"})
+    assert policy_for_tool("npc_conversation").phases == frozenset({"play"})
     assert HOST_PRIVATE_TOOLS == frozenset({"npc_conversation_transport"})
-    assert not any("transport" in item for item in group.tools)
 
 
 def test_conversation_facade_private_transport_and_commit(tmp_path: Path) -> None:

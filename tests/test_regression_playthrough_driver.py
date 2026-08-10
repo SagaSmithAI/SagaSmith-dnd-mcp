@@ -56,7 +56,6 @@ from scripts.regression_playthrough import (
     _occurrence_identity,
     _party_member,
     _party_selections,
-    _phase_groups,
     _pool_character_currency,
     _preflight_level_completion,
     _prepare_narrative_npc,
@@ -84,7 +83,6 @@ from scripts.regression_playthrough import (
     _segment_completion_record,
     _set_source_exhaustion,
     _short_rest,
-    _source_groups,
     _spend_source_currency,
     _spend_source_item,
     _stand_after_source_event,
@@ -373,12 +371,6 @@ def test_source_roll_modifier_ledger_rejects_merged_state_and_wrong_total() -> N
             [dict(merged[0], state_key="cumulative_bonus")],
             expression="1d6+3",
         )
-
-
-def test_source_queries_load_the_phase_specific_public_group() -> None:
-    assert _source_groups("lobby") == ("lobby.modules",)
-    assert _source_groups("play") == ("play.scene",)
-    assert _source_groups("combat") == ("combat.observe",)
 
 
 def test_configure_ending_uses_public_manifest_replace_and_rejects_redefinition() -> None:
@@ -1119,7 +1111,7 @@ def test_failed_module_refresh_restores_its_entry_phase() -> None:
 
     assert result == {"tool_profile": "play", "campaign_revision": 13}
     assert client.phase == "play"
-    assert client.loaded[-1] == ("play.scene_control", "play.scene")
+    assert client.loaded[-1] == ()
 
 
 def test_module_refresh_identity_is_retry_stable_and_revision_sensitive(
@@ -4932,10 +4924,7 @@ def test_module_refresh_validates_ingested_scene_mapping_before_activation(
 
     class Client:
         async def load(self, *group_ids: str) -> None:
-            assert group_ids in {
-                ("lobby.modules",),
-                ("lobby.campaign", "lobby.modules"),
-            }
+            assert group_ids == ()
 
         async def open(self, campaign_id: str) -> None:
             assert campaign_id == "campaign-1"
@@ -5038,7 +5027,7 @@ def test_module_refresh_rejects_changing_the_logical_source_key(
 
     class Client:
         async def load(self, *group_ids: str) -> None:
-            assert group_ids == ("lobby.modules",)
+            assert group_ids == ()
 
         async def domain(self, tool_id: str, arguments: dict):
             assert tool_id == "module_query"
@@ -5551,9 +5540,6 @@ def test_phase_and_idempotency_namespaces_are_stable() -> None:
         )
         == "combat"
     )
-    assert _phase_groups("lobby") == ("lobby.campaign",)
-    assert _phase_groups("play") == ("play.scene_control", "play.scene")
-    assert _phase_groups("combat") == ("combat.save", "combat.observe")
     assert _mutation_key("run", "snapshot", "scene-1") == _mutation_key(
         "run", "snapshot", "scene-1"
     )
@@ -6519,7 +6505,7 @@ def test_failed_route_is_preserved_when_branching_from_verified_snapshot(
     assert result["created_branch"]["id"] == "recovery-branch"
     assert result["checkpoint"]["snapshot"]["slot"] == 61
     assert bool(result["phase_changes"]) is (initial_phase == "play")
-    assert (("lobby.campaign",) in result_client.loads) is (initial_phase == "play")
+    assert all(item == () for item in result_client.loads)
 
 
 def test_branch_from_snapshot_recovers_after_branch_create_interruption() -> None:
@@ -6641,7 +6627,7 @@ def test_branch_from_snapshot_recovers_after_branch_create_interruption() -> Non
     }
     assert result["checkpoint"]["snapshot"]["id"] == "snapshot-61"
     assert "branch_change" not in client.domain_calls
-    assert ("lobby.campaign",) in client.loads
+    assert client.loads and all(item == () for item in client.loads)
 
 
 def test_branch_from_snapshot_recovers_when_target_predates_manifest() -> None:
@@ -10001,7 +9987,7 @@ def test_roll_continuity_recovers_a_response_lost_commit_receipt() -> None:
     )
 
     assert recovered == response
-    assert client.loaded == ["play.scene_control"]
+    assert client.loaded == []
 
 
 def test_roll_continuity_rejects_a_different_receipt_event() -> None:
@@ -10730,7 +10716,7 @@ def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint(
     assert result["scene"]["source_scene_id"] == "source-scene-1"
     assert result["scene"]["agent_ruling"]["committed"] is True
     assert client.continuity_payload["event"]["payload"]["source_scene_id"] == ("source-scene-1")
-    assert client.loaded_groups == [("play.characters",)]
+    assert client.loaded_groups == [()]
     assert client.replaced_manifest["current"]["objective"] == ("Escort the hostage to safety.")
     assert client.replaced_manifest["world_state"] == {
         "prior_state": True,
@@ -11105,7 +11091,7 @@ def test_start_play_uses_public_quality_gate_phase_and_scene_tools() -> None:
             assert campaign_id == "campaign-1"
 
         async def load(self, *group_ids: str) -> None:
-            assert group_ids == ("play.scene", "play.scene_control")
+            assert group_ids == ()
 
         async def core(self, tool_id: str, arguments: dict):
             self.calls.append((tool_id, arguments))

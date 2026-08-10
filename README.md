@@ -15,7 +15,7 @@
 - **预算锁定** — 完整公开目录固定为 89 个工具；Lobby/Play/Combat 目录分别为
   60/58/49。预算测试同时保证聚合输入 schema 不超过合并前 92 个工具的
   56,611 字节基线。
-- **服务端执行门禁** — 未暴露工具即使通过 `exposure_call` 指定名称也会被拒绝；权限不是提示词约定。
+- **服务端执行门禁** — 未暴露工具不能直接调用；权限不是提示词约定。
 - **规则与自设内容分界** — 已注册的标准规则 mechanic 由版本锁定的引擎实现执行；标准卡缺少结果实现时会在付款前要求补引擎，不能降级成自设解释。未注册的模组或自设角色卡必须在导入、构建或写卡事务内依据精确来源写入直接 Agent ruling 或受校验的通用计划；正式使用只执行已经保存的边界，不再临时补内容方案。
 
 ## 运行结构
@@ -23,11 +23,11 @@
 ```mermaid
 flowchart TB
     H[MCP Host / Agent] --> C[13 core tools]
-    C --> O[exposure_open]
+    C --> O[exposure]
     O --> S[search → inspect → load]
-    S --> L[lobby groups]
-    S --> P[play groups]
-    S --> B[combat groups]
+    S --> L[lobby tools]
+    S --> P[play tools]
+    S --> B[combat tools]
     L --> R[D&D runtime + Core]
     P --> R
     B --> R
@@ -96,15 +96,8 @@ NanoBot 示例；其他 stdio MCP Host 使用相同的 `command`、`cwd` 与 `en
         "toolTimeout": 900,
         "injectPrincipal": true,
         "enabledTools": [
-          "exposure_open",
-          "exposure_status",
-          "exposure_search",
-          "exposure_inspect",
-          "exposure_load",
-          "exposure_unload",
-          "exposure_call",
+          "exposure",
           "server_capabilities",
-          "server_tool_profiles",
           "storage_status",
           "campaign_query",
           "game_phase",
@@ -125,18 +118,18 @@ principal；`system:local` 只适用于明确受信任的本地进程。
 ## 渐进式调用流程
 
 ```text
-1. read sagasmith://bootstrap or skill_query(action="plan")
-2. read every skill_plan.required_now document
+1. read sagasmith://bootstrap or skill_query(action="read", identifier="dnd.full")
+2. use skill_query outline/section/search for task-specific guidance
 3. campaign_query(view="resume") when resuming
-4. exposure_open(campaign_id?, principal_id injected or process-bound)
-5. exposure_search("create a 2024 character")
-6. exposure_inspect("lobby.characters", tool_id?, selector?)
-7. exposure_load(["lobby.characters"]) and read skill_plan_delta
+4. exposure(action="open", campaign_id?, principal_id injected or process-bound)
+5. exposure(action="search", query="create a 2024 character")
+6. exposure(action="set", add_tool_ids=[...])
+7. refresh tools/list and call newly visible tools directly
 8. 重新 tools/list，原生调用新出现的工具
-9. exposure_unload(...) 或等待阶段/TTL 自动收回
+9. exposure(action="set", remove_tool_ids=[...]) 或等待阶段/TTL 自动收回
 ```
 
-支持动态工具列表的 Host 使用原生 `tools/list` + `tools/call`；不能刷新 schema 的 Host 可使用 `exposure_call` fallback。两条路径都经过同一个服务端 exposure 与权限检查。
+Host 使用原生 `tools/list` + `tools/call`；每次 exposure 变化后刷新列表。
 
 ## 能力组
 
@@ -149,7 +142,7 @@ principal；`system:local` 只适用于明确受信任的本地进程。
 | combat | `observe`, `turn`, `actions` | 可见战斗状态、回合、攻击/法术/反应/移动 |
 | combat | `save`, `map` | 战斗中分支 Snapshot 与临时地图更新 |
 
-每个组声明 risk、角色要求、是否需要 campaign、是否仅限本地。`server_tool_profiles` 返回机器可读目录，客户端不需要复制这张表。
+每个工具只有一份 phase、角色、campaign 与本地权限声明；`server_capabilities` 返回机器可读目录。
 
 ## D&D 能力面
 
@@ -233,7 +226,7 @@ manifest、结构化内容、actors、来源索引与内容寻址 blobs，同时
 
 - Skill 文档资源：`sagasmith://skill/{skill_id}`
 - 静态目录：`sagasmith://skills/overview`
-- Phase/tool-group 读取计划：核心 `skill_query(kind="skill", action="plan")`
+- Skills 读取：核心 `skill_query` 的 `read|outline|section|search`
 - 动态引用/数据/模板：核心 `skill_query(kind="asset", action="list"|"outline"|"section"|"search"|"read")`
 - Prompts：`dnd_dm`、`module_generator`
 

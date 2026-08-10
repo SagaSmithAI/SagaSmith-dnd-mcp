@@ -1,7 +1,8 @@
-"""Phase and capability-group catalogue for the SagaSmith D&D MCP contract.
+"""One phase policy per public D&D MCP tool.
 
-The catalogue is deliberately server-owned: an MCP client can discover groups
-without having to duplicate the D&D tool taxonomy in an agent prompt.
+Exposure is session-scoped and mutable, but authorization is not encoded in an
+Agent-owned load plan.  This module is the single catalogue used by native
+``tools/list`` filtering and call-time phase/role checks.
 """
 
 from __future__ import annotations
@@ -16,11 +17,10 @@ PROFILE_LOBBY = "lobby"
 PROFILE_PLAY = "play"
 PROFILE_COMBAT = "combat"
 PROFILES = (PROFILE_LOBBY, PROFILE_PLAY, PROFILE_COMBAT)
-CAMPAIGN_DM_ROLE_ORDER = tuple(sorted(CAMPAIGN_DM_ROLES))
 
 
 def campaign_phase(state: Mapping[str, Any] | None) -> str:
-    """Resolve the one effective campaign phase from persisted runtime state."""
+    """Resolve the authoritative phase from persisted campaign state."""
 
     value = dict(state or {})
     combat = value.get("combat")
@@ -32,35 +32,12 @@ def campaign_phase(state: Mapping[str, Any] | None) -> str:
     return phase
 
 
-@dataclass(frozen=True)
-class ToolGroup:
-    """A coherent, phase-safe set of tools that may be exposed together."""
-
-    id: str
-    phase: str
-    title: str
-    description: str
-    risk: str
-    tools: frozenset[str]
-    requires_campaign: bool = True
-    local_only: bool = False
-    roles: frozenset[str] = frozenset()
-
-
-# The first native tools/list response stays intentionally small. The exposure
-# exposure tools are the progressive-discovery protocol; the remainder lets a
-# host diagnose and choose a campaign without loading a domain group.
+# These tools are always visible. ``exposure`` owns the mutable native list;
+# authorization remains a call-time concern.
 CORE_TOOLS = frozenset(
     {
-        "exposure_open",
-        "exposure_status",
-        "exposure_search",
-        "exposure_inspect",
-        "exposure_load",
-        "exposure_unload",
-        "exposure_call",
+        "exposure",
         "server_capabilities",
-        "server_tool_profiles",
         "storage_status",
         "campaign_query",
         "game_phase",
@@ -68,397 +45,159 @@ CORE_TOOLS = frozenset(
     }
 )
 
-# Registered for a trusted Host adapter, but never returned by tools/list or
-# loadable through an exposure. The server authenticates every call separately.
 HOST_PRIVATE_TOOLS = frozenset({"npc_conversation_transport"})
 
 
-def _group(
-    id: str,
-    phase: str,
-    title: str,
-    description: str,
-    risk: str,
-    *tools: str,
-    requires_campaign: bool = True,
-    local_only: bool = False,
-    roles: tuple[str, ...] = (),
-) -> ToolGroup:
-    return ToolGroup(
-        id,
-        phase,
-        title,
-        description,
-        risk,
-        frozenset(tools),
-        requires_campaign,
-        local_only,
-        frozenset(roles),
-    )
+def _names(value: str) -> frozenset[str]:
+    return frozenset(value.split())
 
 
-TOOL_GROUPS = (
-    _group(
-        "lobby.bootstrap",
-        PROFILE_LOBBY,
-        "Campaign bootstrap",
-        "List systems and create a campaign before opening a campaign-bound exposure.",
-        "write",
-        "system_list",
-        "campaign_create",
-        requires_campaign=False,
+PHASE_TOOLS = {
+    PROFILE_LOBBY: _names(
+        """
+        access_grant actor_knowledge_change actor_knowledge_query addon_actor_instantiate
+        bounded_evaluation branch_change branch_query campaign_change campaign_create
+        campaign_event campaign_rules character_ability_apply character_action
+        character_content_apply character_create_from character_metadata_update character_query
+        character_sheet_replace character_spell_prepare character_state_change content_pack
+        content_solution continuity_context dnd_ability_roll dnd_dice_roll inventory_change
+        inventory_transfer memory_change memory_query module_draft module_expand module_query
+        module_search module_set_progress playthrough_manifest rule_expand rule_search
+        rule_seed_bundled rule_seed_status rulebook_draft snapshot_create snapshot_query
+        snapshot_restore state_revision storage_migrate system_list wallet_change
+        """
     ),
-    _group(
-        "lobby.campaign",
-        PROFILE_LOBBY,
-        "Campaign setup",
-        "Create campaigns, manage members, branches, snapshots and campaign state.",
-        "write",
-        "campaign_change",
-        "access_grant",
-        "campaign_event",
-        "branch_change",
-        "branch_query",
-        "snapshot_create",
-        "snapshot_query",
-        "snapshot_restore",
-        "state_revision",
-        "campaign_rules",
-        "playthrough_manifest",
-        roles=CAMPAIGN_DM_ROLE_ORDER,
+    PROFILE_PLAY: _names(
+        """
+        actor_knowledge_change actor_knowledge_query addon_actor_instantiate bounded_evaluation
+        branch_query campaign_change campaign_event campaign_rules character_action
+        character_check character_content_apply character_create_from character_metadata_update
+        character_query character_state_change chase combat_start content_solution
+        continuity_context dnd_ability_roll dnd_check dnd_dice_roll inventory_change
+        inventory_transfer memory_change memory_query module_expand module_query module_search
+        module_set_progress npc_conversation playthrough_manifest rule_expand rule_search
+        snapshot_create snapshot_query state_revision wallet_change
+        """
     ),
-    _group(
-        "lobby.characters",
-        PROFILE_LOBBY,
-        "Character building",
-        "Inspect source documents, create characters, and apply structured sheets, content, "
-        "inventory and prepared spells.",
-        "write",
-        "character_create_from",
-        "character_query",
-        "character_sheet_replace",
-        "character_metadata_update",
-        "character_content_apply",
-        "character_ability_apply",
-        "inventory_change",
-        "inventory_transfer",
-        "wallet_change",
-        "character_state_change",
-        "character_action",
-        "character_spell_prepare",
-        "dnd_dice_roll",
-        "dnd_ability_roll",
+    PROFILE_COMBAT: _names(
+        """
+        actor_knowledge_query addon_actor_instantiate bounded_evaluation branch_change branch_query
+        campaign_rules character_query combat_cast_spell combat_check combat_choice
+        combat_common_action combat_concentration_check combat_end combat_end_turn combat_hp_change
+        combat_join combat_map_patch combat_movement combat_preflight_attack combat_query
+        combat_reaction_attack combat_ready combat_resolve_attack combat_use_activity
+        content_solution continuity_context dnd_check dnd_dice_roll module_query module_search
+        playthrough_manifest rule_expand rule_search snapshot_create snapshot_query snapshot_restore
+        """
     ),
-    _group(
-        "lobby.addon_actors",
-        PROFILE_LOBBY,
-        "Reviewed addon actor templates",
-        "Instantiate an enabled source-reviewed dependent actor without evaluating prose.",
-        "write",
-        "addon_actor_instantiate",
-        roles=CAMPAIGN_DM_ROLE_ORDER,
-    ),
-    _group(
-        "lobby.rules",
-        PROFILE_LOBBY,
-        "Rulebook import and rule packs",
-        "Import rulebooks, compile rule packs, select campaign rules and inspect sources.",
-        "write",
-        "rulebook_draft",
-        "content_pack",
-        "rule_seed_status",
-        "rule_seed_bundled",
-        "rule_search",
-        "rule_expand",
-        "campaign_rules",
-        "content_solution",
-        roles=CAMPAIGN_DM_ROLE_ORDER,
-    ),
-    _group(
-        "lobby.modules",
-        PROFILE_LOBBY,
-        "Module import",
-        "Import adventures, inspect scene indexes, and prepare a campaign module.",
-        "write",
-        "module_draft",
-        "module_query",
-        "module_set_progress",
-        "module_search",
-        "module_expand",
-        roles=CAMPAIGN_DM_ROLE_ORDER,
-    ),
-    _group(
-        "lobby.memory",
-        PROFILE_LOBBY,
-        "Player continuity",
-        "Read audience-safe continuity and separately scoped PC/NPC actor knowledge.",
-        "read",
-        "actor_knowledge_query",
-        "continuity_context",
-        "bounded_evaluation",
-    ),
-    _group(
-        "lobby.memory_control",
-        PROFILE_LOBBY,
-        "Continuity administration",
-        "Maintain objective campaign memory and separately scoped PC/NPC actor knowledge.",
-        "write",
-        "memory_change",
-        "memory_query",
-        "actor_knowledge_change",
-        roles=CAMPAIGN_DM_ROLE_ORDER,
-    ),
-    _group(
-        "lobby.storage_admin",
-        PROFILE_LOBBY,
-        "Storage administration",
-        "Run explicit schema migration actions. Load only for local administration.",
-        "admin",
-        "storage_migrate",
-        requires_campaign=False,
-        local_only=True,
-    ),
-    _group(
-        "play.scene",
-        PROFILE_PLAY,
-        "Player scene context",
-        "Read audience-safe scenes, events, continuity, and actor knowledge during play.",
-        "read",
-        "campaign_event",
-        "module_query",
-        "module_search",
-        "module_expand",
-        "branch_query",
-        "continuity_context",
-        "bounded_evaluation",
-        "actor_knowledge_query",
-    ),
-    _group(
-        "play.scene_control",
-        PROFILE_PLAY,
-        "Scene and continuity control",
-        "Advance scenes, time, world effects, objective memory, actor knowledge, and saves.",
-        "write",
-        "campaign_change",
-        "module_set_progress",
-        "memory_change",
-        "memory_query",
-        "actor_knowledge_change",
-        "snapshot_create",
-        "snapshot_query",
-        "state_revision",
-        "campaign_rules",
-        "content_solution",
-        "playthrough_manifest",
-        roles=CAMPAIGN_DM_ROLE_ORDER,
-    ),
-    _group(
-        "play.npc_conversation",
-        PROFILE_PLAY,
-        "NPC conversation runtime",
-        "Run actor-isolated, multi-turn NPC conversations and commit them atomically.",
-        "write",
-        "npc_conversation",
-        roles=CAMPAIGN_DM_ROLE_ORDER,
-    ),
-    _group(
-        "play.characters",
-        PROFILE_PLAY,
-        "Character state",
-        "Create source-bound narrative NPCs and apply normal out-of-combat character state.",
-        "write",
-        "character_create_from",
-        "character_query",
-        "character_metadata_update",
-        "character_content_apply",
-        "inventory_change",
-        "inventory_transfer",
-        "wallet_change",
-        "character_state_change",
-        "character_action",
-    ),
-    _group(
-        "play.addon_actors",
-        PROFILE_PLAY,
-        "Reviewed addon actor templates",
-        "Instantiate an enabled source-reviewed dependent actor before encounter entry.",
-        "write",
-        "addon_actor_instantiate",
-        roles=CAMPAIGN_DM_ROLE_ORDER,
-    ),
-    _group(
-        "play.resolution",
-        PROFILE_PLAY,
-        "Checks and rolls",
-        "Resolve D&D rolls and character checks before starting combat.",
-        "write",
-        "dnd_dice_roll",
-        "dnd_check",
-        "dnd_ability_roll",
-        "character_check",
-        "rule_search",
-        "rule_expand",
-    ),
-    _group(
-        "play.combat_control",
-        PROFILE_PLAY,
-        "Combat start control",
-        "Start a structured encounter from reviewed canonical actors and scene evidence.",
-        "write",
-        "combat_start",
-        roles=CAMPAIGN_DM_ROLE_ORDER,
-    ),
-    _group(
-        "play.chase",
-        PROFILE_PLAY,
-        "Chase procedure",
-        "Start, inspect, advance, and close a source-reviewed theater-of-the-mind chase.",
-        "write",
-        "chase",
-        roles=CAMPAIGN_DM_ROLE_ORDER,
-    ),
-    _group(
-        "combat.observe",
-        PROFILE_COMBAT,
-        "Combat state",
-        "Inspect encounter state, available combat options, map and current combatant.",
-        "read",
-        "combat_query",
-        "character_query",
-        "continuity_context",
-        "bounded_evaluation",
-        "module_query",
-        "module_search",
-        "branch_query",
-        "actor_knowledge_query",
-        "rule_search",
-        "rule_expand",
-    ),
-    _group(
-        "combat.turn",
-        PROFILE_COMBAT,
-        "Turns and choices",
-        "Advance turns, resolve choice windows, ready actions and end combat.",
-        "write",
-        "combat_end_turn",
-        "combat_ready",
-        "combat_choice",
-    ),
-    _group(
-        "combat.control",
-        PROFILE_COMBAT,
-        "Encounter control",
-        "Join reviewed actors to combat or close the encounter with an audited outcome.",
-        "write",
-        "combat_join",
-        "addon_actor_instantiate",
-        "content_solution",
-        "combat_end",
-        roles=CAMPAIGN_DM_ROLE_ORDER,
-    ),
-    _group(
-        "combat.actions",
-        PROFILE_COMBAT,
-        "Combat actions",
-        "Resolve attacks, movement, actions, reactions, spells, activities and checks.",
-        "write",
-        "combat_preflight_attack",
-        "combat_resolve_attack",
-        "combat_choice",
-        "combat_reaction_attack",
-        "combat_movement",
-        "combat_common_action",
-        "combat_cast_spell",
-        "combat_use_activity",
-        "combat_check",
-        "combat_concentration_check",
-        "combat_hp_change",
-        "dnd_dice_roll",
-        "dnd_check",
-    ),
-    _group(
-        "combat.save",
-        PROFILE_COMBAT,
-        "Combat saves",
-        "Create, restore, and fork branch-aware snapshots during an active encounter.",
-        "write",
-        "branch_change",
-        "snapshot_create",
-        "snapshot_query",
-        "snapshot_restore",
-        "playthrough_manifest",
-        roles=CAMPAIGN_DM_ROLE_ORDER,
-    ),
-    _group(
-        "combat.maintenance",
-        PROFILE_COMBAT,
-        "Combat rules maintenance",
-        "Relock only the built-in Core after an explicit checkpointed runtime upgrade.",
-        "admin",
-        "campaign_rules",
-        roles=CAMPAIGN_DM_ROLE_ORDER,
-    ),
-    _group(
-        "combat.map",
-        PROFILE_COMBAT,
-        "Combat map control",
-        "Patch the temporary combat map created for the current encounter.",
-        "write",
-        "combat_map_patch",
-        roles=CAMPAIGN_DM_ROLE_ORDER,
-    ),
-)
+}
 
-GROUP_BY_ID = {group.id: group for group in TOOL_GROUPS}
+PHASE_DM_TOOLS = {
+    PROFILE_LOBBY: _names(
+        """
+        access_grant actor_knowledge_change addon_actor_instantiate branch_change branch_query
+        campaign_change campaign_event campaign_rules content_pack content_solution memory_change
+        memory_query module_draft module_expand module_query module_search module_set_progress
+        playthrough_manifest rule_expand rule_search rule_seed_bundled rule_seed_status
+        rulebook_draft snapshot_create snapshot_query snapshot_restore state_revision
+        """
+    ),
+    PROFILE_PLAY: _names(
+        """
+        actor_knowledge_change addon_actor_instantiate campaign_change campaign_rules chase
+        combat_start content_solution memory_change memory_query module_set_progress
+        npc_conversation playthrough_manifest snapshot_create snapshot_query state_revision
+        """
+    ),
+    PROFILE_COMBAT: _names(
+        """
+        addon_actor_instantiate branch_change campaign_rules combat_end combat_join combat_map_patch
+        content_solution playthrough_manifest snapshot_create snapshot_query snapshot_restore
+        """
+    ),
+}
+
+NO_CAMPAIGN_TOOLS = frozenset({"campaign_create", "storage_migrate", "system_list"})
+LOCAL_ONLY_TOOLS = frozenset({"storage_migrate"})
+
+
+@dataclass(frozen=True)
+class ToolPolicy:
+    id: str
+    phases: frozenset[str]
+    roles_by_phase: Mapping[str, frozenset[str]]
+    requires_campaign: bool
+    local_only: bool
+
+    def roles(self, phase: str) -> frozenset[str]:
+        return self.roles_by_phase.get(phase, frozenset())
+
+
+def _build_policies() -> dict[str, ToolPolicy]:
+    tool_ids = frozenset().union(*PHASE_TOOLS.values())
+    return {
+        tool_id: ToolPolicy(
+            id=tool_id,
+            phases=frozenset(phase for phase in PROFILES if tool_id in PHASE_TOOLS[phase]),
+            roles_by_phase={
+                phase: frozenset(CAMPAIGN_DM_ROLES)
+                for phase in PROFILES
+                if tool_id in PHASE_DM_TOOLS[phase]
+            },
+            requires_campaign=tool_id not in NO_CAMPAIGN_TOOLS,
+            local_only=tool_id in LOCAL_ONLY_TOOLS,
+        )
+        for tool_id in tool_ids
+    }
+
+
+TOOL_POLICIES = _build_policies()
+
+
+def policy_for_tool(name: str) -> ToolPolicy | None:
+    return TOOL_POLICIES.get(name)
 
 
 def tools_for_phase(phase: str) -> frozenset[str]:
-    return frozenset().union(
-        *(group.tools for group in TOOL_GROUPS if group.phase == phase), CORE_TOOLS
-    )
+    if phase not in PHASE_TOOLS:
+        raise ValueError(f"unsupported tool phase: {phase}")
+    return PHASE_TOOLS[phase] | CORE_TOOLS
 
 
 TOOLS_BY_PROFILE = {profile: tools_for_phase(profile) for profile in PROFILES}
 
 
 def profiles_for_tool(name: str) -> tuple[str, ...]:
-    """Return every phase in which a public tool is valid."""
     if name in CORE_TOOLS:
         return PROFILES
-    return tuple(profile for profile in PROFILES if name in TOOLS_BY_PROFILE[profile])
-
-
-def groups_for_tool(name: str) -> tuple[str, ...]:
-    return tuple(group.id for group in TOOL_GROUPS if name in group.tools)
+    policy = policy_for_tool(name)
+    return tuple(phase for phase in PROFILES if policy is not None and phase in policy.phases)
 
 
 def validate_profile_coverage(tool_names: Iterable[str]) -> None:
-    """Fail server construction if a public tool has no explicit phase/group."""
     missing = sorted(
         name
         for name in tool_names
-        if name not in HOST_PRIVATE_TOOLS and not profiles_for_tool(name)
+        if name not in HOST_PRIVATE_TOOLS and name not in CORE_TOOLS and name not in TOOL_POLICIES
     )
     if missing:
-        raise RuntimeError(f"MCP tools missing a tool profile: {', '.join(missing)}")
+        raise RuntimeError(f"MCP tools missing a tool policy: {', '.join(missing)}")
 
 
 def profile_catalog() -> dict[str, list[str]]:
     return {profile: sorted(TOOLS_BY_PROFILE[profile]) for profile in PROFILES}
 
 
-def group_catalog() -> list[dict[str, object]]:
+def tool_catalog() -> list[dict[str, object]]:
     return [
         {
-            "id": group.id,
-            "phase": group.phase,
-            "title": group.title,
-            "description": group.description,
-            "risk": group.risk,
-            "requires_campaign": group.requires_campaign,
-            "local_only": group.local_only,
-            "roles": sorted(group.roles),
-            "tools": sorted(group.tools),
+            "id": policy.id,
+            "phases": sorted(policy.phases),
+            "roles_by_phase": {
+                phase: sorted(roles) for phase, roles in policy.roles_by_phase.items()
+            },
+            "requires_campaign": policy.requires_campaign,
+            "local_only": policy.local_only,
         }
-        for group in TOOL_GROUPS
+        for policy in sorted(TOOL_POLICIES.values(), key=lambda item: item.id)
     ]

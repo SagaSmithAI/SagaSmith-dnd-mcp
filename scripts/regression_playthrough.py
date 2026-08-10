@@ -847,38 +847,6 @@ def _server_parameters(args: argparse.Namespace) -> StdioServerParameters:
     )
 
 
-def _phase_groups(phase: str) -> tuple[str, ...]:
-    return {
-        "lobby": ("lobby.campaign",),
-        "play": ("play.scene_control", "play.scene"),
-        "combat": ("combat.save", "combat.observe"),
-    }[phase]
-
-
-def _character_group(phase: str) -> str:
-    return {
-        "lobby": "lobby.characters",
-        "play": "play.characters",
-        "combat": "combat.observe",
-    }[phase]
-
-
-def _scene_groups(phase: str) -> tuple[str, ...]:
-    if phase == "lobby":
-        return ("lobby.modules",)
-    if phase == "play":
-        return ("play.scene",)
-    raise RuntimeError("scene progression cannot advance during active combat")
-
-
-def _source_groups(phase: str) -> tuple[str, ...]:
-    return {
-        "lobby": ("lobby.modules",),
-        "play": ("play.scene",),
-        "combat": ("combat.observe",),
-    }[phase]
-
-
 def _scene_locations(scene: dict[str, Any]) -> list[dict[str, Any]]:
     spatial = scene.get("spatial") if isinstance(scene.get("spatial"), dict) else {}
     values = spatial.get("locations") or scene.get("locations") or []
@@ -1504,7 +1472,7 @@ async def _commit_roll_continuity(
     except Exception as exc:
         if "idempotency key reused with a different request" not in str(exc):
             raise
-        await client.load("play.scene_control")
+        await client.load()
         receipt = await client.domain(
             "state_revision",
             {
@@ -1514,7 +1482,7 @@ async def _commit_roll_continuity(
             },
         )
         if not str(receipt.get("branch_id") or ""):
-            await client.load("play.scene")
+            await client.load()
             visible_events = await client.domain(
                 "campaign_event",
                 {
@@ -3426,7 +3394,7 @@ async def _branch_from_snapshot(
         restored_campaign = await _campaign(client, campaign_id)
         restored_phase = _campaign_phase(restored_campaign)
         await client.open(campaign_id)
-        await client.load(*_phase_groups(restored_phase))
+        await client.load()
         checkpoint = await restored_branch_checkpoint()
         source_head_snapshot = next(
             (
@@ -3481,7 +3449,7 @@ async def _branch_from_snapshot(
             )
         )
         await client.open(campaign_id)
-        await client.load("lobby.campaign")
+        await client.load()
     source_checkpoint = await _checkpoint(
         client,
         campaign_id=campaign_id,
@@ -3529,7 +3497,7 @@ async def _branch_from_snapshot(
     if restored_phase == "combat":
         raise RuntimeError("selected snapshot unexpectedly restored active combat")
     await client.open(campaign_id)
-    await client.load(*_phase_groups(restored_phase))
+    await client.load()
     checkpoint = await restored_branch_checkpoint()
     return {
         "source_branch": source_branch,
@@ -4723,7 +4691,7 @@ async def _prepare_narrative_npc(
             "narrative NPC source identity may differ from name only with an instance key"
         )
 
-    await client.load("play.scene", "play.scene_control", "play.characters")
+    await client.load()
     scene = await client.domain(
         "module_query",
         {
@@ -4763,7 +4731,7 @@ async def _prepare_narrative_npc(
         )
     )
     await client.open(campaign_id)
-    await client.load("lobby.campaign", "lobby.characters")
+    await client.load()
     created = _facade_value(
         await client.domain(
             "character_create_from",
@@ -4845,7 +4813,7 @@ async def _prepare_narrative_npc(
         )
     )
     await client.open(campaign_id)
-    await client.load("play.scene", "play.scene_control", "play.characters")
+    await client.load()
     verified_actor = await client.domain(
         "character_query",
         {"view": "get", "payload": {"character_id": str(actor["id"])}},
@@ -5028,7 +4996,7 @@ async def _record_outcome(
         manifest["current"]["objective"] = objective.strip()
     manifest = validate_playthrough_manifest(manifest)
 
-    await client.load("play.characters")
+    await client.load()
     occurrence_scene = await client.domain(
         "module_query",
         {
@@ -11011,7 +10979,7 @@ async def _start_play(
     elif manifest["status"] not in {"ready", "in_progress"}:
         raise RuntimeError("play phase does not have a ready playthrough manifest")
     await client.open(campaign_id)
-    await client.load("play.scene", "play.scene_control")
+    await client.load()
     scene = await _advance_scene(
         client,
         campaign_id=campaign_id,
@@ -11056,7 +11024,7 @@ async def _configure_advancement(
     phase_changes: list[dict[str, Any]] = []
     branch_id = ""
     if initial_phase == "play":
-        await client.load("play.scene")
+        await client.load()
         branches = await client.domain(
             "branch_query",
             {"campaign_id": campaign_id, "view": "list"},
@@ -11086,7 +11054,7 @@ async def _configure_advancement(
             )
         )
         await client.open(campaign_id)
-        await client.load("lobby.campaign")
+        await client.load()
     elif initial_phase != "lobby":
         raise RuntimeError("configure-advancement cannot run during active combat")
     campaign = await _campaign(client, campaign_id)
@@ -11523,7 +11491,7 @@ async def _advance_level(
     ):
         raise ValueError("every level spell source_class must match the advanced class")
 
-    await client.load(*_scene_groups(initial_phase), _character_group(initial_phase))
+    await client.load()
     scene = await client.domain(
         "module_query",
         {
@@ -11584,7 +11552,7 @@ async def _advance_level(
             )
         )
     await client.open(campaign_id)
-    await client.load("lobby.campaign", "lobby.characters", "lobby.rules")
+    await client.load()
     actor = await client.domain(
         "character_query",
         {"view": "get", "payload": {"character_id": actor_id}},
@@ -11960,7 +11928,7 @@ async def _advance_level(
                 )
             )
             await client.open(campaign_id)
-            await client.load("play.scene", "play.scene_control")
+            await client.load()
     checkpoint = None
     if not defer_checkpoint:
         label = checkpoint_label.strip() or (
@@ -12011,7 +11979,7 @@ async def _sync_character_resources(
     if initial_phase == "combat":
         raise RuntimeError("sync-character-resources cannot run during active combat")
 
-    await client.load(_character_group(initial_phase))
+    await client.load()
     actor = await client.domain(
         "character_query",
         {"view": "get", "payload": {"character_id": actor_id}},
@@ -12049,7 +12017,7 @@ async def _sync_character_resources(
             )
         )
     await client.open(campaign_id)
-    await client.load("lobby.campaign", "lobby.characters")
+    await client.load()
     actor = await client.domain(
         "character_query",
         {"view": "get", "payload": {"character_id": actor_id}},
@@ -12096,7 +12064,7 @@ async def _sync_character_resources(
                 )
             )
             await client.open(campaign_id)
-            await client.load("play.scene", "play.scene_control")
+            await client.load()
     checkpoint = None
     if not defer_checkpoint:
         checkpoint = await _checkpoint(
@@ -12251,7 +12219,7 @@ async def _refresh_module(
     if not old_module_id:
         raise ValueError("refresh-module requires a current manifest module")
     if initial_phase == "lobby":
-        await client.load("lobby.modules")
+        await client.load()
     old_index = await client.domain(
         "module_query",
         {
@@ -12329,7 +12297,7 @@ async def _refresh_module(
             )
         )
     await client.open(campaign_id)
-    await client.load("lobby.campaign", "lobby.modules")
+    await client.load()
     staged = await client.domain(
         "module_draft",
         {
@@ -12471,7 +12439,7 @@ async def _refresh_module(
             )
         )
         await client.open(campaign_id)
-        await client.load("play.scene", "play.scene_control")
+        await client.load()
     synced = await _manifest_mutation(
         client,
         campaign_id=campaign_id,
@@ -12540,7 +12508,7 @@ async def _restore_phase_after_failed_lobby_action(
     if current_phase not in CAMPAIGN_GAME_PHASES:
         raise RuntimeError("failed module refresh left the campaign in combat")
     await client.open(campaign_id)
-    await client.load(*_phase_groups(current_phase))
+    await client.load()
     branches = await client.domain(
         "branch_query",
         {"campaign_id": campaign_id, "view": "list"},
@@ -12569,7 +12537,7 @@ async def _restore_phase_after_failed_lobby_action(
         )
     )
     await client.open(campaign_id)
-    await client.load(*_phase_groups(original_phase))
+    await client.load()
     return restored
 
 
@@ -12605,10 +12573,10 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             campaign = await _campaign(client, args.campaign_id)
             phase = _campaign_phase(campaign)
             report["phase"] = phase
-            await client.load(*_phase_groups(phase))
+            await client.load()
             knowledge_actor_ids = _knowledge_preflight_actor_ids(args)
             if knowledge_actor_ids:
-                await client.load(_character_group(phase))
+                await client.load()
                 await _validate_campaign_actor_ids(
                     client,
                     campaign_id=args.campaign_id,
@@ -12618,7 +12586,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             if args.action == "initialize-manifest":
                 if phase != "lobby":
                     raise RuntimeError("initialize-manifest requires the lobby phase")
-                await client.load("lobby.modules")
+                await client.load()
                 report["result"] = await _initialize_manifest_from_import_report(
                     client,
                     campaign_id=args.campaign_id,
@@ -12629,7 +12597,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     import_report_path=args.campaign_import_report,
                 )
             elif args.action == "register-party":
-                await client.load(_character_group(phase))
+                await client.load()
                 report["result"] = await _register_party(
                     client,
                     campaign_id=args.campaign_id,
@@ -12639,7 +12607,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.action == "register-replacement":
                 if phase != "play":
                     raise RuntimeError("register-replacement requires the play phase")
-                await client.load("play.characters")
+                await client.load()
                 report["result"] = await _register_replacement(
                     client,
                     campaign_id=args.campaign_id,
@@ -12691,7 +12659,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 if phase == "combat":
                     raise RuntimeError("configure-advancement cannot run during active combat")
                 if phase == "play":
-                    await client.load("play.scene_control")
+                    await client.load()
                 report["result"] = await _configure_advancement(
                     client,
                     campaign_id=args.campaign_id,
@@ -12743,7 +12711,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     )
                     raise
             elif args.action == "query-source":
-                await client.load(*_source_groups(phase))
+                await client.load()
                 report["result"] = await _query_source(
                     client,
                     campaign_id=args.campaign_id,
@@ -12753,14 +12721,14 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     module_id=args.module_id,
                 )
             elif args.action == "index-source":
-                await client.load(*_source_groups(phase))
+                await client.load()
                 report["result"] = await _index_source(
                     client,
                     campaign_id=args.campaign_id,
                     module_id=args.module_id,
                 )
             elif args.action == "read-scene":
-                await client.load(*_source_groups(phase))
+                await client.load()
                 report["result"] = await _read_scene(
                     client,
                     campaign_id=args.campaign_id,
@@ -12771,7 +12739,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     raise RuntimeError("continue-segment requires the play phase")
                 if not args.condition_id:
                     raise ValueError("continue-segment requires --condition-id")
-                await client.load(*_scene_groups(phase))
+                await client.load()
                 report["result"] = await _continue_completed_segment(
                     client,
                     campaign_id=args.campaign_id,
@@ -12791,7 +12759,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.action == "advance-scene":
                 if phase != "play":
                     raise RuntimeError("advance-scene requires the play phase")
-                await client.load(*_scene_groups(phase))
+                await client.load()
                 report["result"] = await _advance_scene(
                     client,
                     campaign_id=args.campaign_id,
@@ -12823,7 +12791,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.action == "advance-time":
                 if phase != "play":
                     raise RuntimeError("advance-time requires the play phase")
-                await client.load("play.characters")
+                await client.load()
                 report["result"] = await _advance_time(
                     client,
                     campaign_id=args.campaign_id,
@@ -12848,7 +12816,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.action == "initialize-clock":
                 if phase != "play":
                     raise RuntimeError("initialize-clock requires the play phase")
-                await client.load("play.scene_control")
+                await client.load()
                 report["result"] = await _initialize_clock(
                     client,
                     campaign_id=args.campaign_id,
@@ -12859,7 +12827,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.action == "roll-source":
                 if phase != "play":
                     raise RuntimeError("roll-source requires the play phase")
-                await client.load("play.resolution")
+                await client.load()
                 roll_arguments = {
                     "campaign_id": args.campaign_id,
                     "run_id": args.run_id,
@@ -12888,7 +12856,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.action == "resolve-check":
                 if phase != "play":
                     raise RuntimeError("resolve-check requires the play phase")
-                await client.load("play.characters", "play.resolution")
+                await client.load()
                 report["result"] = await _resolve_check(
                     client,
                     campaign_id=args.campaign_id,
@@ -12916,7 +12884,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.action == "resolve-group-check":
                 if phase != "play":
                     raise RuntimeError("resolve-group-check requires the play phase")
-                await client.load("play.characters", "play.resolution")
+                await client.load()
                 report["result"] = await _resolve_group_check(
                     client,
                     campaign_id=args.campaign_id,
@@ -12942,7 +12910,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.action == "resolve-contest":
                 if phase != "play":
                     raise RuntimeError("resolve-contest requires the play phase")
-                await client.load("play.characters", "play.resolution")
+                await client.load()
                 report["result"] = await _resolve_contest(
                     client,
                     campaign_id=args.campaign_id,
@@ -13024,7 +12992,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.action == "apply-damage":
                 if phase != "play":
                     raise RuntimeError("apply-damage requires the play phase")
-                await client.load("play.characters", "play.resolution")
+                await client.load()
                 report["result"] = await _apply_source_damage(
                     client,
                     campaign_id=args.campaign_id,
@@ -13047,7 +13015,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.action == "initialize-source-state":
                 if phase != "play":
                     raise RuntimeError("initialize-source-state requires the play phase")
-                await client.load("play.characters")
+                await client.load()
                 report["result"] = await _initialize_source_state(
                     client,
                     campaign_id=args.campaign_id,
@@ -13067,7 +13035,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.action == "stand-up":
                 if phase != "play":
                     raise RuntimeError("stand-up requires the play phase")
-                await client.load("play.characters")
+                await client.load()
                 report["result"] = await _stand_after_source_event(
                     client,
                     campaign_id=args.campaign_id,
@@ -13085,7 +13053,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.action == "short-rest":
                 if phase != "play":
                     raise RuntimeError("short-rest requires the play phase")
-                await client.load("play.characters")
+                await client.load()
                 report["result"] = await _short_rest(
                     client,
                     campaign_id=args.campaign_id,
@@ -13103,7 +13071,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.action == "use-activity":
                 if phase != "play":
                     raise RuntimeError("use-activity requires the play phase")
-                await client.load("play.characters")
+                await client.load()
                 report["result"] = await _use_activity(
                     client,
                     campaign_id=args.campaign_id,
@@ -13121,7 +13089,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.action == "cast-spell":
                 if phase != "play":
                     raise RuntimeError("cast-spell requires the play phase")
-                await client.load("play.characters")
+                await client.load()
                 report["result"] = await _cast_standard_spell(
                     client,
                     campaign_id=args.campaign_id,
@@ -13145,7 +13113,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.action == "cast-source-spell":
                 if phase != "play":
                     raise RuntimeError("cast-source-spell requires the play phase")
-                await client.load("play.characters")
+                await client.load()
                 report["result"] = await _cast_source_spell(
                     client,
                     campaign_id=args.campaign_id,
@@ -13168,7 +13136,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.action == "cast-healing-spell":
                 if phase != "play":
                     raise RuntimeError("cast-healing-spell requires the play phase")
-                await client.load("play.characters", "play.resolution")
+                await client.load()
                 report["result"] = await _cast_healing_spell(
                     client,
                     campaign_id=args.campaign_id,
@@ -13190,7 +13158,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.action == "revive-character":
                 if phase != "play":
                     raise RuntimeError("revive-character requires the play phase")
-                await client.load("play.characters")
+                await client.load()
                 report["result"] = await _revive_character(
                     client,
                     campaign_id=args.campaign_id,
@@ -13211,7 +13179,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.action == "long-rest":
                 if phase != "play":
                     raise RuntimeError("long-rest requires the play phase")
-                await client.load("play.characters")
+                await client.load()
                 report["result"] = await _long_rest(
                     client,
                     campaign_id=args.campaign_id,
@@ -13229,7 +13197,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.action == "recover-stable":
                 if phase != "play":
                     raise RuntimeError("recover-stable requires the play phase")
-                await client.load("play.characters")
+                await client.load()
                 report["result"] = await _recover_stable_party(
                     client,
                     campaign_id=args.campaign_id,
@@ -13244,7 +13212,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.action == "provision-source-item":
                 if phase != "play":
                     raise RuntimeError("provision-source-item requires the play phase")
-                await client.load("play.characters")
+                await client.load()
                 report["result"] = await _provision_source_item(
                     client,
                     campaign_id=args.campaign_id,
@@ -13262,7 +13230,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.action == "transfer-source-item":
                 if phase != "play":
                     raise RuntimeError("transfer-source-item requires the play phase")
-                await client.load("play.characters")
+                await client.load()
                 report["result"] = await _transfer_source_item_to_party(
                     client,
                     campaign_id=args.campaign_id,
@@ -13283,7 +13251,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.action == "claim-party-item":
                 if phase != "play":
                     raise RuntimeError("claim-party-item requires the play phase")
-                await client.load("play.characters")
+                await client.load()
                 report["result"] = await _claim_party_item_for_character(
                     client,
                     campaign_id=args.campaign_id,
@@ -13303,7 +13271,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.action == "pool-coins":
                 if phase != "play":
                     raise RuntimeError("pool-coins requires the play phase")
-                await client.load("play.characters")
+                await client.load()
                 report["result"] = await _pool_character_currency(
                     client,
                     campaign_id=args.campaign_id,
@@ -13323,7 +13291,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.action == "distribute-coins":
                 if phase != "play":
                     raise RuntimeError("distribute-coins requires the play phase")
-                await client.load("play.characters")
+                await client.load()
                 report["result"] = await _pool_character_currency(
                     client,
                     campaign_id=args.campaign_id,
@@ -13344,7 +13312,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.action == "apply-source-effect":
                 if phase != "play":
                     raise RuntimeError("apply-source-effect requires the play phase")
-                await client.load("play.characters")
+                await client.load()
                 report["result"] = await _apply_source_effect(
                     client,
                     campaign_id=args.campaign_id,
@@ -13364,7 +13332,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.action == "remove-source-effect":
                 if phase != "play":
                     raise RuntimeError("remove-source-effect requires the play phase")
-                await client.load("play.characters")
+                await client.load()
                 report["result"] = await _remove_source_effect(
                     client,
                     campaign_id=args.campaign_id,
@@ -13384,7 +13352,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.action == "set-source-exhaustion":
                 if phase != "play":
                     raise RuntimeError("set-source-exhaustion requires the play phase")
-                await client.load("play.characters")
+                await client.load()
                 report["result"] = await _set_source_exhaustion(
                     client,
                     campaign_id=args.campaign_id,
@@ -13403,7 +13371,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.action == "attack-source-object":
                 if phase != "play":
                     raise RuntimeError("attack-source-object requires the play phase")
-                await client.load("play.characters")
+                await client.load()
                 report["result"] = await _attack_source_object(
                     client,
                     campaign_id=args.campaign_id,
@@ -13483,7 +13451,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.action == "use-consumable":
                 if phase != "play":
                     raise RuntimeError("use-consumable requires the play phase")
-                await client.load("play.characters")
+                await client.load()
                 report["result"] = await _use_shared_consumable(
                     client,
                     campaign_id=args.campaign_id,
@@ -13500,7 +13468,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             elif args.action == "award-xp":
                 if phase != "play":
                     raise RuntimeError("award-xp requires the play phase")
-                await client.load("play.characters")
+                await client.load()
                 report["result"] = await _award_experience(
                     client,
                     campaign_id=args.campaign_id,

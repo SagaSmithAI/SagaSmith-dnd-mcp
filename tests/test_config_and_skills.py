@@ -1,5 +1,4 @@
 import asyncio
-import json
 import os
 from pathlib import Path
 
@@ -7,20 +6,10 @@ import pytest
 from sagasmith_dnd.module_profile import DndModuleProfile
 
 from sagasmith_dnd_mcp.config import McpConfig
-from sagasmith_dnd_mcp.facade_contracts import ACTION_PAYLOAD_CONTRACTS
 from sagasmith_dnd_mcp.server import create_server
 from sagasmith_dnd_mcp.skills import SkillCatalog
 from sagasmith_dnd_mcp.storage import SagaSmithStorage
-from sagasmith_dnd_mcp.tool_budget import (
-    BASELINE_INPUT_SCHEMA_BYTES,
-    BASELINE_PUBLIC_TOOL_COUNT,
-    MAX_INPUT_SCHEMA_BYTES,
-    PROFILE_TOOL_LIMITS,
-    TARGET_CORE_TOOL_COUNT,
-    TARGET_PUBLIC_TOOL_COUNT,
-    TOOL_BUDGET_VERSION,
-)
-from sagasmith_dnd_mcp.tool_profiles import CORE_TOOLS, campaign_phase, profile_catalog
+from sagasmith_dnd_mcp.tool_profiles import campaign_phase, profile_catalog
 
 
 def test_config_owns_local_storage(tmp_path: Path) -> None:
@@ -466,7 +455,6 @@ def test_server_tool_profiles_are_complete_and_attached_to_tool_metadata(tmp_pat
         by_name = {tool.name: tool for tool in tools}
         assert set(by_name) == set().union(*map(set, profile_catalog().values()))
         assert by_name["module_draft"].meta["sagasmith_tool_profiles"] == ["lobby"]
-        assert by_name["module_draft"].meta["sagasmith_tool_groups"] == ["lobby.modules"]
         assert by_name["rulebook_draft"].meta["sagasmith_tool_profiles"] == ["lobby"]
         assert by_name["content_pack"].meta["sagasmith_tool_profiles"] == ["lobby"]
         assert by_name["character_check"].meta["sagasmith_tool_profiles"] == ["play"]
@@ -478,54 +466,8 @@ def test_server_tool_profiles_are_complete_and_attached_to_tool_metadata(tmp_pat
             "combat",
         ]
         assert by_name["campaign_query"].meta["sagasmith_context_sync"] is True
-        assert by_name["game_phase"].meta["sagasmith_tool_groups"] == []
 
     asyncio.run(inspect_tools())
-
-
-def test_machine_facade_contracts_reference_real_public_selectors(
-    tmp_path: Path,
-) -> None:
-    config = McpConfig(
-        home=tmp_path / "home",
-        database_url=None,
-        chroma_url=None,
-        chroma_path_override=None,
-        dnd_skills_dir=tmp_path / "dnd",
-        modulegen_skills_dir=tmp_path / "modulegen",
-        auto_seed_rules=False,
-    )
-
-    async def inspect_contracts() -> None:
-        server = create_server(config)
-        tools = {tool.name: tool for tool in await server.list_tools()}
-        generic_facades = {
-            tool_id
-            for tool_id, tool in tools.items()
-            if "payload" in tool.inputSchema.get("properties", {})
-            and any(
-                field in tool.inputSchema["properties"]
-                and tool.inputSchema["properties"][field].get("enum")
-                for field in ("action", "view", "mode")
-            )
-        }
-        assert generic_facades <= set(ACTION_PAYLOAD_CONTRACTS)
-        for tool_id, action_contracts in ACTION_PAYLOAD_CONTRACTS.items():
-            assert tool_id in tools
-            properties = tools[tool_id].inputSchema["properties"]
-            selector = next(field for field in ("action", "view", "mode") if field in properties)
-            public_values = set(properties[selector]["enum"])
-            assert set(action_contracts) == public_values
-            for variants in action_contracts.values():
-                assert variants
-                for variant in variants:
-                    assert set(variant["required_fields"]) <= set(variant["allowed_fields"])
-                    assert isinstance(variant["additional_properties"], bool)
-        assert (
-            "offset" in ACTION_PAYLOAD_CONTRACTS["rulebook_draft"]["evidence"][1]["allowed_fields"]
-        )
-
-    asyncio.run(inspect_contracts())
 
 
 def test_campaign_phase_uses_combat_as_the_only_effective_override() -> None:
@@ -534,140 +476,6 @@ def test_campaign_phase_uses_combat_as_the_only_effective_override() -> None:
     assert campaign_phase({"game_phase": "play", "combat": {"active": True}}) == "combat"
     with pytest.raises(ValueError, match="unsupported persisted campaign phase"):
         campaign_phase({"game_phase": "combat"})
-
-
-def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> None:
-    config = McpConfig(
-        home=tmp_path / "home",
-        database_url=None,
-        chroma_url=None,
-        chroma_path_override=None,
-        dnd_skills_dir=tmp_path / "dnd",
-        modulegen_skills_dir=tmp_path / "modulegen",
-        auto_seed_rules=False,
-    )
-
-    async def inspect_budget() -> None:
-        server = create_server(config)
-        tools = await server.list_tools()
-        schema_bytes = sum(
-            len(
-                json.dumps(
-                    tool.inputSchema,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode()
-            )
-            for tool in tools
-        )
-
-        assert BASELINE_PUBLIC_TOOL_COUNT == 92
-        assert BASELINE_INPUT_SCHEMA_BYTES == 56_611
-        assert len(CORE_TOOLS) == TARGET_CORE_TOOL_COUNT == 13
-        assert len(tools) == TARGET_PUBLIC_TOOL_COUNT == 82
-        assert (
-            {phase: len(names) for phase, names in profile_catalog().items()}
-            == PROFILE_TOOL_LIMITS
-            == {
-                "lobby": 60,
-                "play": 51,
-                "combat": 49,
-            }
-        )
-        assert schema_bytes <= MAX_INPUT_SCHEMA_BYTES == BASELINE_INPUT_SCHEMA_BYTES
-        by_name = {tool.name: tool for tool in tools}
-        assert by_name["chase"].inputSchema["properties"]["action"]["enum"] == [
-            "start",
-            "query",
-            "take_turn",
-            "end",
-        ]
-        assert by_name["character_check"].inputSchema["properties"]["action"]["enum"] == [
-            "check",
-            "group",
-            "contest",
-            "reroll",
-        ]
-        assert (
-            "rest"
-            not in by_name["character_state_change"].inputSchema["properties"]["action"]["enum"]
-        )
-        assert not {
-            "memory_add",
-            "memory_resolve",
-        } & set(by_name["character_state_change"].inputSchema["properties"]["action"]["enum"])
-        assert by_name["rulebook_draft"].inputSchema["properties"]["action"]["enum"] == [
-            "start",
-            "get",
-            "evidence",
-            "edit",
-            "finalize",
-        ]
-        assert by_name["module_draft"].inputSchema["properties"]["action"]["enum"] == [
-            "start",
-            "get",
-            "evidence",
-            "edit",
-            "finalize",
-        ]
-        assert by_name["content_pack"].inputSchema["properties"]["action"]["enum"] == [
-            "list",
-            "get",
-            "import",
-            "export",
-            "activate",
-            "deactivate",
-            "remove",
-        ]
-        assert by_name["combat_choice"].inputSchema["properties"]["action"]["enum"] == [
-            "open",
-            "resolve",
-            "resolve_defense",
-            "on_hit_ruling",
-            "execute_plan",
-        ]
-        assert by_name["combat_query"].inputSchema["properties"]["view"]["enum"] == [
-            "status",
-            "available_actions",
-            "reactions",
-            "transaction_history",
-            "transaction_receipt",
-        ]
-        assert by_name["combat_common_action"].inputSchema["properties"]["action"]["enum"] == [
-            "dash",
-            "disengage",
-            "dodge",
-            "escape",
-            "help",
-            "hide",
-            "influence",
-            "interact_object",
-            "improvise",
-            "ready",
-            "search",
-            "shake_hypnotic_pattern",
-            "stabilize",
-            "study",
-            "sustain_spell",
-            "use_object",
-            "utilize",
-        ]
-
-        expected_budget = {
-            "version": TOOL_BUDGET_VERSION,
-            "baseline_public_tools": BASELINE_PUBLIC_TOOL_COUNT,
-            "baseline_input_schema_bytes": BASELINE_INPUT_SCHEMA_BYTES,
-            "target_public_tools": TARGET_PUBLIC_TOOL_COUNT,
-            "target_core_tools": TARGET_CORE_TOOL_COUNT,
-            "max_input_schema_bytes": MAX_INPUT_SCHEMA_BYTES,
-            "profile_limits": PROFILE_TOOL_LIMITS,
-        }
-        _, capabilities = await server.call_tool("server_capabilities", {})
-        assert capabilities["tool_exposure"]["budget"] == expected_budget
-        _, profiles = await server.call_tool("server_tool_profiles", {})
-        assert profiles["budget"] == expected_budget
-
-    asyncio.run(inspect_budget())
 
 
 def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path) -> None:
@@ -790,7 +598,7 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
         assert capabilities["features"]["validated_module_runtime_manifest"] is True
         assert capabilities["features"]["shared_continuity_budget"] is True
         assert capabilities["features"]["continuity_diagnostics"] is True
-        assert capabilities["contract_version"] == "2026-07-phase-skill-plan-v8"
+        assert capabilities["contract_version"] == "2026-08-session-exposure-v1"
         assert capabilities["features"]["source_bound_hypnotic_pattern"] is True
         assert capabilities["features"]["build_time_content_resolution"] is True
         assert capabilities["ruling_policy"] == {

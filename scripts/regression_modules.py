@@ -140,7 +140,6 @@ def _campaign_key(root: Path, path: Path, layout: str) -> str:
 class ExposureClient:
     def __init__(self, session: ClientSession) -> None:
         self.session = session
-        self.exposure_id = ""
 
     async def core(self, tool_id: str, arguments: dict[str, Any]) -> Any:
         started = perf_counter()
@@ -148,11 +147,7 @@ class ExposureClient:
             return decode_mcp_result(await self.session.call_tool(tool_id, arguments))
         finally:
             if os.environ.get("SAGASMITH_REGRESSION_TIMINGS") == "1":
-                label = (
-                    str(arguments.get("tool_id") or "")
-                    if tool_id == "exposure_call"
-                    else tool_id
-                )
+                label = tool_id
                 print(
                     json.dumps(
                         {
@@ -168,27 +163,23 @@ class ExposureClient:
         arguments: dict[str, Any] = {"principal_id": PRINCIPAL_ID}
         if campaign_id:
             arguments["campaign_id"] = campaign_id
-        opened = await self.core("exposure_open", arguments)
-        self.exposure_id = str(opened["exposure_id"])
-        return opened
+        return await self.core("exposure", {"action": "open", **arguments})
 
-    async def load(self, *group_ids: str) -> None:
-        for group_id in group_ids:
-            await self.core(
-                "exposure_load",
-                {"exposure_id": self.exposure_id, "group_id": group_id},
-            )
-
-    async def domain(self, tool_id: str, arguments: dict[str, Any]) -> Any:
-        wrapped = await self.core(
-            "exposure_call",
+    async def load(self) -> None:
+        searched = await self.core(
+            "exposure", {"action": "search", "principal_id": PRINCIPAL_ID}
+        )
+        await self.core(
+            "exposure",
             {
-                "exposure_id": self.exposure_id,
-                "tool_id": tool_id,
-                "arguments": arguments,
+                "action": "set",
+                "add_tool_ids": [item["tool_id"] for item in searched["matches"]],
+                "principal_id": PRINCIPAL_ID,
             },
         )
-        return _domain_value(wrapped)
+
+    async def domain(self, tool_id: str, arguments: dict[str, Any]) -> Any:
+        return _domain_value(await self.core(tool_id, arguments))
 
 
 async def campaign_view(
@@ -314,12 +305,7 @@ async def _import_document(
 
     campaign_id = str(campaign["id"])
     await client.open(campaign_id)
-    await client.load(
-        "lobby.campaign",
-        "lobby.rules",
-        "lobby.modules",
-        "lobby.characters",
-    )
+    await client.load()
 
     profile = await client.domain(
         "campaign_rules", {"campaign_id": campaign_id, "action": "get_profile"}
@@ -525,7 +511,7 @@ async def _create_baseline_snapshot(
 ) -> dict[str, Any]:
     baseline_identity = _token(f"{run_id}\0{campaign_key}\0playthrough-manifest-v1")
     await client.open(campaign_id)
-    await client.load("lobby.campaign")
+    await client.load()
     campaign = await client.core(
         "campaign_query",
         {
@@ -629,7 +615,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                             f"{args.run_id}\0campaign\0{campaign_key}"
                         )
                         await client.open()
-                        await client.load("lobby.bootstrap")
+                        await client.load()
                         campaign = await client.domain(
                             "campaign_create",
                             {

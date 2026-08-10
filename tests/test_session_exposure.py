@@ -10,9 +10,6 @@ from pathlib import Path
 import pytest
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
-from mcp.types import ImageContent
-from pypdf import PdfWriter
-from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 from sagasmith_core.access import CAMPAIGN_DM_ROLES
 from sagasmith_dnd.combat_engine import NeedsRulingError
 from sagasmith_dnd.engine import roll
@@ -33,7 +30,7 @@ from sagasmith_dnd_mcp.server import (
     _ruling_status,
     create_server,
 )
-from sagasmith_dnd_mcp.tool_profiles import CORE_TOOLS, GROUP_BY_ID
+from sagasmith_dnd_mcp.tool_profiles import CORE_TOOLS, policy_for_tool
 
 
 def test_pending_ruling_envelope_defaults_to_agent_reasoning() -> None:
@@ -91,58 +88,6 @@ def test_facade_preserves_external_ruling_ownership() -> None:
     assert result["default_resolver"] == "external_input"
     assert result["ruling_kind"] == "missing_or_conflicting_source_review"
     assert result["result"]["reason"] == "source card is incomplete"
-
-
-def test_exposure_inspect_returns_action_specific_payload_contract(
-    tmp_path: Path,
-) -> None:
-    config = McpConfig(
-        home=tmp_path / "home",
-        database_url=None,
-        chroma_url=None,
-        chroma_path_override=None,
-        dnd_skills_dir=tmp_path / "dnd",
-        modulegen_skills_dir=tmp_path / "modulegen",
-        auto_seed_rules=False,
-    )
-
-    async def exercise() -> None:
-        server = create_server(config)
-        _, result = await server.call_tool(
-            "exposure_inspect",
-            {
-                "group_id": "play.resolution",
-                "tool_id": "character_check",
-                "selector": "contest",
-            },
-        )
-        contract = result["tool_contract"]
-        assert contract["selector_field"] == "action"
-        assert contract["selected"] == "contest"
-        contest = contract["actions"]["contest"]
-        assert contest["contract_kind"] == "exact_field_contract"
-        variant = contest["payload_variants"][0]
-        assert variant["additional_properties"] is False
-        assert variant["required_fields"] == [
-            "source_actor_id",
-            "target_actor_id",
-            "source_ability",
-            "target_ability",
-        ]
-        _, module_result = await server.call_tool(
-            "exposure_inspect",
-            {
-                "group_id": "lobby.modules",
-                "tool_id": "module_query",
-                "selector": "scene",
-            },
-        )
-        module_contract = module_result["tool_contract"]["actions"]["scene"]
-        assert module_contract["contract_kind"] == "exact_field_contract"
-        assert module_contract["payload_variants"][0]["additional_properties"] is False
-        assert module_contract["payload_variants"][0]["required_fields"] == ["scene_id"]
-
-    asyncio.run(exercise())
 
 
 def test_facade_preserves_nested_external_ruling_ownership() -> None:
@@ -396,95 +341,6 @@ def test_nested_pending_results_default_to_agent_and_preserve_exceptions() -> No
     )
 
 
-def test_exposure_call_marks_live_dm_ruling_for_agent(tmp_path: Path, monkeypatch) -> None:
-    config = McpConfig(
-        home=tmp_path / "home",
-        database_url=None,
-        chroma_url=None,
-        chroma_path_override=None,
-        dnd_skills_dir=tmp_path / "dnd",
-        modulegen_skills_dir=tmp_path / "modulegen",
-        auto_seed_rules=False,
-    )
-
-    async def exercise() -> None:
-        server = create_server(config)
-
-        async def domain(name: str, arguments: dict) -> dict:
-            _, result = await server.call_tool(name, arguments)
-            return result.get("result", result)
-
-        campaign = await domain(
-            "campaign_create",
-            {"name": "Agent ruling envelope", "idempotency_key": "campaign"},
-        )
-        opened = await domain(
-            "exposure_open",
-            {"campaign_id": campaign["id"], "principal_id": "system:local"},
-        )
-        await domain(
-            "exposure_load",
-            {"exposure_id": opened["exposure_id"], "group_id": "lobby.rules"},
-        )
-        seed_status = server._tool_manager.get_tool("rule_seed_status")
-        monkeypatch.setattr(
-            seed_status,
-            "fn",
-            lambda: {
-                "status": "pending_ruling",
-                "reason": "exact source effect needs adjudication",
-            },
-        )
-        called = await server.call_tool(
-            "exposure_call",
-            {
-                "exposure_id": opened["exposure_id"],
-                "tool_id": "rule_seed_status",
-                "arguments": {},
-            },
-        )
-        assert isinstance(called, list)
-        envelope = json.loads(called[0].text)
-        assert envelope["result"]["status"] == "pending_ruling"
-        assert envelope["ruling_resolution"]["default_resolver"] == "agent"
-        assert envelope["ruling_resolution"]["ruling_kind"] == "agent_dm_adjudication"
-
-    asyncio.run(exercise())
-
-
-def _write_exposure_module_pdf(path: Path) -> None:
-    writer = PdfWriter()
-    page = writer.add_blank_page(width=300, height=300)
-    font = DictionaryObject(
-        {
-            NameObject("/Type"): NameObject("/Font"),
-            NameObject("/Subtype"): NameObject("/Type1"),
-            NameObject("/BaseFont"): NameObject("/Helvetica"),
-        }
-    )
-    page[NameObject("/Resources")] = DictionaryObject(
-        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): writer._add_object(font)})}
-    )
-    lines = [
-        "Chapter 1: Dungeon",
-        "D1. Entry",
-        "A stone corridor descends into darkness.",
-        "D2. Guard Room",
-        "Two doors connect this room to the dungeon.",
-    ]
-    operators = [b"BT /F1 12 Tf 30 250 Td 16 TL"]
-    for index, line in enumerate(lines):
-        if index:
-            operators.append(b"T*")
-        operators.append(f"({line}) Tj".encode("ascii"))
-    operators.append(b"ET")
-    stream = DecodedStreamObject()
-    stream.set_data(b"\n".join(operators))
-    page[NameObject("/Contents")] = writer._add_object(stream)
-    with path.open("wb") as output:
-        writer.write(output)
-
-
 def test_exposures_are_session_scoped_and_phase_safe() -> None:
     registry = ExposureRegistry()
     first = registry.open(
@@ -499,23 +355,22 @@ def test_exposures_are_session_scoped_and_phase_safe() -> None:
         campaign_id="campaign-1",
         phase="lobby",
     )
-    registry.load(first, "lobby.modules")
-    registry.load(first, "lobby.rules")
+    assert registry.set_tools(first, add=["module_draft", "rulebook_draft"]) is True
 
     assert "module_draft" in registry.visible_tools(first)
-    assert "campaign_rules" in registry.visible_tools(first)
     assert "module_draft" not in registry.visible_tools(second)
-    with pytest.raises(ExposureError):
-        registry.load(first, "combat.actions")
-    with pytest.raises(ExposureError):
+    with pytest.raises(ExposureError, match="unavailable"):
+        registry.set_tools(first, add=["combat_query"])
+    with pytest.raises(ExposureError, match="another MCP session"):
         registry.get(first.id, "session:second")
 
     assert registry.refresh_phase(first, "play") is True
-    assert "module_draft" not in registry.visible_tools(first)
+    assert first.loaded_tools == set()
     assert registry.visible_tools(first) == set(CORE_TOOLS)
+    assert first.revision == 2
 
 
-def test_unbound_exposure_only_loads_bootstrap_or_local_admin() -> None:
+def test_unbound_exposure_only_loads_non_campaign_tools() -> None:
     registry = ExposureRegistry()
     exposure = registry.open(
         session_key="session:bootstrap",
@@ -523,138 +378,34 @@ def test_unbound_exposure_only_loads_bootstrap_or_local_admin() -> None:
         campaign_id=None,
         phase="lobby",
     )
-    registry.load(exposure, "lobby.bootstrap")
+    registry.set_tools(exposure, add=["campaign_create", "system_list"])
     with pytest.raises(ExposureError, match="campaign-bound"):
-        registry.load(exposure, "lobby.rules")
+        registry.set_tools(exposure, add=["rulebook_draft"])
     with pytest.raises(ExposureError, match="system:local"):
-        registry.load(exposure, "lobby.storage_admin")
+        registry.set_tools(exposure, add=["storage_migrate"])
 
 
-def test_phase_groups_separate_player_reads_from_dm_control() -> None:
-    assert all(
-        not group.roles or group.roles == CAMPAIGN_DM_ROLES for group in GROUP_BY_ID.values()
-    )
-    assert GROUP_BY_ID["lobby.memory"].roles == frozenset()
-    assert GROUP_BY_ID["lobby.memory_control"].roles == frozenset({"owner", "dm"})
-    assert "memory_query" not in GROUP_BY_ID["lobby.memory"].tools
-    assert "memory_query" in GROUP_BY_ID["lobby.memory_control"].tools
-
-    assert GROUP_BY_ID["play.scene"].roles == frozenset()
-    assert "branch_query" in GROUP_BY_ID["play.scene"].tools
-    assert GROUP_BY_ID["play.scene_control"].roles == frozenset({"owner", "dm"})
-    assert "snapshot_query" not in GROUP_BY_ID["play.scene"].tools
-    assert "snapshot_query" in GROUP_BY_ID["play.scene_control"].tools
-    assert "state_revision" in GROUP_BY_ID["play.scene_control"].tools
-    assert "campaign_rules" in GROUP_BY_ID["play.scene_control"].tools
-    assert "combat_start" not in GROUP_BY_ID["play.resolution"].tools
-    assert GROUP_BY_ID["play.combat_control"].roles == frozenset({"owner", "dm"})
-
-    assert "combat_end" not in GROUP_BY_ID["combat.turn"].tools
-    assert "combat_choice" in GROUP_BY_ID["combat.turn"].tools
-    assert "combat_choice" in GROUP_BY_ID["combat.actions"].tools
-    assert "branch_query" in GROUP_BY_ID["combat.observe"].tools
-    assert GROUP_BY_ID["combat.control"].roles == frozenset({"owner", "dm"})
-    assert GROUP_BY_ID["combat.save"].roles == frozenset({"owner", "dm"})
-    assert "branch_change" in GROUP_BY_ID["combat.save"].tools
-    assert "snapshot_restore" in GROUP_BY_ID["combat.save"].tools
-    assert GROUP_BY_ID["combat.maintenance"].roles == frozenset({"owner", "dm"})
-    assert GROUP_BY_ID["combat.maintenance"].tools == frozenset({"campaign_rules"})
-    assert GROUP_BY_ID["combat.map"].roles == frozenset({"owner", "dm"})
+def test_tool_policy_separates_phase_and_role_authority() -> None:
+    assert policy_for_tool("content_pack").phases == frozenset({"lobby"})
+    assert policy_for_tool("content_pack").roles("lobby") == CAMPAIGN_DM_ROLES
+    assert policy_for_tool("module_query").roles("lobby") == CAMPAIGN_DM_ROLES
+    assert policy_for_tool("module_query").roles("play") == frozenset()
+    assert policy_for_tool("combat_query").phases == frozenset({"combat"})
+    assert policy_for_tool("campaign_create").requires_campaign is False
+    assert policy_for_tool("storage_migrate").local_only is True
 
 
-def test_player_exposure_loads_scene_reads_but_not_scene_control(tmp_path: Path) -> None:
-    config = McpConfig(
-        home=tmp_path / "home",
-        database_url=None,
-        chroma_url=None,
-        chroma_path_override=None,
-        dnd_skills_dir=tmp_path / "dnd",
-        modulegen_skills_dir=tmp_path / "modulegen",
-        auto_seed_rules=False,
-    )
-
-    async def exercise() -> None:
-        server = create_server(config)
-
-        async def call(name: str, arguments: dict):
-            _, result = await server.call_tool(name, arguments)
-            return result.get("result", result) if isinstance(result, dict) else result
-
-        campaign = await call(
-            "campaign_create",
-            {"name": "Player exposure", "idempotency_key": "campaign"},
-        )
-        await call(
-            "game_phase",
-            {
-                "campaign_id": campaign["id"],
-                "action": "set",
-                "tool_profile": "play",
-                "expected_revision": campaign["revision"],
-                "idempotency_key": "play-phase",
-            },
-        )
-        await call(
-            "access_grant",
-            {
-                "scope": "campaign",
-                "campaign_id": campaign["id"],
-                "principal_id": "player:alice",
-                "payload": {"role": "player"},
-            },
-        )
-        opened = await call(
-            "exposure_open",
-            {"campaign_id": campaign["id"], "principal_id": "player:alice"},
-        )
-
-        loaded = await call(
-            "exposure_load",
-            {"exposure_id": opened["exposure_id"], "group_id": "play.scene"},
-        )
-        assert "module_query" in loaded["visible_tools"]
-        assert "snapshot_query" not in loaded["visible_tools"]
-        assert "memory_query" not in loaded["visible_tools"]
-
-        with pytest.raises(Exception, match="cannot access"):
-            await call(
-                "exposure_load",
-                {
-                    "exposure_id": opened["exposure_id"],
-                    "group_id": "play.scene_control",
-                },
-            )
-
-    asyncio.run(exercise())
-
-
-def test_exposure_time_lease_is_deterministic_and_loaded_groups_persist() -> None:
-    registry = ExposureRegistry(ttl=timedelta(microseconds=-1))
-    expired = registry.open(
+def test_exposure_time_lease_and_revision_are_deterministic() -> None:
+    expired_registry = ExposureRegistry(ttl=timedelta(microseconds=-1))
+    expired = expired_registry.open(
         session_key="session:expired",
         principal_id="system:local",
         campaign_id=None,
         phase="lobby",
     )
     with pytest.raises(ExposureError, match="expired"):
-        registry.get(expired.id, "session:expired")
+        expired_registry.get(expired.id, "session:expired")
 
-    registry = ExposureRegistry()
-    exposure = registry.open(
-        session_key="session:ttl",
-        principal_id="system:local",
-        campaign_id="campaign-1",
-        phase="combat",
-    )
-    registry.load(exposure, "combat.observe")
-    registry.load(exposure, "combat.actions")
-    assert "combat.actions" in exposure.loaded_groups
-    registry.require_tool(exposure, "combat_check")
-    registry.require_tool(exposure, "combat_check")
-    assert "combat.actions" in exposure.loaded_groups
-
-
-def test_exposure_lease_uses_one_injected_operational_clock() -> None:
     moments = iter(
         [
             datetime(2026, 7, 28, 1, 0, tzinfo=UTC),
@@ -669,15 +420,13 @@ def test_exposure_lease_uses_one_injected_operational_clock() -> None:
         campaign_id=None,
         phase="lobby",
     )
-
     assert exposure.created_at == datetime(2026, 7, 28, 1, 1, tzinfo=UTC)
-    assert exposure.updated_at == exposure.created_at
-    assert exposure.expires_at == exposure.created_at + timedelta(hours=2)
-    registry.touch(exposure)
+    assert registry.set_tools(exposure, add=["campaign_create"]) is True
+    assert exposure.revision == 1
     assert exposure.updated_at == datetime(2026, 7, 28, 1, 2, tzinfo=UTC)
 
 
-def test_native_tool_list_starts_core_and_expands_per_session(tmp_path) -> None:
+def test_native_tool_list_starts_core_and_varies_per_session(tmp_path: Path) -> None:
     config = McpConfig(
         home=tmp_path / "home",
         database_url=None,
@@ -685,6 +434,7 @@ def test_native_tool_list_starts_core_and_expands_per_session(tmp_path) -> None:
         chroma_path_override=None,
         dnd_skills_dir=tmp_path / "dnd",
         modulegen_skills_dir=tmp_path / "modulegen",
+        auto_seed_rules=False,
     )
 
     async def exercise() -> None:
@@ -692,17 +442,14 @@ def test_native_tool_list_starts_core_and_expands_per_session(tmp_path) -> None:
         server._request_session = lambda: ("mcp:first", object())  # type: ignore[method-assign]
         assert {tool.name for tool in await server.list_tools()} == set(CORE_TOOLS)
 
-        exposure = server.exposure_registry.open(
+        first = server.exposure_registry.open(
             session_key="mcp:first",
             principal_id="system:local",
             campaign_id=None,
             phase="lobby",
         )
-        server.exposure_registry.load(exposure, "lobby.bootstrap")
-        visible = {tool.name for tool in await server.list_tools()}
-        assert set(CORE_TOOLS) <= visible
-        assert "campaign_create" in visible
-        assert "combat_resolve_attack" not in visible
+        server.exposure_registry.set_tools(first, add=["campaign_create"])
+        assert "campaign_create" in {tool.name for tool in await server.list_tools()}
 
         server._request_session = lambda: ("mcp:second", object())  # type: ignore[method-assign]
         assert {tool.name for tool in await server.list_tools()} == set(CORE_TOOLS)
@@ -710,7 +457,9 @@ def test_native_tool_list_starts_core_and_expands_per_session(tmp_path) -> None:
     asyncio.run(exercise())
 
 
-def test_stdio_session_uses_native_refresh_and_exposure_call_fallback(tmp_path) -> None:
+def test_stdio_session_mutates_native_tool_list_and_calls_tools_directly(
+    tmp_path: Path,
+) -> None:
     async def exercise() -> None:
         env = dict(os.environ)
         env.update(
@@ -730,133 +479,64 @@ def test_stdio_session_uses_native_refresh_and_exposure_call_fallback(tmp_path) 
                 initialized = await session.initialize()
                 assert initialized.capabilities.tools.listChanged is True
                 assert {tool.name for tool in (await session.list_tools()).tools} == set(CORE_TOOLS)
-                assert "sagasmith://bootstrap" in {
-                    str(resource.uri) for resource in (await session.list_resources()).resources
-                }
-                outlined = await session.call_tool(
-                    "skill_query",
-                    {
-                        "kind": "skill",
-                        "action": "outline",
-                        "identifier": "dnd.full",
-                    },
-                )
-                outlined_payload = json.loads(outlined.content[0].text)["result"]
-                assert any(
-                    heading["title"] == "Startup" for heading in outlined_payload["headings"]
-                )
 
                 principal_id = "discord:user-42"
-                opened = await session.call_tool("exposure_open", {"principal_id": principal_id})
-                exposure_id = json.loads(opened.content[0].text)["exposure_id"]
+                opened = await session.call_tool(
+                    "exposure",
+                    {"action": "open", "principal_id": principal_id},
+                )
+                assert not opened.isError
                 loaded = await session.call_tool(
-                    "exposure_load",
-                    {"exposure_id": exposure_id, "group_id": "lobby.bootstrap"},
+                    "exposure",
+                    {
+                        "action": "set",
+                        "add_tool_ids": ["campaign_create", "system_list"],
+                        "principal_id": principal_id,
+                    },
                 )
                 assert not loaded.isError
-                assert "campaign_create" in {
-                    tool.name for tool in (await session.list_tools()).tools
-                }
+                visible = {tool.name for tool in (await session.list_tools()).tools}
+                assert "campaign_create" in visible
+                assert "combat_query" not in visible
 
                 created = await session.call_tool(
-                    "exposure_call",
+                    "campaign_create",
                     {
-                        "exposure_id": exposure_id,
-                        "tool_id": "campaign_create",
-                        "arguments": {
-                            "name": "Exposure test",
-                            "idempotency_key": "exposure-test-create",
-                        },
+                        "name": "Exposure test",
+                        "idempotency_key": "exposure-test-create",
                     },
                 )
                 assert not created.isError
-                created_payload = json.loads(created.content[0].text)
-                assert isinstance(created_payload["result"], dict)
-                assert created_payload["result"]["name"] == "Exposure test"
-                campaigns = await session.call_tool(
-                    "campaign_query", {"principal_id": principal_id}
-                )
-                campaign_id = json.loads(campaigns.content[0].text)["result"][0]["id"]
+                campaign_id = json.loads(created.content[0].text)["id"]
 
                 reopened = await session.call_tool(
-                    "exposure_open",
-                    {"campaign_id": campaign_id, "principal_id": principal_id},
-                )
-                exposure_id = json.loads(reopened.content[0].text)["exposure_id"]
-                resumed = await session.call_tool(
-                    "campaign_query",
+                    "exposure",
                     {
-                        "view": "resume",
-                        "payload": {"campaign_id": campaign_id},
+                        "action": "open",
+                        "campaign_id": campaign_id,
                         "principal_id": principal_id,
                     },
                 )
-                resumed_payload = json.loads(resumed.content[0].text)["result"]
-                assert resumed_payload["campaign"]["id"] == campaign_id
-                assert (
-                    resumed_payload["continuity"]["context_receipt"]["campaign_id"] == campaign_id
-                )
-                synchronized = await session.call_tool(
-                    "campaign_query",
-                    {
-                        "view": "binding",
-                        "payload": {"campaign_id": campaign_id},
-                        "principal_id": principal_id,
-                    },
-                )
-                synchronized_payload = json.loads(synchronized.content[0].text)["result"]
-                assert synchronized_payload["campaign_id"] == campaign_id
-                assert synchronized_payload["principal_fingerprint"]
-                assert synchronized_payload["role"] == "owner"
+                assert not reopened.isError
                 loaded = await session.call_tool(
-                    "exposure_load",
-                    {"exposure_id": exposure_id, "group_id": "lobby.rules"},
+                    "exposure",
+                    {
+                        "action": "set",
+                        "add_tool_ids": ["rule_seed_status", "rulebook_draft"],
+                        "principal_id": principal_id,
+                    },
                 )
                 assert not loaded.isError
-                assert "rulebook_draft" in {
-                    tool.name for tool in (await session.list_tools()).tools
-                }
-                inspected = await session.call_tool(
-                    "exposure_inspect",
-                    {
-                        "group_id": "lobby.rules",
-                        "tool_id": "rulebook_draft",
-                        "selector": "start",
-                    },
-                )
-                inspected_payload = json.loads(inspected.content[0].text)
-                assert (
-                    inspected_payload["tool_contract"]["actions"]["start"]["contract_kind"]
-                    == "exact_field_contract"
-                )
-                fallback = await session.call_tool(
-                    "exposure_call",
-                    {
-                        "exposure_id": exposure_id,
-                        "tool_id": "rule_seed_status",
-                        "arguments": {},
-                    },
-                )
-                assert not fallback.isError
-                fallback_payload = json.loads(fallback.content[0].text)
-                assert isinstance(fallback_payload["result"], dict)
-                assert fallback_payload["result"]["auto_seed"] is False
-
-                cross_campaign = await session.call_tool(
-                    "campaign_query",
-                    {
-                        "view": "get",
-                        "payload": {"campaign_id": "another-campaign"},
-                        "principal_id": principal_id,
-                    },
-                )
-                assert cross_campaign.isError
-                assert "bound to" in cross_campaign.content[0].text
+                visible = {tool.name for tool in (await session.list_tools()).tools}
+                assert "rulebook_draft" in visible
+                status = await session.call_tool("rule_seed_status", {})
+                assert not status.isError
+                assert json.loads(status.content[0].text)["auto_seed"] is False
 
     asyncio.run(exercise())
 
 
-def test_stdio_process_binding_overwrites_model_authored_principal(tmp_path) -> None:
+def test_stdio_process_binding_overwrites_model_authored_principal(tmp_path: Path) -> None:
     async def exercise() -> None:
         env = dict(os.environ)
         env.update(
@@ -876,17 +556,17 @@ def test_stdio_process_binding_overwrites_model_authored_principal(tmp_path) -> 
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 opened = await session.call_tool(
-                    "exposure_open",
-                    {"principal_id": "model:forged-user"},
+                    "exposure",
+                    {"action": "open", "principal_id": "model:forged-user"},
                 )
                 opened_payload = json.loads(opened.content[0].text)
                 assert opened_payload["principal_id"] == "discord:trusted-user"
-                exposure_id = opened_payload["exposure_id"]
                 await session.call_tool(
-                    "exposure_load",
+                    "exposure",
                     {
-                        "exposure_id": exposure_id,
-                        "group_id": "lobby.bootstrap",
+                        "action": "set",
+                        "add_tool_ids": ["campaign_create"],
+                        "principal_id": "model:forged-user",
                     },
                 )
                 created = await session.call_tool(
@@ -903,136 +583,8 @@ def test_stdio_process_binding_overwrites_model_authored_principal(tmp_path) -> 
                     {"principal_id": "another:forged-user"},
                 )
                 listed_payload = json.loads(listed.content[0].text)["result"]
-                assert [item["name"] for item in listed_payload] == ["Principal-bound campaign"]
-
-    asyncio.run(exercise())
-
-
-def test_stdio_exposure_fallback_preserves_rendered_image_content(tmp_path: Path) -> None:
-    module_root = tmp_path / "modules"
-    module_root.mkdir()
-    source = module_root / "exposure-module.pdf"
-    _write_exposure_module_pdf(source)
-
-    config = McpConfig(
-        home=tmp_path / "home",
-        database_url=None,
-        chroma_url=None,
-        chroma_path_override=None,
-        dnd_skills_dir=tmp_path / "dnd",
-        modulegen_skills_dir=tmp_path / "modulegen",
-        auto_seed_rules=False,
-        module_import_roots=(module_root,),
-        rule_ocr_enabled=False,
-    )
-
-    async def seed() -> tuple[str, str]:
-        server = create_server(config)
-
-        async def direct(name: str, arguments: dict):
-            called = await server.call_tool(name, arguments)
-            if isinstance(called, tuple):
-                _, structured = called
-                return structured.get("result", structured)
-            return called
-
-        campaign = await direct(
-            "campaign_create",
-            {
-                "name": "Image fallback",
-                "edition": "2014",
-                "idempotency_key": "image-fallback-campaign",
-            },
-        )
-        staged = await direct(
-            "module_draft",
-            {
-                "campaign_id": campaign["id"],
-                "action": "start",
-                "payload": {
-                    "source_path": str(source),
-                    "source_key": "image-fallback",
-                    "title": "Image Fallback",
-                },
-                "idempotency_key": "image-fallback-stage",
-            },
-        )
-        return campaign["id"], staged["module_id"]
-
-    campaign_id, module_id = asyncio.run(seed())
-
-    async def exercise() -> None:
-        env = dict(os.environ)
-        env.update(
-            {
-                "SAGASMITH_DND_MCP_HOME": str(tmp_path / "home"),
-                "SAGASMITH_DND_MCP_AUTO_SEED": "0",
-                "SAGASMITH_DND_MCP_MODULE_IMPORT_ROOTS": str(module_root),
-                "SAGASMITH_DND_MCP_RULE_OCR": "0",
-            }
-        )
-        params = StdioServerParameters(
-            command=sys.executable,
-            args=["-m", "sagasmith_dnd_mcp.server"],
-            cwd=Path(__file__).parents[1],
-            env=env,
-        )
-
-        def decoded(result) -> dict:
-            assert not result.isError
-            return json.loads(result.content[0].text)
-
-        async def rpc(name: str, arguments: dict, *, timeout_seconds: int = 20):
-            try:
-                return await session.call_tool(
-                    name,
-                    arguments,
-                    read_timeout_seconds=timedelta(seconds=timeout_seconds),
-                )
-            except Exception as exc:
-                raise AssertionError(f"stdio MCP call {name!r} did not complete") from exc
-
-        async with stdio_client(params) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                principal_id = "system:local"
-                opened = decoded(
-                    await rpc(
-                        "exposure_open",
-                        {"campaign_id": campaign_id, "principal_id": principal_id},
-                    )
-                )
-                exposure_id = opened["exposure_id"]
-                await rpc(
-                    "exposure_load",
-                    {"exposure_id": exposure_id, "group_id": "lobby.modules"},
-                )
-                rendered = await rpc(
-                    "exposure_call",
-                    {
-                        "exposure_id": exposure_id,
-                        "tool_id": "module_draft",
-                        "arguments": {
-                            "campaign_id": campaign_id,
-                            "action": "evidence",
-                            "payload": {
-                                "kind": "page",
-                                "module_id": module_id,
-                                "page_number": 1,
-                                "scale": 0.5,
-                                "include_ocr_text": False,
-                            },
-                        },
-                    },
-                    timeout_seconds=90,
-                )
-                envelope = decoded(rendered)
-                assert envelope["tool_id"] == "module_draft"
-                assert envelope["result"]["page_number"] == 1
-                assert len(rendered.content[0].text) < 10_000
-                images = [item for item in rendered.content if isinstance(item, ImageContent)]
-                assert len(images) == 1
-                assert images[0].mimeType == "image/png"
-                assert rendered.structuredContent == envelope
+                assert [item["name"] for item in listed_payload] == [
+                    "Principal-bound campaign"
+                ]
 
     asyncio.run(exercise())
