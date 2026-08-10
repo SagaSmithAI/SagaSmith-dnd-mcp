@@ -3514,13 +3514,16 @@ class SessionExposureFastMCP(FastMCP):
         return changed
 
     async def list_tools(self):  # type: ignore[override]
+        public_tools = [
+            tool for tool in await super().list_tools() if tool.name not in HOST_PRIVATE_TOOLS
+        ]
         request = self._request_session()
         if request is None:
-            return await super().list_tools()
+            return public_tools
         session_key, _ = request
         await self._refresh(session_key)
         visible = self.exposure_registry.visible_tools(self.exposure_registry.active(session_key))
-        return [tool for tool in await super().list_tools() if tool.name in visible]
+        return [tool for tool in public_tools if tool.name in visible]
 
     async def call_tool(self, name: str, arguments: dict[str, Any]):  # type: ignore[override]
         request = self._request_session()
@@ -29584,6 +29587,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def npc_conversation_private_context(bundle: dict[str, Any]) -> dict[str, Any]:
         context = {key: deepcopy(value) for key, value in bundle.items() if key != "bundle_receipt"}
         context["purpose"] = "npc_conversation"
+        bundle_authority = dict(context["authority"])
+        context["authority"] = {
+            key: deepcopy(bundle_authority[key])
+            for key in ("campaign_id", "branch_id", "actor_revision", "scene_state_version")
+        }
         context["constraints"] = {
             **dict(context["constraints"]),
             "output_contract": "npc-conversation-proposal.v3",
@@ -29688,9 +29696,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         first_authority = dict(first_bundle["authority"])
         scene = dict(first_bundle.get("scene") or {})
         authority = {
-            "campaign_revision": int(first_authority["campaign_revision"]),
-            "head_snapshot_id": first_authority.get("head_snapshot_id"),
-            "latest_event_sequence": int(first_authority["latest_event_sequence"]),
             "scene_state_version": int(first_authority.get("scene_state_version") or 0),
             "actor_revisions": {actor.id: actor.revision for actor in actors},
             "actor_context_locks": {
@@ -29739,7 +29744,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         session = npc_conversations.require_owner(
             conversation_id, campaign_id=campaign_id, principal_id=principal_id
         )
-        if session.get("status") in {"open", "suspended"}:
+        if session.get("status") == "open":
             npc_conversation_require_fresh(session)
         result = npc_conversations.public_status(session)
         if session.get("status") == "stale":
@@ -29984,7 +29989,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if replay is not None:
             return replay
         if session.get("status") != "open":
-            raise ValueError("conversation must resolve suspended work before closing")
+            raise ValueError("conversation must be open before closing")
         if any(
             item.get("status") in {"pending", "claimed"} for item in session["activations"].values()
         ):

@@ -29,7 +29,7 @@ NPC_TRUTH_POSTURES = frozenset(
 NPC_RESOLUTION_KINDS = frozenset(
     {"ability_check", "contest", "saving_throw", "attack", "dm_adjudication"}
 )
-ACTIVE_CONVERSATION_STATUSES = frozenset({"open", "suspended", "stale"})
+ACTIVE_CONVERSATION_STATUSES = frozenset({"open", "stale"})
 
 
 def _object(value: Any, field: str) -> dict[str, Any]:
@@ -911,7 +911,6 @@ class ConversationStore:
                 "campaign_id": session["campaign_id"],
                 "branch_id": session["branch_id"],
                 "actor_revision": context["authority"]["actor_revision"],
-                "campaign_revision": context["authority"]["campaign_revision"],
                 "working_state_revision": runtime["working_state_revision"],
                 "inbox_cursor": len(session["events"]),
                 "conversation_revision": int(session["conversation_revision"]) + 1,

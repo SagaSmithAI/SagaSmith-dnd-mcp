@@ -521,9 +521,9 @@ def test_machine_facade_contracts_reference_real_public_selectors(
                 for variant in variants:
                     assert set(variant["required_fields"]) <= set(variant["allowed_fields"])
                     assert isinstance(variant["additional_properties"], bool)
-        assert "offset" in ACTION_PAYLOAD_CONTRACTS["rulebook_draft"]["evidence"][1][
-            "allowed_fields"
-        ]
+        assert (
+            "offset" in ACTION_PAYLOAD_CONTRACTS["rulebook_draft"]["evidence"][1]["allowed_fields"]
+        )
 
     asyncio.run(inspect_contracts())
 
@@ -564,13 +564,13 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
         assert BASELINE_PUBLIC_TOOL_COUNT == 92
         assert BASELINE_INPUT_SCHEMA_BYTES == 56_611
         assert len(CORE_TOOLS) == TARGET_CORE_TOOL_COUNT == 13
-        assert len(tools) == TARGET_PUBLIC_TOOL_COUNT == 89
+        assert len(tools) == TARGET_PUBLIC_TOOL_COUNT == 82
         assert (
             {phase: len(names) for phase, names in profile_catalog().items()}
             == PROFILE_TOOL_LIMITS
             == {
                 "lobby": 60,
-                "play": 58,
+                "play": 51,
                 "combat": 49,
             }
         )
