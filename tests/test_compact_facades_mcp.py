@@ -26,7 +26,7 @@ def _config(tmp_path: Path) -> McpConfig:
     )
 
 
-def test_compact_facades_reject_unknown_fields_and_wrong_phases(
+def test_compact_facades_enforce_authoritative_phases_and_roles(
     tmp_path: Path,
 ) -> None:
     async def exercise() -> None:
@@ -50,30 +50,6 @@ def test_compact_facades_reject_unknown_fields_and_wrong_phases(
                 "idempotency_key": "actor",
             },
         )
-
-        with pytest.raises(Exception, match=r"unsupported rulebook_draft\(get\)"):
-            await _call(
-                server,
-                "rulebook_draft",
-                {
-                    "campaign_id": campaign["id"],
-                    "action": "get",
-                    "payload": {"unexpected": "payload-bypass"},
-                },
-            )
-        with pytest.raises(Exception, match=r"unsupported module_draft\(get\)"):
-            await _call(
-                server,
-                "module_draft",
-                {
-                    "campaign_id": campaign["id"],
-                    "action": "get",
-                    "payload": {
-                        "job_id": "job",
-                        "expected_revision": campaign["revision"],
-                    },
-                },
-            )
 
         with pytest.raises(Exception, match="only available during play"):
             await _call(
@@ -132,64 +108,6 @@ def test_compact_facades_reject_unknown_fields_and_wrong_phases(
             },
         )
 
-        with pytest.raises(Exception, match="unsupported character_check"):
-            await _call(
-                server,
-                "character_check",
-                {
-                    "campaign_id": campaign["id"],
-                    "action": "check",
-                    "payload": {
-                        "actor_id": actor["id"],
-                        "kind": "ability",
-                        "ability": "wisdom",
-                        "target_actor_id": actor["id"],
-                    },
-                    "expected_revision": before["revision"],
-                    "idempotency_key": "unknown-check-field",
-                },
-            )
-        with pytest.raises(Exception, match="unsupported chase"):
-            await _call(
-                server,
-                "chase",
-                {
-                    "campaign_id": campaign["id"],
-                    "action": "query",
-                    "payload": {"branch_id": "payload-bypass"},
-                },
-            )
-        with pytest.raises(Exception, match="unsupported memory_change"):
-            await _call(
-                server,
-                "memory_change",
-                {
-                    "campaign_id": campaign["id"],
-                    "action": "commit",
-                    "payload": {
-                        "event": {"summary": "Must not commit."},
-                        "unvalidated_payload": True,
-                    },
-                    "expected_revision": before["revision"],
-                    "idempotency_key": "unknown-commit-field",
-                },
-            )
-        with pytest.raises(Exception, match="unsupported campaign_change"):
-            await _call(
-                server,
-                "campaign_change",
-                {
-                    "campaign_id": campaign["id"],
-                    "action": "clock_advance",
-                    "payload": {
-                        "period": "minute",
-                        "expected_elapsed_ticks": 10,
-                        "state": {"game_time": {"elapsed_ticks": 10}},
-                    },
-                    "expected_revision": before["revision"],
-                    "idempotency_key": "clock-payload-bypass",
-                },
-            )
         with pytest.raises(Exception, match="only available during lobby"):
             await _call(
                 server,

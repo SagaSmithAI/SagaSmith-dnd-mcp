@@ -1197,27 +1197,30 @@ def test_rulebook_import_source_bound_pack_and_noncombat_settlement(tmp_path: Pa
             {"query": "Tools and Skills Together", "edition": "2014", "top_k": 1},
         )
         chunk_id = hits[0]["id"]
-        reviewed = await call(
-            server,
-            "rulebook_draft",
+        decisions = [
             {
-                "campaign_id": campaign["id"],
-                "action": "edit",
-                "payload": {
-                    "job_id": job_id,
-                    "operation": "candidates",
-                    "decisions": [
-                        {
-                            "id": candidate["id"],
-                            "review_status": "rejected",
-                            "reason": "This test installs only the reviewed settlement mechanic.",
-                        }
-                        for candidate in imported["job"]["candidates"]
-                    ],
+                "id": candidate["id"],
+                "review_status": "rejected",
+                "reason": "This test installs only the reviewed settlement mechanic.",
+            }
+            for candidate in imported["job"]["candidates"]
+        ]
+        reviewed = imported
+        if decisions:
+            reviewed = await call(
+                server,
+                "rulebook_draft",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "edit",
+                    "payload": {
+                        "job_id": job_id,
+                        "operation": "candidates",
+                        "decisions": decisions,
+                    },
+                    "idempotency_key": "xgte-review-candidates",
                 },
-                "idempotency_key": "xgte-review-candidates",
-            },
-        )
+            )
         finalized = await call(
             server,
             "rulebook_draft",

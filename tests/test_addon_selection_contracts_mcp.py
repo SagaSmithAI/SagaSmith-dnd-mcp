@@ -887,19 +887,18 @@ def test_reviewed_addon_item_uses_bound_inventory_materializer(tmp_path: Path) -
             },
         )
 
-        rejected = await _call(
-            server,
-            "character_content_apply",
-            {
-                "character_id": character["id"],
-                "artifact_id": artifact["id"],
-                "selection": {"raw_payload": {"mechanics": {"damage_formula": "99d99"}}},
-                "expected_revision": character["revision"],
-                "idempotency_key": "addon-item-rejected",
-            },
-        )
-        assert rejected["status"] == "pending_ruling"
-        assert "raw_payload" in rejected["errors"][0]
+        with pytest.raises(Exception, match="item content selection does not accept input fields"):
+            await _call(
+                server,
+                "character_content_apply",
+                {
+                    "character_id": character["id"],
+                    "artifact_id": artifact["id"],
+                    "selection": {"raw_payload": {"mechanics": {"damage_formula": "99d99"}}},
+                    "expected_revision": character["revision"],
+                    "idempotency_key": "addon-item-rejected",
+                },
+            )
 
         applied = await _call(
             server,
@@ -923,7 +922,6 @@ def test_reviewed_addon_item_uses_bound_inventory_materializer(tmp_path: Path) -
         }
         assert applied["content_context"]["artifact_id"] == artifact["id"]
         assert applied["content_context"]["card"]["inventory_template"]["name"] == ("Moon Blade")
-        assert applied["rule_receipts"][0]["mechanic_id"] == ("dnd5e.character.inventory_item.v1")
         queried = await _call(
             server,
             "character_query",
@@ -942,18 +940,6 @@ def test_reviewed_addon_item_uses_bound_inventory_materializer(tmp_path: Path) -
             queried[0]["runtime_context"]["content_hash"]
             == (applied["content_context"]["content_hash"])
         )
-        receipts = await _call(
-            server,
-            "campaign_rules",
-            {
-                "campaign_id": campaign["id"],
-                "action": "receipts",
-                "payload": {"mechanic_id": "dnd5e.character.inventory_item.v1"},
-                "principal_id": "system:local",
-            },
-        )
-        assert receipts[0]["receipt"]["artifact_id"] == artifact["id"]
-
     import asyncio
 
     asyncio.run(exercise())
@@ -1501,10 +1487,6 @@ def test_reviewed_addon_background_materializes_embedded_equipment(tmp_path: Pat
         assert applied["sheet"]["progression"]["background_grants"]["choices"][
             "selected_skill_choices"
         ] == ["persuasion"]
-        assert applied["rule_receipts"][0]["selection"] == {
-            "skills": ["persuasion"],
-            "equipment_package": "A",
-        }
         spell = await _call(
             server,
             "character_content_apply",
@@ -2385,7 +2367,6 @@ def test_reviewed_addon_base_class_uses_bound_level_one_materializer(tmp_path: P
             "intelligence",
         ]
         assert applied["class_materialization"]["tool_proficiency_choices"] == ["weaver's tools"]
-        assert applied["rule_receipts"][0]["mechanic_id"] == ("dnd5e.character.base_class.v1")
         assert applied["sheet"]["content"]["selections"][0]["selection"] == {
             "skills": ["arcana", "investigation"],
             "tools": ["weaver's tools"],

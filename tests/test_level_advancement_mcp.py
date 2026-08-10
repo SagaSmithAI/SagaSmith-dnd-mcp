@@ -2833,7 +2833,7 @@ def test_rolled_level_hp_is_engine_owned_idempotent_and_revision_safe(
             )
         assert calls == ["1d8"]
 
-        with pytest.raises(Exception, match="unsupported .* payload fields: hp_roll"):
+        with pytest.raises(Exception, match="unexpected fields:.*hp_roll"):
             await _call(
                 server,
                 "character_state_change",

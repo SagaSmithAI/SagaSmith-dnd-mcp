@@ -13794,12 +13794,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if actor_id == target_id:
             raise CombatEngineError("an actor cannot attack itself")
         campaign = campaigns.get(campaign_id)
-        action_payload = sanitize_attack_action(campaign_id, principal_id, dict(action or {}))
+        action_payload = sanitize_attack_action(campaign_id, principal_id, deepcopy(action or {}))
         spell_resolution_id = str(action_payload.pop("spell_resolution_id", "") or "")
         payload = {
             "actor_id": actor_id,
             "target_id": target_id,
-            "action": action_payload,
+            # Spatial validation fills omitted optional facts with their engine
+            # defaults.  Keep the idempotency request bound to the caller's
+            # normalized input instead of mutating it after the hash is bound.
+            "action": deepcopy(action_payload),
             "spell_resolution_id": spell_resolution_id,
             "branch_id": resolved_branch_id,
         }
