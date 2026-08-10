@@ -104,7 +104,8 @@ PHASE_DM_TOOLS = {
     ),
     PROFILE_PLAY: _names(
         """
-        actor_knowledge_change addon_actor_instantiate campaign_change campaign_rules chase
+        actor_knowledge_change addon_actor_instantiate campaign_change campaign_event
+        campaign_rules chase
         combat_start content_solution memory_change memory_query module_set_progress
         npc_conversation playthrough_manifest snapshot_create snapshot_query state_revision
         """

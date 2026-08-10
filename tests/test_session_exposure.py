@@ -390,6 +390,7 @@ def test_tool_policy_separates_phase_and_role_authority() -> None:
     assert policy_for_tool("content_pack").roles("lobby") == CAMPAIGN_DM_ROLES
     assert policy_for_tool("module_query").roles("lobby") == CAMPAIGN_DM_ROLES
     assert policy_for_tool("module_query").roles("play") == frozenset()
+    assert policy_for_tool("campaign_event").roles("play") == CAMPAIGN_DM_ROLES
     assert policy_for_tool("combat_query").phases == frozenset({"combat"})
     assert policy_for_tool("campaign_create").requires_campaign is False
     assert policy_for_tool("storage_migrate").local_only is True
