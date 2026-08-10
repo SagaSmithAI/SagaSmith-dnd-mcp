@@ -998,6 +998,12 @@ def _process_artifacts(
 
 def _next_cycle(unit_dir: Path) -> int:
     cycles = [int(item["cycle"]) for item in _process_artifacts(unit_dir)]
+    for audit_name in ("dm-tool-audit.jsonl", "player-tool-audit.jsonl"):
+        for row in _read_tool_audit(unit_dir / "artifacts" / audit_name):
+            identity = str(row.get("process_id") or row.get("session_key") or "")
+            match = re.search(r":cycle-(\d+)(?::|$)", identity)
+            if match is not None:
+                cycles.append(int(match.group(1)))
     return max(cycles, default=0) + 1
 
 

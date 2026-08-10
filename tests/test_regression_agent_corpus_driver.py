@@ -250,6 +250,14 @@ def test_resume_cycles_preserve_existing_process_artifacts(tmp_path: Path) -> No
     assert [item["cycle"] for item in artifacts] == [1, 4]
     assert _next_cycle(tmp_path) == 5
 
+    audit = tmp_path / "artifacts" / "dm-tool-audit.jsonl"
+    audit.parent.mkdir()
+    audit.write_text(
+        json.dumps({"process_id": "run:module:dm:cycle-007"}) + "\n",
+        encoding="utf-8",
+    )
+    assert _next_cycle(tmp_path) == 8
+
 
 def test_player_starts_only_after_successful_actor_grant() -> None:
     principal = "regression-player-module"
