@@ -788,7 +788,10 @@ class ConversationStore:
                 base.update(
                     {
                         "comprehension": "perceived_only",
-                        "content": "A communication or action was perceived, but its content was not understood.",
+                        "content": (
+                            "A communication or action was perceived, but its content "
+                            "was not understood."
+                        ),
                     }
                 )
             result[actor_id] = base
