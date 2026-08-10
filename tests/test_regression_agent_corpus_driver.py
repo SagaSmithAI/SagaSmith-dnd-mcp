@@ -14,7 +14,9 @@ from scripts.regression_agent_corpus import (
     _coverage_audit,
     _decode_tool_content,
     _dm_prompt,
+    _next_cycle,
     _player_ready,
+    _process_artifacts,
     _read_tool_audit,
     _runnable_units,
     _tool_timeline,
@@ -138,6 +140,22 @@ def test_append_only_tool_audit_survives_context_barrier(tmp_path: Path) -> None
     timeline = _tool_timeline(_read_tool_audit(path), principal="dm")
     assert timeline[0]["tool"] == "campaign_create"
     assert timeline[0]["result"] == {"id": "campaign-1"}
+
+
+def test_resume_cycles_preserve_existing_process_artifacts(tmp_path: Path) -> None:
+    process_dir = tmp_path / "process"
+    process_dir.mkdir()
+    for cycle in (1, 4):
+        stem = f"cycle-{cycle:03d}-regression-dm-module"
+        (process_dir / f"{stem}.stdout.txt").write_text(
+            "ToolListChangedNotification\n", encoding="utf-8"
+        )
+        (process_dir / f"{stem}.stderr.txt").write_text("", encoding="utf-8")
+
+    artifacts = _process_artifacts(tmp_path)
+
+    assert [item["cycle"] for item in artifacts] == [1, 4]
+    assert _next_cycle(tmp_path) == 5
 
 
 def test_player_starts_only_after_successful_actor_grant() -> None:

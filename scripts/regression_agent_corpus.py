@@ -729,10 +729,60 @@ def _run_agent(
     )
 
 
-def _list_changed_count(processes: list[AgentProcess]) -> int:
+def _process_artifacts(
+    unit_dir: Path, current: list[AgentProcess] | None = None
+) -> list[dict[str, Any]]:
+    process_dir = unit_dir / "process"
+    prior: dict[str, dict[str, Any]] = {}
+    report_path = unit_dir / "campaign-report.json"
+    if report_path.is_file():
+        report = _read_json(report_path)
+        prior = {
+            str(item.get("stdout")): dict(item)
+            for item in report.get("agent_processes") or []
+            if item.get("stdout")
+        }
+    for item in current or []:
+        prior[str(item.stdout_path.resolve())] = {
+            "principal": item.principal,
+            "session_id": item.session_id,
+            "cycle": item.cycle,
+            "returncode": item.returncode,
+            "stdout": str(item.stdout_path.resolve()),
+            "stderr": str(item.stderr_path.resolve()),
+            "tool_audit": str(item.audit_path.resolve()),
+        }
+    artifacts: list[dict[str, Any]] = []
+    for stdout_path in sorted(process_dir.glob("cycle-*-*.stdout.txt")):
+        stem = stdout_path.name.removesuffix(".stdout.txt")
+        cycle_text, principal = stem.removeprefix("cycle-").split("-", 1)
+        row = prior.get(str(stdout_path.resolve()), {})
+        artifacts.append(
+            {
+                "principal": row.get("principal", principal),
+                "session_id": row.get("session_id"),
+                "cycle": int(row.get("cycle", cycle_text)),
+                "returncode": row.get("returncode"),
+                "stdout": str(stdout_path.resolve()),
+                "stderr": str(
+                    (process_dir / f"{stem}.stderr.txt").resolve()
+                ),
+                "tool_audit": row.get("tool_audit"),
+            }
+        )
+    return artifacts
+
+
+def _next_cycle(unit_dir: Path) -> int:
+    cycles = [int(item["cycle"]) for item in _process_artifacts(unit_dir)]
+    return max(cycles, default=0) + 1
+
+
+def _list_changed_count(unit_dir: Path) -> int:
     count = 0
-    for process in processes:
-        for path in (process.stdout_path, process.stderr_path):
+    for process in _process_artifacts(unit_dir):
+        for key in ("stdout", "stderr"):
+            path = Path(process[key])
             if path.is_file():
                 count += path.read_text(encoding="utf-8").count(LIST_CHANGED_LOG)
     return count
@@ -768,8 +818,9 @@ def _run_unit(
     player_audit = unit_dir / "artifacts" / "player-tool-audit.jsonl"
     processes: list[AgentProcess] = []
     audit: dict[str, Any] = {"complete": False, "gaps": ["not_started"]}
+    start_cycle = _next_cycle(unit_dir)
 
-    for cycle in range(1, args.max_cycles + 1):
+    for cycle in range(start_cycle, start_cycle + args.max_cycles):
         dm = _run_agent(
             args,
             config=config,
@@ -797,8 +848,8 @@ def _run_unit(
             audit = _coverage_audit(
                 route,
                 dm_calls,
-                process_count=len(processes),
-                list_changed_count=_list_changed_count(processes),
+                process_count=len(_process_artifacts(unit_dir)),
+                list_changed_count=_list_changed_count(unit_dir),
             )
             continue
         player = _run_agent(
@@ -822,8 +873,8 @@ def _run_unit(
         audit = _coverage_audit(
             route,
             calls,
-            process_count=len(processes),
-            list_changed_count=_list_changed_count(processes),
+            process_count=len(_process_artifacts(unit_dir)),
+            list_changed_count=_list_changed_count(unit_dir),
         )
         if audit["complete"]:
             break
@@ -839,11 +890,12 @@ def _run_unit(
     calls = _tool_timeline(dm_rows, principal="dm") + _tool_timeline(
         player_rows, principal="player"
     )
-    list_changed_count = _list_changed_count(processes)
+    process_artifacts = _process_artifacts(unit_dir, processes)
+    list_changed_count = _list_changed_count(unit_dir)
     audit = _coverage_audit(
         route,
         calls,
-        process_count=len(processes),
+        process_count=len(process_artifacts),
         list_changed_count=list_changed_count,
     )
     report = {
@@ -851,18 +903,7 @@ def _run_unit(
         "campaign_line_id": line_id,
         "discovered_unit": unit,
         "route": route,
-        "agent_processes": [
-            {
-                "principal": item.principal,
-                "session_id": item.session_id,
-                "cycle": item.cycle,
-                "returncode": item.returncode,
-                "stdout": str(item.stdout_path.resolve()),
-                "stderr": str(item.stderr_path.resolve()),
-                "tool_audit": str(item.audit_path.resolve()),
-            }
-            for item in processes
-        ],
+        "agent_processes": process_artifacts,
         "tool_timeline": calls,
         "phase_exposure_timeline": _phase_exposure_timeline(calls),
         "tools_list_changed_observed": list_changed_count,
