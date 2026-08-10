@@ -42884,7 +42884,15 @@ boundary.
             source_id = str(required(data, "source_id"))
             access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
             campaign = campaigns.get(campaign_id)
-            source = rules.source(source_id)
+            try:
+                source = rules.source(source_id)
+            except LookupError as error:
+                raise ValueError(
+                    "payload.source_id must identify an indexed rule source; "
+                    "module ids are not rule source ids. Discover rule sources with "
+                    "content_pack(action='list', payload={kind:'source', system_id:'dnd5e', "
+                    "edition:<campaign edition>}) before using mode='statblock'."
+                ) from error
             if str(source.get("system_id") or "") != DND5E.id:
                 raise ValueError("statblock source must belong to the dnd5e rule corpus")
             campaign_edition = campaign_rules_edition(campaign.id)

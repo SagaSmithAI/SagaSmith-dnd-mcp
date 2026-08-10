@@ -219,6 +219,26 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
                 "idempotency_key": "campaign",
             },
         )
+        with pytest.raises(
+            ToolError,
+            match=(
+                "payload.source_id must identify an indexed rule source; "
+                "module ids are not rule source ids"
+            ),
+        ):
+            await _call(
+                server,
+                "character_create_from",
+                {
+                    "mode": "statblock",
+                    "payload": {
+                        "campaign_id": campaign["id"],
+                        "source_id": "not-a-rule-source",
+                        "name": "Commoner",
+                    },
+                    "idempotency_key": "unknown-rule-source",
+                },
+            )
         staged = await _call(
             server,
             "rulebook_draft",
