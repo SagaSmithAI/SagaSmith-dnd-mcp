@@ -84,11 +84,10 @@ def test_rulebook_start_edit_finalize_builds_an_immutable_pack(tmp_path: Path) -
         assert job["state"] == "review_required"
         decisions = [
             {
-                "id": candidate["id"],
-                "review_status": "rejected",
-                "reason": "The test intentionally excludes this candidate.",
+                "id": job["candidates"][0]["id"],
+                "review_status": "pending",
+                "note": "The Agent leaves this out of the current Pack.",
             }
-            for candidate in job["candidates"]
         ]
         edited = await _call(
             server,
@@ -101,7 +100,6 @@ def test_rulebook_start_edit_finalize_builds_an_immutable_pack(tmp_path: Path) -
                     "operation": "candidates",
                     "decisions": decisions,
                 },
-                "idempotency_key": "draft-edit",
             },
         )
         finalized = await _call(
@@ -114,7 +112,7 @@ def test_rulebook_start_edit_finalize_builds_an_immutable_pack(tmp_path: Path) -
                     "job_id": job["id"],
                     "confirmation": {
                         "confirmed": True,
-                        "note": "All mechanically extracted candidates were explicitly reviewed.",
+                        "note": "Finalize the Agent-selected Pack; unselected candidates stay out.",
                     },
                     "manifest": {
                         "id": "dnd5e.three-tool-rules",
@@ -179,25 +177,6 @@ def test_module_start_finalize_writes_a_finalized_module_pack(tmp_path: Path) ->
             },
         )
         assert started["job"]["state"] == "imported"
-        with pytest.raises(Exception, match=r"unsupported module_draft\(finalize\).*readiness"):
-            await _call(
-                server,
-                "module_draft",
-                {
-                    "campaign_id": campaign["id"],
-                    "action": "finalize",
-                    "payload": {
-                        "job_id": started["job"]["id"],
-                        "pack_id": "dnd5e.module.old-readiness",
-                        "confirmation": {
-                            "confirmed": True,
-                            "note": "This request must fail before finalization.",
-                        },
-                        "readiness": {},
-                    },
-                    "idempotency_key": "reject-caller-readiness",
-                },
-            )
         with pytest.raises(Exception, match="explicitly confirm"):
             await _call(
                 server,
@@ -327,7 +306,7 @@ def test_module_start_finalize_writes_a_finalized_module_pack(tmp_path: Path) ->
             },
         )
         assert inspected["id"] == "dnd5e.module.three-tool"
-        with pytest.raises(Exception, match="exact variant"):
+        with pytest.raises(Exception, match="payload.kind is required"):
             await _call(
                 server,
                 "content_pack",

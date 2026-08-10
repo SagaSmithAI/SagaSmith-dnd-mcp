@@ -226,7 +226,6 @@ from sagasmith_dnd.content_actors import (
 from sagasmith_dnd.content_import import (
     artifact_with_direct_resolution,
     audit_release_semantic_validation,
-    author_selection_card_from_candidate,
     candidate_draft_issues,
     compiled_artifacts_from_candidates,
     extract_content_inventory,
@@ -247,10 +246,8 @@ from sagasmith_dnd.content_solution import (
     build_content_solution,
 )
 from sagasmith_dnd.content_validation import (
-    DND_SELECTION_MATERIALIZERS,
     build_catalog_review,
     build_selection_contract,
-    catalog_review_errors,
     content_fingerprint,
     selection_contract_errors,
     selection_input_errors,
@@ -414,8 +411,6 @@ from sagasmith_dnd.standard_spell_ids import (
     CORE_INVISIBILITY_MECHANIC_ID,
     CORE_INVISIBILITY_SPELL_IDS,
     CORE_WITCH_BOLT_MECHANIC_ID,
-    PHB2014_NON_SRD_SPELL_NAMES,
-    SRD2014_RENAMED_SPELLS,
     STANDARD_2014_CONTENT_PACK_ID,
     STANDARD_2014_CONTENT_PACK_VERSION,
 )
@@ -2488,70 +2483,18 @@ def _rule_payload_settled_mechanic_ids(payload: dict[str, Any]) -> set[str]:
     return local | (native if verified else set())
 
 
-def _require_valid_content_attestations(
-    artifacts: list[dict[str, Any]],
-    *,
-    operation: str,
-) -> None:
-    """Reject stale reviewed content before a trusted identifier transport.
-
-    Portable export/import replaces database-local source and chunk UUIDs with
-    stable package keys (or performs the inverse replacement).  That transport
-    changes the content fingerprint without changing the reviewed rule text.
-    We therefore validate the original attestations before any replacement and
-    only then allow the trusted transport path to rebind them.
-    """
-
-    for artifact in artifacts:
-        has_catalog = isinstance(artifact.get("catalog_review"), dict)
-        has_selection = isinstance(artifact.get("selection_contract"), dict)
-        if not has_catalog and not has_selection:
-            continue
-        artifact_id = str(artifact.get("id") or "artifact")
-        errors = []
-        if has_catalog:
-            errors.extend(catalog_review_errors(artifact))
-        if has_selection:
-            errors.extend(selection_contract_errors(artifact))
-        if errors:
-            raise ValueError(
-                f"{operation} refuses stale content attestations for "
-                f"{artifact_id}: {'; '.join(errors)}"
-            )
-
-
-def _rebind_transported_content_attestations(
+def _strip_artifact_authoring_state(
     artifacts: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Bind existing review decisions to trusted portable/local identifiers."""
+    """Keep Pack artifacts executable; draft review history lives in Pack metadata."""
 
-    rebound: list[dict[str, Any]] = []
+    portable: list[dict[str, Any]] = []
     for raw_artifact in artifacts:
         artifact = deepcopy(raw_artifact)
-        reviewed_catalog = artifact.pop("catalog_review", None)
-        reviewed_selection = artifact.pop("selection_contract", None)
-        if reviewed_catalog is None and reviewed_selection is None:
-            rebound.append(artifact)
-            continue
-        if isinstance(reviewed_selection, dict):
-            artifact["selection_contract"] = build_selection_contract(
-                artifact,
-                status=str(reviewed_selection.get("status") or ""),
-                references=list(reviewed_selection.get("references") or []),
-                blockers=list(reviewed_selection.get("blockers") or []),
-            )
-        elif reviewed_selection is not None:
-            raise ValueError("transported selection_contract must be an object")
-        if isinstance(reviewed_catalog, dict):
-            artifact["catalog_review"] = build_catalog_review(
-                artifact,
-                decisions=list(reviewed_catalog.get("decisions") or []),
-                status=str(reviewed_catalog.get("status") or ""),
-            )
-        elif reviewed_catalog is not None:
-            raise ValueError("transported catalog_review must be an object")
-        rebound.append(artifact)
-    return rebound
+        artifact.pop("catalog_review", None)
+        artifact.pop("selection_contract", None)
+        portable.append(artifact)
+    return portable
 
 
 class SessionExposureFastMCP(FastMCP):
@@ -3472,10 +3415,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             artifact_values,
             mechanic_values,
         )
+        artifacts_without_review_contracts = [
+            {
+                key: deepcopy(item)
+                for key, item in artifact.items()
+                if key not in {"catalog_review", "selection_contract"}
+            }
+            for artifact in artifact_values
+        ]
         compiler_errors = [
-            *validate_selection_ready_artifacts(artifact_values),
+            *validate_selection_ready_artifacts(artifacts_without_review_contracts),
             *native_errors,
         ]
+        compiler_warnings: list[str] = []
         semantic_validation = audit_release_semantic_validation(
             artifact_values,
             settled_mechanic_ids=_rule_payload_settled_mechanic_ids(
@@ -3485,11 +3437,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 }
             ),
         )
-        manifest_value["resolution_policy"] = "build_time_complete"
+        manifest_value["resolution_policy"] = "compiled_or_agent"
         manifest_value["semantic_validation"] = deepcopy(semantic_validation)
         if not semantic_validation["complete"]:
-            compiler_errors.extend(
-                "build-time semantic resolution required for "
+            compiler_warnings.extend(
+                "Agent runtime resolution required for "
                 f"{item['artifact_id']}: {item['reason']}"
                 for item in semantic_validation["unresolved"]
             )
@@ -3499,27 +3451,27 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             compiler_errors.append(str(error))
         declared_tests = list(manifest_value.get("tests") or [])
         if mechanics and not declared_tests:
-            compiler_errors.append("executable rule packs require declarative tests")
+            compiler_warnings.append("executable rule pack has no declarative tests")
         elif mechanics and not compiler_errors:
             report = run_mechanic_tests(mechanics or [], declared_tests)
-            if not report["passed"]:
-                compiler_errors.extend(
-                    error
-                    for case in report["cases"]
-                    if not case["passed"]
-                    for error in case["errors"]
+            compiler_errors.extend(
+                error
+                for case in report["cases"]
+                if not case["passed"]
+                for error in case["errors"]
+            )
+            if report["mechanics_uncovered"]:
+                compiler_warnings.append(
+                    "declarative tests do not exercise mechanics: "
+                    + ", ".join(report["mechanics_uncovered"])
                 )
-                if report["mechanics_uncovered"]:
-                    compiler_errors.append(
-                        "declarative tests do not exercise mechanics: "
-                        + ", ".join(report["mechanics_uncovered"])
-                    )
         result = rule_packs.save_draft(
             manifest=manifest_value,
             artifacts=artifact_values,
             mechanics=mechanic_values,
             provenance=provenance,
             additional_errors=compiler_errors,
+            additional_warnings=compiler_warnings,
         )
         return asdict(result)
 
@@ -3787,10 +3739,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "mechanics": [deepcopy(item) for item in pack.mechanics],
             "provenance": deepcopy(provenance),
         }
-        _require_valid_content_attestations(
-            definition["artifacts"],
-            operation="portable rule-pack export",
-        )
+        definition["artifacts"] = _strip_artifact_authoring_state(definition["artifacts"])
         definition["provenance"].pop("import_job_id", None)
         source_ids: set[str] = set()
         chunk_ids: set[str] = set()
@@ -3941,7 +3890,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         portable_definition = refresh_portable_resolution_plans(
             canonicalize_portable_evidence(make_portable(definition))
         )
-        portable_definition["artifacts"] = _rebind_transported_content_attestations(
+        portable_definition["artifacts"] = _strip_artifact_authoring_state(
             list(portable_definition["artifacts"])
         )
         semantic_validation = audit_release_semantic_validation(
@@ -3953,17 +3902,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 }
             ),
         )
-        if not semantic_validation["complete"]:
-            raise ValueError(
-                "portable rule-pack export requires build-time semantic "
-                "resolution: "
-                + "; ".join(
-                    f"{item['artifact_id']}: {item['reason']}"
-                    for item in semantic_validation["unresolved"][:20]
-                )
-            )
         portable_manifest = deepcopy(pack.manifest)
-        portable_manifest["resolution_policy"] = "build_time_complete"
+        portable_manifest["resolution_policy"] = "compiled_or_agent"
         portable_manifest["semantic_validation"] = deepcopy(semantic_validation)
         package_dependencies: list[dict[str, Any]] = []
         pinned_dependencies: list[dict[str, Any]] = []
@@ -4348,10 +4288,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         for item in value["content"].get("mechanics") or []
                         if str(item.get("rule_definition_id") or "") == definition_id
                     ]
-                    localized_artifacts = _rebind_transported_content_attestations(
+                    localized_artifacts = _strip_artifact_authoring_state(
                         refresh_portable_resolution_plans(artifacts)
                     )
-                    localized_mechanics = _rebind_transported_content_attestations(
+                    localized_mechanics = _strip_artifact_authoring_state(
                         refresh_portable_resolution_plans(mechanics)
                     )
                     draft = save_rule_pack_draft(
@@ -11088,10 +11028,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Add entities missed by layout extraction without accepting invented source text."""
 
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
-        if expected_revision is None or not idempotency_key:
-            raise ValueError(
-                "expected_revision and idempotency_key are required for catalog augmentation"
-            )
         normalized_rationale = " ".join(str(rationale).split())
         if not normalized_rationale or len(normalized_rationale) > 2000:
             raise ValueError("catalog augmentation rationale is required and limited to 2000 chars")
@@ -11107,12 +11043,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "rationale": normalized_rationale,
         }
         scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
-        replay = replay_idempotent(scope, idempotency_key, payload)
-        if replay is not None:
-            return replay
+        if idempotency_key:
+            replay = replay_idempotent(scope, idempotency_key, payload)
+            if replay is not None:
+                return replay
         if job.state not in {"extracted", "review_required"}:
             raise ValueError("catalog augmentation must happen before candidate approval")
-        if job.revision != expected_revision:
+        if expected_revision is not None and job.revision != expected_revision:
             raise ValueError(
                 f"import job revision conflict: expected {expected_revision}, found {job.revision}"
             )
@@ -11413,12 +11350,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             candidates.append(candidate)
             added_ids.append(candidate_id)
 
-        updated = import_jobs.set_candidates(
-            job_id,
-            candidates,
-            expected_revision=expected_revision,
-            idempotency_key=idempotency_key,
-            idempotency_write=IdempotencyWrite(
+        idempotency_write = (
+            IdempotencyWrite(
                 scope=scope,
                 payload=payload,
                 response=lambda result: {
@@ -11427,7 +11360,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "added_candidate_ids": added_ids,
                     "replaced_candidate_ids": replaced_ids,
                 },
-            ),
+            )
+            if idempotency_key
+            else None
+        )
+        updated = import_jobs.set_candidates(
+            job_id,
+            candidates,
+            idempotency_key=idempotency_key,
+            idempotency_write=idempotency_write,
         )
         return {
             "job": import_job_view(updated),
@@ -11444,325 +11385,89 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         idempotency_key: str | None = None,
         operation: str = "edit",
     ) -> dict[str, Any]:
-        """Edit source-bound candidates without freezing the in-progress pack."""
+        """Save Agent-owned candidate decisions while the rulebook Pack is editable."""
+
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
-        if not idempotency_key:
-            raise ValueError("idempotency_key is required for candidate review")
-        job = require_import_job(campaign_id, job_id)
-        normalized_decisions = deepcopy(decisions)
-        if job.kind == "rulebook" and job.source_id:
-            candidates_by_id = {
-                str(candidate.get("id") or ""): dict(candidate) for candidate in job.candidates
-            }
-            source_chunks_by_id = {
-                str(chunk.get("id") or ""): str(chunk.get("content") or "")
-                for chunk in rules.source_chunks(job.source_id)
-            }
-            job_payload = dict(job.payload or {})
-            official_references: list[dict[str, Any]] = []
-            accepted_primary_kinds = {
-                str(candidates_by_id.get(str(decision.get("id") or ""), {}).get("kind") or "")
-                for decision in normalized_decisions
-                if decision.get("review_status") == "accepted"
-                and dict(decision.get("catalog_review_decision") or {}).get("role") == "primary"
-            }
-            trusted_reference_kinds = accepted_primary_kinds.intersection(
-                {"background", "class", "feat", "item", "species", "spell", "subclass"}
+        if not isinstance(decisions, list) or not 1 <= len(decisions) <= 500:
+            raise ValueError("candidate editing requires 1 to 500 decisions")
+        job = require_import_job(campaign_id, job_id, "rulebook")
+        if job.state not in {"extracted", "review_required"}:
+            raise ValueError("only an editable rulebook draft accepts candidate decisions")
+        candidates_by_id = {
+            str(candidate.get("id") or ""): deepcopy(candidate)
+            for candidate in job.candidates
+        }
+        normalized_decisions: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for index, raw_decision in enumerate(decisions):
+            if not isinstance(raw_decision, dict):
+                raise ValueError(f"decisions[{index}] must be an object")
+            candidate_id = str(raw_decision.get("id") or "").strip()
+            if candidate_id not in candidates_by_id:
+                raise ValueError(f"unknown candidate: {candidate_id}")
+            if candidate_id in seen:
+                raise ValueError(f"duplicate candidate decision: {candidate_id}")
+            seen.add(candidate_id)
+            current = candidates_by_id[candidate_id]
+            status = str(
+                raw_decision.get("review_status", current.get("review_status") or "pending")
             )
-            if (
-                str(job_payload.get("authority") or "") in {"core", "supplement"}
-                and trusted_reference_kinds
-            ):
-                trusted_pack_ids = (
-                    {CORE_CONTENT_PACK_ID, STANDARD_2014_CONTENT_PACK_ID}
-                    if str(job_payload.get("edition") or "") == "2014"
-                    else {CORE_2024_CONTENT_PACK_ID}
+            if status not in {"pending", "accepted", "rejected", "needs_revision"}:
+                raise ValueError(
+                    "review_status must be pending, accepted, rejected, or needs_revision"
                 )
-                for reference_kind in sorted(trusted_reference_kinds):
-                    official_references.extend(
-                        {
-                            **deepcopy(artifact),
-                            "_selection_schema_reference": {
-                                "pack_id": pack_id,
-                                "pack_version": version,
-                                "artifact_id": str(artifact.get("id") or ""),
-                            },
-                        }
-                        for pack_id, version, artifact in available_content_artifacts(
-                            campaign_id,
-                            kind=reference_kind,
-                        )
-                        if pack_id in trusted_pack_ids
-                    )
-                official_spell_references = [
-                    artifact
-                    for artifact in official_references
-                    if str(artifact.get("kind") or "") == "spell"
-                ]
-                if (
-                    "spell" in trusted_reference_kinds
-                    and str(job_payload.get("edition") or "") == "2014"
-                ):
-                    aliases_by_reference: dict[str, list[str]] = {}
-                    for source_name, reference_name in SRD2014_RENAMED_SPELLS.items():
-                        aliases_by_reference.setdefault(reference_name.casefold(), []).append(
-                            source_name
-                        )
-                    for reference_artifact in official_spell_references:
-                        reference_card = dict(reference_artifact.get("card") or {})
-                        reference_name = " ".join(str(reference_card.get("name") or "").split())
-                        source_names = list(aliases_by_reference.get(reference_name.casefold(), []))
-                        source_aliases = list(source_names)
-                        if reference_name and (
-                            not source_aliases
-                            or str(job_payload.get("publication_id") or "") == "srd2014"
-                        ):
-                            source_names.append(reference_name)
-                        source_names = list(dict.fromkeys(source_names))
-                        reference_artifact["_selection_source_names"] = source_names
-                        if source_aliases:
-                            reference_artifact["_preserve_imported_name"] = True
-                        if (
-                            source_aliases
-                            and str(job_payload.get("publication_id") or "") != "srd2014"
-                        ):
-                            reference_artifact["_selection_default_source_name"] = source_names[0]
-                    if str(job_payload.get("publication_id") or "") == "phb2014":
-                        official_references.extend(
-                            {
-                                "kind": "spell",
-                                "card": {"name": name},
-                                "_selection_source_names": [name],
-                            }
-                            for name in PHB2014_NON_SRD_SPELL_NAMES
-                        )
-            for decision in normalized_decisions:
-                if decision.get("review_status") != "accepted":
-                    continue
-                candidate = candidates_by_id.get(str(decision.get("id") or ""))
-                if candidate is None:
-                    continue
-                raw_review_decision = decision.get("catalog_review_decision")
-                if not isinstance(raw_review_decision, dict):
-                    raise ValueError(
-                        f"candidate {candidate.get('id')} acceptance requires "
-                        "catalog_review_decision"
-                    )
-                review_decision = deepcopy(raw_review_decision)
-                role = str(review_decision.get("role") or "")
-                current_artifact = deepcopy(dict(candidate.get("artifact") or {}))
-                current_review = dict(current_artifact.get("catalog_review") or {})
-                prior_decisions = list(current_review.get("decisions") or [])
-                has_primary = any(
-                    isinstance(item, dict) and item.get("role") == "primary"
-                    for item in prior_decisions
-                )
-                if role == "primary":
-                    reviewed_candidate = {
-                        **candidate,
-                        # Only an explicit reviewed artifact (including one
-                        # authored as a source-bound catalog addition) is a
-                        # complete mechanics contract.  Accepting an extracted
-                        # identity alone must not silently elevate OCR guesses
-                        # to Agent-reviewed semantics.
-                        "agent_review_complete": bool(
-                            "artifact" in decision
-                            or candidate.get("agent_catalog_addition") is True
-                        ),
-                        "artifact": deepcopy(
-                            decision.get("artifact", candidate.get("artifact") or {})
-                        ),
-                    }
-                    candidate_kind = str(candidate.get("kind") or "")
-                    reference_artifacts = [
-                        artifact
-                        for artifact in official_references
-                        if str(artifact.get("kind") or "") == candidate_kind
-                    ]
-                    reviewed_candidate["artifact"] = author_selection_card_from_candidate(
-                        reviewed_candidate,
-                        source_chunks_by_id=source_chunks_by_id,
-                        reference_artifacts=reference_artifacts,
-                        context_candidates=candidates_by_id.values(),
-                    )
-                    first_chunk_id = next(
-                        (
-                            str(chunk_id)
-                            for chunk_id in candidate.get("source_chunk_ids") or []
-                            if str(chunk_id)
-                        ),
-                        "",
-                    )
-                    if not first_chunk_id:
-                        raise ValueError(f"candidate {candidate.get('id')} has no source evidence")
-                    canonical = rules.citation(
-                        first_chunk_id,
-                        source_id=job.source_id,
-                    )
-                    artifact = artifact_with_direct_resolution(
-                        reviewed_candidate,
-                        citation_source=str(canonical["source"]),
-                        source_chunks_by_id=source_chunks_by_id,
-                    )
-                    kind = str(artifact.get("kind") or candidate.get("kind") or "")
-                    application_state = str(
-                        artifact.get("application_state")
-                        or candidate.get("application_state")
-                        or "catalog_only"
-                    )
-                    selection_applicability = str(artifact.get("selection_applicability") or "")
-                    if selection_applicability not in {
-                        "",
-                        "character",
-                        "not_applicable",
-                    }:
-                        raise ValueError(
-                            f"candidate {candidate.get('id')} has invalid selection_applicability"
-                        )
-                    references = list(
-                        dict.fromkeys(
-                            [
-                                *[
-                                    str(value)
-                                    for value in artifact.get("rule_refs") or []
-                                    if str(value)
-                                ],
-                                *[
-                                    f"rule-source-chunk:{value}"
-                                    for value in candidate.get("source_chunk_ids") or []
-                                    if str(value)
-                                ],
-                            ]
-                        )
-                    )
-                    if selection_applicability == "not_applicable":
-                        artifact["selection_contract"] = build_selection_contract(
-                            artifact,
-                            status="not_applicable",
-                            references=references,
-                        )
-                    elif (
-                        kind in DND_SELECTION_MATERIALIZERS
-                        and application_state == "selection_ready"
-                    ):
-                        artifact["selection_contract"] = build_selection_contract(
-                            artifact,
-                            status="ready",
-                            references=references,
-                        )
-                    elif kind in DND_SELECTION_MATERIALIZERS or kind == "class":
-                        artifact["selection_contract"] = build_selection_contract(
-                            artifact,
-                            status="blocked",
-                            references=references,
-                            blockers=[
-                                (
-                                    "reviewed card is not selection-ready"
-                                    if kind in DND_SELECTION_MATERIALIZERS
-                                    else "base-class materializer is not implemented"
-                                )
-                            ],
-                        )
-                    else:
-                        artifact["selection_contract"] = build_selection_contract(
-                            artifact,
-                            status="not_applicable",
-                            references=references,
-                        )
-                    artifact["catalog_review"] = build_catalog_review(
-                        artifact,
-                        decisions=[review_decision],
-                        status="needs_review",
-                    )
-                    decision["artifact"] = artifact
-                    decision["review_status"] = "accepted"
-                    decision["note"] = (
-                        "Agent edit saved; the draft remains editable until explicit finalization"
-                    )
-                elif role in {"critic", "dm"}:
-                    if current_review.get("status") == "approved":
-                        if review_decision not in prior_decisions:
-                            raise ValueError(
-                                f"candidate {candidate.get('id')} is already approved by "
-                                "a different independent review"
-                            )
-                        # An exact idempotent retry can arrive after the first
-                        # request already advanced the durable candidate. Build
-                        # the same normalized payload so the stored response can
-                        # replay instead of treating the newer state as a new
-                        # critic attempt.
-                        decision["artifact"] = current_artifact
-                    elif not has_primary or current_review.get("status") != "needs_review":
-                        raise ValueError(
-                            f"candidate {candidate.get('id')} needs a primary catalog "
-                            "review before independent approval"
-                        )
-                    elif "artifact" in decision:
-                        submitted = decision["artifact"]
-                        if not isinstance(submitted, dict):
-                            raise ValueError("candidate artifact must be an object")
-                        if submitted != current_artifact:
-                            if content_fingerprint(submitted) != content_fingerprint(
-                                current_artifact
-                            ):
-                                raise ValueError(
-                                    "independent review cannot change reviewed content"
-                                )
-                            raise ValueError("independent review must not replace review contracts")
-                    if current_review.get("status") != "approved":
-                        artifact = deepcopy(current_artifact)
-                        artifact["catalog_review"] = build_catalog_review(
-                            artifact,
-                            decisions=[*prior_decisions, review_decision],
-                            status="approved",
-                        )
-                        contract_errors = selection_contract_errors(artifact)
-                        if contract_errors:
-                            raise ValueError("; ".join(contract_errors))
-                        decision["artifact"] = artifact
-                else:
-                    raise ValueError("catalog_review_decision.role must be primary, critic, or dm")
-            for decision in normalized_decisions:
-                candidate = candidates_by_id.get(str(decision.get("id") or ""))
-                if candidate is None:
-                    continue
-                proposed = {
-                    **candidate,
-                    "review_status": decision.get(
-                        "review_status", candidate.get("review_status", "pending")
-                    ),
-                }
-                if "artifact" in decision:
-                    proposed["artifact"] = deepcopy(decision["artifact"])
-                decision["draft_issues"] = candidate_draft_issues(proposed)
-                decision.setdefault("editor", principal_id)
-                decision.setdefault("operation", operation)
+            decision: dict[str, Any] = {
+                "id": candidate_id,
+                "review_status": status,
+                "editor": principal_id,
+                "operation": operation,
+            }
+            for field in ("artifact", "note", "disposition"):
+                if field in raw_decision:
+                    decision[field] = deepcopy(raw_decision[field])
+            proposed = {**current, "review_status": status}
+            if "artifact" in decision:
+                if not isinstance(decision["artifact"], dict):
+                    raise ValueError("candidate artifact must be an object")
+                proposed["artifact"] = deepcopy(decision["artifact"])
+            if status == "accepted" and not isinstance(proposed.get("artifact"), dict):
+                raise ValueError(f"candidate {candidate_id} needs an artifact before inclusion")
+            decision["draft_issues"] = candidate_draft_issues(proposed)
+            normalized_decisions.append(decision)
+
+        validate_rule_candidate_execution_evidence(job, normalized_decisions)
         payload = {
             "job_id": job_id,
             "operation": operation,
             "decisions": normalized_decisions,
         }
         scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
-        replay = replay_idempotent(scope, idempotency_key, payload)
-        if replay is not None:
-            return replay
-        validate_rule_candidate_execution_evidence(job, normalized_decisions)
-        updated = import_jobs.review_candidates(
-            job_id,
-            normalized_decisions,
-            expected_revision=job.revision,
-            idempotency_key=idempotency_key,
-            idempotency_write=IdempotencyWrite(
+        if idempotency_key:
+            replay = replay_idempotent(scope, idempotency_key, payload)
+            if replay is not None:
+                return replay
+        idempotency_write = (
+            IdempotencyWrite(
                 scope=scope,
                 payload=payload,
                 response=lambda result: {
                     "job": import_job_view(result),
                     "candidates": [import_candidate_view(item) for item in result.candidates],
                 },
-            ),
+            )
+            if idempotency_key
+            else None
         )
-        candidate_views = [import_candidate_view(item) for item in updated.candidates]
-        return {"job": import_job_view(updated), "candidates": candidate_views}
+        updated = import_jobs.review_candidates(
+            job_id,
+            normalized_decisions,
+            idempotency_key=idempotency_key,
+            idempotency_write=idempotency_write,
+        )
+        return {
+            "job": import_job_view(updated),
+            "candidates": [import_candidate_view(item) for item in updated.candidates],
+        }
 
     def import_job_finalize_candidates(
         campaign_id: str,
@@ -11803,26 +11508,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             value = deepcopy(candidate)
             status = str(value.get("review_status") or "")
             if status not in {"accepted", "rejected"}:
-                raise ValueError(
-                    f"candidate {value.get('id')} still needs an include or exclude decision"
+                value["review_status"] = "rejected"
+                value["disposition"] = "exclude"
+                value["review_note"] = (
+                    str(value.get("review_note") or "").strip()
+                    or "Excluded by explicit Agent finalization without inclusion"
                 )
-            if status == "accepted":
-                artifact = deepcopy(dict(value.get("artifact") or {}))
-                review = dict(artifact.get("catalog_review") or {})
-                if review.get("status") == "needs_review":
-                    artifact["catalog_review"] = build_catalog_review(
-                        artifact,
-                        decisions=list(review.get("decisions") or []),
-                        status="approved",
-                    )
-                elif review.get("status") != "approved":
-                    raise ValueError(
-                        f"candidate {value.get('id')} has no source-bound Agent review"
-                    )
-                contract_errors = selection_contract_errors(artifact)
-                if contract_errors:
-                    raise ValueError("; ".join(contract_errors))
-                value["artifact"] = artifact
             value["draft_issues"] = candidate_draft_issues(value)
             blockers = [
                 issue
@@ -41041,8 +40732,6 @@ boundary.
                     metadata=dict(value.get("metadata") or {}),
                 )
             elif operation == "package":
-                if not idempotency_key:
-                    raise ValueError("idempotency_key is required for module Pack edits")
                 if job.state != "imported" or not job.module_id:
                     raise ValueError("module Pack decisions require a mechanically imported draft")
                 allowed_decisions = {
@@ -41081,6 +40770,15 @@ boundary.
                     "note": edit_record["note"],
                 }
                 scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
+                idempotency_write = (
+                    IdempotencyWrite(
+                        scope=scope,
+                        payload=request_payload,
+                        response=lambda saved: {"job": import_job_view(saved)},
+                    )
+                    if idempotency_key
+                    else None
+                )
                 updated = import_jobs.record_result(
                     job_id,
                     {
@@ -41093,13 +40791,8 @@ boundary.
                     },
                     state="imported",
                     module_id=job.module_id,
-                    expected_revision=expected_revision,
                     idempotency_key=idempotency_key,
-                    idempotency_write=IdempotencyWrite(
-                        scope=scope,
-                        payload=request_payload,
-                        response=lambda saved: {"job": import_job_view(saved)},
-                    ),
+                    idempotency_write=idempotency_write,
                 )
                 result = {"job": import_job_view(updated), "pack_draft": pack_draft}
             elif operation == "advance":
@@ -42049,12 +41742,6 @@ boundary.
         pack_id, version, artifact = matches[0]
         if str(artifact.get("kind") or "") != "statblock":
             raise ValueError("addon actor instantiation requires a statblock artifact")
-        review_errors = catalog_review_errors(artifact)
-        if review_errors or dict(artifact.get("catalog_review") or {}).get("status") != "approved":
-            raise ValueError(
-                "dependent actor template needs approved source/catalog review: "
-                + "; ".join(review_errors or ["catalog review is not approved"])
-            )
         card = deepcopy(dict(artifact.get("card") or {}))
         requirement = deepcopy(dict(card.get("dependent_actor_template") or {}))
         solution_errors = dependent_actor_template_solution_errors(requirement)

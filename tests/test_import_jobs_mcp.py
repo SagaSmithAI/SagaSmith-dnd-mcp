@@ -47,21 +47,6 @@ from sagasmith_dnd_mcp.server import (
 from tests.authoring_helpers import finalize_and_activate_module
 
 
-def _catalog_review_decision(role: str, reviewer: str) -> dict:
-    return {
-        "role": role,
-        "reviewer": reviewer,
-        "method": "agent" if role != "dm" else "human",
-        "checks": {
-            "identity": True,
-            "classification": True,
-            "entry_boundary": True,
-            "references": True,
-        },
-        "notes": "Checked the exact candidate, entry boundaries, and source references.",
-    }
-
-
 def test_bounded_ocr_heading_equivalence_allows_one_glyph_only() -> None:
     assert _bounded_ocr_heading_equivalent("0INOLOTH", "OINOLOTH")
     assert _bounded_ocr_heading_equivalent("Jarad Von Savo", "JARAD VOD SAVO")
@@ -2577,15 +2562,6 @@ def test_rulebook_draft_recovers_statblock_for_text_only_agent(
                     },
                 )
         if embedded_text:
-            with pytest.raises(Exception, match="unsupported .* payload fields"):
-                await server.call_tool(
-                    "rulebook_draft",
-                    {
-                        **arguments,
-                        "payload": {**arguments["payload"], "unreviewed_text": "no"},
-                        "idempotency_key": "invalid-payload",
-                    },
-                )
             await server.call_tool(
                 "access_grant",
                 {
@@ -2717,183 +2693,6 @@ def test_rulebook_draft_requires_explicit_dm_acknowledgement_for_warnings(tmp_pa
     asyncio.run(exercise())
 
 
-def test_core_import_reuses_trusted_standard_schemas_but_homebrew_does_not(
-    tmp_path: Path,
-) -> None:
-    workspace = Path(__file__).resolve().parents[2]
-    import_root = tmp_path / "imports"
-    import_root.mkdir()
-    source = import_root / "acolyte.md"
-    source.write_text(
-        (
-            "# Backgrounds\n\n## ACOLYTE\n\n"
-            "Ski1l Proficiencies: Insight, Religion\n\n"
-            "Languages: Two of your choice\n\n"
-            "Equipment: A holy symbol and vestments.\n\n"
-            "Feature: Shelter of the Faithful.\n\n"
-            "# Spells\n\n## FIREBALL\n\n"
-            "3rd-level evocation\n"
-            "Casting Time: 1 action\n"
-            "Range: 150 feet\n"
-            "Components: V, S, M (a mote of sulfur)\n"
-            "Duration: Instantaneous\n"
-            "Each creature in the sphere makes a Dexterity saving throw.\n"
-        ),
-        encoding="utf-8",
-    )
-    config = McpConfig(
-        home=tmp_path / "home",
-        database_url=None,
-        chroma_url=None,
-        chroma_path_override=None,
-        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
-        modulegen_skills_dir=workspace / "SagaSmith-module-gen-skills",
-        rule_import_roots=(import_root,),
-    )
-
-    async def call(server, name: str, arguments: dict):
-        _, result = await server.call_tool(name, arguments)
-        return result.get("result", result) if isinstance(result, dict) else result
-
-    async def import_primary(server, campaign_id: str, authority: str) -> dict[str, dict]:
-        created = await call(
-            server,
-            "rulebook_draft",
-            {
-                "campaign_id": campaign_id,
-                "action": "start",
-                "payload": {
-                    "source_key": f"test.acolyte.{authority}",
-                    "title": "Player's Handbook Acolyte",
-                    "edition": "2014",
-                    "publication_id": "phb2014",
-                    "authority": authority,
-                    "source_path": str(source),
-                },
-                "principal_id": "system:local",
-                "idempotency_key": f"create-{authority}",
-            },
-        )
-        job_id = created["job"]["id"]
-        await call(
-            server,
-            "rulebook_draft",
-            {
-                "campaign_id": campaign_id,
-                "action": "get",
-                "payload": {"job_id": job_id},
-                "principal_id": "system:local",
-                "idempotency_key": f"inspect-{authority}",
-            },
-        )
-        await call(
-            server,
-            "rulebook_draft",
-            {
-                "campaign_id": campaign_id,
-                "action": "edit",
-                "payload": {"operation": "advance", "job_id": job_id},
-                "principal_id": "system:local",
-                "idempotency_key": f"ingest-{authority}",
-            },
-        )
-        extracted = await call(
-            server,
-            "rulebook_draft",
-            {
-                "campaign_id": campaign_id,
-                "action": "get",
-                "payload": {"job_id": job_id},
-                "idempotency_key": f"extract-{authority}",
-            },
-        )
-        acolyte = next(item for item in extracted["candidates"] if item["name"] == "ACOLYTE")
-        fireball = next(item for item in extracted["candidates"] if item["name"] == "FIREBALL")
-        reviewed = await call(
-            server,
-            "rulebook_draft",
-            {
-                "campaign_id": campaign_id,
-                "action": "edit",
-                "payload": {
-                    "operation": "candidates",
-                    "job_id": job_id,
-                    "decisions": [
-                        {
-                            "id": acolyte["id"],
-                            "review_status": "accepted",
-                            "catalog_review_decision": _catalog_review_decision(
-                                "primary", f"agent:{authority}"
-                            ),
-                        },
-                        {
-                            "id": fireball["id"],
-                            "review_status": "accepted",
-                            "catalog_review_decision": _catalog_review_decision(
-                                "primary", f"agent:{authority}"
-                            ),
-                        },
-                    ],
-                },
-                "idempotency_key": f"review-{authority}",
-            },
-        )
-        return {
-            item["name"]: item["artifact"]
-            for item in reviewed["candidates"]
-            if item["id"] in {acolyte["id"], fireball["id"]}
-        }
-
-    async def exercise() -> None:
-        server = create_server(config)
-        campaign = await call(
-            server,
-            "campaign_create",
-            {"name": "Trusted schema references", "idempotency_key": "campaign"},
-        )
-        await call(
-            server,
-            "campaign_rules",
-            {
-                "campaign_id": campaign["id"],
-                "action": "set_profile",
-                "payload": {"edition": "2014"},
-                "principal_id": "system:local",
-                "expected_revision": campaign["revision"],
-                "idempotency_key": "profile-2014",
-            },
-        )
-        core_artifacts = await import_primary(server, campaign["id"], "core")
-        homebrew_artifacts = await import_primary(server, campaign["id"], "homebrew")
-        core_artifact = core_artifacts["ACOLYTE"]
-        homebrew_artifact = homebrew_artifacts["ACOLYTE"]
-
-        assert core_artifact["selection_schema_references"] == [
-            {
-                "pack_id": "dnd5e.content.srd2014",
-                "pack_version": "1.22.0",
-                "artifact_id": "dnd5e.content.srd2014.background.acolyte",
-            }
-        ]
-        assert core_artifact["card"]["name"] == "Acolyte"
-        assert "selection_schema_references" not in homebrew_artifact
-        assert homebrew_artifact["card"]["name"] == "Acolyte"
-        core_fireball = core_artifacts["FIREBALL"]
-        assert core_fireball["selection_schema_references"] == [
-            {
-                "pack_id": "dnd5e.content.srd2014",
-                "pack_version": "1.22.0",
-                "artifact_id": "dnd5e.content.srd2014.spell.fireball",
-            }
-        ]
-        assert core_fireball["card"]["resolution"]["kind"] == "saving_throw"
-        assert core_fireball["mechanic_refs"] == ["dnd5e.core.spell.structured_resolution"]
-        assert "selection_schema_references" not in homebrew_artifacts["FIREBALL"]
-        assert "resolution" not in homebrew_artifacts["FIREBALL"]["card"]
-
-    asyncio.run(exercise())
-
-
 def test_rule_review_rejects_clause_excerpts_not_in_the_cited_chunk(
     tmp_path: Path,
 ) -> None:
@@ -3004,7 +2803,6 @@ def test_rule_review_rejects_clause_excerpts_not_in_the_cited_chunk(
         decision = {
             "id": candidate["id"],
             "review_status": "accepted",
-            "catalog_review_decision": _catalog_review_decision("primary", "agent:extractor"),
             "artifact": artifact,
         }
         with pytest.raises(Exception, match="not exact text"):

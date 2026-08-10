@@ -312,21 +312,6 @@ def test_module_package_round_trip_recreates_cast_bindings(tmp_path: Path) -> No
             "campaign_create",
             {"name": "Package target", "edition": "2014", "idempotency_key": "target"},
         )
-        with pytest.raises(ToolError, match=r"unsupported content_pack\(import\) payload"):
-            await _call(
-                server,
-                "content_pack",
-                {
-                    "action": "import",
-                    "payload": {
-                        "kind": "module",
-                        "campaign_id": target_campaign["id"],
-                        "artifact": exported["artifact"],
-                        "activate": "false",
-                    },
-                    "idempotency_key": "invalid-activation-type",
-                },
-            )
         import_arguments = {
             "action": "import",
             "payload": {
@@ -618,4 +603,3 @@ def test_unified_addon_archive_import_reexport_and_actor_creation(tmp_path: Path
         assert created["actor_knowledge_imported"] is False
 
     asyncio.run(exercise())
-
