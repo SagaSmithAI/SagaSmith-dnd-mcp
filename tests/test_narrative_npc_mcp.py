@@ -265,6 +265,37 @@ def test_narrative_npc_rejects_unverifiable_identity_and_source(
     asyncio.run(exercise())
 
 
+def test_narrative_npc_reports_missing_and_unsupported_request_fields(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server, _campaign_id, _source_ref = await _campaign_with_narrative_module(tmp_path)
+        with pytest.raises(
+            Exception,
+            match=(
+                "narrative NPC payload has missing fields: campaign_id, role, summary; "
+                "unsupported fields: occurrence_id, tags"
+            ),
+        ):
+            await _call(
+                server,
+                "character_create_from",
+                {
+                    "mode": "narrative_npc",
+                    "payload": {
+                        "name": "Qelline Alderleaf",
+                        "source_ref": {},
+                        "source_excerpt": "Qelline Alderleaf is a pragmatic farmer.",
+                        "occurrence_id": "wrong-layer",
+                        "tags": ["narrative_only"],
+                    },
+                    "idempotency_key": "incomplete-narrative-npc",
+                },
+            )
+
+    asyncio.run(exercise())
+
+
 def test_narrative_npc_supports_distinct_anonymous_source_instances(
     tmp_path: Path,
 ) -> None:

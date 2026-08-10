@@ -42385,6 +42385,36 @@ boundary.
         data = facade_payload(payload)
         scoped_campaign_id = str(data.get("campaign_id") or "").strip()
         if mode == "narrative_npc":
+            required_narrative_fields = {
+                "campaign_id",
+                "name",
+                "role",
+                "summary",
+                "source_ref",
+                "source_excerpt",
+            }
+            allowed_narrative_fields = required_narrative_fields | {
+                "source_identity",
+                "instance_key",
+                "identity_agent_ruling",
+            }
+            missing_narrative_fields = sorted(
+                field for field in required_narrative_fields if data.get(field) is None
+            )
+            unsupported_narrative_fields = sorted(set(data) - allowed_narrative_fields)
+            if missing_narrative_fields or unsupported_narrative_fields:
+                details = []
+                if missing_narrative_fields:
+                    details.append("missing fields: " + ", ".join(missing_narrative_fields))
+                if unsupported_narrative_fields:
+                    details.append(
+                        "unsupported fields: " + ", ".join(unsupported_narrative_fields)
+                    )
+                raise ValueError("narrative NPC payload has " + "; ".join(details))
+            if not scoped_campaign_id:
+                raise ValueError("narrative NPC campaign_id must be a non-empty string")
+            if not idempotency_key:
+                raise ValueError("idempotency_key is required for narrative NPC creation")
             if authoritative_phase(scoped_campaign_id) != PROFILE_PLAY:
                 raise CombatEngineError("narrative NPCs can be created only during play")
         elif scoped_campaign_id and authoritative_phase(scoped_campaign_id) != PROFILE_LOBBY:
