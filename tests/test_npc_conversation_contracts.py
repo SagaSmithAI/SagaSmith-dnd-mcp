@@ -357,6 +357,7 @@ def test_mechanical_action_waits_locally_without_blocking_public_speech(tmp_path
     assert submitted["publication"]["speech"] == "I never went to the docks."
     assert submitted["publication"]["visible_action"] == ""
     assert submitted["publication"]["action_pending_resolution"] is True
+    assert submitted["resolution_requests"][0]["resolution_id"]
     session = store.get(opened["conversation_id"])
     assert session["status"] == "open"
     assert session["pending_resolutions"][0]["status"] == "pending"
@@ -372,7 +373,27 @@ def test_mechanical_action_waits_locally_without_blocking_public_speech(tmp_path
         idempotency_key="publish-1",
     )
     assert published["status"] == "published"
-    assert store.get(opened["conversation_id"])["status"] == "open"
+    session = store.get(opened["conversation_id"])
+    assert session["status"] == "open"
+    resolution_id = submitted["resolution_requests"][0]["resolution_id"]
+    resolution_audience = _audience(response=(), understood=("npc", "pc"), perceived=("npc", "pc"))
+    resolution_audience["decision_id"] = "resolution-audience"
+    resolved = store.append_event(
+        session,
+        event={
+            "type": "resolution",
+            "speaker_actor_id": "",
+            "content": "Aria wins the contest and keeps her footing.",
+            "resolved_resolution_ids": [resolution_id],
+        },
+        audience_facts=resolution_audience,
+        expected_revision=4,
+        idempotency_key="resolve-1",
+    )
+    final = store.get(opened["conversation_id"])
+    assert resolved["event"]["resolved_resolution_ids"] == [resolution_id]
+    assert final["pending_resolutions"][0]["status"] == "resolved"
+    assert final["pending_resolutions"][0]["resolution_event_id"] == resolved["event"]["event_id"]
 
 
 def test_retired_conversation_journal_is_rejected_instead_of_migrated(tmp_path) -> None:

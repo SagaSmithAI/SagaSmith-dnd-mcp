@@ -210,7 +210,13 @@ def test_conversation_facade_private_transport_and_commit(tmp_path: Path) -> Non
                 "settlement": "narrative",
                 "mechanic_hint": "",
             },
-            "resolution_requests": [],
+            "resolution_requests": [
+                {
+                    "kind": "dm_adjudication",
+                    "reason": "Determine whether Aria notices the evasive movement.",
+                    "actor_ids": [npc["id"], pc["id"]],
+                }
+            ],
             "working_deltas": {
                 "facts": [],
                 "actor_knowledge": [
@@ -271,6 +277,32 @@ def test_conversation_facade_private_transport_and_commit(tmp_path: Path) -> Non
             },
         )
         assert published["publication"]["speech"] == "No. I stayed home."
+        resolution_id = submitted["resolution_requests"][0]["resolution_id"]
+        resolved = await _call(
+            server,
+            "npc_conversation",
+            {
+                "campaign_id": campaign["id"],
+                "action": "ingest",
+                "payload": {
+                    "conversation_id": conversation_id,
+                    "event": {
+                        "type": "resolution",
+                        "content": "Aria notices Mara edging toward the door.",
+                        "resolved_resolution_ids": [resolution_id],
+                    },
+                    "audience_facts": _audience(
+                        "audience-3",
+                        perceived=[pc["id"], npc["id"]],
+                        understood=[pc["id"], npc["id"]],
+                        response=[],
+                    ),
+                    "expected_conversation_revision": 4,
+                    "idempotency_key": "resolve",
+                },
+            },
+        )
+        assert resolved["event"]["resolved_resolution_ids"] == [resolution_id]
         committed = await _call(
             server,
             "npc_conversation",
@@ -279,7 +311,7 @@ def test_conversation_facade_private_transport_and_commit(tmp_path: Path) -> Non
                 "action": "close",
                 "payload": {
                     "conversation_id": conversation_id,
-                    "expected_conversation_revision": 4,
+                    "expected_conversation_revision": 5,
                     "accepted_working_deltas": {
                         npc["id"]: {
                             "fact_indexes": [],
@@ -298,7 +330,8 @@ def test_conversation_facade_private_transport_and_commit(tmp_path: Path) -> Non
             },
         )
         assert committed["event"]["event_type"] == "npc_conversation"
-        assert committed["conversation_revision"] == 5
+        assert committed["conversation_revision"] == 6
+        assert committed["event"]["payload"]["unresolved_resolution_requests"] == []
         transcript = committed["event"]["payload"]["transcript"]
         assert all("audience_facts" in event for event in transcript)
         heard = await _call(

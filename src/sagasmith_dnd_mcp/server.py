@@ -29755,7 +29755,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             for item in session["publications"]
             if item.get("status") == "pending_audience"
         ]
-        result["pending_resolutions"] = deepcopy(session.get("pending_resolutions") or [])
+        result["pending_resolutions"] = [
+            deepcopy(item)
+            for item in session.get("pending_resolutions") or []
+            if item.get("status") == "pending"
+        ]
         result["listener_knowledge_candidates"] = {
             actor_id: deepcopy(values)
             for actor_id, values in dict(session.get("listener_knowledge_candidates") or {}).items()
@@ -29789,6 +29793,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "language",
             "delivery",
             "declared_target_actor_ids",
+            "resolved_resolution_ids",
         }
         if unknown := set(raw) - allowed_fields:
             raise ValueError(f"conversation event has unknown fields: {sorted(unknown)}")
@@ -29814,6 +29819,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError("declared conversation targets must be unique participants")
         language = str(raw.get("language") or "").strip()
         delivery = str(raw.get("delivery") or "").strip()
+        resolved_resolution_ids = [
+            str(item).strip() for item in raw.get("resolved_resolution_ids") or []
+        ]
+        if len(resolved_resolution_ids) != len(set(resolved_resolution_ids)) or any(
+            not item for item in resolved_resolution_ids
+        ):
+            raise ValueError("resolved_resolution_ids must contain unique non-empty ids")
+        if event_type == "resolution" and not resolved_resolution_ids:
+            raise ValueError("resolution events must identify at least one resolved resolution")
+        if event_type != "resolution" and resolved_resolution_ids:
+            raise ValueError("only resolution events may include resolved_resolution_ids")
         audience = normalize_audience_facts(
             audience_facts,
             participant_ids=set(session["participant_ids"]),
@@ -29828,6 +29844,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "language": language,
                 "delivery": delivery,
                 "declared_target_actor_ids": target_actor_ids,
+                "resolved_resolution_ids": resolved_resolution_ids,
             },
             audience_facts=audience,
             expected_revision=expected_conversation_revision,
@@ -30141,7 +30158,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "retrieval_summary": "\n".join(retrieval_lines),
                         "accepted_commitments": accepted_commitments,
                         "unresolved_resolution_requests": deepcopy(
-                            session.get("pending_resolutions") or []
+                            [
+                                item
+                                for item in session.get("pending_resolutions") or []
+                                if item.get("status") == "pending"
+                            ]
                         ),
                         "authority_at_open": deepcopy(session["authority"]),
                     },

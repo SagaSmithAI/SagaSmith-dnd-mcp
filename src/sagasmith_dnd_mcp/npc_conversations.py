@@ -733,6 +733,18 @@ class ConversationStore:
             "audience_facts": deepcopy(audience_facts),
         }
         saved["actor_inboxes"] = self._actor_inboxes(saved, audience_facts)
+        resolved_ids = list(event.get("resolved_resolution_ids") or [])
+        resolutions_by_id = {
+            str(item["resolution_id"]): item for item in session["pending_resolutions"]
+        }
+        if unknown := sorted(set(resolved_ids) - set(resolutions_by_id)):
+            raise ValueError(f"resolution event cites unknown resolution ids: {unknown}")
+        for resolution_id in resolved_ids:
+            resolution = resolutions_by_id[str(resolution_id)]
+            if resolution.get("status") != "pending":
+                raise ValueError(f"resolution is already settled: {resolution_id}")
+            resolution["status"] = "resolved"
+            resolution["resolution_event_id"] = saved["event_id"]
         session["events"].append(saved)
         session["audience_decision_ids"].append(decision_id)
         activations = []
@@ -1003,16 +1015,17 @@ class ConversationStore:
             publication["status"] = "pending_audience"
             publication["speaker_actor_id"] = activation["actor_id"]
             session["publications"].append(deepcopy(publication))
-        if proposal["resolution_requests"]:
-            session["pending_resolutions"].extend(
-                {
-                    **deepcopy(item),
-                    "activation_id": activation["activation_id"],
-                    "actor_id": activation["actor_id"],
-                    "status": "pending",
-                }
-                for item in proposal["resolution_requests"]
-            )
+        created_resolutions = [
+            {
+                **deepcopy(item),
+                "resolution_id": str(uuid4()),
+                "activation_id": activation["activation_id"],
+                "actor_id": activation["actor_id"],
+                "status": "pending",
+            }
+            for item in proposal["resolution_requests"]
+        ]
+        session["pending_resolutions"].extend(created_resolutions)
         for field, values in proposal["working_deltas"].items():
             runtime["working_deltas"][field].extend(deepcopy(values))
         if any(proposal["working_deltas"].values()):
@@ -1025,7 +1038,7 @@ class ConversationStore:
             {
                 "status": "publication_ready" if publication else "resolution_required",
                 "publication": publication,
-                "resolution_requests": deepcopy(proposal["resolution_requests"]),
+                "resolution_requests": deepcopy(created_resolutions),
             },
         )
 
