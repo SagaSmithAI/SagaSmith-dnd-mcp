@@ -934,11 +934,37 @@ def _list_changed_count(unit_dir: Path) -> int:
     return count
 
 
-def _copy_transcript(source: Path, target: Path) -> None:
-    if not source.is_file():
+def _aggregate_transcripts(
+    agent_workspace: Path,
+    session_ids: list[str],
+    target: Path,
+) -> None:
+    sources = [
+        (session_id, _session_path(agent_workspace, session_id))
+        for session_id in dict.fromkeys(session_ids)
+    ]
+    sources = [(session_id, path) for session_id, path in sources if path.is_file()]
+    if not sources:
         return
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(source.read_bytes())
+    with target.open("w", encoding="utf-8") as stream:
+        for session_id, source in sources:
+            stream.write(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "record_type": "session_boundary",
+                        "session_id": session_id,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+            content = source.read_text(encoding="utf-8")
+            stream.write(content)
+            if content and not content.endswith("\n"):
+                stream.write("\n")
 
 
 def _run_unit(
@@ -958,8 +984,8 @@ def _run_unit(
     )
     dm_principal = f"regression-dm-{_safe_id(line_id)}"
     player_principal = f"regression-player-{_safe_id(line_id)}"
-    dm_session = f"{args.run_id}:{line_id}:dm"
-    player_session = f"{args.run_id}:{line_id}:player"
+    dm_session_prefix = f"{args.run_id}:{line_id}:dm"
+    player_session_prefix = f"{args.run_id}:{line_id}:player"
     dm_audit = unit_dir / "artifacts" / "dm-tool-audit.jsonl"
     player_audit = unit_dir / "artifacts" / "player-tool-audit.jsonl"
     processes: list[AgentProcess] = []
@@ -977,6 +1003,7 @@ def _run_unit(
     start_cycle = _next_cycle(unit_dir)
 
     for cycle in range(start_cycle, start_cycle + args.max_cycles):
+        dm_session = f"{dm_session_prefix}:cycle-{cycle:03d}"
         dm = _run_agent(
             args,
             config=config,
@@ -1015,7 +1042,7 @@ def _run_unit(
             agent_workspace=agent_workspace,
             unit_dir=unit_dir,
             principal=player_principal,
-            session_id=player_session,
+            session_id=f"{player_session_prefix}:cycle-{cycle:03d}",
             cycle=cycle,
             prompt=_player_prompt(run_id=args.run_id, line_id=line_id, cycle=cycle),
             audit_path=player_audit,
@@ -1038,16 +1065,32 @@ def _run_unit(
         if player.returncode and args.fail_fast:
             break
 
-    dm_source = _session_path(agent_workspace, dm_session)
-    player_source = _session_path(agent_workspace, player_session)
-    _copy_transcript(dm_source, unit_dir / "artifacts" / "dm-transcript.jsonl")
-    _copy_transcript(player_source, unit_dir / "artifacts" / "player-transcript.jsonl")
     dm_rows = _read_tool_audit(dm_audit)
     player_rows = _read_tool_audit(player_audit)
     calls = _tool_timeline(dm_rows, principal="dm") + _tool_timeline(
         player_rows, principal="player"
     )
     process_artifacts = _process_artifacts(unit_dir, processes)
+    dm_session_ids = [
+        str(item["session_id"])
+        for item in process_artifacts
+        if item.get("principal") == dm_principal and item.get("session_id")
+    ]
+    player_session_ids = [
+        str(item["session_id"])
+        for item in process_artifacts
+        if item.get("principal") == player_principal and item.get("session_id")
+    ]
+    _aggregate_transcripts(
+        agent_workspace,
+        dm_session_ids,
+        unit_dir / "artifacts" / "dm-transcript.jsonl",
+    )
+    _aggregate_transcripts(
+        agent_workspace,
+        player_session_ids,
+        unit_dir / "artifacts" / "player-transcript.jsonl",
+    )
     list_changed_count = _list_changed_count(unit_dir)
     audit = _coverage_audit(
         route,
@@ -1071,6 +1114,8 @@ def _run_unit(
             "player": str((unit_dir / "artifacts" / "player-transcript.jsonl").resolve()),
             "dm_tool_audit": str(dm_audit.resolve()),
             "player_tool_audit": str(player_audit.resolve()),
+            "dm_sessions": dm_session_ids,
+            "player_sessions": player_session_ids,
         },
     }
     _write_json(unit_dir / "campaign-report.json", report)

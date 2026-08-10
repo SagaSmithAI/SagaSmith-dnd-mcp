@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import subprocess
@@ -10,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from scripts.regression_agent_corpus import (
+    _aggregate_transcripts,
     _configure_agent,
     _coverage_audit,
     _decode_tool_content,
@@ -209,6 +211,28 @@ def test_append_only_tool_audit_survives_context_barrier(tmp_path: Path) -> None
     timeline = _tool_timeline(_read_tool_audit(path), principal="dm")
     assert timeline[0]["tool"] == "campaign_create"
     assert timeline[0]["result"] == {"id": "campaign-1"}
+
+
+def test_process_sessions_are_aggregated_with_explicit_boundaries(tmp_path: Path) -> None:
+    workspace = tmp_path / "agent"
+    first = "run:module:dm:cycle-001"
+    second = "run:module:dm:cycle-002"
+    for session_id, content in ((first, '{"role":"user"}\n'), (second, '{"role":"assistant"}\n')):
+        path = workspace / "sessions" / (
+            base64.urlsafe_b64encode(session_id.encode()).decode().rstrip("=") + ".jsonl"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    target = tmp_path / "aggregate.jsonl"
+
+    _aggregate_transcripts(workspace, [first, second, first], target)
+
+    rows = [json.loads(line) for line in target.read_text(encoding="utf-8").splitlines()]
+    assert [
+        row.get("session_id")
+        for row in rows
+        if row.get("record_type") == "session_boundary"
+    ] == [first, second]
 
 
 def test_resume_cycles_preserve_existing_process_artifacts(tmp_path: Path) -> None:
