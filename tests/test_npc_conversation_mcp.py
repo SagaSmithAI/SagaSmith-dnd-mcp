@@ -93,6 +93,56 @@ def test_public_surface_is_one_facade_and_host_transport_is_unloadable() -> None
     assert HOST_PRIVATE_TOOLS == frozenset({"npc_conversation_transport"})
 
 
+def test_active_conversation_blocks_combat_and_leaving_play(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign, npc, pc = await _campaign_with_actors(server)
+        await _call(
+            server,
+            "npc_conversation",
+            {
+                "campaign_id": campaign["id"],
+                "action": "open",
+                "payload": {
+                    "participant_actor_ids": [pc["id"], npc["id"]],
+                    "idempotency_key": "open",
+                },
+            },
+        )
+        current = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+
+        with pytest.raises(Exception, match="close or abort the active NPC conversation"):
+            await _call(
+                server,
+                "combat_start",
+                {
+                    "campaign_id": campaign["id"],
+                    "participant_ids": [pc["id"], npc["id"]],
+                    "positioning_mode": "agent",
+                    "expected_revision": current["revision"],
+                    "idempotency_key": "combat-with-open-conversation",
+                },
+            )
+        with pytest.raises(Exception, match="close or abort the active NPC conversation"):
+            await _call(
+                server,
+                "game_phase",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "set",
+                    "tool_profile": "lobby",
+                    "expected_revision": current["revision"],
+                    "idempotency_key": "lobby-with-open-conversation",
+                },
+            )
+
+    asyncio.run(exercise())
+
+
 def test_conversation_facade_private_transport_and_commit(tmp_path: Path) -> None:
     async def exercise() -> None:
         server = create_server(_config(tmp_path))

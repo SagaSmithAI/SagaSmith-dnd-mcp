@@ -271,6 +271,19 @@ def test_public_chase_uses_exact_module_source_and_no_combat_map(
             for receipt in started["rule_receipts"]
         )
 
+        with pytest.raises(Exception, match="end the active chase"):
+            await _call(
+                server,
+                "combat_start",
+                {
+                    "campaign_id": campaign["id"],
+                    "participant_ids": [pursuer["id"], quarry["id"]],
+                    "positioning_mode": "agent",
+                    "expected_revision": started["campaign_revision"],
+                    "idempotency_key": "combat-before-chase-end",
+                },
+            )
+
         current_pursuer = await _call(
             server,
             "character_query",

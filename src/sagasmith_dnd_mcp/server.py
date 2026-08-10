@@ -2813,7 +2813,14 @@ class SessionExposureFastMCP(FastMCP):
             if session is not None:
                 await session.send_tool_list_changed()
         campaign_id = str(arguments.get("campaign_id") or "") or None
-        if campaign_id and name in {"game_phase", "combat_start", "combat_end"}:
+        if campaign_id and name in {
+            "branch_change",
+            "combat_end",
+            "combat_start",
+            "game_phase",
+            "snapshot_restore",
+            "state_revision",
+        }:
             await self._refresh(session_key, campaign_id)
         campaign_id = campaign_id or (exposure.campaign_id if exposure else None)
         campaign_id = campaign_id or self._result_campaign_id(name, result, arguments)
@@ -10756,6 +10763,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if isinstance(combat, dict) and combat.get("active", False):
             raise CombatEngineError("end the active combat before leaving the combat profile")
         state = dict(campaign.state or {})
+        if profile != PROFILE_PLAY:
+            if dict(state.get("chase") or {}).get("active", False):
+                raise CombatEngineError("end the active chase before leaving Play")
+            if npc_conversations.active_ids(
+                campaign_id=campaign_id,
+                branch_id=resolved_branch_id,
+            ):
+                raise CombatEngineError(
+                    "close or abort the active NPC conversation before leaving Play"
+                )
         state["game_phase"] = profile
         if profile == PROFILE_PLAY:
             if not state.get("adventure_started", False):
@@ -13313,6 +13330,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if isinstance(campaign.state, dict) and campaign.state.get("combat", {}).get("active"):
             raise CombatEngineError(
                 "combat is already active; end it before starting another encounter"
+            )
+        if dict(campaign.state.get("chase") or {}).get("active", False):
+            raise CombatEngineError("end the active chase before starting combat")
+        if npc_conversations.active_ids(
+            campaign_id=campaign_id,
+            branch_id=resolved_branch_id,
+        ):
+            raise CombatEngineError(
+                "close or abort the active NPC conversation before starting combat"
             )
         if len(set(participant_ids)) != len(participant_ids):
             raise ValueError("participant_ids must be unique")

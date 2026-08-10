@@ -476,6 +476,21 @@ class ConversationStore:
         with self._lock:
             self._write(session)
 
+    def active_ids(self, *, campaign_id: str, branch_id: str) -> list[str]:
+        """Return active conversation ids without exposing private journal state."""
+
+        with self._lock:
+            result: list[str] = []
+            for path in self.root.glob("*.json"):
+                session = json.loads(path.read_text(encoding="utf-8"))
+                if (
+                    session.get("campaign_id") == campaign_id
+                    and session.get("branch_id") == branch_id
+                    and session.get("status") in ACTIVE_CONVERSATION_STATUSES
+                ):
+                    result.append(str(session["conversation_id"]))
+            return sorted(result)
+
     @staticmethod
     def _fingerprint(value: Any) -> str:
         encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

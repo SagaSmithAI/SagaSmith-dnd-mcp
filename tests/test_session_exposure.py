@@ -536,6 +536,142 @@ def test_stdio_session_mutates_native_tool_list_and_calls_tools_directly(
     asyncio.run(exercise())
 
 
+def test_stdio_undo_phase_change_immediately_notifies_and_refreshes_tools(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        notifications: list[str] = []
+
+        async def on_message(message) -> None:
+            notifications.append(type(getattr(message, "root", message)).__name__)
+
+        env = dict(os.environ)
+        env.update(
+            {
+                "SAGASMITH_DND_MCP_HOME": str(tmp_path / "home"),
+                "SAGASMITH_DND_MCP_AUTO_SEED": "0",
+            }
+        )
+        params = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "sagasmith_dnd_mcp.server"],
+            cwd=Path(__file__).parents[1],
+            env=env,
+        )
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write, message_handler=on_message) as session:
+                await session.initialize()
+                principal_id = "discord:undo-phase"
+                await session.call_tool(
+                    "exposure", {"action": "open", "principal_id": principal_id}
+                )
+                await session.call_tool(
+                    "exposure",
+                    {
+                        "action": "set",
+                        "add_tool_ids": ["campaign_create"],
+                        "principal_id": principal_id,
+                    },
+                )
+                created = await session.call_tool(
+                    "campaign_create",
+                    {"name": "Undo phase", "idempotency_key": "create"},
+                )
+                campaign_id = json.loads(created.content[0].text)["id"]
+                await session.call_tool(
+                    "exposure",
+                    {
+                        "action": "open",
+                        "campaign_id": campaign_id,
+                        "principal_id": principal_id,
+                    },
+                )
+                await session.call_tool(
+                    "exposure",
+                    {
+                        "action": "set",
+                        "add_tool_ids": ["game_phase"],
+                        "principal_id": principal_id,
+                    },
+                )
+                current = await session.call_tool(
+                    "campaign_query",
+                    {
+                        "view": "get",
+                        "payload": {"campaign_id": campaign_id},
+                        "principal_id": principal_id,
+                    },
+                )
+                revision = json.loads(current.content[0].text)["result"]["revision"]
+                entered = await session.call_tool(
+                    "game_phase",
+                    {
+                        "campaign_id": campaign_id,
+                        "action": "set",
+                        "tool_profile": "play",
+                        "expected_revision": revision,
+                        "idempotency_key": "enter-play",
+                    },
+                )
+                assert not entered.isError
+                await session.call_tool(
+                    "exposure",
+                    {
+                        "action": "set",
+                        "add_tool_ids": ["character_check", "state_revision"],
+                        "principal_id": principal_id,
+                    },
+                )
+                assert "character_check" in {
+                    tool.name for tool in (await session.list_tools()).tools
+                }
+                history = await session.call_tool(
+                    "state_revision",
+                    {
+                        "campaign_id": campaign_id,
+                        "action": "history",
+                        "payload": {},
+                    },
+                )
+                expected_history_sequence = json.loads(history.content[0].text)["result"][0][
+                    "sequence"
+                ]
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                notifications.clear()
+
+                undone = await session.call_tool(
+                    "state_revision",
+                    {
+                        "campaign_id": campaign_id,
+                        "action": "undo",
+                        "payload": {
+                            "expected_history_sequence": expected_history_sequence,
+                        },
+                        "idempotency_key": "undo-enter-play",
+                    },
+                )
+                assert not undone.isError
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                assert "ToolListChangedNotification" in notifications
+                visible = {tool.name for tool in (await session.list_tools()).tools}
+                assert "character_check" not in visible
+                resumed = await session.call_tool(
+                    "campaign_query",
+                    {
+                        "view": "get",
+                        "payload": {"campaign_id": campaign_id},
+                        "principal_id": principal_id,
+                    },
+                )
+                assert json.loads(resumed.content[0].text)["result"]["state"][
+                    "game_phase"
+                ] == "lobby"
+
+    asyncio.run(exercise())
+
+
 def test_stdio_process_binding_overwrites_model_authored_principal(tmp_path: Path) -> None:
     async def exercise() -> None:
         env = dict(os.environ)
