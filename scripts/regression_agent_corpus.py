@@ -843,6 +843,16 @@ def _run_unit(
     player_audit = unit_dir / "artifacts" / "player-tool-audit.jsonl"
     processes: list[AgentProcess] = []
     audit: dict[str, Any] = {"complete": False, "gaps": ["not_started"]}
+    prior_calls = _tool_timeline(
+        _read_tool_audit(dm_audit), principal="dm"
+    ) + _tool_timeline(_read_tool_audit(player_audit), principal="player")
+    if prior_calls:
+        audit = _coverage_audit(
+            route,
+            prior_calls,
+            process_count=len(_process_artifacts(unit_dir)),
+            list_changed_count=_list_changed_count(unit_dir),
+        )
     start_cycle = _next_cycle(unit_dir)
 
     for cycle in range(start_cycle, start_cycle + args.max_cycles):
