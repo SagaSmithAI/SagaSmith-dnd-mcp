@@ -1974,10 +1974,7 @@ async def _switch_phase(
         )
     )
     await client.open(campaign_id)
-    if target_phase == "lobby":
-        await client.load("lobby.campaign", "lobby.rules", "lobby.characters")
-    else:
-        await client.load("play.scene_control", "play.scene")
+    await client.load()
     return dict(changed)
 
 
@@ -2014,9 +2011,9 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             if return_phase not in CAMPAIGN_GAME_PHASES:
                 raise ValueError("--return-phase must be lobby or play")
             if entry_phase == "lobby":
-                await client.load("lobby.campaign", "lobby.rules", "lobby.characters")
+                await client.load()
             else:
-                await client.load("play.scene_control", "play.scene")
+                await client.load()
             phase_changes: list[dict[str, Any]] = []
             current_phase = entry_phase
             if current_phase == "play":

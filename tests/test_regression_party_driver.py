@@ -501,4 +501,4 @@ def test_replacement_phase_switch_uses_public_campaign_and_branch_tools() -> Non
     )
 
     assert result == {"tool_profile": "lobby", "campaign_revision": 10}
-    assert client.loaded[-1] == ("lobby.campaign", "lobby.rules", "lobby.characters")
+    assert client.loaded[-1] == ()

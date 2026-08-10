@@ -1881,7 +1881,7 @@ def test_status_uses_play_character_exposure_before_combat() -> None:
 
     assert result["phase"] == "play"
     assert result["combat"] is None
-    assert client.loaded == [("play.characters",)]
+    assert client.loaded == [()]
     assert [actor["id"] for actor in result["actors"]] == ["pc-1", "pc-2"]
     assert result["actors"][0]["resources"]["test"]["value"] == 1
     assert result["actors"][0]["spell_slots"]["1"]["value"] == 2

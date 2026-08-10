@@ -4290,13 +4290,7 @@ async def _start(
     if not args.scene_id:
         raise ValueError("encounter start requires --scene-id")
     opened_play = await client.open(args.campaign_id)
-    await client.load(
-        "play.scene",
-        "play.scene_control",
-        "play.characters",
-        "play.resolution",
-        "play.combat_control",
-    )
+    await client.load()
     campaign = await _campaign(client, args.campaign_id)
     phase = str(campaign.get("effective_game_phase") or "")
     if phase != "play":
@@ -4742,14 +4736,7 @@ async def _start(
     _require_committed_encounter_start(started)
     started["participant_preflight"] = encounter_preflight
     opened_combat = await client.open(args.campaign_id)
-    await client.load(
-        "combat.observe",
-        "combat.actions",
-        "combat.turn",
-        "combat.control",
-        "combat.save",
-        "combat.map",
-    )
+    await client.load()
     reinforcement_queue: list[dict[str, Any]] = []
     agent_reinforcement_initiative_rulings: list[dict[str, Any]] = []
     reinforcements = [
@@ -7314,14 +7301,7 @@ async def _auto_run(
     hostile_ids: list[str],
 ) -> dict[str, Any]:
     opened_combat = await client.open(args.campaign_id)
-    await client.load(
-        "combat.observe",
-        "combat.actions",
-        "combat.turn",
-        "combat.control",
-        "combat.save",
-        "combat.map",
-    )
+    await client.load()
     campaign = await _campaign(client, args.campaign_id)
     if not bool(
         dict(dict(campaign.get("state") or {}).get("combat") or {}).get(
@@ -9069,7 +9049,7 @@ async def _auto_run(
         },
     )
     opened_play = await client.open(args.campaign_id)
-    await client.load("play.scene", "play.scene_control", "play.characters")
+    await client.load()
     checkpoint = None
     if _source_outcome_allows_checkpoint(outcome_status):
         checkpoint = await _checkpoint(
@@ -9186,7 +9166,7 @@ async def _finalize_ended_encounter(
     opened = await client.open(args.campaign_id)
     if str(opened.get("phase") or "") != "play":
         raise RuntimeError("encounter finalization requires the Play phase")
-    await client.load("play.scene", "play.scene_control", "play.characters")
+    await client.load()
     campaign = await _campaign(client, args.campaign_id)
     combat = dict(dict(campaign.get("state") or {}).get("combat") or {})
     outcome = dict(combat.get("outcome") or {})
@@ -9345,7 +9325,7 @@ async def _resume_source_reinforcements(
     )
     if not reinforcement_ids:
         return []
-    await client.load("combat.observe", "combat.control")
+    await client.load()
     combat = await client.domain(
         "combat_query",
         {"campaign_id": args.campaign_id, "view": "status"},
@@ -9511,13 +9491,13 @@ async def _status(
     phase = str(opened.get("phase") or "")
     combat = None
     if phase == "combat":
-        await client.load("combat.observe")
+        await client.load()
         combat = await client.domain(
             "combat_query",
             {"campaign_id": campaign_id, "view": "status"},
         )
     elif phase == "play":
-        await client.load("play.characters")
+        await client.load()
         campaign = await _campaign(client, campaign_id)
         retained_combat = dict(dict(campaign.get("state") or {}).get("combat") or {})
         combat = retained_combat or None

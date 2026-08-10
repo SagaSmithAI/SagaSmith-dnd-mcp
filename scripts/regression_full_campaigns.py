@@ -124,7 +124,7 @@ async def _create_campaign(
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     await client.open()
-    await client.load("lobby.bootstrap")
+    await client.load()
     line_id = str(line["id"])
     identity = _token(f"{args.run_id}\0full-campaign\0{line_id}")
     campaign = await client.domain(
@@ -139,7 +139,7 @@ async def _create_campaign(
         },
     )
     await client.open(str(campaign["id"]))
-    await client.load("lobby.campaign")
+    await client.load()
     advancement = dict(line["play_requirements"].get("advancement") or {})
     selected_advancement = str(advancement.get("selected") or "")
     if selected_advancement not in ADVANCEMENT_MODES:
@@ -584,12 +584,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     primary = modules_by_sequence[1]
                     player_documents: list[dict[str, Any]] = []
                     await client.open(campaign_id)
-                    await client.load(
-                        "lobby.campaign",
-                        "lobby.rules",
-                        "lobby.modules",
-                        "lobby.characters",
-                    )
+                    await client.load()
                     for entry in line.get("player_materials") or []:
                         document_index += 1
                         document = await _import_document(

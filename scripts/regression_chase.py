@@ -434,12 +434,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             opened = await client.open(args.campaign_id)
             if opened.get("phase") != "play":
                 raise RuntimeError("chase regression requires the play phase")
-            await client.load(
-                "play.chase",
-                "play.characters",
-                "play.scene",
-                "play.scene_control",
-            )
+            await client.load()
             actors = await _actors(client, args.campaign_id, participant_ids)
             campaign = await _campaign(client, args.campaign_id)
             existing = _facade_value(
