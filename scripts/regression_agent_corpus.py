@@ -440,6 +440,30 @@ def _ending_completed(calls: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _manifest_party_ready(calls: list[dict[str, Any]]) -> bool:
+    for call in reversed(calls):
+        if call.get("tool") != "playthrough_manifest" or not call.get("ok"):
+            continue
+        for node in _walk(call.get("result")):
+            if not isinstance(node, dict) or not isinstance(node.get("manifest"), dict):
+                continue
+            manifest = node["manifest"]
+            party = manifest.get("party") or {}
+            selected_size = party.get("selected_size")
+            members = party.get("members") or []
+            active_count = sum(
+                1
+                for member in members
+                if isinstance(member, dict) and member.get("status") == "active"
+            )
+            return (
+                manifest.get("status") in {"ready", "in_progress", "completed"}
+                and isinstance(selected_size, int)
+                and active_count == selected_size
+            )
+    return False
+
+
 def _mechanism_covered(mechanism: str, calls: list[dict[str, Any]]) -> bool:
     if mechanism == "preparation":
         return _ordered_success(
@@ -545,6 +569,8 @@ def _coverage_audit(
         gaps.append("cold_start:exposure_open_missing")
     if not _has_player_access_pair(calls):
         gaps.append("preparation:player_membership_or_actor_grant_missing")
+    if not _manifest_party_ready(calls):
+        gaps.append("preparation:manifest_party_not_ready")
     if list_changed_count < 1:
         gaps.append("host:list_changed_not_observed")
     if _has_exposure_reopen_after_transition(calls):

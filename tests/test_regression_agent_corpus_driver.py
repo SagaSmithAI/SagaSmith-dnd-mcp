@@ -62,6 +62,22 @@ def _player_grants(principal: str = "cli:player") -> list[dict[str, object]]:
     ]
 
 
+def _ready_manifest_call() -> dict[str, object]:
+    return _call(
+        "playthrough_manifest",
+        arguments={"action": "sync"},
+        result={
+            "manifest": {
+                "status": "ready",
+                "party": {
+                    "selected_size": 1,
+                    "members": [{"actor_id": "pc-1", "status": "active"}],
+                },
+            }
+        },
+    )
+
+
 def test_wrapped_mcp_text_is_decoded_without_losing_artifacts() -> None:
     value = _decode_tool_content(
         json.dumps(
@@ -306,6 +322,7 @@ def test_coverage_requires_real_ordered_boundaries_retries_and_recovery() -> Non
             result={"status": "completed", "achieved": True},
         ),
         *_player_grants(),
+        _ready_manifest_call(),
         _call("campaign_query", principal="player"),
     ]
     audit = _coverage_audit(route, calls, process_count=4, list_changed_count=3)
@@ -352,6 +369,7 @@ def test_preparation_requires_finalize_import_activate_order() -> None:
         _call("content_pack", arguments={"action": "import"}),
         bypassed[3],
         *_player_grants(),
+        _ready_manifest_call(),
     ]
 
     bypassed_audit = _coverage_audit(
@@ -359,6 +377,7 @@ def test_preparation_requires_finalize_import_activate_order() -> None:
     )
     assert bypassed_audit["complete"] is False
     assert "preparation:player_membership_or_actor_grant_missing" in bypassed_audit["gaps"]
+    assert "preparation:manifest_party_not_ready" in bypassed_audit["gaps"]
     assert _coverage_audit(route, complete, process_count=1, list_changed_count=1)[
         "complete"
     ] is True
