@@ -110,6 +110,42 @@ def test_dm_two_players_restart_and_combat_projection(tmp_path: Path) -> None:
                 },
             )
 
+        partial_grant = await call(
+            first_server,
+            "access_grant",
+            {
+                "scope": "actor",
+                "campaign_id": campaign["id"],
+                "principal_id": "player:alice",
+                "payload": {"actor_id": alice["id"], "can_control": True},
+                "by_principal_id": "system:local",
+            },
+        )
+        assert partial_grant["can_control"] is True
+        assert partial_grant["can_view_private"] is True
+        with pytest.raises(
+            Exception,
+            match=(
+                "actor access grant has unsupported fields: control, role; "
+                "provide can_control and/or can_view_private"
+            ),
+        ):
+            await call(
+                first_server,
+                "access_grant",
+                {
+                    "scope": "actor",
+                    "campaign_id": campaign["id"],
+                    "principal_id": "player:alice",
+                    "payload": {
+                        "actor_id": alice["id"],
+                        "role": "player",
+                        "control": "owner",
+                    },
+                    "by_principal_id": "system:local",
+                },
+            )
+
         for actor, key, proposition in (
             (alice, "moon-mark", "The moon mark opens the east gate."),
             (bob, "bell-code", "The bell code is three short strikes."),

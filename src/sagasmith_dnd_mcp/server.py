@@ -11881,8 +11881,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         principal_id: str,
         actor_id: str,
-        can_control: bool = False,
-        can_view_private: bool = False,
+        can_control: bool | None = None,
+        can_view_private: bool | None = None,
         by_principal_id: str | None = None,
     ) -> dict[str, Any]:
         """Grant an explicit PC/NPC control and private-sheet view permission."""
@@ -44565,12 +44565,25 @@ boundary.
                 campaign_id, principal_id, data.get("role", "player"), by_principal_id
             )
         else:
+            allowed_fields = {"actor_id", "can_control", "can_view_private"}
+            unsupported_fields = sorted(set(data) - allowed_fields)
+            permission_fields = {"can_control", "can_view_private"} & set(data)
+            if unsupported_fields or not permission_fields:
+                details = []
+                if unsupported_fields:
+                    details.append("unsupported fields: " + ", ".join(unsupported_fields))
+                if not permission_fields:
+                    details.append("provide can_control and/or can_view_private")
+                raise ValueError("actor access grant has " + "; ".join(details))
+            for field in permission_fields:
+                if not isinstance(data[field], bool):
+                    raise ValueError(f"actor access grant {field} must be a boolean")
             result = actor_grant(
                 campaign_id,
                 principal_id,
                 required(data, "actor_id"),
-                data.get("can_control", False),
-                data.get("can_view_private", False),
+                data.get("can_control"),
+                data.get("can_view_private"),
                 by_principal_id,
             )
         return facade_result(scope, result)
