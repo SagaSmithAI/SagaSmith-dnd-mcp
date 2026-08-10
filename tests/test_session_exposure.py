@@ -696,6 +696,25 @@ def test_stdio_session_mutates_native_tool_list_and_calls_tools_directly(
                 assert rebound_payload["campaign_id"] == second_campaign_id
                 assert rebound_payload["loaded_tools"] == []
 
+                repeated = await session.call_tool(
+                    "exposure",
+                    {
+                        "action": "open",
+                        "campaign_id": second_campaign_id,
+                        "principal_id": principal_id,
+                    },
+                )
+                assert repeated.isError
+                assert "already bound" in repeated.content[0].text
+                retained = await session.call_tool(
+                    "exposure",
+                    {"action": "get", "principal_id": principal_id},
+                )
+                assert not retained.isError
+                assert json.loads(retained.content[0].text)["exposure_id"] == rebound_payload[
+                    "exposure_id"
+                ]
+
     asyncio.run(exercise())
 
 

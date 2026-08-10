@@ -45421,6 +45421,17 @@ boundary.
         request = mcp._request_session()
         session_key = request[0] if request is not None else f"direct:{principal_id}"
         if action == "open":
+            current = exposures.active(session_key)
+            if (
+                current is not None
+                and current.principal_id == principal_id
+                and current.campaign_id == campaign_id
+            ):
+                raise ExposureError(
+                    "This MCP session is already bound to that campaign. "
+                    "Keep the exposure and use action='get', 'search', or 'set'; "
+                    "phase and recovery refreshes must not reopen it."
+                )
             phase = PROFILE_LOBBY
             if campaign_id:
                 access.require_campaign(campaign_id, principal_id)
