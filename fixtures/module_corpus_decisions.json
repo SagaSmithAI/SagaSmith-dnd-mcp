@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "decisions_by_sha256": {
+    "7068355b6f9b07926557ce7dc8c8fb6e598458a5d025156907b9ac70d789640b": {
+      "classification": "adventure_module",
+      "system_id": "dnd5e",
+      "disposition": "runnable_installed_pack_required",
+      "reason_code": "active_install_missing_reproducible_finalized_pack",
+      "campaign_line_id": "descent-into-avernus-zh",
+      "title": "Descent into Avernus zh"
+    },
+    "e8554e2f3091043188a94554adcd0a463697919fa3461144e4a846bd900e9369": {
+      "classification": "adventure_module",
+      "system_id": "dnd5e",
+      "disposition": "excluded",
+      "reason_code": "draft_source_not_finalized",
+      "title": "Temple of the Moon"
+    },
+    "2b08b638643bbcd1382f30e442cdef552e235aa97f420947024af7f34d0fcb9b": {
+      "classification": "adventure_module",
+      "system_id": "dnd5e",
+      "disposition": "excluded",
+      "reason_code": "draft_source_not_finalized",
+      "title": "The Dragon's Dinner"
+    },
+    "a92a7d6f67432dfacd935161a7c90a6ec9ba7f4fc636a8e8f09537070bbdeeb6": {
+      "classification": "adventure_module",
+      "system_id": "dnd5e",
+      "disposition": "excluded",
+      "reason_code": "draft_source_not_finalized",
+      "title": "The Wild Sheep Chase"
+    },
+    "a954f83eb0b437908204f028587d50c59802b360c1a7fd5c8ce0df3d08086be5": {
+      "classification": "adventure_module",
+      "system_id": "dnd5e",
+      "disposition": "excluded",
+      "reason_code": "draft_source_not_finalized",
+      "title": "Wolves of Welton"
+    },
+    "4da50d98b78399195d63bac23244daec09a8f1ce0a42659f04385191cd8636c0": {
+      "classification": "monster_supplement",
+      "system_id": "dnd5e",
+      "disposition": "excluded",
+      "reason_code": "monster_supplement_not_adventure",
+      "title": "Snowmen and Snow Golems"
+    },
+    "cdd4277bfbe2a3ddeb82d6ecdde3fa89461abe5dad5dcb611fb4dba75c0dd0f1": {
+      "classification": "auxiliary_map",
+      "system_id": "dnd5e",
+      "disposition": "excluded",
+      "reason_code": "auxiliary_map_only",
+      "title": "Sheep Chase Map"
+    },
+    "cf520ea5d328f1f3b100afb1be20feb3fb36982a48d2e5f154bf76937812236f": {
+      "classification": "mechanism_fixture",
+      "system_id": "dnd5e",
+      "disposition": "excluded",
+      "reason_code": "synthetic_smoke_not_adventure",
+      "title": "Regression Smoke Module"
+    },
+    "39b6a53915ddf9f48831ae45ac7180b6c7d5fc7bf49e1b7fe764c28ed1885436": {
+      "classification": "rulebook",
+      "system_id": "coc7e",
+      "disposition": "excluded",
+      "reason_code": "system_mismatch_coc7e"
+    },
+    "866ccff5742f9820b920c9a901a315baecc2913124530c3fb52bf5a70bef8a60": {
+      "classification": "adventure_module",
+      "system_id": "coc7e",
+      "disposition": "excluded",
+      "reason_code": "system_mismatch_coc7e"
+    },
+    "cf485d43f41af6beb7d72cf4ff6948c67b86666a7411f5fb34ae6a66170d5274": {
+      "classification": "adventure_module",
+      "system_id": "coc7e",
+      "disposition": "excluded",
+      "reason_code": "system_mismatch_coc7e"
+    },
+    "e75e7053e5db9762267b27082e4128998f059396e3e9924e49d5a02512a4d237": {
+      "classification": "player_handout",
+      "system_id": "coc7e",
+      "disposition": "excluded",
+      "reason_code": "system_mismatch_coc7e"
+    },
+    "14437ca4eca3b6c05b22403bdad30bdb8668f1837e0a2d0ee42e49c160d8aa07": {
+      "classification": "adventure_module",
+      "system_id": "coc7e",
+      "disposition": "excluded",
+      "reason_code": "system_mismatch_coc7e"
+    },
+    "40adb14dfab68e82e7f949666dc569deab8816c49a99663b59f61dd6515109f6": {
+      "classification": "adventure_module",
+      "system_id": "coc7e",
+      "disposition": "excluded",
+      "reason_code": "system_mismatch_coc7e"
+    }
+  }
+}
