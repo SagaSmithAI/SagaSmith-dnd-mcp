@@ -274,7 +274,6 @@ def test_module_start_finalize_writes_a_finalized_module_pack(tmp_path: Path) ->
                 "payload": {
                     "job_id": started["job"]["id"],
                     "pack_id": "dnd5e.module.three-tool",
-                    "include_package": True,
                     "confirmation": {
                         "confirmed": True,
                         "note": "The Agent reviewed the complete module fixture.",
@@ -285,14 +284,20 @@ def test_module_start_finalize_writes_a_finalized_module_pack(tmp_path: Path) ->
         )
         assert finalized["job"]["state"] == "compiled"
         assert finalized["confirmation"]["reviewer"] == "system:local"
-        assert finalized["package"]["metadata"]["agent_finalization"] == finalized["confirmation"]
-        assert finalized["package"]["metadata"]["authoring_review"] == {
-            "schema_version": 1,
-            "draft_kind": "module",
-            "draft_revision": edited["job"]["revision"],
-            "package_edit_history": edited["job"]["result"]["pack_edit_history"],
-        }
-        assert finalized["package"]["kind"] == "module"
+        assert "package" not in finalized
+        draft = await _call(
+            server,
+            "module_draft",
+            {
+                "campaign_id": campaign["id"],
+                "action": "get",
+                "payload": {"job_id": started["job"]["id"]},
+            },
+        )
+        assert draft["job"]["result"]["finalized_package"]["artifact"] == finalized[
+            "artifact"
+        ]
+        assert "package" not in draft["job"]["result"]["finalized_package"]
         inspected = await _call(
             server,
             "content_pack",
@@ -306,6 +311,14 @@ def test_module_start_finalize_writes_a_finalized_module_pack(tmp_path: Path) ->
             },
         )
         assert inspected["id"] == "dnd5e.module.three-tool"
+        assert inspected["metadata"]["agent_finalization"] == finalized["confirmation"]
+        assert inspected["metadata"]["authoring_review"] == {
+            "schema_version": 1,
+            "draft_kind": "module",
+            "draft_revision": edited["job"]["revision"],
+            "package_edit_history": edited["job"]["result"]["pack_edit_history"],
+        }
+        assert inspected["kind"] == "module"
         with pytest.raises(Exception, match="payload.kind is required"):
             await _call(
                 server,

@@ -40868,11 +40868,21 @@ boundary.
         require_facade_phase(campaign_id, f"module_draft({action})", PROFILE_LOBBY)
         if action == "get":
             data = facade_payload(payload)
-            result = (
-                {"job": import_job_get(campaign_id, str(data["job_id"]), principal_id)}
+            jobs = (
+                [import_job_get(campaign_id, str(data["job_id"]), principal_id)]
                 if data.get("job_id")
-                else {"jobs": import_job_list(campaign_id, "module", principal_id)}
+                else import_job_list(campaign_id, "module", principal_id)
             )
+            for job_view in jobs:
+                job_result = dict(job_view.get("result") or {})
+                finalized = dict(job_result.get("finalized_package") or {})
+                if finalized:
+                    finalized.pop("package", None)
+                    job_view["result"] = {
+                        **job_result,
+                        "finalized_package": finalized,
+                    }
+            result = {"job": jobs[0]} if data.get("job_id") else {"jobs": jobs}
             return facade_result(action, result)
 
         if action == "start":
@@ -41232,6 +41242,7 @@ boundary.
                 ),
             },
         }
+        include_package = final_data.get("include_package") is True
         packaged = export_module_pack(
             campaign_id,
             {
@@ -41239,14 +41250,14 @@ boundary.
                 for key, value in final_data.items()
                 if key not in {"confirmation", "job_id"}
             }
-            | {"module_id": job.module_id, "include_package": True},
+            | {"module_id": job.module_id, "include_package": include_package},
             principal_id,
         )
         finalized_package = {
             "artifact": packaged["artifact"],
             "summary": packaged["summary"],
-            "package": packaged.get("package"),
             "confirmation": agent_confirmation,
+            **({"package": packaged["package"]} if include_package else {}),
         }
         updated = import_jobs.record_result(
             job_id,
