@@ -1007,9 +1007,10 @@ create a reserve/bench PC in this fresh regression campaign.
 `preparation:party_mechanics_not_ready` requires completing the existing party,
 not creating replacements. Read the exact
 `dnd:full/skills/dnd-dm/references/CHAR_CREATION.md` asset, follow its bootstrap,
-ability, full-sheet review, catalog-application, and final re-read sequence for
-every manifest PC, then sync the refreshed member records. Do not enter Play
-until the coverage audit no longer reports this gap.
+ability, exact catalog-application, metadata-profile, and final re-read sequence
+for every manifest PC, then sync the refreshed member records. Do not use
+`character_sheet_replace` as a parallel bootstrap path. Do not enter Play until
+the coverage audit no longer reports this gap.
 Before that work, read
 `dnd:full/skills/dnd-dm/references/CAMPAIGN_REGRESSION.md` through
 `skill_query(kind="asset", action="read", identifier=...)`. This gap is not
