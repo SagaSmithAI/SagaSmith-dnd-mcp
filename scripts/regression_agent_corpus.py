@@ -760,6 +760,13 @@ missing campaign/actor grants and never authorizes rebuilding the Pack or party.
 `preparation:manifest_party_not_ready` requires only creating any source-sized
 missing PCs, replacing the complete manifest with full member records, and
 syncing it to `ready`; it also never authorizes rebuilding the Pack.
+Before that work, read
+`dnd:full/skills/dnd-dm/references/CAMPAIGN_REGRESSION.md` through
+`skill_query`. This gap is not satisfied by `module_set_progress` state or by a
+successful `sync` that still returns an empty member list. Do not stop after
+either result: source-confirmed `selected_size` remains the recommended maximum,
+so create any missing PCs, register every full member record with manifest
+`replace`, and verify the subsequent `sync` response itself is `ready`.
 After every exposure open, seeing only core tools is expected, not a blocker:
 search and set the next required native tool. A cycle that only lists state or
 opens exposure has made no progress. Unless a true external boundary is reached,
