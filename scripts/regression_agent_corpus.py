@@ -147,12 +147,13 @@ def _read_session(path: Path) -> list[dict[str, Any]]:
 def _read_tool_audit(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for record in _read_session(path):
+        process_id = str(record.get("process_id") or f"legacy:{path.resolve()}")
         assistant = record.get("assistant_message")
         if isinstance(assistant, dict):
-            rows.append(assistant)
+            rows.append({**assistant, "_process_id": process_id})
         for result in record.get("tool_results") or []:
             if isinstance(result, dict):
-                rows.append(result)
+                rows.append({**result, "_process_id": process_id})
     return rows
 
 
@@ -172,6 +173,7 @@ def _tool_timeline(rows: list[dict[str, Any]], *, principal: str) -> list[dict[s
                     arguments = {"_invalid_json": str(function.get("arguments") or "")}
                 pending[call_id] = {
                     "principal": principal,
+                    "process_id": row.get("_process_id"),
                     "tool_call_id": call_id,
                     "tool": _normalize_tool_name(function.get("name")),
                     "arguments": arguments,
@@ -184,6 +186,7 @@ def _tool_timeline(rows: list[dict[str, Any]], *, principal: str) -> list[dict[s
             call_id,
             {
                 "principal": principal,
+                "process_id": row.get("_process_id"),
                 "tool_call_id": call_id,
                 "tool": _normalize_tool_name(row.get("name")),
                 "arguments": {},
@@ -326,8 +329,9 @@ def _has_revision_refresh(calls: list[dict[str, Any]]) -> bool:
 
 
 def _has_exposure_reopen_after_transition(calls: list[dict[str, Any]]) -> bool:
-    transitioned = False
+    transitioned: dict[str, bool] = {}
     for call in calls:
+        process_id = str(call.get("process_id") or "legacy")
         arguments = call.get("arguments") or {}
         tool = call.get("tool")
         action = arguments.get("action")
@@ -337,9 +341,14 @@ def _has_exposure_reopen_after_transition(calls: list[dict[str, Any]]) -> bool:
             or (tool == "branch_change" and action == "checkout")
             or (tool == "state_revision" and action in {"undo", "redo"})
         ):
-            transitioned = True
+            transitioned[process_id] = True
             continue
-        if transitioned and tool == "exposure" and action == "open" and call.get("ok"):
+        if (
+            transitioned.get(process_id, False)
+            and tool == "exposure"
+            and action == "open"
+            and call.get("ok")
+        ):
             return True
     return False
 
@@ -756,6 +765,9 @@ def _run_agent(
     try:
         process_env = dict(os.environ)
         process_env["NANOBOT_TOOL_AUDIT_PATH"] = str(audit_path.resolve())
+        process_env["NANOBOT_TOOL_AUDIT_PROCESS_ID"] = (
+            f"{args.run_id}:{principal}:cycle-{cycle:03d}"
+        )
         completed = subprocess.run(
             command,
             cwd=workspace / "SagaSmith-agent",

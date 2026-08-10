@@ -344,6 +344,30 @@ def test_phase_transition_rejects_exposure_reopen_as_refresh() -> None:
     assert "exposure:reopened_after_transition" in audit["gaps"]
 
 
+def test_new_agent_process_may_cold_start_exposure_after_prior_transition() -> None:
+    route = {"scenarios": []}
+    calls = [
+        {**_call("skill_query"), "process_id": "process-1"},
+        {
+            **_call("exposure", arguments={"action": "open"}),
+            "process_id": "process-1",
+        },
+        {
+            **_call("game_phase", arguments={"action": "set"}),
+            "process_id": "process-1",
+        },
+        {**_call("skill_query"), "process_id": "process-2"},
+        {
+            **_call("exposure", arguments={"action": "open"}),
+            "process_id": "process-2",
+        },
+    ]
+
+    audit = _coverage_audit(route, calls, process_count=2, list_changed_count=2)
+
+    assert "exposure:reopened_after_transition" not in audit["gaps"]
+
+
 def test_dynamic_inventory_is_the_only_source_of_runnable_units() -> None:
     future = {"campaign_line_id": "future-module"}
     assert _runnable_units({"coverage_units": [future]}) == [future]
