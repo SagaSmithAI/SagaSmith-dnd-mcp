@@ -172,12 +172,10 @@ def normalize_conversation_proposal(value: Any) -> dict[str, Any]:
         "proposed_action",
         {"summary", "target_refs", "settlement", "mechanic_hint"},
     )
-    action_summary = _text(
-        action.get("summary"), "proposed_action.summary", maximum=1_000
+    action_summary = _text(action.get("summary"), "proposed_action.summary", maximum=1_000)
+    settlement = (
+        _text(action.get("settlement"), "proposed_action.settlement", maximum=20) or "narrative"
     )
-    settlement = _text(
-        action.get("settlement"), "proposed_action.settlement", maximum=20
-    ) or "narrative"
     if settlement not in {"narrative", "mechanical"}:
         raise ValueError("proposed_action.settlement must be narrative or mechanical")
     target_refs = _string_list(
@@ -257,9 +255,7 @@ def normalize_conversation_proposal(value: Any) -> dict[str, Any]:
         "resolution_requests": requests,
         "working_deltas": normalized_deltas,
         "visible_cues": _string_list(data.get("visible_cues"), "visible_cues", maximum=500),
-        "decision_summary": _text(
-            data.get("decision_summary"), "decision_summary", maximum=500
-        ),
+        "decision_summary": _text(data.get("decision_summary"), "decision_summary", maximum=500),
     }
 
 
@@ -428,7 +424,9 @@ def normalize_audience_facts(
         "understood_actor_ids": sorted(understood),
         "response_actor_ids": sorted(response),
         "partial_renditions": partial,
-        "basis_refs": _string_list(data.get("basis_refs"), "audience_facts.basis_refs", maximum=300),
+        "basis_refs": _string_list(
+            data.get("basis_refs"), "audience_facts.basis_refs", maximum=300
+        ),
         "reason": _text(data.get("reason"), "audience_facts.reason", required=True, maximum=1_000),
     }
 
@@ -584,7 +582,9 @@ class ConversationStore:
                     and existing.get("open_idempotency_key") == idempotency_key
                 ):
                     if existing.get("open_fingerprint") != open_fingerprint:
-                        raise ValueError("idempotency_key was already used to open another conversation")
+                        raise ValueError(
+                            "idempotency_key was already used to open another conversation"
+                        )
                     return self.public_status(existing)
                 if (
                     existing.get("campaign_id") == campaign_id
@@ -633,9 +633,7 @@ class ConversationStore:
                 "activations": {},
                 "publications": [],
                 "pending_resolutions": [],
-                "listener_knowledge_candidates": {
-                    actor_id: [] for actor_id in participant_ids
-                },
+                "listener_knowledge_candidates": {actor_id: [] for actor_id in participant_ids},
                 "audience_decision_ids": [],
                 "idempotency": {},
                 "open_idempotency_key": idempotency_key,
@@ -747,7 +745,9 @@ class ConversationStore:
             }
             session["activations"][activation_id] = activation
             activations.append(self._public_activation(session, activation))
-        public_event = {key: deepcopy(value) for key, value in saved.items() if key != "actor_inboxes"}
+        public_event = {
+            key: deepcopy(value) for key, value in saved.items() if key != "actor_inboxes"
+        }
         return self.finish_mutation(
             session,
             {
@@ -824,9 +824,7 @@ class ConversationStore:
             + (1 if session.get("_pending_mutation") else 0),
         }
 
-    def _activation_from_ref(
-        self, session: dict[str, Any], activation_ref: str
-    ) -> dict[str, Any]:
+    def _activation_from_ref(self, session: dict[str, Any], activation_ref: str) -> dict[str, Any]:
         for activation in session["activations"].values():
             if secrets.compare_digest(activation_ref, self._capability(session, activation)):
                 return activation
@@ -982,7 +980,11 @@ class ConversationStore:
             )
 
         publication = None
-        if proposal["utterance_segments"] or proposal["visible_cues"] or proposal["proposed_action"]["summary"]:
+        if (
+            proposal["utterance_segments"]
+            or proposal["visible_cues"]
+            or proposal["proposed_action"]["summary"]
+        ):
             publication = derive_publication(proposal, publication_id=str(uuid4()))
             if proposal["proposed_action"]["settlement"] == "mechanical":
                 publication["visible_action"] = ""
@@ -1007,11 +1009,14 @@ class ConversationStore:
         runtime["inbox_cursor"] = len(session["events"])
         activation["status"] = "completed"
         activation["lease"] = None
-        return self.finish_mutation(session, {
-            "status": "publication_ready" if publication else "resolution_required",
-            "publication": publication,
-            "resolution_requests": deepcopy(proposal["resolution_requests"]),
-        })
+        return self.finish_mutation(
+            session,
+            {
+                "status": "publication_ready" if publication else "resolution_required",
+                "publication": publication,
+                "resolution_requests": deepcopy(proposal["resolution_requests"]),
+            },
+        )
 
     def cancel_activation(
         self,
@@ -1153,7 +1158,9 @@ class ConversationStore:
             }
             session["activations"][activation["activation_id"]] = activation
             activations.append(self._public_activation(session, activation))
-        public_event = {key: deepcopy(value) for key, value in event.items() if key != "actor_inboxes"}
+        public_event = {
+            key: deepcopy(value) for key, value in event.items() if key != "actor_inboxes"
+        }
         return self.finish_mutation(
             session,
             {

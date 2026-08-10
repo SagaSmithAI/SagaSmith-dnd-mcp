@@ -477,7 +477,6 @@ from sagasmith_dnd_mcp.npc_conversations import (
     NPC_CONVERSATION_CONTRACT,
     ConversationStore,
     normalize_audience_facts,
-    normalize_conversation_proposal,
 )
 from sagasmith_dnd_mcp.npc_turns import (
     NPC_NARRATIVE_ACTION_KINDS,
@@ -4682,18 +4681,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         pinned_dependencies: list[dict[str, Any]] = []
         for dependency in portable_manifest.get("dependencies", []):
             if not isinstance(dependency, dict) or not dependency.get("version"):
-                raise ValueError(
-                    "rule Pack dependencies must pin a version"
-                )
+                raise ValueError("rule Pack dependencies must pin a version")
             dependency_id = str(dependency.get("id") or "")
             dependency_version = str(dependency.get("version") or "")
             dependency_pack = rule_packs.get_version(dependency_id, dependency_version)
             dependency_provenance = rule_packs.provenance(dependency_id, dependency_version)
             content_dependency = dict(dependency_provenance.get("content_definition") or {})
-            stored_definition_checksum = str(
-                content_dependency.get("definition_checksum")
-                or ""
-            )
+            stored_definition_checksum = str(content_dependency.get("definition_checksum") or "")
             dependency_descriptor = rule_content_descriptor(
                 dependency_id,
                 dependency_version,
@@ -6734,9 +6728,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ):
                 reason = f"{attack_name}: thrown weapon range is missing"
                 manual_rulings.append(reason)
-                disabled_capabilities.append(
-                    {"id": attack_id, "kind": "attack", "reason": reason}
-                )
+                disabled_capabilities.append({"id": attack_id, "kind": "attack", "reason": reason})
             ammunition_id = str(attack.get("ammunition_item_id") or "")
             if (
                 ammunition_id
@@ -6812,8 +6804,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         disabled_capabilities = list(
             {
-                (item["id"], item["kind"], item["reason"]): item
-                for item in disabled_capabilities
+                (item["id"], item["kind"], item["reason"]): item for item in disabled_capabilities
             }.values()
         )
         disabled_ids = {item["id"] for item in disabled_capabilities}
@@ -14492,9 +14483,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise NeedsRulingError(str(error), missing=("battle_map",)) from error
         elif positioning_mode == "agent":
             if battle_map is not None:
-                raise CombatEngineError(
-                    "agent-positioned combat does not accept a battle_map"
-                )
+                raise CombatEngineError("agent-positioned combat does not accept a battle_map")
             positioned_actor_ids = sorted(
                 actor_id_value
                 for actor_id_value, entry in config_by_actor.items()
@@ -23336,8 +23325,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     or set(actor_ids) - participant_ids
                 ):
                     raise CombatEngineError(
-                        f"Agent area spatial fact {field} must contain unique current "
-                        "combatant IDs"
+                        f"Agent area spatial fact {field} must contain unique current combatant IDs"
                     )
             if (
                 not decision_id
@@ -29013,9 +29001,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "actor_id": actor.id,
                         "status": "dying",
                         "unresolved_at_end": True,
-                        "death_saves": deepcopy(
-                            dict(actor_combat.get("death_saves") or {})
-                        ),
+                        "death_saves": deepcopy(dict(actor_combat.get("death_saves") or {})),
                         "resolution_actions": ["heal", "stabilize", "death_save"],
                     }
                 )
@@ -29343,8 +29329,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             dict(item) for item in list(payload.get("public_speech_acts") or [])
                         ],
                         "visible_portrayal_cues": [
-                            str(item)
-                            for item in list(payload.get("visible_portrayal_cues") or [])
+                            str(item) for item in list(payload.get("visible_portrayal_cues") or [])
                         ],
                         "participants": [dict(item) for item in event.participants],
                     }
@@ -29509,9 +29494,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if current_branch_id != session["branch_id"]:
             reasons.append("branch_id")
         scene = npc_turn_scene_projection(
-            modules.current_scene(
-                str(session["campaign_id"]), scope_id=str(session["scope_id"])
-            )
+            modules.current_scene(str(session["campaign_id"]), scope_id=str(session["scope_id"]))
         )
         if str((scene or {}).get("scene_id") or "") != str(session.get("scene_id") or ""):
             reasons.append("scene_id")
@@ -29571,13 +29554,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 runtime["actor_runtime_id"] = (
                     f"{session['conversation_id']}:{actor_id}:r{actor.revision}"
                 )
-                runtime["working_deltas"] = {
-                    "facts": [], "actor_knowledge": [], "commitments": []
-                }
+                runtime["working_deltas"] = {"facts": [], "actor_knowledge": [], "commitments": []}
                 runtime["working_state_revision"] += 1
                 for activation in session["activations"].values():
                     if activation["actor_id"] == actor_id and activation["status"] in {
-                        "pending", "claimed"
+                        "pending",
+                        "claimed",
                     }:
                         activation["status"] = "invalidated"
                         activation["lease"] = None
@@ -29591,9 +29573,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             session["stale_reasons"] = reasons
             session["updated_at_ns"] = time.time_ns()
             npc_conversations.save(session)
-            raise ValueError(
-                "SESSION_STALE: authoritative state changed: " + ", ".join(reasons)
-            )
+            raise ValueError("SESSION_STALE: authoritative state changed: " + ", ".join(reasons))
         if refreshed_actor_ids:
             session["authority"] = authority
             session["refreshed_actor_ids"] = refreshed_actor_ids
@@ -29602,9 +29582,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             npc_conversations.save(session)
 
     def npc_conversation_private_context(bundle: dict[str, Any]) -> dict[str, Any]:
-        context = {
-            key: deepcopy(value) for key, value in bundle.items() if key != "bundle_receipt"
-        }
+        context = {key: deepcopy(value) for key, value in bundle.items() if key != "bundle_receipt"}
         context["purpose"] = "npc_conversation"
         context["constraints"] = {
             **dict(context["constraints"]),
@@ -29768,20 +29746,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             result["stale_reasons"] = list(session.get("stale_reasons") or [])
         result["activations"] = npc_conversations.list_activations(session)
         result["pending_publications"] = [
-            {
-                key: deepcopy(value)
-                for key, value in item.items()
-                if key not in {"speaker_actor_id"}
-            }
+            {key: deepcopy(value) for key, value in item.items() if key not in {"speaker_actor_id"}}
             for item in session["publications"]
             if item.get("status") == "pending_audience"
         ]
         result["pending_resolutions"] = deepcopy(session.get("pending_resolutions") or [])
         result["listener_knowledge_candidates"] = {
             actor_id: deepcopy(values)
-            for actor_id, values in dict(
-                session.get("listener_knowledge_candidates") or {}
-            ).items()
+            for actor_id, values in dict(session.get("listener_knowledge_candidates") or {}).items()
             if values
         }
         result["refreshed_actor_ids"] = list(session.get("refreshed_actor_ids") or [])
@@ -30032,8 +30004,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if session.get("status") != "open":
             raise ValueError("conversation must resolve suspended work before closing")
         if any(
-            item.get("status") in {"pending", "claimed"}
-            for item in session["activations"].values()
+            item.get("status") in {"pending", "claimed"} for item in session["activations"].values()
         ):
             raise ValueError("conversation has unfinished NPC activations")
         selections = dict(accepted_working_deltas or {})
@@ -30068,6 +30039,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     working["actor_knowledge"],
                     selection.get("actor_knowledge_indexes") or [],
                     "actor_knowledge_indexes",
+                )
+            )
+            knowledge_data.extend(
+                npc_conversation_select_indexes(
+                    list(
+                        dict(session.get("listener_knowledge_candidates") or {}).get(actor_id, [])
+                    ),
+                    selection.get("listener_knowledge_indexes") or [],
+                    "listener_knowledge_indexes",
                 )
             )
             commitments = npc_conversation_select_indexes(
@@ -30225,9 +30205,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         session["status"] = "aborted"
         for runtime in session["actor_runtimes"].values():
             runtime["context"] = {}
-            runtime["working_deltas"] = {
-                "facts": [], "actor_knowledge": [], "commitments": []
-            }
+            runtime["working_deltas"] = {"facts": [], "actor_knowledge": [], "commitments": []}
         return npc_conversations.finish_mutation(
             session,
             {"conversation_id": conversation_id, "status": "aborted", "recoverable": False},
@@ -30252,17 +30230,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 query=str(data.get("query") or ""),
                 branch_id=data.get("branch_id"),
                 principal_id=principal_id,
-            )
-            knowledge_data.extend(
-                npc_conversation_select_indexes(
-                    list(
-                        dict(session.get("listener_knowledge_candidates") or {}).get(
-                            actor_id, []
-                        )
-                    ),
-                    selection.get("listener_knowledge_indexes") or [],
-                    "listener_knowledge_indexes",
-                )
             )
         conversation_id = str(data["conversation_id"])
         if action == "get":
@@ -30327,9 +30294,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "campaign_id": campaign_id,
             "conversation_id": conversation_id,
             "activation_ref": str(data["activation_ref"]),
-            "expected_conversation_revision": int(
-                data["expected_conversation_revision"]
-            ),
+            "expected_conversation_revision": int(data["expected_conversation_revision"]),
             "idempotency_key": str(data["idempotency_key"]),
             "principal_id": principal_id,
         }
@@ -36960,9 +36925,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         play_grant: dict[str, Any] | None = None
         if phase == PROFILE_PLAY and requested_method != "spellbook_copy":
             if kind not in {"activity", "feat", "feature", "item", "spell"}:
-                raise CombatEngineError(
-                    f"{kind or 'this content'} cannot be granted during play"
-                )
+                raise CombatEngineError(f"{kind or 'this content'} cannot be granted during play")
             if not is_dm(current.campaign_id, principal_id):
                 raise PermissionError("play-time content grants require the campaign DM")
             if not isinstance(grant, dict) or set(grant) != {"kind", "reason", "source_ref"}:
@@ -36976,9 +36939,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "play-time grant kind must be story_reward, training, or module_reward"
                 )
             if not reason or len(reason) > 1000:
-                raise CombatEngineError(
-                    "play-time grant reason must contain 1 to 1000 characters"
-                )
+                raise CombatEngineError("play-time grant reason must contain 1 to 1000 characters")
             source_ref_value = grant.get("source_ref")
             artifact_rule_refs = {
                 str(reference).strip()
@@ -37009,11 +36970,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "pack_id": pack_id,
             "version": version,
             "selection": deepcopy(selection),
-            **(
-                {"grant": deepcopy(play_grant)}
-                if operation != "character.spellbook.copy"
-                else {}
-            ),
+            **({"grant": deepcopy(play_grant)} if operation != "character.spellbook.copy" else {}),
         }
         replay = replay_idempotent(
             f"character-write:{current.campaign_id}:{branch_id}:{principal_id}:{current.id}",
@@ -41804,14 +41761,10 @@ boundary.
                     "disposition": str(
                         candidate.get("disposition")
                         or (
-                            "include"
-                            if candidate.get("review_status") == "accepted"
-                            else "exclude"
+                            "include" if candidate.get("review_status") == "accepted" else "exclude"
                         )
                     ),
-                    "original_fingerprint": str(
-                        candidate.get("original_fingerprint") or ""
-                    ),
+                    "original_fingerprint": str(candidate.get("original_fingerprint") or ""),
                     "review_note": str(candidate.get("review_note") or ""),
                     "draft_issues": deepcopy(candidate.get("draft_issues") or []),
                     "edit_history": deepcopy(candidate.get("edit_history") or []),
@@ -42401,9 +42354,7 @@ boundary.
         kind = str(required(data, "kind"))
         routing_kinds = {"core_rules", "addon", "module", "preset"}
         if kind not in routing_kinds:
-            raise ValueError(
-                "payload.kind must be core_rules, addon, module, or preset"
-            )
+            raise ValueError("payload.kind must be core_rules, addon, module, or preset")
         if action == "list":
             if kind == "core_rules":
                 result = [

@@ -7,7 +7,6 @@ from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
 from sagasmith_dnd_mcp.tool_profiles import GROUP_BY_ID, HOST_PRIVATE_TOOLS
 
-
 HOST_TOKEN = "test-host-token-with-sufficient-entropy"
 
 
@@ -33,22 +32,46 @@ async def _call(server, name: str, arguments: dict):
 
 
 async def _campaign_with_actors(server):
-    campaign = await _call(server, "campaign_create", {"name": "NPC", "idempotency_key": "campaign"})
-    npc = await _call(server, "character_create_from", {
-        "mode": "direct",
-        "payload": {"campaign_id": campaign["id"], "name": "Mara", "character_type": "npc", "summary": "Guarded."},
-        "idempotency_key": "npc",
-    })
-    pc = await _call(server, "character_create_from", {
-        "mode": "direct",
-        "payload": {"campaign_id": campaign["id"], "name": "Aria"},
-        "idempotency_key": "pc",
-    })
-    current = await _call(server, "campaign_query", {"view": "get", "payload": {"campaign_id": campaign["id"]}})
-    await _call(server, "game_phase", {
-        "campaign_id": campaign["id"], "action": "set", "tool_profile": "play",
-        "expected_revision": current["revision"], "idempotency_key": "play",
-    })
+    campaign = await _call(
+        server, "campaign_create", {"name": "NPC", "idempotency_key": "campaign"}
+    )
+    npc = await _call(
+        server,
+        "character_create_from",
+        {
+            "mode": "direct",
+            "payload": {
+                "campaign_id": campaign["id"],
+                "name": "Mara",
+                "character_type": "npc",
+                "summary": "Guarded.",
+            },
+            "idempotency_key": "npc",
+        },
+    )
+    pc = await _call(
+        server,
+        "character_create_from",
+        {
+            "mode": "direct",
+            "payload": {"campaign_id": campaign["id"], "name": "Aria"},
+            "idempotency_key": "pc",
+        },
+    )
+    current = await _call(
+        server, "campaign_query", {"view": "get", "payload": {"campaign_id": campaign["id"]}}
+    )
+    await _call(
+        server,
+        "game_phase",
+        {
+            "campaign_id": campaign["id"],
+            "action": "set",
+            "tool_profile": "play",
+            "expected_revision": current["revision"],
+            "idempotency_key": "play",
+        },
+    )
     return campaign, npc, pc
 
 
@@ -76,57 +99,92 @@ def test_conversation_facade_private_transport_and_commit(tmp_path: Path) -> Non
     async def exercise() -> None:
         server = create_server(_config(tmp_path))
         campaign, npc, pc = await _campaign_with_actors(server)
-        opened = await _call(server, "npc_conversation", {
-            "campaign_id": campaign["id"], "action": "open",
-            "payload": {
-                "participant_actor_ids": [pc["id"], npc["id"]],
-                "query": "identity and goals", "idempotency_key": "open",
+        opened = await _call(
+            server,
+            "npc_conversation",
+            {
+                "campaign_id": campaign["id"],
+                "action": "open",
+                "payload": {
+                    "participant_actor_ids": [pc["id"], npc["id"]],
+                    "query": "identity and goals",
+                    "idempotency_key": "open",
+                },
             },
-        })
+        )
         assert opened["conversation_revision"] == 0
         assert "actor_knowledge" not in str(opened)
         conversation_id = opened["conversation_id"]
-        ingested = await _call(server, "npc_conversation", {
-            "campaign_id": campaign["id"], "action": "ingest",
-            "payload": {
-                "conversation_id": conversation_id,
-                "event": {
-                    "type": "speech", "speaker_actor_id": pc["id"],
-                    "content": "Were you at the docks?", "language": "Common",
-                    "declared_target_actor_ids": [npc["id"]],
+        ingested = await _call(
+            server,
+            "npc_conversation",
+            {
+                "campaign_id": campaign["id"],
+                "action": "ingest",
+                "payload": {
+                    "conversation_id": conversation_id,
+                    "event": {
+                        "type": "speech",
+                        "speaker_actor_id": pc["id"],
+                        "content": "Were you at the docks?",
+                        "language": "Common",
+                        "declared_target_actor_ids": [npc["id"]],
+                    },
+                    "audience_facts": _audience(
+                        "audience-1",
+                        perceived=[pc["id"], npc["id"]],
+                        understood=[pc["id"], npc["id"]],
+                        response=[npc["id"]],
+                    ),
+                    "expected_conversation_revision": 0,
+                    "idempotency_key": "ingest",
                 },
-                "audience_facts": _audience(
-                    "audience-1", perceived=[pc["id"], npc["id"]],
-                    understood=[pc["id"], npc["id"]], response=[npc["id"]],
-                ),
-                "expected_conversation_revision": 0,
-                "idempotency_key": "ingest",
             },
-        })
+        )
         activation = ingested["activations"][0]
         assert set(activation) == {
-            "activation_ref", "actor_id", "reason", "response_required",
-            "from_cursor", "to_cursor", "status", "conversation_revision",
+            "activation_ref",
+            "actor_id",
+            "reason",
+            "response_required",
+            "from_cursor",
+            "to_cursor",
+            "status",
+            "conversation_revision",
         }
         with pytest.raises(Exception, match="authentication"):
-            await _call(server, "npc_conversation_transport", {
-                "campaign_id": campaign["id"], "conversation_id": conversation_id,
-                "action": "claim_activation", "host_token": "wrong",
+            await _call(
+                server,
+                "npc_conversation_transport",
+                {
+                    "campaign_id": campaign["id"],
+                    "conversation_id": conversation_id,
+                    "action": "claim_activation",
+                    "host_token": "wrong",
+                    "payload": {
+                        "activation_ref": activation["activation_ref"],
+                        "expected_conversation_revision": 1,
+                        "idempotency_key": "claim",
+                    },
+                },
+            )
+        capsule = await _call(
+            server,
+            "npc_conversation_transport",
+            {
+                "campaign_id": campaign["id"],
+                "conversation_id": conversation_id,
+                "action": "claim_activation",
+                "host_token": HOST_TOKEN,
                 "payload": {
                     "activation_ref": activation["activation_ref"],
                     "expected_conversation_revision": 1,
                     "idempotency_key": "claim",
+                    "cursor": 0,
+                    "include_bootstrap": True,
                 },
-            })
-        capsule = await _call(server, "npc_conversation_transport", {
-            "campaign_id": campaign["id"], "conversation_id": conversation_id,
-            "action": "claim_activation", "host_token": HOST_TOKEN,
-            "payload": {
-                "activation_ref": activation["activation_ref"],
-                "expected_conversation_revision": 1,
-                "idempotency_key": "claim", "cursor": 0, "include_bootstrap": True,
             },
-        })
+        )
         identity_ref = f"actor:{npc['id']}:identity"
         proposal = {
             "schema_version": 3,
@@ -135,62 +193,104 @@ def test_conversation_facade_private_transport_and_commit(tmp_path: Path) -> Non
             "actor_runtime_id": capsule["actor_runtime_id"],
             "response_bid": {"should_respond": True, "urgency": 80, "reason": "Addressed."},
             "private_intent": "Deflect.",
-            "utterance_segments": [{
-                "text": "No. I stayed home.", "speech_act": "deny",
-                "truth_posture": "intentional_deception", "basis_refs": [identity_ref],
-                "targets": [pc["id"]], "language": "Common", "delivery": "flatly",
-            }],
-            "proposed_action": {"summary": "", "target_refs": [], "settlement": "narrative", "mechanic_hint": ""},
+            "utterance_segments": [
+                {
+                    "text": "No. I stayed home.",
+                    "speech_act": "deny",
+                    "truth_posture": "intentional_deception",
+                    "basis_refs": [identity_ref],
+                    "targets": [pc["id"]],
+                    "language": "Common",
+                    "delivery": "flatly",
+                }
+            ],
+            "proposed_action": {
+                "summary": "",
+                "target_refs": [],
+                "settlement": "narrative",
+                "mechanic_hint": "",
+            },
             "resolution_requests": [],
             "working_deltas": {
                 "facts": [],
-                "actor_knowledge": [{
-                    "action": "add", "actor_id": npc["id"],
-                    "knowledge_key": f"conversation:{conversation_id}:questioned",
-                    "proposition": "Aria asked about the docks.",
-                    "subject_ref": f"actor:{pc['id']}", "epistemic_status": "belief",
-                    "confidence": 3, "cause": f"conversation:{conversation_id}",
-                    "disclosure_scope": "dm",
-                }],
+                "actor_knowledge": [
+                    {
+                        "action": "add",
+                        "actor_id": npc["id"],
+                        "knowledge_key": f"conversation:{conversation_id}:questioned",
+                        "proposition": "Aria asked about the docks.",
+                        "subject_ref": f"actor:{pc['id']}",
+                        "epistemic_status": "belief",
+                        "confidence": 3,
+                        "cause": f"conversation:{conversation_id}",
+                        "disclosure_scope": "dm",
+                    }
+                ],
                 "commitments": [],
             },
-            "visible_cues": ["Mara looks away."], "decision_summary": "Deny.",
+            "visible_cues": ["Mara looks away."],
+            "decision_summary": "Deny.",
         }
-        submitted = await _call(server, "npc_conversation_transport", {
-            "campaign_id": campaign["id"], "conversation_id": conversation_id,
-            "action": "submit_proposal", "host_token": HOST_TOKEN,
-            "payload": {
-                "activation_ref": activation["activation_ref"], "lease_id": capsule["lease_id"],
-                "proposal": proposal, "expected_conversation_revision": 2,
-                "idempotency_key": "submit",
+        submitted = await _call(
+            server,
+            "npc_conversation_transport",
+            {
+                "campaign_id": campaign["id"],
+                "conversation_id": conversation_id,
+                "action": "submit_proposal",
+                "host_token": HOST_TOKEN,
+                "payload": {
+                    "activation_ref": activation["activation_ref"],
+                    "lease_id": capsule["lease_id"],
+                    "proposal": proposal,
+                    "expected_conversation_revision": 2,
+                    "idempotency_key": "submit",
+                },
             },
-        })
+        )
         assert submitted["status"] == "publication_ready"
         assert "private_intent" not in str(submitted["publication"])
-        published = await _call(server, "npc_conversation", {
-            "campaign_id": campaign["id"], "action": "publish",
-            "payload": {
-                "conversation_id": conversation_id,
-                "publication_id": submitted["publication"]["publication_id"],
-                "audience_facts": _audience(
-                    "audience-2", perceived=[pc["id"], npc["id"]],
-                    understood=[pc["id"], npc["id"]], response=[],
-                ),
-                "expected_conversation_revision": 3, "idempotency_key": "publish",
-            },
-        })
-        assert published["publication"]["speech"] == "No. I stayed home."
-        committed = await _call(server, "npc_conversation", {
-            "campaign_id": campaign["id"], "action": "close",
-            "payload": {
-                "conversation_id": conversation_id,
-                "expected_conversation_revision": 4,
-                "accepted_working_deltas": {
-                    npc["id"]: {"fact_indexes": [], "actor_knowledge_indexes": [0], "commitment_indexes": []}
+        published = await _call(
+            server,
+            "npc_conversation",
+            {
+                "campaign_id": campaign["id"],
+                "action": "publish",
+                "payload": {
+                    "conversation_id": conversation_id,
+                    "publication_id": submitted["publication"]["publication_id"],
+                    "audience_facts": _audience(
+                        "audience-2",
+                        perceived=[pc["id"], npc["id"]],
+                        understood=[pc["id"], npc["id"]],
+                        response=[],
+                    ),
+                    "expected_conversation_revision": 3,
+                    "idempotency_key": "publish",
                 },
-                "idempotency_key": "close",
             },
-        })
+        )
+        assert published["publication"]["speech"] == "No. I stayed home."
+        committed = await _call(
+            server,
+            "npc_conversation",
+            {
+                "campaign_id": campaign["id"],
+                "action": "close",
+                "payload": {
+                    "conversation_id": conversation_id,
+                    "expected_conversation_revision": 4,
+                    "accepted_working_deltas": {
+                        npc["id"]: {
+                            "fact_indexes": [],
+                            "actor_knowledge_indexes": [0],
+                            "commitment_indexes": [],
+                        }
+                    },
+                    "idempotency_key": "close",
+                },
+            },
+        )
         assert committed["event"]["event_type"] == "npc_conversation"
         assert committed["conversation_revision"] == 5
 
@@ -201,19 +301,41 @@ def test_unrelated_campaign_event_does_not_stale_conversation(tmp_path: Path) ->
     async def exercise() -> None:
         server = create_server(_config(tmp_path))
         campaign, npc, pc = await _campaign_with_actors(server)
-        opened = await _call(server, "npc_conversation", {
-            "campaign_id": campaign["id"], "action": "open",
-            "payload": {"participant_actor_ids": [pc["id"], npc["id"]], "idempotency_key": "open"},
-        })
-        await _call(server, "campaign_event", {
-            "campaign_id": campaign["id"], "action": "add",
-            "payload": {"event_type": "world_change", "summary": "A remote bell rings.", "audience_scope": "public"},
-            "idempotency_key": "bell",
-        })
-        status = await _call(server, "npc_conversation", {
-            "campaign_id": campaign["id"], "action": "get",
-            "payload": {"conversation_id": opened["conversation_id"]},
-        })
+        opened = await _call(
+            server,
+            "npc_conversation",
+            {
+                "campaign_id": campaign["id"],
+                "action": "open",
+                "payload": {
+                    "participant_actor_ids": [pc["id"], npc["id"]],
+                    "idempotency_key": "open",
+                },
+            },
+        )
+        await _call(
+            server,
+            "campaign_event",
+            {
+                "campaign_id": campaign["id"],
+                "action": "add",
+                "payload": {
+                    "event_type": "world_change",
+                    "summary": "A remote bell rings.",
+                    "audience_scope": "public",
+                },
+                "idempotency_key": "bell",
+            },
+        )
+        status = await _call(
+            server,
+            "npc_conversation",
+            {
+                "campaign_id": campaign["id"],
+                "action": "get",
+                "payload": {"conversation_id": opened["conversation_id"]},
+            },
+        )
         assert status["status"] == "open"
         assert status["conversation_revision"] == 0
 
@@ -224,40 +346,58 @@ def test_selected_actor_knowledge_change_refreshes_only_that_runtime(tmp_path: P
     async def exercise() -> None:
         server = create_server(_config(tmp_path))
         campaign, npc, pc = await _campaign_with_actors(server)
-        knowledge = await _call(server, "actor_knowledge_change", {
-            "action": "add",
-            "payload": {
+        knowledge = await _call(
+            server,
+            "actor_knowledge_change",
+            {
+                "action": "add",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "actor_id": npc["id"],
+                    "knowledge_key": "dock-secret",
+                    "proposition": "The ledger is under the pier.",
+                    "subject_ref": "location:docks",
+                    "epistemic_status": "known",
+                },
+                "idempotency_key": "knowledge-add",
+            },
+        )
+        opened = await _call(
+            server,
+            "npc_conversation",
+            {
                 "campaign_id": campaign["id"],
-                "actor_id": npc["id"],
-                "knowledge_key": "dock-secret",
-                "proposition": "The ledger is under the pier.",
-                "subject_ref": "location:docks",
-                "epistemic_status": "known",
+                "action": "open",
+                "payload": {
+                    "participant_actor_ids": [pc["id"], npc["id"]],
+                    "query": "dock secret",
+                    "idempotency_key": "open",
+                },
             },
-            "idempotency_key": "knowledge-add",
-        })
-        opened = await _call(server, "npc_conversation", {
-            "campaign_id": campaign["id"], "action": "open",
-            "payload": {
-                "participant_actor_ids": [pc["id"], npc["id"]],
-                "query": "dock secret",
-                "idempotency_key": "open",
+        )
+        await _call(
+            server,
+            "actor_knowledge_change",
+            {
+                "action": "revise",
+                "payload": {
+                    "knowledge_id": knowledge["id"],
+                    "proposition": "The ledger was moved to the warehouse.",
+                    "epistemic_status": "known",
+                    "expected_revision_id": knowledge["revision_id"],
+                },
+                "idempotency_key": "knowledge-revise",
             },
-        })
-        await _call(server, "actor_knowledge_change", {
-            "action": "revise",
-            "payload": {
-                "knowledge_id": knowledge["id"],
-                "proposition": "The ledger was moved to the warehouse.",
-                "epistemic_status": "known",
-                "expected_revision_id": knowledge["revision_id"],
+        )
+        status = await _call(
+            server,
+            "npc_conversation",
+            {
+                "campaign_id": campaign["id"],
+                "action": "get",
+                "payload": {"conversation_id": opened["conversation_id"]},
             },
-            "idempotency_key": "knowledge-revise",
-        })
-        status = await _call(server, "npc_conversation", {
-            "campaign_id": campaign["id"], "action": "get",
-            "payload": {"conversation_id": opened["conversation_id"]},
-        })
+        )
         assert status["status"] == "open"
         assert status["conversation_revision"] == 1
         assert status["refreshed_actor_ids"] == [npc["id"]]
