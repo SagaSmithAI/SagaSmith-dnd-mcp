@@ -1603,10 +1603,10 @@ async def _catalog(client: ExposureClient, campaign_id: str) -> list[dict[str, A
     return list(
         _facade_value(
             await client.domain(
-                "content_pack",
+                "character_query",
                 {
-                    "action": "list",
-                    "payload": {"kind": "catalog", "campaign_id": campaign_id},
+                    "view": "catalog",
+                    "payload": {"campaign_id": campaign_id},
                 },
             )
         )
