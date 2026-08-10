@@ -276,6 +276,28 @@ def test_coverage_does_not_accept_narration_or_unordered_successes() -> None:
     assert "host:list_changed_not_observed" in audit["gaps"]
 
 
+def test_preparation_requires_finalize_import_activate_order() -> None:
+    route = {"scenarios": [{"id": "prep", "mechanisms": ["preparation"]}]}
+    bypassed = [
+        _call("skill_query"),
+        _call("exposure", arguments={"action": "open"}),
+        _call("module_draft", arguments={"action": "finalize"}),
+        _call("content_pack", arguments={"action": "activate"}),
+    ]
+    complete = [
+        *bypassed[:3],
+        _call("content_pack", arguments={"action": "import"}),
+        bypassed[3],
+    ]
+
+    assert _coverage_audit(route, bypassed, process_count=1, list_changed_count=1)[
+        "complete"
+    ] is False
+    assert _coverage_audit(route, complete, process_count=1, list_changed_count=1)[
+        "complete"
+    ] is True
+
+
 def test_dynamic_inventory_is_the_only_source_of_runnable_units() -> None:
     future = {"campaign_line_id": "future-module"}
     assert _runnable_units({"coverage_units": [future]}) == [future]

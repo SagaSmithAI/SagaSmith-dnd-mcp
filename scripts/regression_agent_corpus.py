@@ -379,6 +379,15 @@ def _ending_completed(calls: list[dict[str, Any]]) -> bool:
 
 
 def _mechanism_covered(mechanism: str, calls: list[dict[str, Any]]) -> bool:
+    if mechanism == "preparation":
+        return _ordered_success(
+            calls,
+            [
+                ("module_draft", "finalize"),
+                ("content_pack", "import"),
+                ("content_pack", "activate"),
+            ],
+        )
     if mechanism == "idempotent_retry":
         return _has_idempotent_retry(calls)
     if mechanism == "revision_conflict_refresh":
@@ -413,7 +422,6 @@ def _mechanism_covered(mechanism: str, calls: list[dict[str, Any]]) -> bool:
             ],
         )
     mappings: dict[str, tuple[tuple[str, str | None], ...]] = {
-        "preparation": (("module_draft", None), ("content_pack", None)),
         "play_scene": (("module_query", "scene"),),
         "noncombat_check": (("character_check", None),),
         "npc_conversation": (("npc_conversation", None),),

@@ -41515,6 +41515,21 @@ boundary.
                 if not idempotency_key:
                     raise ValueError("idempotency_key is required for module activation")
                 module_id = str(required(data, "module_id"))
+                module = next(
+                    (
+                        item
+                        for item in modules.list(campaign_id, include_retired=True)
+                        if str(item.get("id") or item.get("module_id") or "") == module_id
+                    ),
+                    None,
+                )
+                if module is None:
+                    raise LookupError(module_id)
+                if str(module.get("parser_profile") or "") != "content-package":
+                    raise ValueError(
+                        "module activation requires a module imported from a finalized Pack "
+                        "artifact"
+                    )
                 scene_map = {
                     str(item.get("stable_key") or ""): str(item.get("scene_id") or "")
                     for item in modules.scene_index(campaign_id, module_id=module_id)

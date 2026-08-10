@@ -303,6 +303,19 @@ async def finalize_and_activate_module(
     )
     activated = None
     if activate:
+        imported = await call(
+            server,
+            "content_pack",
+            {
+                "action": "import",
+                "payload": {
+                    "campaign_id": campaign_id,
+                    "kind": "module",
+                    "artifact": finalized["artifact"],
+                },
+                "idempotency_key": f"{operation_key}:import",
+            },
+        )
         campaign = await call(
             server,
             "campaign_query",
@@ -316,11 +329,15 @@ async def finalize_and_activate_module(
                 "payload": {
                     "campaign_id": campaign_id,
                     "kind": "module",
-                    "module_id": finalized["job"]["module_id"],
+                    "module_id": imported["module_id"],
                     **({"progress_remaps": progress_remaps} if progress_remaps else {}),
                 },
                 "expected_revision": campaign["revision"],
                 "idempotency_key": f"{operation_key}:activate",
             },
         )
-    return {"finalized": finalized, "activated": activated}
+    return {
+        "finalized": finalized,
+        "imported": imported if activate else None,
+        "activated": activated,
+    }

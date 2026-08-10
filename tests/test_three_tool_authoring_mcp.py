@@ -298,6 +298,20 @@ def test_module_start_finalize_writes_a_finalized_module_pack(tmp_path: Path) ->
             "artifact"
         ]
         assert "package" not in draft["job"]["result"]["finalized_package"]
+        with pytest.raises(Exception, match="imported from a finalized Pack artifact"):
+            await _call(
+                server,
+                "content_pack",
+                {
+                    "action": "activate",
+                    "payload": {
+                        "campaign_id": campaign["id"],
+                        "kind": "module",
+                        "module_id": started["module_id"],
+                    },
+                    "idempotency_key": "reject-draft-activation",
+                },
+            )
         inspected = await _call(
             server,
             "content_pack",
