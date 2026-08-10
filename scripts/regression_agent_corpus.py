@@ -329,27 +329,25 @@ def _has_revision_refresh(calls: list[dict[str, Any]]) -> bool:
 
 
 def _has_exposure_reopen_after_transition(calls: list[dict[str, Any]]) -> bool:
+    opened: dict[str, bool] = {}
     transitioned: dict[str, bool] = {}
     for call in calls:
         process_id = str(call.get("process_id") or "legacy")
         arguments = call.get("arguments") or {}
         tool = call.get("tool")
         action = arguments.get("action")
+        if tool == "exposure" and action == "open" and call.get("ok"):
+            if opened.get(process_id, False) and transitioned.get(process_id, False):
+                return True
+            opened[process_id] = True
+            continue
         if call.get("ok") and (
             tool in {"combat_start", "combat_end", "snapshot_restore"}
             or (tool == "game_phase" and action == "set")
             or (tool == "branch_change" and action == "checkout")
             or (tool == "state_revision" and action in {"undo", "redo"})
-        ):
+        ) and opened.get(process_id, False):
             transitioned[process_id] = True
-            continue
-        if (
-            transitioned.get(process_id, False)
-            and tool == "exposure"
-            and action == "open"
-            and call.get("ok")
-        ):
-            return True
     return False
 
 
