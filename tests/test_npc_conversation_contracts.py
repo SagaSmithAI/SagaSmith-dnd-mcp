@@ -13,7 +13,7 @@ from sagasmith_dnd_mcp.npc_conversations import (
 
 def _proposal(**overrides):
     value = {
-        "schema_version": 3,
+        "schema_version": 4,
         "conversation_id": "conversation",
         "activation_id": "activation",
         "actor_runtime_id": "conversation:npc",
@@ -91,28 +91,48 @@ def _open(store):
     )
 
 
-def test_v3_is_strict_but_speech_act_is_open() -> None:
+def test_v4_requires_only_text_for_each_utterance() -> None:
     normalized = normalize_conversation_proposal(_proposal())
     assert normalized["utterance_segments"][0]["speech_act"] == "deflect_with_a_denial"
     old = _proposal(schema_version=2)
-    with pytest.raises(ValueError, match="must be 3"):
+    with pytest.raises(ValueError, match="must be 4"):
         normalize_conversation_proposal(old)
-    uncited = _proposal()
-    uncited["utterance_segments"][0]["basis_refs"] = []
-    with pytest.raises(ValueError, match="requires a basis_ref"):
-        normalize_conversation_proposal(uncited)
+    minimal = _proposal(
+        response_bid={"should_respond": True},
+        utterance_segments=[{"text": "No."}],
+    )
+    normalized_minimal = normalize_conversation_proposal(minimal)
+    assert normalized_minimal["utterance_segments"] == [
+        {
+            "text": "No.",
+            "speech_act": "",
+            "truth_posture": "",
+            "basis_refs": [],
+            "targets": [],
+            "language": "",
+            "delivery": "",
+        }
+    ]
 
 
-def test_schema_accepts_normalized_v3_proposal() -> None:
+def test_schema_accepts_minimal_v4_proposal() -> None:
     schema_path = (
         __import__("pathlib").Path(__file__).parents[1]
         / "src"
         / "sagasmith_dnd_mcp"
         / "contracts"
-        / "npc-conversation-proposal.v3.schema.json"
+        / "npc-conversation-proposal.v4.schema.json"
     )
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
-    assert not list(Draft202012Validator(schema).iter_errors(_proposal()))
+    minimal = {
+        "schema_version": 4,
+        "conversation_id": "conversation",
+        "activation_id": "activation",
+        "actor_runtime_id": "conversation:npc",
+        "response_bid": {"should_respond": True},
+        "utterance_segments": [{"text": "No."}],
+    }
+    assert not list(Draft202012Validator(schema).iter_errors(minimal))
 
 
 def test_publication_drops_private_semantics() -> None:

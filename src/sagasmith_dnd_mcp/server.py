@@ -7893,25 +7893,36 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "target_adjacent_ally_actor_ids",
                 "cleave_secondary_eligible",
             }
-            required_spatial_fields = allowed_spatial_fields - {"cleave_secondary_eligible"}
+            required_spatial_fields = {
+                "decision_id",
+                "reason",
+                "targetable",
+                "in_range",
+                "cover_degree",
+                "attacker_can_see_target",
+                "target_can_see_attacker",
+            }
             unknown = set(raw_spatial_facts) - allowed_spatial_fields
             missing = required_spatial_fields - set(raw_spatial_facts)
             decision_id = str(raw_spatial_facts.get("decision_id") or "").strip()
             reason = " ".join(str(raw_spatial_facts.get("reason") or "").split())
             if unknown or missing or not decision_id or not reason:
                 raise CombatEngineError(
-                    "Agent spatial facts require one decision_id, reason, and the complete "
-                    "attack fact set"
+                    "Agent spatial facts require one decision_id, reason, and the attack "
+                    "facts needed to determine targetability"
                 )
             for field in {
                 "targetable",
                 "in_range",
-                "long_range",
                 "attacker_can_see_target",
                 "target_can_see_attacker",
-                "target_within_5_ft",
             }:
                 if not isinstance(raw_spatial_facts.get(field), bool):
+                    raise CombatEngineError(f"Agent spatial fact {field} must be boolean")
+            for field in {"long_range", "target_within_5_ft"}:
+                if field in raw_spatial_facts and not isinstance(
+                    raw_spatial_facts[field], bool
+                ):
                     raise CombatEngineError(f"Agent spatial fact {field} must be boolean")
             if "cleave_secondary_eligible" in raw_spatial_facts and not isinstance(
                 raw_spatial_facts["cleave_secondary_eligible"], bool
@@ -7938,7 +7949,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "helper_actor_ids",
                 "target_adjacent_ally_actor_ids",
             }:
-                raw_ids = raw_spatial_facts.get(field)
+                raw_ids = raw_spatial_facts.get(field, [])
                 if (
                     not isinstance(raw_ids, list)
                     or any(not isinstance(item, str) for item in raw_ids)
@@ -7955,6 +7966,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "decision_id": decision_id,
                 "reason": reason,
                 "cover_degree": cover_degree,
+                "long_range": bool(raw_spatial_facts.get("long_range", False)),
+                "target_within_5_ft": bool(
+                    raw_spatial_facts.get("target_within_5_ft", False)
+                ),
+                "cleave_secondary_eligible": bool(
+                    raw_spatial_facts.get("cleave_secondary_eligible", False)
+                ),
             }
             action["context"] = context
             return
@@ -8006,7 +8024,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 missing=("movement.spatial_facts",),
                 ruling_kind="agent_dm_adjudication",
             )
-        required_fields = {
+        allowed_fields = {
             "decision_id",
             "reason",
             "destination_legal",
@@ -8017,9 +8035,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "moves_closer_to_visible_fear_source",
             "opportunity_attack_actor_ids",
         }
-        if set(spatial_facts) != required_fields:
+        required_fields = {"decision_id", "reason", "destination_legal", "distance_ft"}
+        if set(spatial_facts) - allowed_fields or required_fields - set(spatial_facts):
             raise CombatEngineError(
-                "Agent movement spatial facts must contain the complete movement fact set"
+                "Agent movement spatial facts require decision_id, reason, destination_legal, "
+                "and distance_ft"
             )
         decision_id = str(spatial_facts.get("decision_id") or "").strip()
         reason = " ".join(str(spatial_facts.get("reason") or "").split())
@@ -8031,10 +8051,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "enters_turn_source_30_ft",
             "moves_closer_to_visible_fear_source",
         }:
-            if not isinstance(spatial_facts[field], bool):
+            if not isinstance(spatial_facts.get(field, False), bool):
                 raise CombatEngineError(f"Agent movement spatial fact {field} must be boolean")
         for field in {"distance_ft", "difficult_terrain_extra_ft"}:
-            value = spatial_facts[field]
+            value = spatial_facts.get(field, 0)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value % 5:
                 raise CombatEngineError(
                     f"Agent movement spatial fact {field} must be a non-negative "
@@ -8043,7 +8063,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         participant_ids = {
             str(item.get("actor_id") or "") for item in encounter.get("combatants", [])
         }
-        threat_ids = spatial_facts["opportunity_attack_actor_ids"]
+        threat_ids = spatial_facts.get("opportunity_attack_actor_ids", [])
         if (
             not isinstance(threat_ids, list)
             or any(not isinstance(item, str) for item in threat_ids)
@@ -8058,6 +8078,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             **dict(spatial_facts),
             "decision_id": decision_id,
             "reason": reason,
+            "difficult_terrain_extra_ft": int(
+                spatial_facts.get("difficult_terrain_extra_ft", 0)
+            ),
+            "moves_farther_from_turn_source": bool(
+                spatial_facts.get("moves_farther_from_turn_source", False)
+            ),
+            "enters_turn_source_30_ft": bool(
+                spatial_facts.get("enters_turn_source_30_ft", False)
+            ),
+            "moves_closer_to_visible_fear_source": bool(
+                spatial_facts.get("moves_closer_to_visible_fear_source", False)
+            ),
             "opportunity_attack_actor_ids": list(threat_ids),
         }
 
@@ -10095,7 +10127,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "contract": NPC_CONVERSATION_CONTRACT,
                 "phase": "play",
                 "execution_mode": "client_subagents_required",
-                "proposal_contract": "npc-conversation-proposal.v3",
+                "proposal_contract": "npc-conversation-proposal.v4",
                 "public_tool": "npc_conversation",
                 "public_actions": ["open", "get", "ingest", "publish", "close", "abort"],
                 "host_transport": "private_authenticated_unlisted",
@@ -10168,11 +10200,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "source_backed_actor_images": True,
                 "structured_content_catalog": True,
                 "structured_content_selection_requirements": True,
-                "build_time_content_resolution": True,
+                "compiled_or_agent_content_resolution": True,
                 "editable_rulebook_drafts": True,
-                "deterministic_candidate_revalidation": True,
+                "advisory_candidate_review": True,
                 "explicit_rulebook_finalization": True,
-                "module_draft_idempotency": True,
+                "durable_finalization_idempotency": True,
                 "managed_module_document_staging": True,
                 "core_pdf_module_normalization": True,
                 "module_document_cache": True,
@@ -22080,7 +22112,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     missing=("area.spatial_facts",),
                     ruling_kind="agent_dm_adjudication",
                 )
-            required_spatial_fields = {
+            allowed_spatial_fields = {
                 "decision_id",
                 "reason",
                 "affected_target_ids",
@@ -22088,14 +22120,24 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "line_of_effect_clear",
                 "friendly_fire_included",
             }
-            if set(spatial_facts) != required_spatial_fields:
+            required_spatial_fields = {
+                "decision_id",
+                "reason",
+                "affected_target_ids",
+                "line_of_effect_clear",
+            }
+            if (
+                set(spatial_facts) - allowed_spatial_fields
+                or required_spatial_fields - set(spatial_facts)
+            ):
                 raise CombatEngineError(
-                    "Agent area spatial facts must contain the complete area fact set"
+                    "Agent area spatial facts require decision_id, reason, affected_target_ids, "
+                    "and line_of_effect_clear"
                 )
             decision_id = str(spatial_facts.get("decision_id") or "").strip()
             reason = " ".join(str(spatial_facts.get("reason") or "").split())
             affected_ids = spatial_facts.get("affected_target_ids")
-            excluded_ids = spatial_facts.get("excluded_actor_ids")
+            excluded_ids = spatial_facts.get("excluded_actor_ids", [])
             participant_ids = {
                 str(item.get("actor_id") or "") for item in encounter.get("combatants", [])
             }
@@ -22118,7 +22160,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 or affected_ids != normalized_target_ids
                 or set(affected_ids) & set(excluded_ids)
                 or not isinstance(spatial_facts.get("line_of_effect_clear"), bool)
-                or not isinstance(spatial_facts.get("friendly_fire_included"), bool)
+                or (
+                    "friendly_fire_included" in spatial_facts
+                    and not isinstance(spatial_facts["friendly_fire_included"], bool)
+                )
             ):
                 raise CombatEngineError(
                     "Agent area spatial facts must exactly justify the declared targets"
@@ -22131,6 +22176,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "reason": reason,
                 "affected_target_ids": list(affected_ids),
                 "excluded_actor_ids": list(excluded_ids),
+                "friendly_fire_included": bool(
+                    spatial_facts.get("friendly_fire_included", False)
+                ),
             }
         elif spatial_facts is not None:
             raise CombatEngineError(
@@ -28264,7 +28312,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         }
         context["constraints"] = {
             **dict(context["constraints"]),
-            "output_contract": "npc-conversation-proposal.v3",
+            "output_contract": "npc-conversation-proposal.v4",
         }
         context["delegation"] = {
             "schema_version": 1,
@@ -28275,7 +28323,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "tools_exposed": False,
             "persist_worker_session": True,
             "authoritative_result": False,
-            "output_contract": "npc-conversation-proposal.v3",
+            "output_contract": "npc-conversation-proposal.v4",
         }
         actor_id = str(dict(context["actor"])["id"])
         commitments = [

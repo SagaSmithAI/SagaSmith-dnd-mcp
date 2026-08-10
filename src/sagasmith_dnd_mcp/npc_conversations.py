@@ -20,12 +20,9 @@ from typing import Any
 from uuid import uuid4
 
 NPC_CONVERSATION_SCHEMA_VERSION = 2
-NPC_CONVERSATION_PROPOSAL_SCHEMA_VERSION = 3
+NPC_CONVERSATION_PROPOSAL_SCHEMA_VERSION = 4
 NPC_CONVERSATION_CONTRACT = "npc-conversation.v2"
 
-NPC_TRUTH_POSTURES = frozenset(
-    {"believes_true", "uncertain", "intentional_deception", "opinion", "nonfactual"}
-)
 NPC_RESOLUTION_KINDS = frozenset(
     {"ability_check", "contest", "saving_throw", "attack", "dm_adjudication"}
 )
@@ -71,7 +68,7 @@ def _string_list(value: Any, field: str, *, maximum: int = 200) -> list[str]:
 
 
 def normalize_conversation_proposal(value: Any) -> dict[str, Any]:
-    """Normalize the sole authoritative v3 NPC proposal contract."""
+    """Normalize the minimal authoritative v4 NPC proposal contract."""
 
     data = _object(value, "npc_conversation.proposal")
     allowed = {
@@ -90,7 +87,7 @@ def normalize_conversation_proposal(value: Any) -> dict[str, Any]:
     }
     _strict(data, "npc_conversation.proposal", allowed)
     if data.get("schema_version") != NPC_CONVERSATION_PROPOSAL_SCHEMA_VERSION:
-        raise ValueError("npc_conversation.proposal.schema_version must be 3")
+        raise ValueError("npc_conversation.proposal.schema_version must be 4")
 
     response_bid = _object(data.get("response_bid") or {}, "response_bid")
     _strict(response_bid, "response_bid", {"should_respond", "urgency", "reason"})
@@ -119,30 +116,11 @@ def normalize_conversation_proposal(value: Any) -> dict[str, Any]:
                 "delivery",
             },
         )
-        speech_act = _text(
-            item.get("speech_act"),
-            f"utterance_segments[{index}].speech_act",
-            required=True,
-            maximum=40,
-        )
-        truth_posture = _text(
-            item.get("truth_posture"),
-            f"utterance_segments[{index}].truth_posture",
-            required=True,
-            maximum=40,
-        )
-        if truth_posture not in NPC_TRUTH_POSTURES:
-            raise ValueError(f"unsupported NPC truth posture: {truth_posture}")
         basis_refs = _string_list(
             item.get("basis_refs"),
             f"utterance_segments[{index}].basis_refs",
             maximum=300,
         )
-        if (
-            truth_posture in {"believes_true", "uncertain", "intentional_deception"}
-            and not basis_refs
-        ):
-            raise ValueError(f"utterance_segments[{index}] factual content requires a basis_ref")
         segments.append(
             {
                 "text": _text(
@@ -151,8 +129,16 @@ def normalize_conversation_proposal(value: Any) -> dict[str, Any]:
                     required=True,
                     maximum=2_000,
                 ),
-                "speech_act": speech_act,
-                "truth_posture": truth_posture,
+                "speech_act": _text(
+                    item.get("speech_act"),
+                    f"utterance_segments[{index}].speech_act",
+                    maximum=100,
+                ),
+                "truth_posture": _text(
+                    item.get("truth_posture"),
+                    f"utterance_segments[{index}].truth_posture",
+                    maximum=100,
+                ),
                 "basis_refs": basis_refs,
                 "targets": _string_list(
                     item.get("targets"), f"utterance_segments[{index}].targets"
@@ -937,7 +923,7 @@ class ConversationStore:
                 "may_call_tools": False,
                 "may_roll_dice": False,
                 "may_write_state": False,
-                "output_contract": "npc-conversation-proposal.v3",
+                "output_contract": "npc-conversation-proposal.v4",
             },
         }
         return self.finish_mutation(session, capsule)

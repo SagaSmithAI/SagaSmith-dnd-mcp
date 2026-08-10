@@ -496,7 +496,7 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
             "contract": "npc-conversation.v2",
             "phase": "play",
             "execution_mode": "client_subagents_required",
-            "proposal_contract": "npc-conversation-proposal.v3",
+            "proposal_contract": "npc-conversation-proposal.v4",
             "public_tool": "npc_conversation",
             "public_actions": ["open", "get", "ingest", "publish", "close", "abort"],
             "host_transport": "private_authenticated_unlisted",
@@ -524,9 +524,9 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
         assert capabilities["features"]["source_bound_rule_packs"] is True
         assert capabilities["features"]["structured_content_selection_requirements"] is True
         assert capabilities["features"]["editable_rulebook_drafts"] is True
-        assert capabilities["features"]["deterministic_candidate_revalidation"] is True
+        assert capabilities["features"]["advisory_candidate_review"] is True
         assert capabilities["features"]["explicit_rulebook_finalization"] is True
-        assert capabilities["features"]["module_draft_idempotency"] is True
+        assert capabilities["features"]["durable_finalization_idempotency"] is True
         assert capabilities["features"]["managed_module_document_staging"] is True
         assert capabilities["features"]["core_pdf_module_normalization"] is True
         assert capabilities["features"]["module_document_cache"] is True
@@ -600,7 +600,7 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
         assert capabilities["features"]["continuity_diagnostics"] is True
         assert capabilities["contract_version"] == "2026-08-session-exposure-v1"
         assert capabilities["features"]["source_bound_hypnotic_pattern"] is True
-        assert capabilities["features"]["build_time_content_resolution"] is True
+        assert capabilities["features"]["compiled_or_agent_content_resolution"] is True
         assert capabilities["ruling_policy"] == {
             "default_dm_resolver": "agent",
             "agent_adjudicates": [

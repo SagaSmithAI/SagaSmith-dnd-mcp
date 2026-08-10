@@ -185,7 +185,7 @@ def test_conversation_facade_private_transport_and_commit(tmp_path: Path) -> Non
         )
         identity_ref = f"actor:{npc['id']}:identity"
         proposal = {
-            "schema_version": 3,
+            "schema_version": 4,
             "conversation_id": conversation_id,
             "activation_id": capsule["activation_id"],
             "actor_runtime_id": capsule["actor_runtime_id"],
