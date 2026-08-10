@@ -757,6 +757,9 @@ does not satisfy preparation. Here `preparation` means a scenario gap ending in
 `:preparation`; the separate
 `preparation:player_membership_or_actor_grant_missing` gap requires only the
 missing campaign/actor grants and never authorizes rebuilding the Pack or party.
+`preparation:manifest_party_not_ready` requires only creating any source-sized
+missing PCs, replacing the complete manifest with full member records, and
+syncing it to `ready`; it also never authorizes rebuilding the Pack.
 After every exposure open, seeing only core tools is expected, not a blocker:
 search and set the next required native tool. A cycle that only lists state or
 opens exposure has made no progress. Unless a true external boundary is reached,
