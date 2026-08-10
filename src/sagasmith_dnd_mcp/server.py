@@ -41042,6 +41042,28 @@ boundary.
             data = facade_payload(payload)
             access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
             job = require_import_job(campaign_id, job_id, "module")
+            source_key = str(dict(job.payload or {}).get("source_key") or job.artifact)
+
+            def chunk_evidence_receipt(
+                item: dict[str, Any],
+                *,
+                page: int | None = None,
+            ) -> dict[str, Any]:
+                evidence_page = page if page is not None else item.get("page_start")
+                heading_path = [str(value) for value in item.get("heading_path") or []]
+                note_subject = " / ".join(heading_path) or str(
+                    item.get("scene_title") or "module evidence"
+                )
+                return {
+                    **deepcopy(item),
+                    "source_ref": {
+                        "source_key": source_key,
+                        "page": evidence_page,
+                        "chunk_hash": str(item.get("content_hash") or ""),
+                        "note": f"Agent-reviewed source evidence: {note_subject}",
+                    },
+                }
+
             evidence_kind = str(
                 data.get("kind") or ("page" if data.get("page_number") else "chunks")
             )
@@ -41069,7 +41091,10 @@ boundary.
                 limit = data.get("limit", 100)
                 if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
                     raise ValueError("payload.limit must be an integer between 1 and 500")
-                return facade_result(action, chunks[:limit])
+                return facade_result(
+                    action,
+                    [chunk_evidence_receipt(item) for item in chunks[:limit]],
+                )
             if evidence_kind != "page":
                 raise ValueError("payload.kind must be page or chunks")
             if not data.get("page_number"):
@@ -41083,6 +41108,19 @@ boundary.
                 data["page_number"],
                 include_ocr=data.get("include_ocr_text", True),
             )
+            page_chunks = []
+            if job.module_id:
+                for item in modules.list_chunks(campaign_id, job.module_id):
+                    page_start = item.get("page_start")
+                    page_end = item.get("page_end")
+                    if (
+                        isinstance(page_start, int)
+                        and isinstance(page_end, int)
+                        and page_start <= rendered.page_number <= page_end
+                    ):
+                        page_chunks.append(
+                            chunk_evidence_receipt(item, page=rendered.page_number)
+                        )
             return facade_render_result(
                 [
                     {
@@ -41097,6 +41135,7 @@ boundary.
                         "scale": rendered.scale,
                         "image_checksum": rendered.checksum,
                         "transcription": transcription,
+                        "citation_candidates": page_chunks,
                     },
                     Image(data=rendered.content, format="png"),
                 ]

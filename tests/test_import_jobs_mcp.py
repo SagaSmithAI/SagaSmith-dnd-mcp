@@ -2049,6 +2049,25 @@ def test_module_import_accepts_checksum_bound_agent_transcript_review(
         )
         metadata = json.loads(rendered.content[0].text)
         assert isinstance(rendered.content[1], ImageContent)
+        assert metadata["citation_candidates"]
+        page_source_ref = metadata["citation_candidates"][0]["source_ref"]
+        assert page_source_ref["source_key"] == "transcript"
+        assert page_source_ref["page"] == 1
+        assert len(page_source_ref["chunk_hash"]) == 64
+        assert page_source_ref["note"].startswith("Agent-reviewed source evidence:")
+        _, chunk_evidence = await server.call_tool(
+            "module_draft",
+            {
+                "campaign_id": campaign["id"],
+                "action": "evidence",
+                "payload": {
+                    "job_id": job_id,
+                    "kind": "chunks",
+                    "query": "Arrival transcript",
+                },
+            },
+        )
+        assert chunk_evidence["result"][0]["source_ref"] == page_source_ref
         assert [item["model"] for item in metadata["transcription"]["ocr"]["variants"]] == [
             "medium",
             "small",

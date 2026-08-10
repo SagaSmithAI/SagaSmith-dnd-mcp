@@ -1,4 +1,5 @@
 import asyncio
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -303,6 +304,62 @@ def test_module_start_finalize_writes_a_finalized_module_pack(tmp_path: Path) ->
             },
         )
         assert edited["job"]["result"]["pack_edit_history"]
+        invalid_manifest = deepcopy(edited["pack_draft"]["manifest"])
+        invalid_manifest["play_profile"]["pregenerated_characters"]["source_refs"][0][
+            "chunk_hash"
+        ] = "0" * 64
+        invalid_ref = await _call(
+            server,
+            "module_draft",
+            {
+                "campaign_id": campaign["id"],
+                "action": "edit",
+                "payload": {
+                    "job_id": started["job"]["id"],
+                    "operation": "package",
+                    "manifest": invalid_manifest,
+                },
+                "expected_revision": edited["job"]["revision"],
+                "idempotency_key": "module-invalid-source-ref",
+            },
+        )
+        with pytest.raises(
+            Exception,
+            match="module source_ref.chunk_hash does not match imported draft evidence",
+        ):
+            await _call(
+                server,
+                "module_draft",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "finalize",
+                    "payload": {
+                        "job_id": started["job"]["id"],
+                        "pack_id": "dnd5e.module.invalid-source-ref",
+                        "confirmation": {
+                            "confirmed": True,
+                            "note": "This draft contains a fabricated source reference.",
+                        },
+                    },
+                    "idempotency_key": "reject-invalid-source-ref",
+                },
+            )
+        restored = await _call(
+            server,
+            "module_draft",
+            {
+                "campaign_id": campaign["id"],
+                "action": "edit",
+                "payload": {
+                    "job_id": started["job"]["id"],
+                    "operation": "package",
+                    "manifest": edited["pack_draft"]["manifest"],
+                },
+                "expected_revision": invalid_ref["job"]["revision"],
+                "idempotency_key": "module-restore-source-ref",
+            },
+        )
+        assert restored["pack_draft"]["manifest"] == edited["pack_draft"]["manifest"]
         finalized = await _call(
             server,
             "module_draft",
@@ -367,8 +424,8 @@ def test_module_start_finalize_writes_a_finalized_module_pack(tmp_path: Path) ->
         assert inspected["metadata"]["authoring_review"] == {
             "schema_version": 1,
             "draft_kind": "module",
-            "draft_revision": edited["job"]["revision"],
-            "package_edit_history": edited["job"]["result"]["pack_edit_history"],
+            "draft_revision": restored["job"]["revision"],
+            "package_edit_history": restored["job"]["result"]["pack_edit_history"],
         }
         assert inspected["kind"] == "module"
         with pytest.raises(Exception, match="payload.kind is required"):
