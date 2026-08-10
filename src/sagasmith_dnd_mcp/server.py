@@ -29520,16 +29520,39 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         ):
             reasons.append("scene_state_version")
         refreshed_actor_ids: list[str] = []
+        current_memory_heads = {
+            str(item.id): str(item.revision_id)
+            for item in memories.list(
+                str(session["campaign_id"]),
+                branch_id=str(session["branch_id"]),
+                include_inactive=True,
+            )
+        }
         for actor_id, expected_revision in dict(authority["actor_revisions"]).items():
             try:
                 actor = characters.get(str(actor_id))
             except LookupError:
                 reasons.append(f"actor:{actor_id}:missing")
                 continue
-            if actor.revision != int(expected_revision):
-                runtime = session["actor_runtimes"].get(str(actor_id))
-                if runtime is None:
-                    continue
+            runtime = session["actor_runtimes"].get(str(actor_id))
+            if runtime is None:
+                continue
+            lock = dict(dict(authority.get("actor_context_locks") or {}).get(actor_id) or {})
+            fact_changed = any(
+                current_memory_heads.get(str(item_id)) != str(revision_id)
+                for item_id, revision_id in dict(lock.get("fact_heads") or {}).items()
+            )
+            knowledge_changed = False
+            for knowledge_id, revision_id in dict(lock.get("knowledge_heads") or {}).items():
+                try:
+                    current = knowledge.get(str(knowledge_id), branch_id=str(session["branch_id"]))
+                except LookupError:
+                    knowledge_changed = True
+                    break
+                if str(current.revision_id) != str(revision_id):
+                    knowledge_changed = True
+                    break
+            if actor.revision != int(expected_revision) or fact_changed or knowledge_changed:
                 bundle = continuity_context(
                     campaign_id=str(session["campaign_id"]),
                     query="",
@@ -29559,6 +29582,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         activation["status"] = "invalidated"
                         activation["lease"] = None
                 authority["actor_revisions"][actor_id] = actor.revision
+                authority.setdefault("actor_context_locks", {})[actor_id] = (
+                    npc_conversation_context_lock(runtime["context"])
+                )
                 refreshed_actor_ids.append(str(actor_id))
         if reasons:
             session["status"] = "stale"
@@ -29571,6 +29597,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if refreshed_actor_ids:
             session["authority"] = authority
             session["refreshed_actor_ids"] = refreshed_actor_ids
+            session["conversation_revision"] = int(session["conversation_revision"]) + 1
             session["updated_at_ns"] = time.time_ns()
             npc_conversations.save(session)
 
@@ -29607,6 +29634,26 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         ]
         context["commitments"] = commitments
         return context
+
+    def npc_conversation_context_lock(context: dict[str, Any]) -> dict[str, Any]:
+        fact_items = [
+            *list(context.get("relationships") or []),
+            *list(context.get("goals") or []),
+            *list(context.get("commitments") or []),
+            *list(context.get("common_context") or []),
+        ]
+        return {
+            "fact_heads": {
+                str(item["id"]): str(item["revision_id"])
+                for item in fact_items
+                if isinstance(item, dict) and item.get("id") and item.get("revision_id")
+            },
+            "knowledge_heads": {
+                str(item["id"]): str(item["revision_id"])
+                for item in list(context.get("actor_knowledge") or [])
+                if isinstance(item, dict) and item.get("id") and item.get("revision_id")
+            },
+        }
 
     @internal_operation
     def conversation_open(
@@ -29668,6 +29715,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "latest_event_sequence": int(first_authority["latest_event_sequence"]),
             "scene_state_version": int(first_authority.get("scene_state_version") or 0),
             "actor_revisions": {actor.id: actor.revision for actor in actors},
+            "actor_context_locks": {
+                actor_id: npc_conversation_context_lock(context)
+                for actor_id, context in actor_contexts.items()
+            },
             "principal_fingerprint": dict(first_authority["host_context_binding"])[
                 "principal_fingerprint"
             ],
@@ -29965,9 +30016,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for conversation_close")
-        npc_conversations.require_owner(
+        owned = npc_conversations.require_owner(
             conversation_id, campaign_id=campaign_id, principal_id=principal_id
         )
+        npc_conversation_require_fresh(owned)
         session, replay = npc_conversations.begin_mutation(
             conversation_id,
             expected_revision=expected_conversation_revision,
@@ -29977,7 +30029,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         if replay is not None:
             return replay
-        npc_conversation_require_fresh(session)
         if session.get("status") != "open":
             raise ValueError("conversation must resolve suspended work before closing")
         if any(

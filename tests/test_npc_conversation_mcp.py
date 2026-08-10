@@ -218,3 +218,48 @@ def test_unrelated_campaign_event_does_not_stale_conversation(tmp_path: Path) ->
         assert status["conversation_revision"] == 0
 
     asyncio.run(exercise())
+
+
+def test_selected_actor_knowledge_change_refreshes_only_that_runtime(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign, npc, pc = await _campaign_with_actors(server)
+        knowledge = await _call(server, "actor_knowledge_change", {
+            "action": "add",
+            "payload": {
+                "campaign_id": campaign["id"],
+                "actor_id": npc["id"],
+                "knowledge_key": "dock-secret",
+                "proposition": "The ledger is under the pier.",
+                "subject_ref": "location:docks",
+                "epistemic_status": "known",
+            },
+            "idempotency_key": "knowledge-add",
+        })
+        opened = await _call(server, "npc_conversation", {
+            "campaign_id": campaign["id"], "action": "open",
+            "payload": {
+                "participant_actor_ids": [pc["id"], npc["id"]],
+                "query": "dock secret",
+                "idempotency_key": "open",
+            },
+        })
+        await _call(server, "actor_knowledge_change", {
+            "action": "revise",
+            "payload": {
+                "knowledge_id": knowledge["id"],
+                "proposition": "The ledger was moved to the warehouse.",
+                "epistemic_status": "known",
+                "expected_revision_id": knowledge["revision_id"],
+            },
+            "idempotency_key": "knowledge-revise",
+        })
+        status = await _call(server, "npc_conversation", {
+            "campaign_id": campaign["id"], "action": "get",
+            "payload": {"conversation_id": opened["conversation_id"]},
+        })
+        assert status["status"] == "open"
+        assert status["conversation_revision"] == 1
+        assert status["refreshed_actor_ids"] == [npc["id"]]
+
+    asyncio.run(exercise())
