@@ -2782,11 +2782,12 @@ class SessionExposureFastMCP(FastMCP):
             raise ExposureError(
                 "No active exposure for this MCP session. Call exposure(action='open')."
             )
-        if exposure is not None and not name.startswith("exposure_"):
+        if exposure is not None:
             arguments = self._bind_exposure_principal(
                 exposure, name, arguments, inject_missing=True
             )
-            self._scope_validator(exposure, name, arguments)
+            if name != "exposure" or arguments.get("action") != "open":
+                self._scope_validator(exposure, name, arguments)
         if name not in CORE_TOOLS:
             assert exposure is not None
             async with self._exposure_lock(exposure.id):

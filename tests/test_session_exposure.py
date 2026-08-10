@@ -508,6 +508,15 @@ def test_stdio_session_mutates_native_tool_list_and_calls_tools_directly(
                 )
                 assert not created.isError
                 campaign_id = json.loads(created.content[0].text)["id"]
+                second_created = await session.call_tool(
+                    "campaign_create",
+                    {
+                        "name": "Exposure test second",
+                        "idempotency_key": "exposure-test-create-second",
+                    },
+                )
+                assert not second_created.isError
+                second_campaign_id = json.loads(second_created.content[0].text)["id"]
 
                 reopened = await session.call_tool(
                     "exposure",
@@ -532,6 +541,19 @@ def test_stdio_session_mutates_native_tool_list_and_calls_tools_directly(
                 status = await session.call_tool("rule_seed_status", {})
                 assert not status.isError
                 assert json.loads(status.content[0].text)["auto_seed"] is False
+
+                rebound = await session.call_tool(
+                    "exposure",
+                    {
+                        "action": "open",
+                        "campaign_id": second_campaign_id,
+                        "principal_id": principal_id,
+                    },
+                )
+                assert not rebound.isError
+                rebound_payload = json.loads(rebound.content[0].text)
+                assert rebound_payload["campaign_id"] == second_campaign_id
+                assert rebound_payload["loaded_tools"] == []
 
     asyncio.run(exercise())
 

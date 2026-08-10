@@ -315,22 +315,40 @@ async def _installed_records(
             for campaign in campaigns or []:
                 campaign_id = str(campaign["id"])
                 notifications.clear()
-                await session.call_tool(
-                    "exposure",
-                    {
-                        "action": "open",
-                        "campaign_id": campaign_id,
-                        "principal_id": PRINCIPAL_ID,
-                    },
-                )
-                await session.call_tool(
-                    "exposure",
-                    {
-                        "action": "set",
-                        "add_tool_ids": ["module_query"],
-                        "principal_id": PRINCIPAL_ID,
-                    },
-                )
+                try:
+                    decode_mcp_result(
+                        await session.call_tool(
+                            "exposure",
+                            {
+                                "action": "open",
+                                "campaign_id": campaign_id,
+                                "principal_id": PRINCIPAL_ID,
+                            },
+                        )
+                    )
+                    decode_mcp_result(
+                        await session.call_tool(
+                            "exposure",
+                            {
+                                "action": "set",
+                                "add_tool_ids": ["module_query"],
+                                "principal_id": PRINCIPAL_ID,
+                            },
+                        )
+                    )
+                except RuntimeError as exc:
+                    records.append(
+                        {
+                            "source_kind": "installed_campaign",
+                            "home": _relative(home, workspace),
+                            "campaign_id": campaign_id,
+                            "campaign_name": campaign.get("name"),
+                            "disposition": "pending",
+                            "reason_code": "installed_campaign_not_inspectable",
+                            "error": str(exc),
+                        }
+                    )
+                    continue
                 await asyncio.sleep(0)
                 visible = {tool.name for tool in (await session.list_tools()).tools}
                 if "module_query" not in visible:
