@@ -578,10 +578,23 @@ def _evidence_summary(route: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def _managed_source_summary(unit: dict[str, Any]) -> list[dict[str, str]]:
+    paths = list(unit.get("module_paths") or [])
+    checksums = list(unit.get("module_sha256") or [])
+    return [
+        {
+            "source_path": str((workspace / path).resolve()),
+            "source_sha256": str(checksums[index]) if index < len(checksums) else "",
+        }
+        for index, path in enumerate(paths)
+    ]
+
+
 def _dm_prompt(
     *,
     run_id: str,
     line_id: str,
+    unit: dict[str, Any],
     route: dict[str, Any],
     player_principal: str,
     cycle: int,
@@ -610,6 +623,7 @@ through the authenticated list and resume using its UUID.
 
 The following fixture is coverage evidence and route intent, not a story answer.
 Retrieve and expand the exact managed source before deciding what happens:
+managed_sources={json.dumps(_managed_source_summary(unit), ensure_ascii=False)}
 evidence={json.dumps(_evidence_summary(route), ensure_ascii=False)}
 scenarios={json.dumps(route.get("scenarios") or [], ensure_ascii=False)}
 
@@ -832,6 +846,7 @@ def _run_unit(
             prompt=_dm_prompt(
                 run_id=args.run_id,
                 line_id=line_id,
+                unit=unit,
                 route=route,
                 player_principal=player_principal,
                 cycle=cycle,

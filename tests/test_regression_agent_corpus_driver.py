@@ -332,12 +332,20 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     prompt = _dm_prompt(
         run_id="run",
         line_id="module",
+        unit={
+            "module_paths": ["reference/module.pdf"],
+            "module_sha256": ["c" * 64],
+        },
         route=route,
         player_principal="player",
         cycle=1,
         gaps=[],
     )
     assert "Retrieve and expand the exact managed source before deciding" in prompt
+    source_path = str(
+        (Path(__file__).resolve().parents[2] / "reference/module.pdf").resolve()
+    )
+    assert source_path.replace("\\", "\\\\") in prompt
     assert "coverage evidence and route intent, not a story answer" in prompt
     assert "never a campaign UUID" in prompt
     assert "Open exposure without a campaign" in prompt
