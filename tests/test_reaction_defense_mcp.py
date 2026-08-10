@@ -91,6 +91,7 @@ def test_public_attack_pauses_for_parry_before_damage(tmp_path: Path, monkeypatc
             server,
             "rule_search",
             {
+                "campaign_id": campaign["id"],
                 "query": "defender adds 2 to its AC",
                 "edition": "2014",
                 "top_k": 1,

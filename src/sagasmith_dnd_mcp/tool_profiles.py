@@ -88,6 +88,7 @@ PHASE_TOOLS = {
         combat_reaction_attack combat_ready combat_resolve_attack combat_use_activity
         content_solution continuity_context dnd_check dnd_dice_roll module_query module_search
         playthrough_manifest rule_expand rule_search snapshot_create snapshot_query snapshot_restore
+        state_revision
         """
     ),
 }
@@ -105,7 +106,7 @@ PHASE_DM_TOOLS = {
     PROFILE_PLAY: _names(
         """
         actor_knowledge_change addon_actor_instantiate campaign_change campaign_event
-        campaign_rules chase
+        campaign_rules character_content_apply character_create_from chase
         combat_start content_solution memory_change memory_query module_set_progress
         npc_conversation playthrough_manifest snapshot_create snapshot_query state_revision
         """
@@ -114,6 +115,7 @@ PHASE_DM_TOOLS = {
         """
         addon_actor_instantiate branch_change campaign_rules combat_end combat_join combat_map_patch
         content_solution playthrough_manifest snapshot_create snapshot_query snapshot_restore
+        state_revision
         """
     ),
 }

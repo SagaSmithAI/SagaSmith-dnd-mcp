@@ -492,6 +492,7 @@ from sagasmith_dnd_mcp.tool_profiles import (
     campaign_phase,
     policy_for_tool,
     tool_catalog,
+    tools_for_phase,
     validate_profile_coverage,
 )
 
@@ -2510,6 +2511,7 @@ class SessionExposureFastMCP(FastMCP):
         *args: Any,
         exposure_registry: ExposureRegistry,
         phase_lookup: Any,
+        allowed_tools_lookup: Any,
         scope_validator: Any,
         random_context_factory: Any,
         context_binding_factory: Any,
@@ -2518,6 +2520,7 @@ class SessionExposureFastMCP(FastMCP):
     ) -> None:
         self.exposure_registry = exposure_registry
         self._phase_lookup = phase_lookup
+        self._allowed_tools_lookup = allowed_tools_lookup
         self._scope_validator = scope_validator
         self._random_context_factory = random_context_factory
         self._context_binding_factory = context_binding_factory
@@ -2734,27 +2737,27 @@ class SessionExposureFastMCP(FastMCP):
         return result
 
     async def _refresh(self, session_key: str, campaign_id: str | None = None) -> bool:
-        changed = False
-        exposures = (
-            [self.exposure_registry.active(session_key)]
+        changed_session_keys: set[str] = set()
+        exposure_items = (
+            [(session_key, self.exposure_registry.active(session_key))]
             if campaign_id is None
-            else list(self.exposure_registry.for_campaign(campaign_id))
+            else list(self.exposure_registry.active_items(campaign_id))
         )
-        for exposure in exposures:
+        for key, exposure in exposure_items:
             if exposure is None or exposure.campaign_id is None:
                 continue
-            changed = (
-                self.exposure_registry.refresh_phase(
-                    exposure, self._phase_lookup(exposure.campaign_id)
-                )
-                or changed
-            )
-        if changed:
-            for key, _ in self.exposure_registry.active_items(campaign_id):
-                session = self._sessions.get(key)
-                if session is not None:
-                    await session.send_tool_list_changed()
-        return changed
+            phase = self._phase_lookup(exposure.campaign_id)
+            if self.exposure_registry.refresh_phase(
+                exposure,
+                phase,
+                allowed_tools=self._allowed_tools_lookup(exposure, phase),
+            ):
+                changed_session_keys.add(key)
+        for key in changed_session_keys:
+            session = self._sessions.get(key)
+            if session is not None:
+                await session.send_tool_list_changed()
+        return bool(changed_session_keys)
 
     async def list_tools(self):  # type: ignore[override]
         public_tools = [
@@ -2814,18 +2817,13 @@ class SessionExposureFastMCP(FastMCP):
             if session is not None:
                 await session.send_tool_list_changed()
         campaign_id = str(arguments.get("campaign_id") or "") or None
-        if campaign_id and name in {
-            "branch_change",
-            "combat_end",
-            "combat_start",
-            "game_phase",
-            "snapshot_restore",
-            "state_revision",
-        }:
-            await self._refresh(session_key, campaign_id)
         campaign_id = campaign_id or (exposure.campaign_id if exposure else None)
         campaign_id = campaign_id or self._result_campaign_id(name, result, arguments)
         if campaign_id:
+            # Reconcile every successful campaign call. Most calls are a cheap
+            # no-op, while phase restores and role changes no longer depend on
+            # a fragile list of mutation tool names.
+            await self._refresh(session_key, campaign_id)
             principal_argument = self._principal_argument(name)
             principal_id = str(
                 arguments.get(principal_argument) if principal_argument else ""
@@ -4698,6 +4696,33 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     exposures = ExposureRegistry()
 
+    def allowed_tools_for_exposure(exposure: Exposure, phase: str) -> set[str]:
+        """Return tools the bound principal may still load in the current phase."""
+
+        allowed = set(tools_for_phase(phase))
+        for tool_id in tuple(allowed):
+            policy = policy_for_tool(tool_id)
+            if policy is None:
+                continue
+            if policy.local_only and exposure.principal_id != LOCAL_SYSTEM_PRINCIPAL_ID:
+                allowed.discard(tool_id)
+                continue
+            roles = policy.roles(phase)
+            if not roles:
+                continue
+            if exposure.campaign_id is None:
+                allowed.discard(tool_id)
+                continue
+            try:
+                access.require_campaign(
+                    exposure.campaign_id,
+                    exposure.principal_id,
+                    roles=set(roles),
+                )
+            except (LookupError, PermissionError):
+                allowed.discard(tool_id)
+        return allowed
+
     def campaign_random_context(
         campaign_id: str,
         tool_id: str,
@@ -4733,6 +4758,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         ),
         exposure_registry=exposures,
         phase_lookup=authoritative_phase,
+        allowed_tools_lookup=allowed_tools_for_exposure,
         scope_validator=validate_exposure_scope,
         random_context_factory=campaign_random_context,
         context_binding_factory=lambda campaign_id, principal_id, arguments: (
@@ -10764,6 +10790,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if isinstance(combat, dict) and combat.get("active", False):
             raise CombatEngineError("end the active combat before leaving the combat profile")
         state = dict(campaign.state or {})
+        current_profile = str(state.get("game_phase") or PROFILE_LOBBY)
+        if current_profile == profile:
+            return {
+                "campaign_id": campaign_id,
+                "tool_profile": profile,
+                "combat_active": False,
+                "campaign_revision": campaign.revision,
+                "revisions": [],
+                "changed": False,
+            }
         if profile != PROFILE_PLAY:
             if dict(state.get("chase") or {}).get("active", False):
                 raise CombatEngineError("end the active chase before leaving Play")
@@ -12765,6 +12801,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         if not participant_ids or len(participant_ids) != len(set(participant_ids)):
             raise ValueError("participant_ids must contain unique actors")
+        if npc_conversations.active_ids(
+            campaign_id=campaign_id,
+            branch_id=resolved_branch_id,
+        ):
+            raise CombatEngineError(
+                "close or abort the active NPC conversation before starting a chase"
+            )
         evidence = reviewed_chase_source(
             campaign_id,
             scene_id=scene_id,
@@ -28566,6 +28609,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         membership = access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_facade_phase(campaign_id, "npc_conversation", PROFILE_PLAY)
         branch_id = require_current_branch(campaign_id, branch_id)
+        campaign = campaigns.get(campaign_id)
+        if dict(campaign.state.get("chase") or {}).get("active", False):
+            raise CombatEngineError(
+                "end the active chase before opening an NPC conversation"
+            )
         actor_ids = [str(item).strip() for item in participant_actor_ids]
         if not actor_ids or any(not item for item in actor_ids):
             raise ValueError("participant_actor_ids must contain at least one actor")
@@ -30792,8 +30840,60 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if hit.metadata.get("visibility", "keeper") in PLAYER_MODULE_VISIBILITY_SCOPES
         ]
 
+    def campaign_rule_source_ids(campaign_id: str) -> set[str]:
+        """Resolve the indexed sources visible to this campaign and branch."""
+
+        profile = rule_profiles.get(campaign_id)
+        if profile is None:
+            raise RulesetUnavailableError("campaign has no authoritative rule profile")
+        bundled_root = config.dnd_skills_dir / "full" / "skills" / "dnd-dm" / "srd"
+        bundled_identities = (
+            {
+                (source.source_key, source.checksum)
+                for source in build_bundled_rule_sources(bundled_root)
+            }
+            if bundled_root.is_dir()
+            else set()
+        )
+        allowed = {
+            str(source["id"])
+            for source in rules.sources(system_id=DND5E.id)
+            if (str(source.get("source_key") or ""), str(source.get("checksum") or ""))
+            in bundled_identities
+            and str(source.get("edition") or "") == str(profile.edition)
+            and str(source.get("locale") or "") == str(profile.locale)
+        }
+
+        def collect(value: Any) -> None:
+            if isinstance(value, dict):
+                source_id = value.get("source_id")
+                if isinstance(source_id, str) and source_id:
+                    allowed.add(source_id)
+                for child in value.values():
+                    collect(child)
+            elif isinstance(value, list):
+                for child in value:
+                    collect(child)
+
+        effective = rule_packs.effective_ruleset(campaign_id)
+        for locked in effective.lock:
+            version = rule_packs.get_version(
+                str(locked["pack_id"]),
+                str(locked["version"]),
+            )
+            collect(asdict(version))
+
+        if authoritative_phase(campaign_id) == PROFILE_LOBBY:
+            allowed.update(
+                str(job.source_id)
+                for job in import_jobs.list(campaign_id, kind="rulebook")
+                if job.source_id
+            )
+        return allowed
+
     @public_tool()
     def rule_search(
+        campaign_id: str,
         query: str,
         edition: str | None = None,
         locale: str | None = None,
@@ -30801,8 +30901,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         source_ids: list[str] | None = None,
         source_keys: list[str] | None = None,
         top_k: int = 8,
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> list[dict[str, Any]]:
-        """Search rules, optionally constrained to exact imported sources/publications."""
+        """Search only rules visible to the current campaign ruleset."""
+        access.require_campaign(campaign_id, principal_id)
+        allowed_source_ids = campaign_rule_source_ids(campaign_id)
+        if source_ids is not None:
+            requested = {str(item) for item in source_ids}
+            if unknown := sorted(requested - allowed_source_ids):
+                raise ValueError(
+                    "rule_search source_ids are outside the current campaign ruleset: "
+                    + ", ".join(unknown)
+                )
+            allowed_source_ids &= requested
+        if not allowed_source_ids:
+            return []
         embedder, vectors = storage.dense_components()
         hits = rules.search(
             system_id=DND5E.id,
@@ -30810,7 +30923,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             edition=edition,
             locale=locale,
             publications=publications,
-            source_ids=source_ids,
+            source_ids=sorted(allowed_source_ids),
             source_keys=source_keys,
             top_k=top_k,
             embedder=embedder,
@@ -30819,9 +30932,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return [asdict(hit) for hit in hits]
 
     @public_tool()
-    def rule_expand(chunk_id: str) -> dict[str, Any]:
-        """Read a complete indexed D&D rule chunk after it was selected by search."""
-        return rules.expand(chunk_id)
+    def rule_expand(
+        campaign_id: str,
+        chunk_id: str,
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+    ) -> dict[str, Any]:
+        """Read one indexed chunk only when its source belongs to this campaign ruleset."""
+        access.require_campaign(campaign_id, principal_id)
+        expanded = rules.expand(chunk_id)
+        source_id = str(dict(expanded.get("source") or {}).get("id") or "")
+        if source_id not in campaign_rule_source_ids(campaign_id):
+            raise PermissionError("rule chunk is outside the current campaign ruleset")
+        return expanded
 
     def rule_document_stage(
         campaign_id: str,
@@ -45296,7 +45418,12 @@ boundary.
         if campaign_id is not None and campaign_id != current.campaign_id:
             raise ExposureError("Reopen the exposure to bind a different campaign.")
         if current.campaign_id:
-            exposures.refresh_phase(current, authoritative_phase(current.campaign_id))
+            current_phase = authoritative_phase(current.campaign_id)
+            exposures.refresh_phase(
+                current,
+                current_phase,
+                allowed_tools=allowed_tools_for_exposure(current, current_phase),
+            )
         if action == "get":
             return exposures.status(current)
 

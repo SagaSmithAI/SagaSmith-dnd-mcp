@@ -242,16 +242,21 @@ class DndGateway:
         return await self.envelope(request, result, campaign_id)
 
     async def rule_search(self, request: web.Request) -> web.Response:
+        campaign_id = request.query.get("campaign_id", "")
+        if not campaign_id:
+            raise web.HTTPBadRequest(text="campaign_id is required")
         result = await self.call(
             "rule_search",
             {
+                "campaign_id": campaign_id,
                 "query": request.query.get("query", ""),
                 "edition": request.query.get("edition"),
                 "locale": request.query.get("locale"),
                 "top_k": min(int(request.query.get("limit", "8")), 50),
+                "principal_id": self.principal(request),
             },
         )
-        return await self.envelope(request, result)
+        return await self.envelope(request, result, campaign_id)
 
     async def combat(self, request: web.Request) -> web.Response:
         campaign_id = request.match_info["campaign_id"]

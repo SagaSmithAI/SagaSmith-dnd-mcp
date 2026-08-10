@@ -40,6 +40,20 @@ def test_response_receipt_failure_rolls_back_the_state_write(
             "campaign_create",
             {"name": "Crash recovery", "edition": "2014", "idempotency_key": "campaign"},
         )
+        no_op = await call(
+            server,
+            "game_phase",
+            {
+                "campaign_id": campaign["id"],
+                "action": "set",
+                "tool_profile": "lobby",
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "already-lobby",
+            },
+        )
+        assert no_op["changed"] is False
+        assert no_op["campaign_revision"] == campaign["revision"]
+        assert no_op["revisions"] == []
         arguments = {
             "campaign_id": campaign["id"],
             "action": "set",

@@ -97,7 +97,7 @@ def test_active_conversation_blocks_combat_and_leaving_play(tmp_path: Path) -> N
     async def exercise() -> None:
         server = create_server(_config(tmp_path))
         campaign, npc, pc = await _campaign_with_actors(server)
-        await _call(
+        opened = await _call(
             server,
             "npc_conversation",
             {
@@ -109,6 +109,30 @@ def test_active_conversation_blocks_combat_and_leaving_play(tmp_path: Path) -> N
                 },
             },
         )
+        await _call(
+            server,
+            "campaign_event",
+            {
+                "campaign_id": campaign["id"],
+                "action": "add",
+                "payload": {
+                    "summary": "An unrelated clocktower bell rings elsewhere.",
+                    "event_type": "ambient",
+                    "audience_scope": "dm",
+                },
+                "idempotency_key": "unrelated-play-event",
+            },
+        )
+        still_open = await _call(
+            server,
+            "npc_conversation",
+            {
+                "campaign_id": campaign["id"],
+                "action": "get",
+                "payload": {"conversation_id": opened["conversation_id"]},
+            },
+        )
+        assert still_open["status"] == "open"
         current = await _call(
             server,
             "campaign_query",
@@ -137,6 +161,25 @@ def test_active_conversation_blocks_combat_and_leaving_play(tmp_path: Path) -> N
                     "tool_profile": "lobby",
                     "expected_revision": current["revision"],
                     "idempotency_key": "lobby-with-open-conversation",
+                },
+            )
+        with pytest.raises(Exception, match="close or abort the active NPC conversation"):
+            await _call(
+                server,
+                "chase",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "start",
+                    "payload": {
+                        "participant_ids": [pc["id"], npc["id"]],
+                        "quarry_ids": [npc["id"]],
+                        "initial_distance_ft": 30,
+                        "scene_id": "blocked-before-source-resolution",
+                        "source_ref": {},
+                        "source_excerpt": "blocked",
+                    },
+                    "expected_revision": current["revision"],
+                    "idempotency_key": "chase-with-open-conversation",
                 },
             )
 

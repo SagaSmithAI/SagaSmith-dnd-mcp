@@ -158,9 +158,25 @@ def test_bundled_rule_seed_reports_complete_multilingual_corpus(tmp_path: Path) 
         assert "bundled:srd2014:zh:monsters-alt" in source_keys
         assert "bundled:srd2024:en:dnd5esrd-333-364" in source_keys
 
+        _, campaign = await server.call_tool(
+            "campaign_create",
+            {
+                "name": "Bundled search",
+                "edition": "2014",
+                "locale": "en",
+                "idempotency_key": "bundled-search-campaign",
+            },
+        )
+
         _, response = await server.call_tool(
             "rule_search",
-            {"query": "Tarrasque", "edition": "2014", "locale": "en", "top_k": 3},
+            {
+                "campaign_id": campaign["id"],
+                "query": "Tarrasque",
+                "edition": "2014",
+                "locale": "en",
+                "top_k": 3,
+            },
         )
         monster_source_id = next(
             item["id"]

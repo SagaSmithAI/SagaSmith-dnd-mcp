@@ -417,7 +417,7 @@ def test_mechanical_action_waits_locally_without_blocking_public_speech(tmp_path
     assert final["events"][-1]["actor_inboxes"]["pc"]["resolved_resolution_ids"] == [resolution_id]
 
 
-def test_retired_conversation_journal_is_rejected_instead_of_migrated(tmp_path) -> None:
+def test_retired_conversation_journal_is_ignored_by_current_runtime(tmp_path) -> None:
     root = tmp_path / "conversations"
     store = ConversationStore(root)
     conversation_id = "00000000-0000-0000-0000-000000000001"
@@ -425,5 +425,10 @@ def test_retired_conversation_journal_is_rejected_instead_of_migrated(tmp_path) 
         json.dumps({"schema_version": 1, "contract": "npc-conversation.v1", "status": "open"}),
         encoding="utf-8",
     )
-    with pytest.raises(RuntimeError, match="retired contract"):
+    with pytest.raises(LookupError):
         store.get(conversation_id)
+    opened = _open(store)
+    assert opened["status"] == "open"
+    assert store.active_ids(campaign_id="campaign", branch_id="branch") == [
+        opened["conversation_id"]
+    ]

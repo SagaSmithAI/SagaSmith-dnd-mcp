@@ -1194,9 +1194,42 @@ def test_rulebook_import_source_bound_pack_and_noncombat_settlement(tmp_path: Pa
         hits = await call(
             server,
             "rule_search",
-            {"query": "Tools and Skills Together", "edition": "2014", "top_k": 1},
+            {
+                "campaign_id": campaign["id"],
+                "query": "Tools and Skills Together",
+                "edition": "2014",
+                "top_k": 1,
+            },
         )
         chunk_id = hits[0]["id"]
+        other_campaign = await call(
+            server,
+            "campaign_create",
+            {
+                "name": "Unrelated rules",
+                "edition": "2014",
+                "idempotency_key": "other-campaign",
+            },
+        )
+        assert await call(
+            server,
+            "rule_search",
+            {
+                "campaign_id": other_campaign["id"],
+                "query": "Tools and Skills Together",
+                "edition": "2014",
+                "top_k": 1,
+            },
+        ) == []
+        with pytest.raises(Exception, match="outside the current campaign ruleset"):
+            await call(
+                server,
+                "rule_expand",
+                {
+                    "campaign_id": other_campaign["id"],
+                    "chunk_id": chunk_id,
+                },
+            )
         decisions = [
             {
                 "id": candidate["id"],

@@ -121,8 +121,18 @@ class ExposureRegistry:
             and (campaign_id is None or exposure.campaign_id == campaign_id)
         )
 
-    def refresh_phase(self, exposure: Exposure, phase: str) -> bool:
-        allowed = tools_for_phase(phase)
+    def refresh_phase(
+        self,
+        exposure: Exposure,
+        phase: str,
+        *,
+        allowed_tools: Iterable[str] | None = None,
+    ) -> bool:
+        allowed = (
+            tools_for_phase(phase)
+            if allowed_tools is None
+            else set(allowed_tools) | set(CORE_TOOLS)
+        )
         retained = exposure.loaded_tools & allowed
         changed = exposure.phase != phase or retained != exposure.loaded_tools
         if changed:

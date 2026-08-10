@@ -455,21 +455,31 @@ class ConversationStore:
             os.fsync(handle.fileno())
         os.replace(temporary, path)
 
+    @staticmethod
+    def _is_current_session(value: Any) -> bool:
+        return (
+            isinstance(value, dict)
+            and value.get("schema_version") == NPC_CONVERSATION_SCHEMA_VERSION
+            and value.get("contract") == NPC_CONVERSATION_CONTRACT
+        )
+
+    def _current_sessions(self):
+        for path in self.root.glob("*.json"):
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if self._is_current_session(value):
+                yield value
+
     def get(self, conversation_id: str) -> dict[str, Any]:
         with self._lock:
             path = self._path(conversation_id)
             if not path.is_file():
                 raise LookupError(conversation_id)
             value = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(value, dict):
-                raise RuntimeError("NPC conversation journal is invalid")
-            if (
-                value.get("schema_version") != NPC_CONVERSATION_SCHEMA_VERSION
-                or value.get("contract") != NPC_CONVERSATION_CONTRACT
-            ):
-                raise RuntimeError(
-                    "NPC conversation journal uses a retired contract; discard the draft and reopen"
-                )
+            if not self._is_current_session(value):
+                raise LookupError(conversation_id)
             return value
 
     def save(self, session: dict[str, Any]) -> None:
@@ -481,8 +491,7 @@ class ConversationStore:
 
         with self._lock:
             result: list[str] = []
-            for path in self.root.glob("*.json"):
-                session = json.loads(path.read_text(encoding="utf-8"))
+            for session in self._current_sessions():
                 if (
                     session.get("campaign_id") == campaign_id
                     and session.get("branch_id") == branch_id
@@ -576,16 +585,7 @@ class ConversationStore:
                     "participants": participant_ids,
                 }
             )
-            for path in self.root.glob("*.json"):
-                existing = json.loads(path.read_text(encoding="utf-8"))
-                if existing.get("status") in ACTIVE_CONVERSATION_STATUSES and (
-                    existing.get("schema_version") != NPC_CONVERSATION_SCHEMA_VERSION
-                    or existing.get("contract") != NPC_CONVERSATION_CONTRACT
-                ):
-                    raise RuntimeError(
-                        "an active NPC conversation uses a retired contract; "
-                        "discard it before opening"
-                    )
+            for existing in self._current_sessions():
                 if (
                     existing.get("campaign_id") == campaign_id
                     and existing.get("principal_id") == principal_id

@@ -33,6 +33,136 @@ from sagasmith_dnd_mcp.server import (
 from sagasmith_dnd_mcp.tool_profiles import CORE_TOOLS, policy_for_tool
 
 
+def test_role_refresh_crops_loaded_tools_without_changing_phase() -> None:
+    registry = ExposureRegistry()
+    exposure = registry.open(
+        session_key="session",
+        principal_id="player",
+        campaign_id="campaign",
+        phase="play",
+    )
+    registry.set_tools(
+        exposure,
+        add=["character_check", "character_create_from", "character_content_apply"],
+    )
+
+    changed = registry.refresh_phase(
+        exposure,
+        "play",
+        allowed_tools={"character_check"},
+    )
+
+    assert changed is True
+    assert exposure.phase == "play"
+    assert exposure.loaded_tools == {"character_check"}
+
+
+def test_play_authoring_facades_are_dm_only_and_recovery_survives_combat() -> None:
+    assert policy_for_tool("character_create_from").roles("play") == frozenset(
+        CAMPAIGN_DM_ROLES
+    )
+    assert policy_for_tool("character_content_apply").roles("play") == frozenset(
+        CAMPAIGN_DM_ROLES
+    )
+    assert policy_for_tool("state_revision").roles("combat") == frozenset(
+        CAMPAIGN_DM_ROLES
+    )
+
+
+def test_role_demotion_refreshes_only_the_affected_native_session(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        server = create_server(
+            McpConfig(
+                home=tmp_path / "home",
+                database_url=None,
+                chroma_url=None,
+                chroma_path_override=None,
+                dnd_skills_dir=tmp_path / "dnd",
+                modulegen_skills_dir=tmp_path / "modulegen",
+                auto_seed_rules=False,
+            )
+        )
+
+        async def call(name: str, arguments: dict):
+            _, result = await server.call_tool(name, arguments)
+            return result.get("result", result) if isinstance(result, dict) else result
+
+        campaign = await call(
+            "campaign_create",
+            {"name": "Role refresh", "idempotency_key": "campaign"},
+        )
+        principal_id = "discord:role-refresh"
+        await call(
+            "access_grant",
+            {
+                "scope": "campaign",
+                "campaign_id": campaign["id"],
+                "principal_id": principal_id,
+                "payload": {"role": "dm"},
+                "by_principal_id": "system:local",
+            },
+        )
+        await call(
+            "game_phase",
+            {
+                "campaign_id": campaign["id"],
+                "action": "set",
+                "tool_profile": "play",
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "play",
+            },
+        )
+        exposure = server.exposure_registry.open(
+            session_key="player-session",
+            principal_id=principal_id,
+            campaign_id=campaign["id"],
+            phase="play",
+        )
+        server.exposure_registry.set_tools(
+            exposure,
+            add=["character_check", "character_create_from", "character_content_apply"],
+        )
+        owner_exposure = server.exposure_registry.open(
+            session_key="owner-session",
+            principal_id="system:local",
+            campaign_id=campaign["id"],
+            phase="play",
+        )
+        server.exposure_registry.set_tools(
+            owner_exposure,
+            add=["character_create_from"],
+        )
+
+        class Session:
+            notifications = 0
+
+            async def send_tool_list_changed(self) -> None:
+                self.notifications += 1
+
+        session = Session()
+        owner_session = Session()
+        server._sessions["player-session"] = session
+        server._sessions["owner-session"] = owner_session
+        await call(
+            "access_grant",
+            {
+                "scope": "campaign",
+                "campaign_id": campaign["id"],
+                "principal_id": principal_id,
+                "payload": {"role": "player"},
+                "by_principal_id": "system:local",
+            },
+        )
+
+        assert await server._refresh("player-session", campaign["id"]) is True
+        assert exposure.loaded_tools == {"character_check"}
+        assert session.notifications == 1
+        assert owner_exposure.loaded_tools == {"character_create_from"}
+        assert owner_session.notifications == 0
+
+    asyncio.run(exercise())
+
+
 def test_pending_ruling_envelope_defaults_to_agent_reasoning() -> None:
     assert _ruling_status("committed", "generic_spell_effect") == {"status": "committed"}
     assert _ruling_status("pending_ruling", "generic_spell_effect") == {

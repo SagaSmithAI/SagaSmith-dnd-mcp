@@ -274,6 +274,20 @@ def test_public_chase_uses_exact_module_source_and_no_combat_map(
         with pytest.raises(Exception, match="end the active chase"):
             await _call(
                 server,
+                "npc_conversation",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "open",
+                    "payload": {
+                        "participant_actor_ids": [pursuer["id"], quarry["id"]],
+                        "idempotency_key": "conversation-during-chase",
+                    },
+                },
+            )
+
+        with pytest.raises(Exception, match="end the active chase"):
+            await _call(
+                server,
                 "combat_start",
                 {
                     "campaign_id": campaign["id"],
