@@ -620,6 +620,10 @@ route to one legal verified ending. Exercise the listed Play, NPC, chase,
 combat, audience, and recovery obligations at genuine scene boundaries. Keep
 NPC workers isolated and close/abort before mechanics or combat. Use both
 spatial modes only where assigned by the matrix. Let MCP own dice and state.
+Keep the campaign in Lobby until the current Pack is active, the party is ready,
+and the player grant exists. If an earlier interrupted cycle entered Play before
+those prerequisites, close any active Play workflow and return to Lobby before
+continuing preparation. Do not chase later matrix gaps ahead of prerequisites.
 Stop only for a real external boundary or when the current cycle has exhausted
 its tool budget; in that case report the exact authoritative blocker and leave
 state resumable.
