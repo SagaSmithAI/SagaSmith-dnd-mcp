@@ -3569,7 +3569,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 CORE_2024_CONTENT_PACK_VERSION,
             )
 
-    def ensure_actor_preset_pack(
+    def ensure_actor_content_pack(
         pack_id: str,
         version: str,
         builder: Callable[[Path], list[dict[str, Any]]],
@@ -3629,7 +3629,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ensure_core_content_pack()
     ensure_standard2014_content_pack()
     ensure_core2024_content_pack()
-    ensure_actor_preset_pack(
+    ensure_actor_content_pack(
         SRD2014_PRESET_PACK_ID,
         SRD2014_PRESET_PACK_VERSION,
         build_srd2014_preset_actors,
@@ -3637,7 +3637,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         title="D&D 5e SRD 5.1 Actor Presets",
         edition="2014",
     )
-    ensure_actor_preset_pack(
+    ensure_actor_content_pack(
         SRD2024_PRESET_PACK_ID,
         SRD2024_PRESET_PACK_VERSION,
         build_srd2024_preset_actors,
