@@ -628,6 +628,15 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
             "module_sha256": ["c" * 64],
             "edition": "2014",
             "advancement_mode": "xp",
+            "play_requirements": {
+                "recommended_party_size": {
+                    "status": "source_confirmed",
+                    "minimum": 4,
+                    "maximum": 5,
+                    "selected": 5,
+                },
+                "starting_level": {"selected": 1},
+            },
         },
         route=route,
         player_principal="player",
@@ -647,6 +656,8 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "Open exposure without a campaign" in prompt
     assert 'explicit `edition="2014"`' in prompt
     assert '`advancement_mode="xp"`' in prompt
+    assert '"selected": 5' in prompt
+    assert "re-resolve its exact current Pack evidence" in prompt
     assert '"decision"' not in prompt
     assert '"outcome"' not in prompt
 

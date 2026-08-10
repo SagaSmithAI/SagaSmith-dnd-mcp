@@ -359,6 +359,7 @@ def _declared_records(
                     .get("selected")
                     or ""
                 ),
+                "play_requirements": dict(line.get("play_requirements") or {}),
                 "evidence": ["declared_corpus"],
             }
         )

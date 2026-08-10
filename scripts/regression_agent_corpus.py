@@ -804,6 +804,8 @@ Run id: {run_id}
 Campaign line label (never a campaign UUID): {line_id}
 Source-declared D&D edition: {unit.get("edition")}
 Source-selected advancement mode: {unit.get("advancement_mode")}
+Source-reviewed preparation profile (re-resolve its exact current Pack evidence):
+{json.dumps(unit.get("play_requirements") or {}, ensure_ascii=False)}
 Trusted player principal to grant one actor: cli:{player_principal}
 Cycle: {cycle}
 

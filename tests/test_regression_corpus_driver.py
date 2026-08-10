@@ -120,6 +120,7 @@ def test_declared_campaign_lines_are_data_driven(tmp_path: Path) -> None:
     assert units[0]["module_sha256"] == [checksum]
     assert units[0]["edition"] == "2014"
     assert units[0]["advancement_mode"] == "xp"
+    assert units[0]["play_requirements"] == {"advancement": {"selected": "xp"}}
     assert records[0]["checksum_valid"] is True
     assert records[0]["disposition"] == "runnable"
 
