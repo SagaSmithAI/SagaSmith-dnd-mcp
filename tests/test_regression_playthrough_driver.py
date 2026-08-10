@@ -4911,6 +4911,15 @@ def test_module_refresh_validates_ingested_scene_mapping_before_activation(
     events: list[str] = []
     indexes = {
         "module-v1": [{"scene_id": "scene-v1", "stable_key": "chapter-cave"}],
+        "draft-module-v2": [
+            {
+                "scene_id": "draft-scene-v2",
+                "stable_key": "chapter-cave",
+                "chapter_id": "draft-chapter-v2",
+                "chapter": "Chapter",
+                "title": "Cave",
+            }
+        ],
         "module-v2": [
             {
                 "scene_id": "scene-v2",
@@ -4951,7 +4960,7 @@ def test_module_refresh_validates_ingested_scene_mapping_before_activation(
                 return {
                     "start": {
                         "job": {"id": "job-1"},
-                        "module_id": "module-v2",
+                        "module_id": "draft-module-v2",
                         "inspection": {
                             "valid": True,
                             "errors": [],
@@ -4964,8 +4973,21 @@ def test_module_refresh_validates_ingested_scene_mapping_before_activation(
                     },
                 }[action]
             if tool_id == "content_pack":
-                assert arguments["action"] == "activate"
-                events.append("activate")
+                action = arguments["action"]
+                events.append(action)
+                if action == "import":
+                    assert arguments["payload"] == {
+                        "campaign_id": "campaign-1",
+                        "kind": "module",
+                        "artifact": "module-v2.pack",
+                    }
+                    return {"module_id": "module-v2", "activated": False}
+                assert action == "activate"
+                assert arguments["payload"] == {
+                    "campaign_id": "campaign-1",
+                    "kind": "module",
+                    "module_id": "module-v2",
+                }
                 return {
                     "activation": {
                         "module_id": "module-v2",
@@ -5015,7 +5037,11 @@ def test_module_refresh_validates_ingested_scene_mapping_before_activation(
     )
 
     assert result["new_module_id"] == "module-v2"
-    assert events.index("index:module-v2") < events.index("activate")
+    assert result["ingested"]["module_id"] == "draft-module-v2"
+    assert result["imported"] == {"module_id": "module-v2", "activated": False}
+    assert events.index("index:draft-module-v2") < events.index("import")
+    assert events.index("import") < events.index("activate")
+    assert events.index("activate") < events.index("index:module-v2")
 
 
 def test_module_refresh_rejects_changing_the_logical_source_key(

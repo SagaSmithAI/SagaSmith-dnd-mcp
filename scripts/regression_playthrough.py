@@ -12358,6 +12358,21 @@ async def _refresh_module(
             "idempotency_key": _mutation_key(run_id, "module-refresh-finalize", job_id),
         },
     )
+    imported = await client.domain(
+        "content_pack",
+        {
+            "action": "import",
+            "payload": {
+                "campaign_id": campaign_id,
+                "kind": "module",
+                "artifact": finalized["artifact"],
+            },
+            "idempotency_key": _mutation_key(run_id, "module-refresh-import", job_id),
+        },
+    )
+    imported_module_id = str(imported.get("module_id") or "")
+    if not imported_module_id:
+        raise RuntimeError("module Pack import returned no module id")
     campaign = await _campaign(client, campaign_id)
     activated = await client.domain(
         "content_pack",
@@ -12366,7 +12381,7 @@ async def _refresh_module(
             "payload": {
                 "campaign_id": campaign_id,
                 "kind": "module",
-                "artifact": finalized["artifact"],
+                "module_id": imported_module_id,
                 **({"progress_remaps": activation_remaps} if activation_remaps else {}),
             },
             "expected_revision": campaign["revision"],
@@ -12463,6 +12478,10 @@ async def _refresh_module(
             "module_id": draft_module_id,
             "chapter_count": staged.get("chapter_count"),
             "scene_count": staged.get("scene_count"),
+        },
+        "imported": {
+            "module_id": imported_module_id,
+            "activated": bool(imported.get("activated", False)),
         },
         "activation": activated["activation"],
         "progress_remap_rulings": progress_remap_rulings,
