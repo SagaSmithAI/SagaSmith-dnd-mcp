@@ -285,7 +285,13 @@ def test_conversation_facade_private_transport_and_commit(tmp_path: Path) -> Non
                             "fact_indexes": [],
                             "actor_knowledge_indexes": [0],
                             "commitment_indexes": [],
-                        }
+                        },
+                        pc["id"]: {
+                            "fact_indexes": [],
+                            "actor_knowledge_indexes": [],
+                            "commitment_indexes": [],
+                            "listener_knowledge_indexes": [0],
+                        },
                     },
                     "idempotency_key": "close",
                 },
@@ -293,6 +299,19 @@ def test_conversation_facade_private_transport_and_commit(tmp_path: Path) -> Non
         )
         assert committed["event"]["event_type"] == "npc_conversation"
         assert committed["conversation_revision"] == 5
+        transcript = committed["event"]["payload"]["transcript"]
+        assert all("audience_facts" in event for event in transcript)
+        heard = await _call(
+            server,
+            "actor_knowledge_query",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": pc["id"],
+                "view": "list",
+                "payload": {},
+            },
+        )
+        assert [item["proposition"] for item in heard] == [f"{npc['id']} said: No. I stayed home."]
 
     asyncio.run(exercise())
 

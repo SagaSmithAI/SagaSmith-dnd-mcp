@@ -477,6 +477,13 @@ class ConversationStore:
             value = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(value, dict):
                 raise RuntimeError("NPC conversation journal is invalid")
+            if (
+                value.get("schema_version") != NPC_CONVERSATION_SCHEMA_VERSION
+                or value.get("contract") != NPC_CONVERSATION_CONTRACT
+            ):
+                raise RuntimeError(
+                    "NPC conversation journal uses a retired contract; discard the draft and reopen"
+                )
             return value
 
     def save(self, session: dict[str, Any]) -> None:
@@ -542,12 +549,6 @@ class ConversationStore:
             self._write(session)
             return result
 
-    def delete(self, conversation_id: str) -> None:
-        with self._lock:
-            path = self._path(conversation_id)
-            if path.exists():
-                path.unlink()
-
     def open(
         self,
         *,
@@ -576,6 +577,14 @@ class ConversationStore:
             )
             for path in self.root.glob("*.json"):
                 existing = json.loads(path.read_text(encoding="utf-8"))
+                if existing.get("status") in ACTIVE_CONVERSATION_STATUSES and (
+                    existing.get("schema_version") != NPC_CONVERSATION_SCHEMA_VERSION
+                    or existing.get("contract") != NPC_CONVERSATION_CONTRACT
+                ):
+                    raise RuntimeError(
+                        "an active NPC conversation uses a retired contract; "
+                        "discard it before opening"
+                    )
                 if (
                     existing.get("campaign_id") == campaign_id
                     and existing.get("principal_id") == principal_id
@@ -1084,6 +1093,18 @@ class ConversationStore:
             raise ValueError("segment_audience_facts must contain one ruling per utterance segment")
         if not segment_facts:
             segment_facts = [deepcopy(audience_facts) for _ in segments]
+        elif (
+            len(
+                {
+                    str(audience_facts["decision_id"]),
+                    *(str(item["decision_id"]) for item in segment_facts),
+                }
+            )
+            != len(segment_facts) + 1
+        ):
+            raise ValueError(
+                "explicit overall and segment audience facts must use distinct decision ids"
+            )
         decision_ids = {
             str(audience_facts["decision_id"]),
             *(str(item["decision_id"]) for item in segment_facts),

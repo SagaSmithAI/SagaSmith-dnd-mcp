@@ -30096,8 +30096,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "utterance_segments",
                     "visible_cues",
                     "visible_action",
-                    "perceived_by",
-                    "understood_by",
+                    "audience_facts",
+                    "segment_audience_facts",
                 )
                 if key in event
             }
