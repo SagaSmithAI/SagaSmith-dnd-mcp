@@ -624,6 +624,11 @@ Keep the campaign in Lobby until the current Pack is active, the party is ready,
 and the player grant exists. If an earlier interrupted cycle entered Play before
 those prerequisites, close any active Play workflow and return to Lobby before
 continuing preparation. Do not chase later matrix gaps ahead of prerequisites.
+After every exposure open, seeing only core tools is expected, not a blocker:
+search and set the next required native tool. A cycle that only lists state or
+opens exposure has made no progress. Unless a true external boundary is reached,
+complete at least one successful authoritative mutation toward the first unmet
+prerequisite before stopping the cycle.
 Stop only for a real external boundary or when the current cycle has exhausted
 its tool budget; in that case report the exact authoritative blocker and leave
 state resumable.
