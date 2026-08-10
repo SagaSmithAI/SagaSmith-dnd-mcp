@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from scripts.regression_modules import _facade_value
 from scripts.regression_runtime import (
     decode_mcp_result,
     exception_leaf_messages,
@@ -18,7 +19,7 @@ def test_decode_mcp_result_owns_text_structured_and_error_contracts() -> None:
     text_result = SimpleNamespace(
         content=[SimpleNamespace(text='{"value": 3}')],
         isError=False,
-        structuredContent={"ignored": True},
+        structuredContent=None,
     )
     structured_result = SimpleNamespace(
         content=[],
@@ -35,6 +36,31 @@ def test_decode_mcp_result_owns_text_structured_and_error_contracts() -> None:
     assert decode_mcp_result(structured_result) == {"value": 4}
     with pytest.raises(RuntimeError, match="denied"):
         decode_mcp_result(error_result)
+
+
+def test_decode_mcp_result_prefers_authoritative_structured_list() -> None:
+    result = SimpleNamespace(
+        content=[
+            SimpleNamespace(text='{"id":"first"}'),
+            SimpleNamespace(text='{"id":"second"}'),
+        ],
+        isError=False,
+        structuredContent={
+            "result": [{"id": "first"}, {"id": "second"}],
+            "host_context_binding": {"domain": "sagasmith-dnd"},
+        },
+    )
+
+    assert decode_mcp_result(result) == result.structuredContent
+
+
+def test_facade_value_unwraps_structured_result_with_context_binding() -> None:
+    payload = {
+        "result": [{"id": "first"}],
+        "host_context_binding": {"domain": "sagasmith-dnd"},
+    }
+
+    assert _facade_value(payload) == [{"id": "first"}]
 
 
 def test_exception_leaf_messages_flattens_nested_exception_groups() -> None:

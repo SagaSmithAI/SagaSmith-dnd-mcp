@@ -86,6 +86,7 @@ def _facade_value(payload: Any) -> Any:
         and (
             "action" in payload
             or "view" in payload
+            or "host_context_binding" in payload
             or set(payload) == {"result"}
         )
     ):

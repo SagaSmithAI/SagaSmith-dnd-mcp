@@ -27,8 +27,11 @@ def decode_mcp_result(result: Any) -> Any:
     message = "\n".join(texts)
     if result.isError:
         raise RuntimeError(message or "MCP tool call failed")
+    structured = getattr(result, "structuredContent", None)
+    if structured is not None:
+        return structured
     if not message:
-        return result.structuredContent
+        return None
     return json.loads(message)
 
 
