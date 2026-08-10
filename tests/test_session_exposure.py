@@ -614,9 +614,19 @@ def test_stdio_session_mutates_native_tool_list_and_calls_tools_directly(
                 principal_id = "discord:user-42"
                 opened = await session.call_tool(
                     "exposure",
-                    {"action": "open", "principal_id": principal_id},
+                    {
+                        "action": "open",
+                        "campaign_id": "",
+                        "query": "",
+                        "add_tool_ids": [],
+                        "remove_tool_ids": [],
+                        "principal_id": principal_id,
+                    },
                 )
                 assert not opened.isError
+                opened_payload = json.loads(opened.content[0].text)
+                assert opened_payload["campaign_id"] is None
+                assert {tool.name for tool in (await session.list_tools()).tools} == set(CORE_TOOLS)
                 loaded = await session.call_tool(
                     "exposure",
                     {

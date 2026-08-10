@@ -45389,6 +45389,7 @@ boundary.
     ) -> dict[str, Any]:
         """Open, inspect, search, or mutate this session's native tool list."""
 
+        campaign_id = str(campaign_id or "").strip() or None
         if config.bound_principal_id is not None:
             principal_id = config.bound_principal_id
         request = mcp._request_session()
