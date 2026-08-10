@@ -3243,6 +3243,10 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "chromadb", marker = "extra == 'dense'", specifier = ">=0.6.0,<1.0.0" },
+    { name = "pillow", marker = "extra == 'all'", specifier = ">=10.0.0,<13.0.0" },
+    { name = "pillow", marker = "extra == 'images'", specifier = ">=10.0.0,<13.0.0" },
+    { name = "pymupdf", marker = "extra == 'all'", specifier = ">=1.26.0,<2.0.0" },
+    { name = "pymupdf", marker = "extra == 'images'", specifier = ">=1.26.0,<2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.0,<10.0.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0.0,<7.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
@@ -3251,7 +3255,7 @@ requires-dist = [
     { name = "sagasmith-core", extras = ["documents", "embedding", "vector"], marker = "extra == 'all'", specifier = ">=0.2.0,<0.3.0" },
     { name = "sentence-transformers", marker = "extra == 'dense'", specifier = ">=5.0.0,<6.0.0" },
 ]
-provides-extras = ["dense", "documents", "all", "dev"]
+provides-extras = ["dense", "documents", "images", "all", "dev"]
 
 [[package]]
 name = "sagasmith-dnd-mcp"
@@ -3259,6 +3263,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },
+    { name = "pillow" },
     { name = "sagasmith-core", extra = ["documents", "ocr", "vector"] },
     { name = "sagasmith-dnd" },
 ]
@@ -3279,6 +3284,7 @@ gateway = [
 requires-dist = [
     { name = "aiohttp", marker = "extra == 'gateway'", specifier = ">=3.11.0,<4.0.0" },
     { name = "mcp", specifier = ">=1.26.0,<2.0.0" },
+    { name = "pillow", specifier = ">=10.0.0,<13.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.0,<10.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
     { name = "sagasmith-core", extras = ["vector", "documents", "ocr"], editable = "../sagasmith-core" },

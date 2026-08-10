@@ -454,6 +454,7 @@ from sagasmith_dnd_mcp.bounded_evaluations import (
     normalize_bounded_proposal,
     validate_bounded_proposal_refs,
 )
+from sagasmith_dnd_mcp.combat_render import render_combat_png
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.exposure import Exposure, ExposureError, ExposureRegistry
 from sagasmith_dnd_mcp.npc_conversations import (
@@ -3993,6 +3994,52 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "dependencies": package_dependencies,
         }
 
+    def runtime_actor_with_portrait(
+        actor: dict[str, Any],
+        package: dict[str, Any],
+        blobs: dict[str, bytes],
+    ) -> dict[str, Any]:
+        """Retain a package actor's immutable image as non-mechanical runtime notes."""
+
+        value = deepcopy(actor)
+        image = value.get("image")
+        if not isinstance(image, dict):
+            return value
+        asset_key = str(image.get("asset_key") or "")
+        assets = {
+            str(item.get("asset_key") or ""): dict(item)
+            for item in package.get("assets", [])
+            if isinstance(item, dict)
+        }
+        asset = assets.get(asset_key)
+        if asset is None or str(asset.get("kind") or "") != "actor_image":
+            raise ValueError("content actor image does not resolve to an actor_image asset")
+        checksum = str(asset.get("checksum") or "")
+        content = blobs.get(checksum)
+        if content is None:
+            raise ValueError("content actor image blob is missing from its package")
+        stored = storage.store_actor_image(asset, content)
+        notes = deepcopy(dict(value.get("notes") or {}))
+        profile = deepcopy(dict(notes.get("profile") or {}))
+        profile["portrait_ref"] = {
+            "asset_key": asset_key,
+            "checksum": stored["checksum"],
+            "media_type": stored["media_type"],
+            "alt": str(image.get("alt") or f"{value.get('name') or 'Actor'} portrait"),
+            "source": {
+                "kind": "content_pack",
+                "package_id": str(package["id"]),
+                "package_version": str(package["version"]),
+                "package_checksum": str(package["checksum"]),
+            },
+        }
+        notes["profile"] = profile
+        value["notes"] = validate_character_notes(
+            notes,
+            character_type=str(value.get("actor_type") or "") or None,
+        )
+        return value
+
     def import_content_module_package(
         campaign_id: str,
         package: dict[str, Any],
@@ -4034,7 +4081,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         actor_map: dict[str, str] = {}
         binding_ids = []
         module_key = str(normalized["sources"][0]["source_key"])
-        for actor in validated_actors:
+        for source_actor in validated_actors:
+            actor = runtime_actor_with_portrait(source_actor, normalized, blobs)
             bindings = list(actor["bindings"])
             preset_pc = (
                 any(str(binding.get("binding_kind") or "") == "preset_pc" for binding in bindings)
@@ -4333,6 +4381,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         actor_result = None
         if value["actors"]:
             actor_manifest, actor_artifacts = content_actor_catalog_definition(value)
+            for artifact in actor_artifacts:
+                card = dict(artifact.get("card") or {})
+                content_actor = card.get("content_actor")
+                if isinstance(content_actor, dict):
+                    card["content_actor"] = runtime_actor_with_portrait(
+                        content_actor,
+                        value,
+                        blobs,
+                    )
+                    artifact["card"] = card
             try:
                 actor_pack = rule_packs.get_version(actor_manifest["id"], actor_manifest["version"])
             except LookupError:
@@ -6680,6 +6738,112 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign = campaigns.get(campaign_id)
         encounter = dict(campaign.state or {}).get("combat")
         return combat_audience_view(campaign_id, principal_id, encounter)
+
+    def party_public_combat_view(
+        campaign_id: str,
+        principal_id: str,
+    ) -> dict[str, Any] | None:
+        """Return a shared-party projection that cannot elevate the caller's view."""
+
+        caller_view = combat_view(campaign_id, principal_id)
+        if caller_view is None:
+            return None
+        value = deepcopy(caller_view)
+        combatants = [
+            dict(item)
+            for item in value.get("combatants", [])
+            if isinstance(item, dict)
+            and not bool(item.get("hidden", False))
+            and "invisible" not in condition_ids(item.get("conditions", []))
+        ]
+        current = current_combatant(caller_view)
+        current_id = str(current.get("actor_id")) if current is not None else None
+        visible_combatants = [
+            {
+                key: item[key]
+                for key in ("actor_id", "token_id", "name", "initiative", "position")
+                if key in item
+            }
+            for item in combatants
+        ]
+        visible_ids = [str(item.get("actor_id")) for item in visible_combatants]
+        value["combatants"] = visible_combatants
+        value["turn_index"] = visible_ids.index(current_id) if current_id in visible_ids else None
+        for key in (
+            "log",
+            "rulings",
+            "pending",
+            "readied",
+            "effects",
+            "reinforcements",
+            "participant_manifest",
+        ):
+            value.pop(key, None)
+        battle_map = value.get("battle_map")
+        if isinstance(battle_map, dict):
+            value["battle_map"] = {
+                key: deepcopy(battle_map[key])
+                for key in ("id", "schema_version", "lifecycle", "source", "grid", "bounds")
+                if key in battle_map
+            }
+        return value
+
+    def render_combat_snapshot(
+        campaign_id: str,
+        principal_id: str,
+        audience_projection: Literal["caller", "party_public"],
+    ) -> list[Any]:
+        """Render a read-only audience projection without affecting combat readiness."""
+
+        if audience_projection == "party_public":
+            encounter = party_public_combat_view(campaign_id, principal_id)
+        else:
+            encounter = combat_view(campaign_id, principal_id)
+        if encounter is None:
+            raise CombatEngineError("campaign has no combat snapshot to render")
+        portraits: dict[str, bytes] = {}
+        for combatant in encounter.get("combatants", []):
+            if not isinstance(combatant, dict):
+                continue
+            actor_id_value = str(combatant.get("actor_id") or "")
+            if not actor_id_value:
+                continue
+            character = characters.get(actor_id_value)
+            portrait_ref = dict(
+                dict(dict(character.notes or {}).get("profile") or {}).get("portrait_ref") or {}
+            )
+            portrait = storage.read_actor_image(str(portrait_ref.get("checksum") or ""))
+            if portrait is not None:
+                portraits[actor_id_value] = portrait
+            if audience_projection != "caller":
+                continue
+            try:
+                access.require_actor(campaign_id, actor_id_value, principal_id, private=True)
+            except PermissionError:
+                continue
+            hp = dict(dict(character.sheet or {}).get("combat") or {}).get("hp")
+            if isinstance(hp, dict):
+                combatant["hp"] = {
+                    "current": hp.get("value"),
+                    "max": hp.get("max"),
+                    "temporary": hp.get("temp"),
+                }
+        metadata, content = render_combat_png(
+            encounter,
+            portraits=portraits,
+            audience_projection=audience_projection,
+        )
+        campaign = campaigns.get(campaign_id)
+        metadata.update(
+            {
+                "campaign_id": campaign_id,
+                "campaign_revision": campaign.revision,
+                "view": "render",
+                "render_is_authoritative": False,
+                "combat_state_is_authoritative": True,
+            }
+        )
+        return [metadata, Image(data=content, format="png")]
 
     def combat_response(
         campaign_id: str, principal_id: str, response: dict[str, Any]
@@ -41937,6 +42101,8 @@ boundary.
                 field for field in ("artifact", "source_path") if data.get(field) is not None
             ]
             package_checksum = None
+            package = None
+            package_blobs: dict[str, bytes] = {}
             if not package_sources:
                 if not artifact_id:
                     raise ValueError("provide artifact_id or one content package archive")
@@ -41948,7 +42114,7 @@ boundary.
                         "payload.artifact or payload.source_path"
                     )
                 source = package_sources[0]
-                package, _blobs = storage.read_content_archive(
+                package, package_blobs = storage.read_content_archive(
                     artifact=(str(data["artifact"]) if source == "artifact" else None),
                     source_path=(data.get("source_path") if source == "source_path" else None),
                 )
@@ -41964,6 +42130,7 @@ boundary.
                     raise ValueError("artifact_id must identify exactly one package actor")
                 card = validate_dnd_content_actor(matches[0])
                 package_checksum = package["checksum"]
+                card = runtime_actor_with_portrait(card, package, package_blobs)
             if card.get("schema") != "sagasmith.actor-card.v3":
                 raise ValueError("installed actor preset is not a unified v3 actor card")
             campaign_id = str(data["campaign_id"]) if data.get("campaign_id") is not None else None
@@ -41994,7 +42161,11 @@ boundary.
                     "package_checksum": package_checksum,
                     "provenance": deepcopy(card.get("provenance") or {}),
                     "bindings": deepcopy(card.get("bindings") or []),
-                    "image_retained_by_runtime": False,
+                    "image_retained_by_runtime": bool(
+                        dict(dict(card.get("notes") or {}).get("profile") or {}).get(
+                            "portrait_ref"
+                        )
+                    ),
                 },
                 "actor_knowledge_imported": False,
             }
@@ -44506,6 +44677,7 @@ boundary.
             "status",
             "available_actions",
             "reactions",
+            "render",
             "transaction_history",
             "transaction_receipt",
         ] = "status",
@@ -44513,7 +44685,7 @@ boundary.
         payload: dict[str, Any] | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
-        """Read combat state or DM-only transaction evidence without committing state."""
+        """Read combat state, render a safe snapshot, or inspect DM-only transactions."""
         data = facade_payload(payload)
         if view == "status":
             result = combat_status(campaign_id, principal_id)
@@ -44524,6 +44696,17 @@ boundary.
         elif view == "reactions":
             result = combat_reactions(
                 campaign_id, required({"actor_id": actor_id}, "actor_id"), principal_id
+            )
+        elif view == "render":
+            audience_projection = str(data.get("audience_projection") or "caller")
+            if audience_projection not in {"caller", "party_public"}:
+                raise ValueError("audience_projection must be caller or party_public")
+            return facade_render_result(
+                render_combat_snapshot(
+                    campaign_id,
+                    principal_id,
+                    audience_projection,
+                )
             )
         elif view == "transaction_history":
             result = state_history(campaign_id, data.get("limit", 100), principal_id)

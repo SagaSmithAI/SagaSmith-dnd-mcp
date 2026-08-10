@@ -173,6 +173,10 @@ class McpConfig:
         return self.artifacts_dir / "content-packages"
 
     @property
+    def actor_images_dir(self) -> Path:
+        return self.artifacts_dir / "actor-images"
+
+    @property
     def npc_conversations_dir(self) -> Path:
         return self.home / "runtime" / "npc-conversations"
 
@@ -183,6 +187,7 @@ class McpConfig:
             self.modules_dir,
             self.module_assets_dir,
             self.content_packages_dir,
+            self.actor_images_dir,
             self.npc_conversations_dir,
             self.rulebooks_dir,
             self.normalized_rulebooks_dir,

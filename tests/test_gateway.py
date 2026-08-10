@@ -1,7 +1,11 @@
 import asyncio
+import base64
+import hashlib
+import json
 from pathlib import Path
 
 from aiohttp.test_utils import TestClient, TestServer
+from mcp.types import CallToolResult, ImageContent, TextContent
 from sagasmith_core.idempotency import IdempotencyConflictError
 
 from sagasmith_dnd_mcp.config import McpConfig
@@ -134,6 +138,60 @@ def test_gateway_requires_configured_bearer_token(tmp_path: Path) -> None:
                 headers={"Authorization": "Bearer secret"},
             )
             assert allowed.status == 200
+        finally:
+            await client.close()
+
+    asyncio.run(exercise())
+
+
+def test_gateway_streams_native_combat_render_content(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        app = create_app(config(tmp_path), GatewayConfig())
+        gateway = app[GATEWAY_KEY]
+        image = b"\x89PNG\r\n\x1a\nrender"
+        metadata = {
+            "mime_type": "image/png",
+            "image_checksum": hashlib.sha256(image).hexdigest(),
+        }
+        calls = []
+
+        async def render(tool_id, arguments):
+            calls.append((tool_id, arguments))
+            return CallToolResult(
+                content=[
+                    TextContent(type="text", text=json.dumps(metadata)),
+                    ImageContent(
+                        type="image",
+                        mimeType="image/png",
+                        data=base64.b64encode(image).decode("ascii"),
+                    ),
+                ],
+                structuredContent=metadata,
+            )
+
+        gateway.server.call_tool = render
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            response = await client.get(
+                "/api/campaigns/campaign-1/combat/render",
+                headers={"X-SagaSmith-Principal": "user:player"},
+            )
+            assert response.status == 200
+            assert response.content_type == "image/png"
+            assert await response.read() == image
+            assert response.headers["Cache-Control"] == "no-store"
+            assert calls == [
+                (
+                    "combat_query",
+                    {
+                        "campaign_id": "campaign-1",
+                        "view": "render",
+                        "payload": {"audience_projection": "party_public"},
+                        "principal_id": "user:player",
+                    },
+                )
+            ]
         finally:
             await client.close()
 

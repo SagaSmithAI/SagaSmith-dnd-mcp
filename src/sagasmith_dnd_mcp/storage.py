@@ -64,6 +64,7 @@ class SagaSmithStorage:
             },
             "artifacts_dir": str(self.config.artifacts_dir),
             "content_packages_dir": str(self.config.content_packages_dir),
+            "actor_images_dir": str(self.config.actor_images_dir),
             "rules": {
                 "auto_seed": self.config.auto_seed_rules,
                 "seed_root": str(self.config.dnd_skills_dir / "full" / "skills" / "dnd-dm" / "srd"),
@@ -416,6 +417,43 @@ class SagaSmithStorage:
         if target.stat().st_size > 4 * 1024 * 1024 * 1024:
             raise ValueError("content package exceeds the 4 GiB safety limit")
         return loads_content_archive(target.read_bytes())
+
+    def store_actor_image(self, asset: dict[str, Any], content: bytes) -> dict[str, Any]:
+        """Store one immutable content-pack actor image by its verified checksum."""
+
+        media_type = str(asset.get("media_type") or "").casefold()
+        if not media_type.startswith("image/"):
+            raise ValueError("actor image asset must use an image media type")
+        checksum = str(asset.get("checksum") or "").casefold()
+        if not re.fullmatch(r"[0-9a-f]{64}", checksum):
+            raise ValueError("actor image asset requires a SHA-256 checksum")
+        if hashlib.sha256(content).hexdigest() != checksum:
+            raise ValueError("actor image asset checksum does not match its blob")
+        target = (self.config.actor_images_dir / checksum).resolve()
+        if target.parent != self.config.actor_images_dir.resolve():
+            raise ValueError("invalid managed actor image path")
+        if not target.exists():
+            target.write_bytes(content)
+        elif file_sha256(target) != checksum:
+            raise RuntimeError("managed actor image checksum mismatch")
+        return {
+            "checksum": checksum,
+            "media_type": media_type,
+            "path": str(target),
+        }
+
+    def read_actor_image(self, checksum: str) -> bytes | None:
+        """Read an immutable actor image without accepting an arbitrary path."""
+
+        normalized = str(checksum or "").casefold()
+        if not re.fullmatch(r"[0-9a-f]{64}", normalized):
+            return None
+        target = (self.config.actor_images_dir / normalized).resolve()
+        if target.parent != self.config.actor_images_dir.resolve() or not target.is_file():
+            return None
+        if file_sha256(target) != normalized:
+            raise RuntimeError("managed actor image checksum mismatch")
+        return target.read_bytes()
 
     def store_content_module_asset(
         self, module_id: str, asset: dict[str, Any], content: bytes

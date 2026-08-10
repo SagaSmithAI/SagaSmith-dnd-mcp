@@ -13,6 +13,7 @@ license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "SagaSmithAI" }]
 dependencies = [
     "mcp>=1.26.0,<2.0.0",
+    "Pillow>=10.0.0,<13.0.0",
     "sagasmith-core[vector,documents,ocr]>=0.2.0,<0.3.0",
     "sagasmith-dnd>=0.2.0,<0.3.0",
 ]

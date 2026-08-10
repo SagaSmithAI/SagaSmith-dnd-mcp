@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hmac
 import json
 import logging
@@ -11,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from aiohttp import web
+from mcp.types import ImageContent
 from sagasmith_core.access import LOCAL_SYSTEM_PRINCIPAL_ID
 from sagasmith_core.idempotency import IdempotencyConflictError
 
@@ -271,6 +273,46 @@ class DndGateway:
             }
         return await self.envelope(request, result, campaign_id)
 
+    async def combat_render(self, request: web.Request) -> web.Response:
+        """Return the MCP-rendered PNG without recreating combat projection in the UI."""
+
+        campaign_id = request.match_info["campaign_id"]
+        audience_projection = request.query.get("audience_projection", "party_public")
+        if audience_projection not in {"caller", "party_public"}:
+            raise web.HTTPBadRequest(
+                text="audience_projection must be caller or party_public"
+            )
+        rendered = await self.server.call_tool(
+            "combat_query",
+            {
+                "campaign_id": campaign_id,
+                "view": "render",
+                "payload": {"audience_projection": audience_projection},
+                "principal_id": self.principal(request),
+            },
+        )
+        image = next(
+            (item for item in rendered.content if isinstance(item, ImageContent)),
+            None,
+        )
+        if image is None:
+            raise RuntimeError("combat render returned no image content")
+        metadata = rendered.structuredContent or {}
+        checksum = str(metadata.get("image_checksum") or "")
+        headers = {
+            "Cache-Control": "no-store",
+            "Content-Disposition": (
+                f'attachment; filename="sagasmith-combat-{campaign_id}.png"'
+            ),
+        }
+        if checksum:
+            headers["ETag"] = f'"{checksum}"'
+        return web.Response(
+            body=base64.b64decode(image.data, validate=True),
+            content_type=image.mimeType,
+            headers=headers,
+        )
+
     async def combat_move(self, request: web.Request) -> web.Response:
         campaign_id = request.match_info["campaign_id"]
         principal_id = self.principal(request)
@@ -423,6 +465,10 @@ def create_app(
     app.router.add_get("/api/campaigns/{campaign_id}/events", gateway.events)
     app.router.add_get("/api/campaigns/{campaign_id}/search", gateway.module_search)
     app.router.add_get("/api/campaigns/{campaign_id}/combat", gateway.combat)
+    app.router.add_get(
+        "/api/campaigns/{campaign_id}/combat/render",
+        gateway.combat_render,
+    )
     app.router.add_post("/api/campaigns/{campaign_id}/combat/move", gateway.combat_move)
     app.router.add_get("/api/campaigns/{campaign_id}/stream", gateway.stream)
     app.router.add_get("/api/rules", gateway.rule_sources)
