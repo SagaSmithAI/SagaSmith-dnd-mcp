@@ -93,6 +93,47 @@ def test_public_surface_is_one_facade_and_host_transport_is_unloadable() -> None
     assert HOST_PRIVATE_TOOLS == frozenset({"npc_conversation_transport"})
 
 
+def test_open_errors_explain_the_single_participant_array(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign, _npc, pc = await _campaign_with_actors(server)
+        with pytest.raises(Exception, match="every PC and NPC campaign runtime id"):
+            await _call(
+                server,
+                "npc_conversation",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "open",
+                    "payload": {"npc_actor_ids": [pc["id"]]},
+                },
+            )
+        with pytest.raises(Exception, match="payload.idempotency_key"):
+            await _call(
+                server,
+                "npc_conversation",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "open",
+                    "payload": {"participant_actor_ids": [pc["id"]]},
+                },
+            )
+        with pytest.raises(Exception, match="inside payload.participant_actor_ids"):
+            await _call(
+                server,
+                "npc_conversation",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "open",
+                    "payload": {
+                        "participant_actor_ids": [pc["id"]],
+                        "idempotency_key": "pc-only",
+                    },
+                },
+            )
+
+    asyncio.run(exercise())
+
+
 def test_active_conversation_blocks_combat_and_leaving_play(tmp_path: Path) -> None:
     async def exercise() -> None:
         server = create_server(_config(tmp_path))

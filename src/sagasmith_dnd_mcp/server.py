@@ -28675,7 +28675,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor for actor in actors if actor.character_type in NON_PLAYER_CHARACTER_TYPES
         ]
         if not npc_actors:
-            raise ValueError("conversation requires at least one NPC or monster")
+            raise ValueError(
+                "conversation requires at least one NPC or monster campaign runtime id "
+                "inside payload.participant_actor_ids"
+            )
 
         actor_contexts: dict[str, dict[str, Any]] = {}
         first_bundle: dict[str, Any] | None = None
@@ -29225,6 +29228,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
         data = dict(payload or {})
         if action == "open":
+            if not isinstance(data.get("participant_actor_ids"), list):
+                raise ValueError(
+                    "npc_conversation open requires payload.participant_actor_ids: "
+                    "put every PC and NPC campaign runtime id in that one array; "
+                    "there are no npc_actor_ids or npc_ids fields"
+                )
+            if not str(data.get("idempotency_key") or "").strip():
+                raise ValueError(
+                    "npc_conversation open requires payload.idempotency_key"
+                )
             return npc_conversation_open_impl(
                 campaign_id=campaign_id,
                 participant_actor_ids=list(data["participant_actor_ids"]),
