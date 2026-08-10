@@ -353,6 +353,12 @@ def _declared_records(
                 "module_paths": [item["path"] for item in module_records],
                 "status": "runnable",
                 "edition": edition,
+                "advancement_mode": str(
+                    dict(line.get("play_requirements") or {})
+                    .get("advancement", {})
+                    .get("selected")
+                    or ""
+                ),
                 "evidence": ["declared_corpus"],
             }
         )
@@ -505,6 +511,7 @@ def _raw_records(
                     "classification": decision.get("classification", "unreviewed"),
                     "system_id": decision.get("system_id"),
                     "edition": decision.get("edition"),
+                    "advancement_mode": decision.get("advancement_mode"),
                     "disposition": decision.get("disposition", "pending"),
                     "reason_code": decision.get("reason_code", "unreviewed_source_candidate"),
                     "campaign_line_id": decision.get("campaign_line_id"),
@@ -685,6 +692,7 @@ async def build_report(args: argparse.Namespace) -> dict[str, Any]:
                 "module_paths": [record["path"]],
                 "status": record["disposition"],
                 "edition": record.get("edition"),
+                "advancement_mode": record.get("advancement_mode"),
                 "evidence": ["raw_source_decision"],
             }
             units.append(unit)

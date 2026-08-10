@@ -464,12 +464,19 @@ def _manifest_party_ready(calls: list[dict[str, Any]]) -> bool:
     return False
 
 
-def _campaign_edition_matches(calls: list[dict[str, Any]], expected_edition: str) -> bool:
+def _campaign_profile_matches(
+    calls: list[dict[str, Any]],
+    *,
+    expected_edition: str,
+    expected_advancement_mode: str,
+) -> bool:
     return any(
         call.get("tool") == "campaign_create"
         and call.get("ok")
         and str((call.get("arguments") or {}).get("edition") or "")
         == expected_edition
+        and str((call.get("arguments") or {}).get("advancement_mode") or "")
+        == expected_advancement_mode
         for call in calls
     )
 
@@ -610,6 +617,7 @@ def _coverage_audit(
     process_count: int,
     list_changed_count: int,
     expected_edition: str | None = None,
+    expected_advancement_mode: str | None = None,
 ) -> dict[str, Any]:
     gaps: list[str] = []
     scenarios: list[dict[str, Any]] = []
@@ -648,8 +656,16 @@ def _coverage_audit(
         gaps.append("cold_start:skill_query_missing")
     if not _call_matches(calls, "exposure", action="open"):
         gaps.append("cold_start:exposure_open_missing")
-    if expected_edition and not _campaign_edition_matches(calls, expected_edition):
-        gaps.append("preparation:campaign_edition_unverified_or_mismatch")
+    if (
+        expected_edition
+        and expected_advancement_mode
+        and not _campaign_profile_matches(
+            calls,
+            expected_edition=expected_edition,
+            expected_advancement_mode=expected_advancement_mode,
+        )
+    ):
+        gaps.append("preparation:campaign_profile_unverified_or_mismatch")
     if not _has_player_access_pair(calls):
         gaps.append("preparation:player_membership_or_actor_grant_missing")
     if not _manifest_party_ready(calls):
@@ -787,6 +803,7 @@ def _dm_prompt(
 Run id: {run_id}
 Campaign line label (never a campaign UUID): {line_id}
 Source-declared D&D edition: {unit.get("edition")}
+Source-selected advancement mode: {unit.get("advancement_mode")}
 Trusted player principal to grant one actor: cli:{player_principal}
 Cycle: {cycle}
 
@@ -807,8 +824,9 @@ This runner gives each campaign line a fresh MCP home. On the first cycle,
 campaign-line label as `campaign_id` and do not diagnose that absence as an
 authorization failure. Open exposure without a campaign, search for the exact
 `campaign_create` tool, set it, refresh the native list, call it directly with a
-reproducible seed, explicit `edition={json.dumps(unit.get("edition"))}`, and this
-line label in its slug/name, then reopen exposure with
+reproducible seed, explicit `edition={json.dumps(unit.get("edition"))}` and
+`advancement_mode={json.dumps(unit.get("advancement_mode"))}`, and this line
+label in its slug/name, then reopen exposure with
 the returned real campaign UUID. On later cycles, locate that created campaign
 through the authenticated list and resume using its UUID.
 
@@ -1070,8 +1088,13 @@ def _run_unit(
 ) -> dict[str, Any]:
     line_id = _unit_id(unit)
     expected_edition = str(unit.get("edition") or "").strip()
+    expected_advancement_mode = str(unit.get("advancement_mode") or "").strip()
     if not expected_edition:
         raise ValueError(f"runnable coverage unit {line_id!r} is missing source edition")
+    if expected_advancement_mode not in {"milestone", "xp"}:
+        raise ValueError(
+            f"runnable coverage unit {line_id!r} is missing source advancement mode"
+        )
     unit_dir = args.output_dir / "campaigns" / _safe_id(line_id)
     home = unit_dir / "mcp-home"
     agent_workspace = unit_dir / "agent-workspace"
@@ -1101,6 +1124,7 @@ def _run_unit(
             process_count=len(_process_artifacts(unit_dir)),
             list_changed_count=_list_changed_count(unit_dir),
             expected_edition=expected_edition,
+            expected_advancement_mode=expected_advancement_mode,
         )
     start_cycle = _next_cycle(unit_dir)
 
@@ -1137,6 +1161,7 @@ def _run_unit(
                 process_count=len(_process_artifacts(unit_dir)),
                 list_changed_count=_list_changed_count(unit_dir),
                 expected_edition=expected_edition,
+                expected_advancement_mode=expected_advancement_mode,
             )
             continue
         player = _run_agent(
@@ -1163,6 +1188,7 @@ def _run_unit(
             process_count=len(_process_artifacts(unit_dir)),
             list_changed_count=_list_changed_count(unit_dir),
             expected_edition=expected_edition,
+            expected_advancement_mode=expected_advancement_mode,
         )
         if audit["complete"]:
             break
@@ -1202,6 +1228,7 @@ def _run_unit(
         process_count=len(process_artifacts),
         list_changed_count=list_changed_count,
         expected_edition=expected_edition,
+        expected_advancement_mode=expected_advancement_mode,
     )
     report = {
         "schema_version": 1,

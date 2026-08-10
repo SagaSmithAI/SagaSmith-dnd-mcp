@@ -428,7 +428,7 @@ def test_preparation_requires_finalize_import_activate_order() -> None:
     ] is True
 
 
-def test_preparation_requires_explicit_source_matching_campaign_edition() -> None:
+def test_preparation_requires_explicit_source_matching_campaign_profile() -> None:
     route = {"scenarios": []}
     shared = [
         _call("skill_query"),
@@ -437,30 +437,49 @@ def test_preparation_requires_explicit_source_matching_campaign_edition() -> Non
         _ready_manifest_call(),
     ]
     omitted = [*shared, _call("campaign_create", arguments={"name": "campaign"})]
-    wrong = [
+    wrong_edition = [
         *shared,
-        _call("campaign_create", arguments={"name": "campaign", "edition": "2024"}),
+        _call(
+            "campaign_create",
+            arguments={"name": "campaign", "edition": "2024", "advancement_mode": "xp"},
+        ),
+    ]
+    wrong_advancement = [
+        *shared,
+        _call(
+            "campaign_create",
+            arguments={
+                "name": "campaign",
+                "edition": "2014",
+                "advancement_mode": "milestone",
+            },
+        ),
     ]
     matching = [
         *shared,
-        _call("campaign_create", arguments={"name": "campaign", "edition": "2014"}),
+        _call(
+            "campaign_create",
+            arguments={"name": "campaign", "edition": "2014", "advancement_mode": "xp"},
+        ),
     ]
 
-    for calls in (omitted, wrong):
+    for calls in (omitted, wrong_edition, wrong_advancement):
         audit = _coverage_audit(
             route,
             calls,
             process_count=1,
             list_changed_count=1,
             expected_edition="2014",
+            expected_advancement_mode="xp",
         )
-        assert "preparation:campaign_edition_unverified_or_mismatch" in audit["gaps"]
-    assert "preparation:campaign_edition_unverified_or_mismatch" not in _coverage_audit(
+        assert "preparation:campaign_profile_unverified_or_mismatch" in audit["gaps"]
+    assert "preparation:campaign_profile_unverified_or_mismatch" not in _coverage_audit(
         route,
         matching,
         process_count=1,
         list_changed_count=1,
         expected_edition="2014",
+        expected_advancement_mode="xp",
     )["gaps"]
 
 
@@ -608,6 +627,7 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
             "module_paths": ["reference/module.pdf"],
             "module_sha256": ["c" * 64],
             "edition": "2014",
+            "advancement_mode": "xp",
         },
         route=route,
         player_principal="player",
@@ -626,6 +646,7 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "never a campaign UUID" in prompt
     assert "Open exposure without a campaign" in prompt
     assert 'explicit `edition="2014"`' in prompt
+    assert '`advancement_mode="xp"`' in prompt
     assert '"decision"' not in prompt
     assert '"outcome"' not in prompt
 
