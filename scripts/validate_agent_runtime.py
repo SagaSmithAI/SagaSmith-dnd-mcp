@@ -8,14 +8,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-REQUIRED_DND_CORE_TOOLS = {
-    "campaign_query",
-    "exposure",
-    "game_phase",
-    "server_capabilities",
-    "skill_query",
-    "storage_status",
-}
 REQUIRED_DND_SKILLS = ("dnd-dm", "dnd-campaign-manager")
 
 
@@ -82,11 +74,11 @@ def validate_runtime(config_path: Path, agent_root: Path) -> list[str]:
     if not isinstance(cwd, str) or not _resolve_config_path(agent_root, cwd).is_dir():
         errors.append("The configured sagasmith_dnd MCP working directory does not exist.")
 
-    enabled = dnd.get("enabledTools")
-    enabled_tools = set(enabled) if isinstance(enabled, list) else set()
-    missing_tools = sorted(REQUIRED_DND_CORE_TOOLS - enabled_tools)
-    if missing_tools:
-        errors.append(f"sagasmith_dnd.enabledTools is missing: {', '.join(missing_tools)}")
+    if dnd.get("enabledTools") != ["*"]:
+        errors.append(
+            "sagasmith_dnd.enabledTools must be ['*'] so tools/list_changed can refresh "
+            "the server-owned native list."
+        )
     if dnd.get("injectPrincipal") is not True:
         errors.append("sagasmith_dnd.injectPrincipal must be true for actor authorization.")
     timeout = dnd.get("toolTimeout")

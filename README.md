@@ -230,7 +230,7 @@ manifest、结构化内容、actors、来源索引与内容寻址 blobs，同时
 - 动态引用/数据/模板：核心 `skill_query(kind="asset", action="list"|"outline"|"section"|"search"|"read")`
 - Prompts：`dnd_dm`、`module_generator`
 
-读取计划来自 Skills 仓库的 `full/data/skill-plan.v1.json`，服务端校验其
+Skill 深度通过 `skill_query(read|outline|section|search)` 按需读取；工具可见性由当前 exposure 的原生列表决定。
 24 个工具组覆盖、依赖 DAG、真实工具成员、文档 checksum 和字符预算。
 成功读取计划 fragment 后会返回 read receipt；checksum 未变化时同一 session
 无需重复装载。Skill plan 只管理 Agent 上下文，不替代 MCP 权限和事务校验。

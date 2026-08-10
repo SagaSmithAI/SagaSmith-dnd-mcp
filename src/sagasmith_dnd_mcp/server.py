@@ -490,7 +490,6 @@ from sagasmith_dnd_mcp.tool_profiles import (
     PROFILE_PLAY,
     campaign_phase,
     policy_for_tool,
-    profiles_for_tool,
     tool_catalog,
     validate_profile_coverage,
 )
@@ -39494,8 +39493,7 @@ boundary.
         """Start a D&D DM turn with the bundled D&D DM instructions available as a resource."""
         return (
             f"You are running campaign {campaign_id}. Objective: {objective}\n\n"
-            "Read sagasmith://bootstrap first. Use core skill_query(action='plan') and "
-            "read every required_now document for the current exposure. Use bounded "
+            "Read sagasmith://bootstrap first. Use bounded skill_query "
             "outline/section/search only for task-specific depth; do not load the entire "
             "DM document unless required. Use module_search/module_expand and "
             "rule_search/rule_expand for exact factual evidence; record durable changes "
@@ -45148,7 +45146,6 @@ boundary.
     for registered_tool in registered_tools:
         registered_tool.meta = {
             **dict(registered_tool.meta or {}),
-            "sagasmith_tool_profiles": list(profiles_for_tool(registered_tool.name)),
             "sagasmith_domain_context": "sagasmith-dnd",
         }
         if registered_tool.name == "campaign_query":

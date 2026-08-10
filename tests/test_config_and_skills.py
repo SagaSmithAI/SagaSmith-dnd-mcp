@@ -439,7 +439,7 @@ def test_server_advertises_native_tools_list_changed(tmp_path: Path) -> None:
     assert capabilities["tools"]["listChanged"] is True
 
 
-def test_server_tool_profiles_are_complete_and_attached_to_tool_metadata(tmp_path: Path) -> None:
+def test_server_tools_keep_domain_context_metadata_without_host_profiles(tmp_path: Path) -> None:
     config = McpConfig(
         home=tmp_path / "home",
         database_url=None,
@@ -454,17 +454,10 @@ def test_server_tool_profiles_are_complete_and_attached_to_tool_metadata(tmp_pat
         tools = await server.list_tools()
         by_name = {tool.name: tool for tool in tools}
         assert set(by_name) == set().union(*map(set, profile_catalog().values()))
-        assert by_name["module_draft"].meta["sagasmith_tool_profiles"] == ["lobby"]
-        assert by_name["rulebook_draft"].meta["sagasmith_tool_profiles"] == ["lobby"]
-        assert by_name["content_pack"].meta["sagasmith_tool_profiles"] == ["lobby"]
-        assert by_name["character_check"].meta["sagasmith_tool_profiles"] == ["play"]
-        assert by_name["combat_resolve_attack"].meta["sagasmith_tool_profiles"] == ["combat"]
-        assert by_name["combat_start"].meta["sagasmith_tool_profiles"] == ["play"]
-        assert by_name["game_phase"].meta["sagasmith_tool_profiles"] == [
-            "lobby",
-            "play",
-            "combat",
-        ]
+        assert all(
+            tool.meta["sagasmith_domain_context"] == "sagasmith-dnd"
+            for tool in by_name.values()
+        )
         assert by_name["campaign_query"].meta["sagasmith_context_sync"] is True
 
     asyncio.run(inspect_tools())
