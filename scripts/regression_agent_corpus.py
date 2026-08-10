@@ -649,6 +649,11 @@ Keep the campaign in Lobby until the current Pack is active, the party is ready,
 and the player grant exists. If an earlier interrupted cycle entered Play before
 those prerequisites, close any active Play workflow and return to Lobby before
 continuing preparation. Do not chase later matrix gaps ahead of prerequisites.
+When the current gaps include `preparation`, do not initialize the playthrough
+manifest or enter Play: read the finalized draft artifact, complete a successful
+`content_pack(import, kind="module")`, and activate only the new module id
+returned by that import. A prior activation without a successful Pack import
+does not satisfy preparation.
 After every exposure open, seeing only core tools is expected, not a blocker:
 search and set the next required native tool. A cycle that only lists state or
 opens exposure has made no progress. Unless a true external boundary is reached,

@@ -365,6 +365,7 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     )
     assert "Retrieve and expand the exact managed source before deciding" in prompt
     assert "dnd:full/references/skill-groups/lobby/modules-import.md" in prompt
+    assert "A prior activation without a successful Pack import" in prompt
     source_path = str(
         (Path(__file__).resolve().parents[2] / "reference/module.pdf").resolve()
     )
