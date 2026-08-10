@@ -35397,6 +35397,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "payment",
                     ],
                 }
+            elif artifact_kind == "class":
+                definition = dict(card.get("class_definition") or {})
+                skill_count = int(definition.get("skill_choice_count", 0) or 0)
+                tool_count = int(definition.get("tool_choice_count", 0) or 0)
+                fields = []
+                if skill_count:
+                    fields.append("skills")
+                if tool_count:
+                    fields.append("tools")
+                selection_requirements = {
+                    "fields": fields,
+                    "skill_choice_count": skill_count,
+                    "skill_options": list(definition.get("skill_options") or []),
+                    "tool_choice_count": tool_count,
+                    "tool_options": list(definition.get("tool_options") or []),
+                }
             elif artifact_kind == "subclass":
                 selection_requirements = {
                     "fields": ["target_class_name"],

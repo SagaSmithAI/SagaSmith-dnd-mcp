@@ -147,6 +147,98 @@ def test_character_build_rejects_silently_ignored_catalog_shortcuts(tmp_path: Pa
     asyncio.run(exercise())
 
 
+def test_bundled_2014_class_catalog_can_complete_a_bootstrap_actor(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Catalog character build", "edition": "2014", "idempotency_key": "campaign"},
+        )
+        built = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "build",
+                "payload": {"campaign_id": campaign["id"], "name": "Catalog Fighter"},
+                "idempotency_key": "actor",
+            },
+        )
+        actor = built["instance"]
+        scored = await _call(
+            server,
+            "character_ability_apply",
+            {
+                "character_id": actor["id"],
+                "method": "standard_array",
+                "assignments": {
+                    "strength": 15,
+                    "dexterity": 14,
+                    "constitution": 13,
+                    "intelligence": 12,
+                    "wisdom": 10,
+                    "charisma": 8,
+                },
+                "expected_revision": actor["revision"],
+                "idempotency_key": "scores",
+            },
+        )
+        catalog = await _call(
+            server,
+            "character_query",
+            {
+                "view": "catalog",
+                "payload": {"campaign_id": campaign["id"], "kind": "class", "query": "Fighter"},
+            },
+        )
+        fighter = next(item for item in catalog if item["name"] == "Fighter")
+        assert fighter["application_state"] == "selection_ready"
+        assert fighter["selection_requirements"] == {
+            "fields": ["skills"],
+            "skill_choice_count": 2,
+            "skill_options": [
+                "acrobatics",
+                "athletics",
+                "history",
+                "insight",
+                "intimidation",
+                "perception",
+            ],
+            "tool_choice_count": 0,
+            "tool_options": [],
+        }
+
+        applied = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": actor["id"],
+                "artifact_id": fighter["id"],
+                "selection": {"skills": ["athletics", "perception"]},
+                "expected_revision": scored["character"]["revision"],
+                "idempotency_key": "fighter",
+            },
+        )
+
+        assert "sheet" in applied, applied
+        sheet = applied["sheet"]
+        assert sheet["progression"]["classes"] == [
+            {"name": "Fighter", "level": 1, "subclass": "", "hit_die": 10}
+        ]
+        assert sheet["combat"]["hit_dice"]["d10"] == {
+            "label": "d10",
+            "value": 1,
+            "max": 1,
+            "recovers_on": "long_rest",
+            "source_key": "Fighter",
+            "slot_level": 0,
+        }
+        assert sheet["skills"]["athletics"]["proficiency"] == "proficient"
+        assert sheet["content"]["selections"][0]["artifact_id"] == fighter["id"]
+
+    asyncio.run(exercise())
+
+
 def test_ability_roll_rejects_stale_revision_and_caller_roll_payload(
     tmp_path: Path, monkeypatch
 ) -> None:
