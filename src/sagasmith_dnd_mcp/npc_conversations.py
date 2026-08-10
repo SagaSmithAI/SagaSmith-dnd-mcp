@@ -19,51 +19,12 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-NPC_CONVERSATION_SCHEMA_VERSION = 1
-NPC_CONVERSATION_PROPOSAL_SCHEMA_VERSION = 2
-NPC_CONVERSATION_CONTRACT = "npc-conversation.v1"
+NPC_CONVERSATION_SCHEMA_VERSION = 2
+NPC_CONVERSATION_PROPOSAL_SCHEMA_VERSION = 3
+NPC_CONVERSATION_CONTRACT = "npc-conversation.v2"
 
 NPC_TRUTH_POSTURES = frozenset(
     {"believes_true", "uncertain", "intentional_deception", "opinion", "nonfactual"}
-)
-NPC_SPEECH_ACT_KINDS = frozenset(
-    {"assert", "ask", "promise", "threaten", "refuse", "reveal", "withhold", "lie"}
-)
-NPC_ACTION_KINDS = frozenset(
-    {
-        "none",
-        "gesture",
-        "offer",
-        "refuse",
-        "surrender",
-        "move",
-        "flee",
-        "attack",
-        "use_item",
-        "exchange_item",
-        "scene_transition",
-        "observe",
-        "interact",
-        "follow",
-        "wait",
-        "other",
-    }
-)
-NPC_NARRATIVE_ACTION_KINDS = frozenset(
-    {
-        "none",
-        "gesture",
-        "offer",
-        "refuse",
-        "surrender",
-        "move",
-        "flee",
-        "scene_transition",
-        "observe",
-        "interact",
-        "follow",
-        "wait",
-    }
 )
 NPC_RESOLUTION_KINDS = frozenset(
     {"ability_check", "contest", "saving_throw", "attack", "dm_adjudication"}
@@ -110,7 +71,7 @@ def _string_list(value: Any, field: str, *, maximum: int = 200) -> list[str]:
 
 
 def normalize_conversation_proposal(value: Any) -> dict[str, Any]:
-    """Normalize v2 proposals where every speakable byte belongs to a cited segment."""
+    """Normalize the sole authoritative v3 NPC proposal contract."""
 
     data = _object(value, "npc_conversation.proposal")
     allowed = {
@@ -129,7 +90,7 @@ def normalize_conversation_proposal(value: Any) -> dict[str, Any]:
     }
     _strict(data, "npc_conversation.proposal", allowed)
     if data.get("schema_version") != NPC_CONVERSATION_PROPOSAL_SCHEMA_VERSION:
-        raise ValueError("npc_conversation.proposal.schema_version must be 2")
+        raise ValueError("npc_conversation.proposal.schema_version must be 3")
 
     response_bid = _object(data.get("response_bid") or {}, "response_bid")
     _strict(response_bid, "response_bid", {"should_respond", "urgency", "reason"})
@@ -164,8 +125,6 @@ def normalize_conversation_proposal(value: Any) -> dict[str, Any]:
             required=True,
             maximum=40,
         )
-        if speech_act not in NPC_SPEECH_ACT_KINDS:
-            raise ValueError(f"unsupported NPC speech act kind: {speech_act}")
         truth_posture = _text(
             item.get("truth_posture"),
             f"utterance_segments[{index}].truth_posture",
@@ -180,8 +139,7 @@ def normalize_conversation_proposal(value: Any) -> dict[str, Any]:
             maximum=300,
         )
         if (
-            speech_act in {"assert", "reveal", "lie"}
-            and truth_posture in {"believes_true", "uncertain", "intentional_deception"}
+            truth_posture in {"believes_true", "uncertain", "intentional_deception"}
             and not basis_refs
         ):
             raise ValueError(f"utterance_segments[{index}] factual content requires a basis_ref")
@@ -209,10 +167,22 @@ def normalize_conversation_proposal(value: Any) -> dict[str, Any]:
         )
 
     action = _object(data.get("proposed_action") or {}, "proposed_action")
-    _strict(action, "proposed_action", {"kind", "target_ref", "summary"})
-    action_kind = _text(action.get("kind"), "proposed_action.kind", maximum=50) or "none"
-    if action_kind not in NPC_ACTION_KINDS:
-        raise ValueError(f"unsupported NPC action kind: {action_kind}")
+    _strict(
+        action,
+        "proposed_action",
+        {"summary", "target_refs", "settlement", "mechanic_hint"},
+    )
+    action_summary = _text(
+        action.get("summary"), "proposed_action.summary", maximum=1_000
+    )
+    settlement = _text(
+        action.get("settlement"), "proposed_action.settlement", maximum=20
+    ) or "narrative"
+    if settlement not in {"narrative", "mechanical"}:
+        raise ValueError("proposed_action.settlement must be narrative or mechanical")
+    target_refs = _string_list(
+        action.get("target_refs"), "proposed_action.target_refs", maximum=300
+    )
 
     raw_requests = data.get("resolution_requests") or []
     if not isinstance(raw_requests, list) or len(raw_requests) > 8:
@@ -238,8 +208,8 @@ def normalize_conversation_proposal(value: Any) -> dict[str, Any]:
                 ),
             }
         )
-    if action_kind not in NPC_NARRATIVE_ACTION_KINDS and not requests:
-        raise ValueError(f"NPC action {action_kind!r} requires an explicit resolution request")
+    if settlement == "mechanical" and action_summary and not requests:
+        raise ValueError("a mechanical NPC action requires an explicit resolution request")
 
     deltas = _object(data.get("working_deltas") or {}, "working_deltas")
     _strict(deltas, "working_deltas", {"facts", "actor_knowledge", "commitments"})
@@ -253,9 +223,9 @@ def normalize_conversation_proposal(value: Any) -> dict[str, Any]:
         normalized_deltas[field] = [deepcopy(dict(item)) for item in raw_items]
 
     should_respond = response_bid["should_respond"]
-    if should_respond and not segments and action_kind == "none" and not requests:
+    if should_respond and not segments and not action_summary and not requests:
         raise ValueError("responding NPC must speak, act, or request resolution")
-    if not should_respond and (segments or action_kind != "none" or requests):
+    if not should_respond and (segments or action_summary or requests):
         raise ValueError("non-responding NPC must not speak, act, or request resolution")
 
     return {
@@ -277,11 +247,12 @@ def normalize_conversation_proposal(value: Any) -> dict[str, Any]:
         "private_intent": _text(data.get("private_intent"), "private_intent", maximum=1_000),
         "utterance_segments": segments,
         "proposed_action": {
-            "kind": action_kind,
-            "target_ref": _text(
-                action.get("target_ref"), "proposed_action.target_ref", maximum=300
+            "summary": action_summary,
+            "target_refs": target_refs,
+            "settlement": settlement,
+            "mechanic_hint": _text(
+                action.get("mechanic_hint"), "proposed_action.mechanic_hint", maximum=500
             ),
-            "summary": _text(action.get("summary"), "proposed_action.summary", maximum=1_000),
         },
         "resolution_requests": requests,
         "working_deltas": normalized_deltas,
@@ -321,9 +292,11 @@ def validate_conversation_proposal(
     )
     if unknown := sorted(cited_actor_ids - allowed_actor_ids):
         raise ValueError(f"NPC proposal cites actors outside its conversation: {unknown}")
-    target_ref = str(proposal["proposed_action"].get("target_ref") or "")
-    if target_ref and target_ref not in {f"actor:{item}" for item in allowed_actor_ids}:
-        raise ValueError("NPC proposal action target is outside its conversation")
+    allowed_target_refs = {f"actor:{item}" for item in allowed_actor_ids}
+    if unknown := sorted(
+        set(proposal["proposed_action"].get("target_refs") or []) - allowed_target_refs
+    ):
+        raise ValueError(f"NPC proposal action targets outside its conversation: {unknown}")
     for index, item in enumerate(proposal["working_deltas"]["facts"]):
         if str(item.get("subject_ref") or "") != f"actor:{actor_id}":
             raise ValueError(f"working_deltas.facts[{index}] must belong to the speaking actor")
@@ -339,9 +312,9 @@ def validate_conversation_proposal(
                 "or commitments"
             )
     for index, item in enumerate(proposal["working_deltas"]["actor_knowledge"]):
-        if str(item.get("actor_id") or "") not in allowed_actor_ids:
+        if str(item.get("actor_id") or "") != actor_id:
             raise ValueError(
-                f"working_deltas.actor_knowledge[{index}] targets an actor outside the conversation"
+                f"working_deltas.actor_knowledge[{index}] must belong to the speaking actor"
             )
     for index, item in enumerate(proposal["working_deltas"]["commitments"]):
         if str(item.get("actor_id") or "") != actor_id:
@@ -385,9 +358,78 @@ def derive_publication(proposal: dict[str, Any], *, publication_id: str) -> dict
         "utterance_segments": segments,
         "speech": " ".join(item["text"] for item in segments),
         "visible_cues": list(proposal["visible_cues"]),
-        "visible_action": (
-            str(action.get("summary") or action["kind"]) if action["kind"] != "none" else ""
+        "visible_action": str(action.get("summary") or ""),
+        "action_settlement": str(action.get("settlement") or "narrative"),
+        "action_target_refs": list(action.get("target_refs") or []),
+    }
+
+
+def normalize_audience_facts(
+    value: Any,
+    *,
+    participant_ids: set[str],
+    response_actor_ids: set[str],
+) -> dict[str, Any]:
+    """Validate an Agent ruling without deriving perception or comprehension."""
+
+    data = _object(value, "audience_facts")
+    _strict(
+        data,
+        "audience_facts",
+        {
+            "decision_id",
+            "resolver",
+            "perceived_actor_ids",
+            "understood_actor_ids",
+            "response_actor_ids",
+            "partial_renditions",
+            "basis_refs",
+            "reason",
+        },
+    )
+    if _text(data.get("resolver"), "audience_facts.resolver", required=True) != "agent":
+        raise ValueError("audience_facts.resolver must be agent")
+    perceived = set(
+        _string_list(data.get("perceived_actor_ids"), "audience_facts.perceived_actor_ids")
+    )
+    understood = set(
+        _string_list(data.get("understood_actor_ids"), "audience_facts.understood_actor_ids")
+    )
+    response = set(
+        _string_list(data.get("response_actor_ids"), "audience_facts.response_actor_ids")
+    )
+    if unknown := sorted((perceived | understood | response) - participant_ids):
+        raise ValueError(f"audience_facts cites actors outside the conversation: {unknown}")
+    if not understood <= perceived:
+        raise ValueError("understood_actor_ids must be a subset of perceived_actor_ids")
+    if not response <= perceived:
+        raise ValueError("response_actor_ids must be a subset of perceived_actor_ids")
+    if unknown := sorted(response - response_actor_ids):
+        raise ValueError(f"response_actor_ids contains actors without NPC runtimes: {unknown}")
+    partial_raw = _object(data.get("partial_renditions") or {}, "partial_renditions")
+    partial: dict[str, str] = {}
+    for actor_id, rendition in partial_raw.items():
+        if actor_id not in perceived - understood:
+            raise ValueError(
+                "partial_renditions may target only perceived actors who did not fully understand"
+            )
+        partial[actor_id] = _text(
+            rendition,
+            f"partial_renditions.{actor_id}",
+            required=True,
+            maximum=2_000,
+        )
+    return {
+        "decision_id": _text(
+            data.get("decision_id"), "audience_facts.decision_id", required=True, maximum=100
         ),
+        "resolver": "agent",
+        "perceived_actor_ids": sorted(perceived),
+        "understood_actor_ids": sorted(understood),
+        "response_actor_ids": sorted(response),
+        "partial_renditions": partial,
+        "basis_refs": _string_list(data.get("basis_refs"), "audience_facts.basis_refs", maximum=300),
+        "reason": _text(data.get("reason"), "audience_facts.reason", required=True, maximum=1_000),
     }
 
 
@@ -443,6 +485,65 @@ class ConversationStore:
         with self._lock:
             self._write(session)
 
+    @staticmethod
+    def _fingerprint(value: Any) -> str:
+        encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    def begin_mutation(
+        self,
+        conversation_id: str,
+        *,
+        expected_revision: int,
+        idempotency_key: str,
+        operation: str,
+        payload: Any,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """Load one journal revision and replay only an identical prior write."""
+
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required")
+        with self._lock:
+            session = self.get(conversation_id)
+            fingerprint = self._fingerprint({"operation": operation, "payload": payload})
+            prior = dict(session.get("idempotency") or {}).get(idempotency_key)
+            if prior is not None:
+                if prior.get("fingerprint") != fingerprint:
+                    raise ValueError("idempotency_key was already used with another payload")
+                return session, deepcopy(prior["result"])
+            if int(session.get("conversation_revision") or 0) != int(expected_revision):
+                raise ValueError(
+                    "CONVERSATION_REVISION_CONFLICT: expected "
+                    f"{expected_revision}, current {session.get('conversation_revision')}"
+                )
+            session["_pending_mutation"] = {
+                "key": idempotency_key,
+                "fingerprint": fingerprint,
+            }
+            return session, None
+
+    def finish_mutation(self, session: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+        """Compare-and-swap one in-memory mutation into the durable journal."""
+
+        pending = dict(session.pop("_pending_mutation", {}))
+        if not pending:
+            raise RuntimeError("conversation mutation was not prepared")
+        with self._lock:
+            current = self.get(str(session["conversation_id"]))
+            if int(current.get("conversation_revision") or 0) != int(
+                session.get("conversation_revision") or 0
+            ):
+                raise ValueError("CONVERSATION_REVISION_CONFLICT: journal changed during write")
+            session["conversation_revision"] = int(session["conversation_revision"]) + 1
+            session["updated_at_ns"] = time.time_ns()
+            result = {**deepcopy(result), "conversation_revision": session["conversation_revision"]}
+            session.setdefault("idempotency", {})[str(pending["key"])] = {
+                "fingerprint": str(pending["fingerprint"]),
+                "result": deepcopy(result),
+            }
+            self._write(session)
+            return result
+
     def delete(self, conversation_id: str) -> None:
         with self._lock:
             path = self._path(conversation_id)
@@ -460,11 +561,31 @@ class ConversationStore:
         authority: dict[str, Any],
         participants: list[dict[str, Any]],
         actor_contexts: dict[str, dict[str, Any]],
+        idempotency_key: str,
     ) -> dict[str, Any]:
         with self._lock:
+            if not idempotency_key:
+                raise ValueError("idempotency_key is required")
             participant_ids = [str(item["actor_id"]) for item in participants]
+            open_fingerprint = self._fingerprint(
+                {
+                    "campaign_id": campaign_id,
+                    "branch_id": branch_id,
+                    "principal_id": principal_id,
+                    "scope_id": scope_id,
+                    "participants": participant_ids,
+                }
+            )
             for path in self.root.glob("*.json"):
                 existing = json.loads(path.read_text(encoding="utf-8"))
+                if (
+                    existing.get("campaign_id") == campaign_id
+                    and existing.get("principal_id") == principal_id
+                    and existing.get("open_idempotency_key") == idempotency_key
+                ):
+                    if existing.get("open_fingerprint") != open_fingerprint:
+                        raise ValueError("idempotency_key was already used to open another conversation")
+                    return self.public_status(existing)
                 if (
                     existing.get("campaign_id") == campaign_id
                     and existing.get("branch_id") == branch_id
@@ -501,6 +622,7 @@ class ConversationStore:
                 "scope_id": scope_id,
                 "scene_id": scene_id,
                 "status": "open",
+                "conversation_revision": 0,
                 "created_at_ns": now_ns,
                 "updated_at_ns": now_ns,
                 "authority": deepcopy(authority),
@@ -510,6 +632,11 @@ class ConversationStore:
                 "events": [],
                 "activations": {},
                 "publications": [],
+                "pending_resolutions": [],
+                "audience_decision_ids": [],
+                "idempotency": {},
+                "open_idempotency_key": idempotency_key,
+                "open_fingerprint": open_fingerprint,
             }
             self._write(session)
             return self.public_status(session)
@@ -529,6 +656,7 @@ class ConversationStore:
                 "status",
                 "created_at_ns",
                 "updated_at_ns",
+                "conversation_revision",
                 "authority",
                 "participants",
             )
@@ -569,26 +697,36 @@ class ConversationStore:
         session: dict[str, Any],
         *,
         event: dict[str, Any],
-        perceived_by: list[str],
-        understood_by: list[str],
-        activate_actor_ids: list[str],
-        response_required_actor_ids: set[str],
+        audience_facts: dict[str, Any],
+        expected_revision: int,
+        idempotency_key: str,
     ) -> dict[str, Any]:
-        if session["status"] == "suspended" and event.get("type") == "resolution":
-            session["status"] = "open"
-        elif session["status"] != "open":
+        session, replay = self.begin_mutation(
+            str(session["conversation_id"]),
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            operation="ingest",
+            payload={"event": event, "audience_facts": audience_facts},
+        )
+        if replay is not None:
+            return replay
+        if session["status"] != "open":
             raise ValueError(f"conversation is not open: {session['status']}")
+        decision_id = str(audience_facts["decision_id"])
+        if decision_id in session["audience_decision_ids"]:
+            raise ValueError("audience_facts.decision_id must be unique in the conversation")
         sequence = len(session["events"]) + 1
         saved = {
             "event_id": f"conversation-event:{session['conversation_id']}:{sequence}",
             "sequence": sequence,
             **deepcopy(event),
-            "perceived_by": list(perceived_by),
-            "understood_by": list(understood_by),
+            "audience_facts": deepcopy(audience_facts),
         }
+        saved["actor_inboxes"] = self._actor_inboxes(saved, audience_facts)
         session["events"].append(saved)
+        session["audience_decision_ids"].append(decision_id)
         activations = []
-        for actor_id in activate_actor_ids:
+        for actor_id in audience_facts["response_actor_ids"]:
             runtime = session["actor_runtimes"].get(actor_id)
             if runtime is None:
                 continue
@@ -597,12 +735,8 @@ class ConversationStore:
                 "activation_id": activation_id,
                 "actor_runtime_id": runtime["actor_runtime_id"],
                 "actor_id": actor_id,
-                "reason": (
-                    "directly_addressed"
-                    if actor_id in response_required_actor_ids
-                    else "conversation_observed"
-                ),
-                "response_required": actor_id in response_required_actor_ids,
+                "reason": "agent_selected_response",
+                "response_required": True,
                 "from_cursor": runtime["inbox_cursor"],
                 "to_cursor": sequence,
                 "status": "pending",
@@ -610,9 +744,52 @@ class ConversationStore:
             }
             session["activations"][activation_id] = activation
             activations.append(self._public_activation(session, activation))
-        session["updated_at_ns"] = time.time_ns()
-        self.save(session)
-        return {"event": deepcopy(saved), "activations": activations}
+        public_event = {key: deepcopy(value) for key, value in saved.items() if key != "actor_inboxes"}
+        return self.finish_mutation(
+            session,
+            {
+                "conversation_id": session["conversation_id"],
+                "event": public_event,
+                "activations": activations,
+            },
+        )
+
+    @staticmethod
+    def _actor_inboxes(event: dict[str, Any], audience: dict[str, Any]) -> dict[str, Any]:
+        understood = set(audience["understood_actor_ids"])
+        partial = dict(audience["partial_renditions"])
+        result: dict[str, Any] = {}
+        for actor_id in audience["perceived_actor_ids"]:
+            base = {
+                "event_id": event["event_id"],
+                "sequence": event["sequence"],
+                "type": event["type"],
+                "speaker_actor_id": event.get("speaker_actor_id", ""),
+                "language": event.get("language", ""),
+                "delivery": event.get("delivery", ""),
+                "audience_decision_id": audience["decision_id"],
+            }
+            if actor_id in understood:
+                base.update(
+                    {
+                        "comprehension": "full",
+                        "content": event.get("content", ""),
+                        "utterance_segments": deepcopy(event.get("utterance_segments") or []),
+                        "visible_cues": deepcopy(event.get("visible_cues") or []),
+                        "visible_action": event.get("visible_action", ""),
+                    }
+                )
+            elif actor_id in partial:
+                base.update({"comprehension": "partial", "content": partial[actor_id]})
+            else:
+                base.update(
+                    {
+                        "comprehension": "perceived_only",
+                        "content": "A communication or action was perceived, but its content was not understood.",
+                    }
+                )
+            result[actor_id] = base
+        return result
 
     def _capability(self, session: dict[str, Any], activation: dict[str, Any]) -> str:
         message = ":".join(
@@ -631,8 +808,6 @@ class ConversationStore:
         return {
             key: deepcopy(activation[key])
             for key in (
-                "activation_id",
-                "actor_runtime_id",
                 "actor_id",
                 "reason",
                 "response_required",
@@ -640,7 +815,19 @@ class ConversationStore:
                 "to_cursor",
                 "status",
             )
-        } | {"worker_handle": self._capability(session, activation)}
+        } | {
+            "activation_ref": self._capability(session, activation),
+            "conversation_revision": int(session["conversation_revision"])
+            + (1 if session.get("_pending_mutation") else 0),
+        }
+
+    def _activation_from_ref(
+        self, session: dict[str, Any], activation_ref: str
+    ) -> dict[str, Any]:
+        for activation in session["activations"].values():
+            if secrets.compare_digest(activation_ref, self._capability(session, activation)):
+                return activation
+        raise PermissionError("invalid actor-scoped activation_ref")
 
     def list_activations(self, session: dict[str, Any]) -> list[dict[str, Any]]:
         return [
@@ -653,22 +840,32 @@ class ConversationStore:
         self,
         session: dict[str, Any],
         *,
-        activation_id: str,
-        worker_handle: str,
+        activation_ref: str,
         cursor: int,
         include_bootstrap: bool,
+        expected_revision: int,
+        idempotency_key: str,
     ) -> dict[str, Any]:
-        activation = session["activations"].get(activation_id)
-        if activation is None:
-            raise LookupError(activation_id)
-        if not secrets.compare_digest(worker_handle, self._capability(session, activation)):
-            raise PermissionError("invalid actor-scoped worker handle")
+        session, replay = self.begin_mutation(
+            str(session["conversation_id"]),
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            operation="claim_activation",
+            payload={
+                "activation_ref": activation_ref,
+                "cursor": cursor,
+                "include_bootstrap": include_bootstrap,
+            },
+        )
+        if replay is not None:
+            return replay
+        activation = self._activation_from_ref(session, activation_ref)
         if activation["status"] == "completed":
             raise ValueError("activation is already completed")
         now_ns = time.time_ns()
         current_lease = activation.get("lease")
         if current_lease and int(current_lease.get("expires_at_ns", 0)) > now_ns:
-            raise ValueError("activation is already leased")
+            raise ValueError("activation is already leased; replay the original idempotency_key")
         lease_id = str(uuid4())
         expires_at_ns = now_ns + self.lease_ttl_s * 1_000_000_000
         activation["lease"] = {"lease_id": lease_id, "expires_at_ns": expires_at_ns}
@@ -677,8 +874,8 @@ class ConversationStore:
         inbox = [
             deepcopy(event)
             for event in session["events"]
-            if int(event["sequence"]) > max(0, int(cursor))
-            and activation["actor_id"] in event["perceived_by"]
+            for item in [dict(event.get("actor_inboxes") or {}).get(activation["actor_id"])]
+            if item is not None and int(event["sequence"]) > max(0, int(cursor))
         ]
         event_basis_refs = [str(item["event_id"]) for item in inbox]
         context = runtime["context"]
@@ -689,10 +886,10 @@ class ConversationStore:
             }
         )
         capsule = {
-            "schema_version": 1,
+            "schema_version": 2,
             "contract": NPC_CONVERSATION_CONTRACT,
             "conversation_id": session["conversation_id"],
-            "activation_id": activation_id,
+            "activation_id": activation["activation_id"],
             "actor_runtime_id": activation["actor_runtime_id"],
             "actor_id": activation["actor_id"],
             "lease_id": lease_id,
@@ -704,6 +901,7 @@ class ConversationStore:
                 "campaign_revision": context["authority"]["campaign_revision"],
                 "working_state_revision": runtime["working_state_revision"],
                 "inbox_cursor": len(session["events"]),
+                "conversation_revision": int(session["conversation_revision"]) + 1,
             },
             "bootstrap": deepcopy(context) if include_bootstrap else None,
             "working_state": deepcopy(runtime["working_deltas"]),
@@ -714,27 +912,31 @@ class ConversationStore:
                 "may_call_tools": False,
                 "may_roll_dice": False,
                 "may_write_state": False,
-                "output_contract": "npc-conversation-proposal.v2",
+                "output_contract": "npc-conversation-proposal.v3",
             },
         }
-        session["updated_at_ns"] = now_ns
-        self.save(session)
-        return capsule
+        return self.finish_mutation(session, capsule)
 
     def submit(
         self,
         session: dict[str, Any],
         *,
-        activation_id: str,
-        worker_handle: str,
+        activation_ref: str,
         lease_id: str,
-        proposal: dict[str, Any],
+        proposal: Any,
+        expected_revision: int,
+        idempotency_key: str,
     ) -> dict[str, Any]:
-        activation = session["activations"].get(activation_id)
-        if activation is None:
-            raise LookupError(activation_id)
-        if not secrets.compare_digest(worker_handle, self._capability(session, activation)):
-            raise PermissionError("invalid actor-scoped worker handle")
+        session, replay = self.begin_mutation(
+            str(session["conversation_id"]),
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            operation="submit_proposal",
+            payload={"activation_ref": activation_ref, "lease_id": lease_id, "proposal": proposal},
+        )
+        if replay is not None:
+            return replay
+        activation = self._activation_from_ref(session, activation_ref)
         lease = activation.get("lease") or {}
         if lease.get("lease_id") != lease_id:
             raise PermissionError("invalid activation lease")
@@ -746,92 +948,172 @@ class ConversationStore:
             *(
                 str(event["event_id"])
                 for event in session["events"]
-                if activation["actor_id"] in event["perceived_by"]
+                if activation["actor_id"] in dict(event.get("actor_inboxes") or {})
             ),
         }
-        validate_conversation_proposal(
-            proposal,
-            conversation_id=session["conversation_id"],
-            activation_id=activation_id,
-            actor_runtime_id=activation["actor_runtime_id"],
-            actor_id=activation["actor_id"],
-            allowed_basis_refs=allowed_basis_refs,
-            allowed_actor_ids=set(session["participant_ids"]),
-        )
-        if proposal["resolution_requests"]:
-            session["status"] = "suspended"
-            activation["status"] = "completed"
-            activation["lease"] = None
-            session["updated_at_ns"] = time.time_ns()
-            self.save(session)
+        try:
+            normalized = normalize_conversation_proposal(proposal)
+            validate_conversation_proposal(
+                normalized,
+                conversation_id=session["conversation_id"],
+                activation_id=activation["activation_id"],
+                actor_runtime_id=activation["actor_runtime_id"],
+                actor_id=activation["actor_id"],
+                allowed_basis_refs=allowed_basis_refs,
+                allowed_actor_ids=set(session["participant_ids"]),
+            )
+        except ValueError as exc:
             return {
-                "status": "resolution_required",
-                "publication": None,
-                "resolution_requests": deepcopy(proposal["resolution_requests"]),
+                "status": "validation_failed",
+                "validation_issues": [{"path": "proposal", "message": str(exc)}],
+                "lease_retained": True,
+                "conversation_revision": int(session["conversation_revision"]),
             }
+        proposal = normalized
         if not proposal["response_bid"]["should_respond"]:
             activation["status"] = "completed"
             activation["lease"] = None
             runtime["inbox_cursor"] = len(session["events"])
-            session["updated_at_ns"] = time.time_ns()
-            self.save(session)
-            return {"status": "passed", "publication": None, "resolution_requests": []}
+            return self.finish_mutation(
+                session, {"status": "passed", "publication": None, "resolution_requests": []}
+            )
 
-        publication_id = str(uuid4())
-        publication = derive_publication(proposal, publication_id=publication_id)
-        session["publications"].append(publication)
-        sequence = len(session["events"]) + 1
-        targets = {
-            item for segment in publication["utterance_segments"] for item in segment["targets"]
-        }
-        perceived_by = list(session["participant_ids"])
-        session["events"].append(
-            {
-                "event_id": f"conversation-event:{session['conversation_id']}:{sequence}",
-                "sequence": sequence,
-                "type": "npc_publication",
-                "speaker_actor_id": activation["actor_id"],
-                "publication_id": publication_id,
-                "content": publication["speech"],
-                "utterance_segments": deepcopy(publication["utterance_segments"]),
-                "visible_cues": deepcopy(publication["visible_cues"]),
-                "visible_action": publication["visible_action"],
-                "perceived_by": perceived_by,
-                "understood_by": perceived_by,
-            }
-        )
+        publication = None
+        if proposal["utterance_segments"] or proposal["visible_cues"] or proposal["proposed_action"]["summary"]:
+            publication = derive_publication(proposal, publication_id=str(uuid4()))
+            if proposal["proposed_action"]["settlement"] == "mechanical":
+                publication["visible_action"] = ""
+                publication["action_pending_resolution"] = True
+            publication["status"] = "pending_audience"
+            publication["speaker_actor_id"] = activation["actor_id"]
+            session["publications"].append(deepcopy(publication))
+        if proposal["resolution_requests"]:
+            session["pending_resolutions"].extend(
+                {
+                    **deepcopy(item),
+                    "activation_id": activation["activation_id"],
+                    "actor_id": activation["actor_id"],
+                    "status": "pending",
+                }
+                for item in proposal["resolution_requests"]
+            )
         for field, values in proposal["working_deltas"].items():
             runtime["working_deltas"][field].extend(deepcopy(values))
         if any(proposal["working_deltas"].values()):
             runtime["working_state_revision"] += 1
-        runtime["inbox_cursor"] = sequence
+        runtime["inbox_cursor"] = len(session["events"])
         activation["status"] = "completed"
         activation["lease"] = None
+        return self.finish_mutation(session, {
+            "status": "publication_ready" if publication else "resolution_required",
+            "publication": publication,
+            "resolution_requests": deepcopy(proposal["resolution_requests"]),
+        })
 
-        followups = []
-        for target_actor_id in sorted(targets - {activation["actor_id"]}):
-            target_runtime = session["actor_runtimes"].get(target_actor_id)
-            if target_runtime is None:
+    def cancel_activation(
+        self,
+        session: dict[str, Any],
+        *,
+        activation_ref: str,
+        lease_id: str,
+        expected_revision: int,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        session, replay = self.begin_mutation(
+            str(session["conversation_id"]),
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            operation="cancel_activation",
+            payload={"activation_ref": activation_ref, "lease_id": lease_id},
+        )
+        if replay is not None:
+            return replay
+        activation = self._activation_from_ref(session, activation_ref)
+        lease = dict(activation.get("lease") or {})
+        if lease.get("lease_id") != lease_id:
+            raise PermissionError("invalid activation lease")
+        activation["lease"] = None
+        activation["status"] = "pending"
+        return self.finish_mutation(session, {"status": "pending", "cancelled": True})
+
+    def publish(
+        self,
+        session: dict[str, Any],
+        *,
+        publication_id: str,
+        audience_facts: dict[str, Any],
+        expected_revision: int,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        session, replay = self.begin_mutation(
+            str(session["conversation_id"]),
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            operation="publish",
+            payload={"publication_id": publication_id, "audience_facts": audience_facts},
+        )
+        if replay is not None:
+            return replay
+        publication = next(
+            (item for item in session["publications"] if item["publication_id"] == publication_id),
+            None,
+        )
+        if publication is None:
+            raise LookupError(publication_id)
+        if publication.get("status") != "pending_audience":
+            raise ValueError("publication is not awaiting audience facts")
+        decision_id = str(audience_facts["decision_id"])
+        if decision_id in session["audience_decision_ids"]:
+            raise ValueError("audience_facts.decision_id must be unique in the conversation")
+        sequence = len(session["events"]) + 1
+        event = {
+            "event_id": f"conversation-event:{session['conversation_id']}:{sequence}",
+            "sequence": sequence,
+            "type": "npc_publication",
+            "speaker_actor_id": publication["speaker_actor_id"],
+            "publication_id": publication_id,
+            "content": publication["speech"],
+            "utterance_segments": deepcopy(publication["utterance_segments"]),
+            "visible_cues": deepcopy(publication["visible_cues"]),
+            "visible_action": publication["visible_action"],
+            "audience_facts": deepcopy(audience_facts),
+        }
+        event["actor_inboxes"] = self._actor_inboxes(event, audience_facts)
+        session["events"].append(event)
+        session["audience_decision_ids"].append(decision_id)
+        publication["status"] = "published"
+        publication["audience_decision_id"] = decision_id
+        activations = []
+        for actor_id in audience_facts["response_actor_ids"]:
+            if actor_id == publication["speaker_actor_id"]:
                 continue
-            followup_id = str(uuid4())
-            followup = {
-                "activation_id": followup_id,
-                "actor_runtime_id": target_runtime["actor_runtime_id"],
-                "actor_id": target_actor_id,
-                "reason": "directly_addressed",
+            runtime = session["actor_runtimes"].get(actor_id)
+            if runtime is None:
+                continue
+            activation = {
+                "activation_id": str(uuid4()),
+                "actor_runtime_id": runtime["actor_runtime_id"],
+                "actor_id": actor_id,
+                "reason": "agent_selected_response",
                 "response_required": True,
-                "from_cursor": target_runtime["inbox_cursor"],
+                "from_cursor": runtime["inbox_cursor"],
                 "to_cursor": sequence,
                 "status": "pending",
                 "lease": None,
             }
-            session["activations"][followup_id] = followup
-            followups.append(self._public_activation(session, followup))
-        session["updated_at_ns"] = time.time_ns()
-        self.save(session)
-        return {
-            "status": "published",
-            "publication": publication,
-            "resolution_requests": [],
-            "followup_activations": followups,
-        }
+            session["activations"][activation["activation_id"]] = activation
+            activations.append(self._public_activation(session, activation))
+        public_event = {key: deepcopy(value) for key, value in event.items() if key != "actor_inboxes"}
+        return self.finish_mutation(
+            session,
+            {
+                "status": "published",
+                "publication": {
+                    key: deepcopy(value)
+                    for key, value in publication.items()
+                    if key not in {"speaker_actor_id", "status"}
+                },
+                "event": public_event,
+                "activations": activations,
+            },
+        )

@@ -68,6 +68,10 @@ CORE_TOOLS = frozenset(
     }
 )
 
+# Registered for a trusted Host adapter, but never returned by tools/list or
+# loadable through an exposure. The server authenticates every call separately.
+HOST_PRIVATE_TOOLS = frozenset({"npc_conversation_transport"})
+
 
 def _group(
     id: str,
@@ -254,14 +258,7 @@ TOOL_GROUPS = (
         "NPC conversation runtime",
         "Run actor-isolated, multi-turn NPC conversations and commit them atomically.",
         "write",
-        "conversation_open",
-        "conversation_status",
-        "conversation_ingest",
-        "conversation_activations",
-        "npc_activation_checkout",
-        "npc_activation_submit",
-        "conversation_close",
-        "conversation_abort",
+        "npc_conversation",
         roles=CAMPAIGN_DM_ROLE_ORDER,
     ),
     _group(
@@ -437,7 +434,11 @@ def groups_for_tool(name: str) -> tuple[str, ...]:
 
 def validate_profile_coverage(tool_names: Iterable[str]) -> None:
     """Fail server construction if a public tool has no explicit phase/group."""
-    missing = sorted(name for name in tool_names if not profiles_for_tool(name))
+    missing = sorted(
+        name
+        for name in tool_names
+        if name not in HOST_PRIVATE_TOOLS and not profiles_for_tool(name)
+    )
     if missing:
         raise RuntimeError(f"MCP tools missing a tool profile: {', '.join(missing)}")
 

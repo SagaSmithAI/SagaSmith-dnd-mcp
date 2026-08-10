@@ -29,6 +29,68 @@ def _variant(
 
 
 ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
+    "npc_conversation": {
+        "open": [
+            _variant(
+                ("branch_id", "idempotency_key", "participant_actor_ids", "query", "scope_id"),
+                ("participant_actor_ids", "idempotency_key"),
+            )
+        ],
+        "get": [_variant(("conversation_id",), ("conversation_id",))],
+        "ingest": [
+            _variant(
+                (
+                    "audience_facts",
+                    "conversation_id",
+                    "event",
+                    "expected_conversation_revision",
+                    "idempotency_key",
+                ),
+                (
+                    "conversation_id",
+                    "event",
+                    "audience_facts",
+                    "expected_conversation_revision",
+                    "idempotency_key",
+                ),
+            )
+        ],
+        "publish": [
+            _variant(
+                (
+                    "audience_facts",
+                    "conversation_id",
+                    "expected_conversation_revision",
+                    "idempotency_key",
+                    "publication_id",
+                ),
+                (
+                    "conversation_id",
+                    "publication_id",
+                    "audience_facts",
+                    "expected_conversation_revision",
+                    "idempotency_key",
+                ),
+            )
+        ],
+        "close": [
+            _variant(
+                (
+                    "accepted_working_deltas",
+                    "conversation_id",
+                    "expected_conversation_revision",
+                    "idempotency_key",
+                ),
+                ("conversation_id", "expected_conversation_revision", "idempotency_key"),
+            )
+        ],
+        "abort": [
+            _variant(
+                ("conversation_id", "expected_conversation_revision", "idempotency_key"),
+                ("conversation_id", "expected_conversation_revision", "idempotency_key"),
+            )
+        ],
+    },
     "rulebook_draft": {
         "start": [
             _variant(

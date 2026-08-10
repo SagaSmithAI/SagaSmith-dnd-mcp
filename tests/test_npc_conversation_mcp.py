@@ -5,6 +5,10 @@ import pytest
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
+from sagasmith_dnd_mcp.tool_profiles import GROUP_BY_ID, HOST_PRIVATE_TOOLS
+
+
+HOST_TOKEN = "test-host-token-with-sufficient-entropy"
 
 
 def _config(tmp_path: Path) -> McpConfig:
@@ -16,6 +20,7 @@ def _config(tmp_path: Path) -> McpConfig:
         dnd_skills_dir=tmp_path / "dnd",
         modulegen_skills_dir=tmp_path / "modulegen",
         auto_seed_rules=False,
+        npc_host_token=HOST_TOKEN,
     )
 
 
@@ -28,272 +33,188 @@ async def _call(server, name: str, arguments: dict):
 
 
 async def _campaign_with_actors(server):
-    campaign = await _call(
-        server,
-        "campaign_create",
-        {"name": "NPC conversation", "idempotency_key": "campaign"},
-    )
-    npc = await _call(
-        server,
-        "character_create_from",
-        {
-            "mode": "direct",
-            "payload": {
-                "campaign_id": campaign["id"],
-                "name": "Mara",
-                "character_type": "npc",
-                "summary": "A guarded dockworker.",
-            },
-            "idempotency_key": "npc",
-        },
-    )
-    pc = await _call(
-        server,
-        "character_create_from",
-        {
-            "mode": "direct",
-            "payload": {"campaign_id": campaign["id"], "name": "Aria"},
-            "idempotency_key": "pc",
-        },
-    )
-    current = await _call(
-        server,
-        "campaign_query",
-        {"view": "get", "payload": {"campaign_id": campaign["id"]}},
-    )
-    await _call(
-        server,
-        "game_phase",
-        {
-            "campaign_id": campaign["id"],
-            "action": "set",
-            "tool_profile": "play",
-            "expected_revision": current["revision"],
-            "idempotency_key": "play",
-        },
-    )
+    campaign = await _call(server, "campaign_create", {"name": "NPC", "idempotency_key": "campaign"})
+    npc = await _call(server, "character_create_from", {
+        "mode": "direct",
+        "payload": {"campaign_id": campaign["id"], "name": "Mara", "character_type": "npc", "summary": "Guarded."},
+        "idempotency_key": "npc",
+    })
+    pc = await _call(server, "character_create_from", {
+        "mode": "direct",
+        "payload": {"campaign_id": campaign["id"], "name": "Aria"},
+        "idempotency_key": "pc",
+    })
+    current = await _call(server, "campaign_query", {"view": "get", "payload": {"campaign_id": campaign["id"]}})
+    await _call(server, "game_phase", {
+        "campaign_id": campaign["id"], "action": "set", "tool_profile": "play",
+        "expected_revision": current["revision"], "idempotency_key": "play",
+    })
     return campaign, npc, pc
 
 
-def test_multi_turn_conversation_keeps_private_capsules_out_of_director_and_commits_once(
-    tmp_path: Path,
-) -> None:
+def _audience(decision_id, *, perceived, understood, response):
+    return {
+        "decision_id": decision_id,
+        "resolver": "agent",
+        "perceived_actor_ids": perceived,
+        "understood_actor_ids": understood,
+        "response_actor_ids": response,
+        "partial_renditions": {},
+        "basis_refs": ["scene:current"],
+        "reason": "Agent resolved scene range, occlusion, delivery, and language.",
+    }
+
+
+def test_public_surface_is_one_facade_and_host_transport_is_unloadable() -> None:
+    group = GROUP_BY_ID["play.npc_conversation"]
+    assert group.tools == frozenset({"npc_conversation"})
+    assert HOST_PRIVATE_TOOLS == frozenset({"npc_conversation_transport"})
+    assert not any("transport" in item for item in group.tools)
+
+
+def test_conversation_facade_private_transport_and_commit(tmp_path: Path) -> None:
     async def exercise() -> None:
         server = create_server(_config(tmp_path))
         campaign, npc, pc = await _campaign_with_actors(server)
-        opened = await _call(
-            server,
-            "conversation_open",
-            {
-                "campaign_id": campaign["id"],
+        opened = await _call(server, "npc_conversation", {
+            "campaign_id": campaign["id"], "action": "open",
+            "payload": {
                 "participant_actor_ids": [pc["id"], npc["id"]],
-                "query": "identity and current goals",
+                "query": "identity and goals", "idempotency_key": "open",
             },
-        )
-        assert opened["status"] == "open"
+        })
+        assert opened["conversation_revision"] == 0
         assert "actor_knowledge" not in str(opened)
         conversation_id = opened["conversation_id"]
-
-        ingested = await _call(
-            server,
-            "conversation_ingest",
-            {
-                "campaign_id": campaign["id"],
+        ingested = await _call(server, "npc_conversation", {
+            "campaign_id": campaign["id"], "action": "ingest",
+            "payload": {
                 "conversation_id": conversation_id,
                 "event": {
-                    "type": "speech",
-                    "speaker_actor_id": pc["id"],
-                    "content": "Were you at the docks last night?",
-                    "language": "Common",
-                    "delivery": "normal",
+                    "type": "speech", "speaker_actor_id": pc["id"],
+                    "content": "Were you at the docks?", "language": "Common",
                     "declared_target_actor_ids": [npc["id"]],
                 },
+                "audience_facts": _audience(
+                    "audience-1", perceived=[pc["id"], npc["id"]],
+                    understood=[pc["id"], npc["id"]], response=[npc["id"]],
+                ),
+                "expected_conversation_revision": 0,
+                "idempotency_key": "ingest",
             },
-        )
+        })
         activation = ingested["activations"][0]
-        assert activation["actor_id"] == npc["id"]
-        assert activation["response_required"] is True
-        assert "context" not in activation
-        with pytest.raises(Exception, match="unfinished NPC activations"):
-            await _call(
-                server,
-                "conversation_close",
-                {
-                    "campaign_id": campaign["id"],
-                    "conversation_id": conversation_id,
-                    "idempotency_key": "premature-close",
+        assert set(activation) == {
+            "activation_ref", "actor_id", "reason", "response_required",
+            "from_cursor", "to_cursor", "status", "conversation_revision",
+        }
+        with pytest.raises(Exception, match="authentication"):
+            await _call(server, "npc_conversation_transport", {
+                "campaign_id": campaign["id"], "conversation_id": conversation_id,
+                "action": "claim_activation", "host_token": "wrong",
+                "payload": {
+                    "activation_ref": activation["activation_ref"],
+                    "expected_conversation_revision": 1,
+                    "idempotency_key": "claim",
                 },
-            )
-
-        capsule = await _call(
-            server,
-            "npc_activation_checkout",
-            {
-                "campaign_id": campaign["id"],
-                "conversation_id": conversation_id,
-                "activation_id": activation["activation_id"],
-                "worker_handle": activation["worker_handle"],
-                "cursor": 0,
-                "include_bootstrap": True,
+            })
+        capsule = await _call(server, "npc_conversation_transport", {
+            "campaign_id": campaign["id"], "conversation_id": conversation_id,
+            "action": "claim_activation", "host_token": HOST_TOKEN,
+            "payload": {
+                "activation_ref": activation["activation_ref"],
+                "expected_conversation_revision": 1,
+                "idempotency_key": "claim", "cursor": 0, "include_bootstrap": True,
             },
-        )
-        assert capsule["bootstrap"]["actor"]["id"] == npc["id"]
-        assert capsule["bootstrap"]["delegation"]["persist_worker_session"] is True
+        })
         identity_ref = f"actor:{npc['id']}:identity"
-        assert identity_ref in capsule["constraints"]["allowed_basis_refs"]
-
         proposal = {
-            "schema_version": 2,
+            "schema_version": 3,
             "conversation_id": conversation_id,
-            "activation_id": activation["activation_id"],
-            "actor_runtime_id": activation["actor_runtime_id"],
-            "response_bid": {
-                "should_respond": True,
-                "urgency": 80,
-                "reason": "Aria addressed Mara directly.",
-            },
-            "private_intent": "Avoid further questions about the docks.",
-            "utterance_segments": [
-                {
-                    "text": "No. I stayed home.",
-                    "speech_act": "lie",
-                    "truth_posture": "intentional_deception",
-                    "basis_refs": [identity_ref],
-                    "targets": [pc["id"]],
-                    "language": "Common",
-                    "delivery": "flatly",
-                }
-            ],
-            "proposed_action": {"kind": "none", "target_ref": "", "summary": ""},
+            "activation_id": capsule["activation_id"],
+            "actor_runtime_id": capsule["actor_runtime_id"],
+            "response_bid": {"should_respond": True, "urgency": 80, "reason": "Addressed."},
+            "private_intent": "Deflect.",
+            "utterance_segments": [{
+                "text": "No. I stayed home.", "speech_act": "deny",
+                "truth_posture": "intentional_deception", "basis_refs": [identity_ref],
+                "targets": [pc["id"]], "language": "Common", "delivery": "flatly",
+            }],
+            "proposed_action": {"summary": "", "target_refs": [], "settlement": "narrative", "mechanic_hint": ""},
             "resolution_requests": [],
             "working_deltas": {
                 "facts": [],
-                "actor_knowledge": [
-                    {
-                        "action": "add",
-                        "actor_id": pc["id"],
-                        "knowledge_key": f"conversation:{conversation_id}:mara-denial",
-                        "proposition": "Mara claimed that she stayed home.",
-                        "subject_ref": f"actor:{npc['id']}",
-                        "epistemic_status": "rumor",
-                        "confidence": 2,
-                        "cause": f"told_by:{npc['id']}",
-                        "disclosure_scope": "owner",
-                    }
-                ],
+                "actor_knowledge": [{
+                    "action": "add", "actor_id": npc["id"],
+                    "knowledge_key": f"conversation:{conversation_id}:questioned",
+                    "proposition": "Aria asked about the docks.",
+                    "subject_ref": f"actor:{pc['id']}", "epistemic_status": "belief",
+                    "confidence": 3, "cause": f"conversation:{conversation_id}",
+                    "disclosure_scope": "dm",
+                }],
                 "commitments": [],
             },
-            "visible_cues": ["Mara looks away before answering."],
-            "decision_summary": "Deny the dock visit.",
+            "visible_cues": ["Mara looks away."], "decision_summary": "Deny.",
         }
-        submitted = await _call(
-            server,
-            "npc_activation_submit",
-            {
-                "campaign_id": campaign["id"],
-                "conversation_id": conversation_id,
-                "activation_id": activation["activation_id"],
-                "worker_handle": activation["worker_handle"],
-                "lease_id": capsule["lease_id"],
-                "proposal": proposal,
+        submitted = await _call(server, "npc_conversation_transport", {
+            "campaign_id": campaign["id"], "conversation_id": conversation_id,
+            "action": "submit_proposal", "host_token": HOST_TOKEN,
+            "payload": {
+                "activation_ref": activation["activation_ref"], "lease_id": capsule["lease_id"],
+                "proposal": proposal, "expected_conversation_revision": 2,
+                "idempotency_key": "submit",
             },
-        )
-        assert submitted["publication"]["speech"] == "No. I stayed home."
+        })
+        assert submitted["status"] == "publication_ready"
         assert "private_intent" not in str(submitted["publication"])
-        assert "intentional_deception" not in str(submitted["publication"])
-
-        committed = await _call(
-            server,
-            "conversation_close",
-            {
-                "campaign_id": campaign["id"],
+        published = await _call(server, "npc_conversation", {
+            "campaign_id": campaign["id"], "action": "publish",
+            "payload": {
                 "conversation_id": conversation_id,
+                "publication_id": submitted["publication"]["publication_id"],
+                "audience_facts": _audience(
+                    "audience-2", perceived=[pc["id"], npc["id"]],
+                    understood=[pc["id"], npc["id"]], response=[],
+                ),
+                "expected_conversation_revision": 3, "idempotency_key": "publish",
+            },
+        })
+        assert published["publication"]["speech"] == "No. I stayed home."
+        committed = await _call(server, "npc_conversation", {
+            "campaign_id": campaign["id"], "action": "close",
+            "payload": {
+                "conversation_id": conversation_id,
+                "expected_conversation_revision": 4,
                 "accepted_working_deltas": {
-                    npc["id"]: {
-                        "fact_indexes": [],
-                        "actor_knowledge_indexes": [0],
-                        "commitment_indexes": [],
-                    }
+                    npc["id"]: {"fact_indexes": [], "actor_knowledge_indexes": [0], "commitment_indexes": []}
                 },
-                "idempotency_key": "close-conversation",
+                "idempotency_key": "close",
             },
-        )
-        replay = await _call(
-            server,
-            "conversation_close",
-            {
-                "campaign_id": campaign["id"],
-                "conversation_id": conversation_id,
-                "accepted_working_deltas": {},
-                "idempotency_key": "close-conversation",
-            },
-        )
-        assert replay == committed
+        })
         assert committed["event"]["event_type"] == "npc_conversation"
-        assert [item["type"] for item in committed["event"]["payload"]["transcript"]] == [
-            "speech",
-            "npc_publication",
-        ]
-        assert committed["actor_knowledge"][0]["epistemic_status"] == "rumor"
-        status = await _call(
-            server,
-            "conversation_status",
-            {"campaign_id": campaign["id"], "conversation_id": conversation_id},
-        )
-        assert status["status"] == "closed"
+        assert committed["conversation_revision"] == 5
 
     asyncio.run(exercise())
 
 
-def test_external_authority_change_marks_conversation_stale(tmp_path: Path) -> None:
+def test_unrelated_campaign_event_does_not_stale_conversation(tmp_path: Path) -> None:
     async def exercise() -> None:
         server = create_server(_config(tmp_path))
         campaign, npc, pc = await _campaign_with_actors(server)
-        opened = await _call(
-            server,
-            "conversation_open",
-            {
-                "campaign_id": campaign["id"],
-                "participant_actor_ids": [pc["id"], npc["id"]],
-            },
-        )
-        await _call(
-            server,
-            "campaign_event",
-            {
-                "campaign_id": campaign["id"],
-                "action": "add",
-                "payload": {
-                    "event_type": "world_change",
-                    "summary": "The city bell rings.",
-                    "audience_scope": "public",
-                },
-                "idempotency_key": "bell",
-            },
-        )
-        with pytest.raises(Exception, match="SESSION_STALE"):
-            await _call(
-                server,
-                "conversation_ingest",
-                {
-                    "campaign_id": campaign["id"],
-                    "conversation_id": opened["conversation_id"],
-                    "event": {
-                        "type": "speech",
-                        "speaker_actor_id": pc["id"],
-                        "content": "What was that?",
-                    },
-                },
-            )
-        status = await _call(
-            server,
-            "conversation_status",
-            {
-                "campaign_id": campaign["id"],
-                "conversation_id": opened["conversation_id"],
-            },
-        )
-        assert status["status"] == "stale"
-        assert status["stale_reasons"]
+        opened = await _call(server, "npc_conversation", {
+            "campaign_id": campaign["id"], "action": "open",
+            "payload": {"participant_actor_ids": [pc["id"], npc["id"]], "idempotency_key": "open"},
+        })
+        await _call(server, "campaign_event", {
+            "campaign_id": campaign["id"], "action": "add",
+            "payload": {"event_type": "world_change", "summary": "A remote bell rings.", "audience_scope": "public"},
+            "idempotency_key": "bell",
+        })
+        status = await _call(server, "npc_conversation", {
+            "campaign_id": campaign["id"], "action": "get",
+            "payload": {"conversation_id": opened["conversation_id"]},
+        })
+        assert status["status"] == "open"
+        assert status["conversation_revision"] == 0
 
     asyncio.run(exercise())

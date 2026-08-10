@@ -6,34 +6,34 @@ from jsonschema import Draft202012Validator
 from sagasmith_dnd_mcp.npc_conversations import (
     ConversationStore,
     derive_publication,
+    normalize_audience_facts,
     normalize_conversation_proposal,
 )
 
 
 def _proposal(**overrides):
     value = {
-        "schema_version": 2,
+        "schema_version": 3,
         "conversation_id": "conversation",
         "activation_id": "activation",
         "actor_runtime_id": "conversation:npc",
-        "response_bid": {
-            "should_respond": True,
-            "urgency": 70,
-            "reason": "Directly addressed.",
+        "response_bid": {"should_respond": True, "urgency": 70, "reason": "Addressed."},
+        "private_intent": "Hide the visit.",
+        "utterance_segments": [{
+            "text": "I never went to the docks.",
+            "speech_act": "deflect_with_a_denial",
+            "truth_posture": "intentional_deception",
+            "basis_refs": ["knowledge:dock-visit:rev-1"],
+            "targets": ["pc"],
+            "language": "Common",
+            "delivery": "quietly",
+        }],
+        "proposed_action": {
+            "summary": "",
+            "target_refs": [],
+            "settlement": "narrative",
+            "mechanic_hint": "",
         },
-        "private_intent": "Hide the visit to the docks.",
-        "utterance_segments": [
-            {
-                "text": "I never went to the docks.",
-                "speech_act": "lie",
-                "truth_posture": "intentional_deception",
-                "basis_refs": ["knowledge:dock-visit:rev-1"],
-                "targets": ["pc"],
-                "language": "Common",
-                "delivery": "quietly",
-            }
-        ],
-        "proposed_action": {"kind": "none", "target_ref": "", "summary": ""},
         "resolution_requests": [],
         "working_deltas": {"facts": [], "actor_knowledge": [], "commitments": []},
         "visible_cues": ["She avoids eye contact."],
@@ -43,220 +43,184 @@ def _proposal(**overrides):
     return value
 
 
-def _context():
+def _context(actor_id="npc"):
     return {
         "authority": {"actor_revision": 2, "campaign_revision": 5},
-        "actor": {"id": "npc", "name": "Mara"},
+        "actor": {"id": actor_id, "name": "Mara"},
         "constraints": {
             "allowed_basis_refs": ["knowledge:dock-visit:rev-1"],
-            "allowed_target_actor_ids": ["npc", "pc"],
+            "allowed_target_actor_ids": ["npc", "npc-2", "pc"],
         },
     }
 
 
-def test_v2_has_no_free_utterance_bypass() -> None:
-    raw = _proposal(utterance={"text": "Unsupported assertion."}, utterance_segments=[])
-    with pytest.raises(ValueError, match="unknown fields"):
-        normalize_conversation_proposal(raw)
+def _audience(*, response=("npc",), understood=("npc",), perceived=("npc",), partial=None):
+    return normalize_audience_facts(
+        {
+            "decision_id": "audience-1",
+            "resolver": "agent",
+            "perceived_actor_ids": list(perceived),
+            "understood_actor_ids": list(understood),
+            "response_actor_ids": list(response),
+            "partial_renditions": partial or {},
+            "basis_refs": ["scene:line-of-sight"],
+            "reason": "Agent applied the current scene and delivery facts.",
+        },
+        participant_ids={"npc", "npc-2", "pc"},
+        response_actor_ids={"npc", "npc-2"},
+    )
 
+
+def _open(store):
+    return store.open(
+        campaign_id="campaign",
+        branch_id="branch",
+        principal_id="dm",
+        scope_id="party",
+        scene_id="scene",
+        authority={"campaign_revision": 5, "scene_state_version": 0},
+        participants=[
+            {"actor_id": "npc", "name": "Mara", "kind": "npc"},
+            {"actor_id": "npc-2", "name": "Tomas", "kind": "npc"},
+            {"actor_id": "pc", "name": "Aria", "kind": "pc"},
+        ],
+        actor_contexts={"npc": _context(), "npc-2": _context("npc-2")},
+        idempotency_key="open-1",
+    )
+
+
+def test_v3_is_strict_but_speech_act_is_open() -> None:
+    normalized = normalize_conversation_proposal(_proposal())
+    assert normalized["utterance_segments"][0]["speech_act"] == "deflect_with_a_denial"
+    old = _proposal(schema_version=2)
+    with pytest.raises(ValueError, match="must be 3"):
+        normalize_conversation_proposal(old)
     uncited = _proposal()
     uncited["utterance_segments"][0]["basis_refs"] = []
     with pytest.raises(ValueError, match="requires a basis_ref"):
         normalize_conversation_proposal(uncited)
 
 
-def test_schema_accepts_normalized_v2_proposal() -> None:
+def test_schema_accepts_normalized_v3_proposal() -> None:
     schema_path = (
         __import__("pathlib").Path(__file__).parents[1]
-        / "src"
-        / "sagasmith_dnd_mcp"
-        / "contracts"
-        / "npc-conversation-proposal.v2.schema.json"
+        / "src" / "sagasmith_dnd_mcp" / "contracts"
+        / "npc-conversation-proposal.v3.schema.json"
     )
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
     assert not list(Draft202012Validator(schema).iter_errors(_proposal()))
 
 
-def test_publication_drops_private_intent_and_truth_posture() -> None:
+def test_publication_drops_private_semantics() -> None:
     publication = derive_publication(
         normalize_conversation_proposal(_proposal()), publication_id="publication"
     )
-    assert publication["speech"] == "I never went to the docks."
-    assert publication["visible_cues"] == ["She avoids eye contact."]
     encoded = json.dumps(publication)
+    assert publication["speech"] == "I never went to the docks."
     assert "private_intent" not in encoded
     assert "intentional_deception" not in encoded
 
 
-def test_store_persists_actor_scoped_activation_and_incremental_inbox(tmp_path) -> None:
+def test_audience_facts_select_activation_and_redact_each_inbox(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    opened = store.open(
-        campaign_id="campaign",
-        branch_id="branch",
-        principal_id="dm",
-        scope_id="party",
-        scene_id="scene",
-        authority={"campaign_revision": 5, "latest_event_sequence": 9},
-        participants=[
-            {"actor_id": "npc", "name": "Mara", "kind": "npc"},
-            {"actor_id": "pc", "name": "Aria", "kind": "pc"},
-        ],
-        actor_contexts={"npc": _context()},
+    opened = _open(store)
+    session = store.get(opened["conversation_id"])
+    audience = _audience(
+        response=("npc",),
+        understood=("npc",),
+        perceived=("npc", "npc-2"),
     )
-    conversation_id = opened["conversation_id"]
-    session = store.require_owner(conversation_id, campaign_id="campaign", principal_id="dm")
     ingested = store.append_event(
         session,
-        event={
-            "type": "speech",
-            "speaker_actor_id": "pc",
-            "content": "I know you went to the docks.",
-            "language": "Common",
-        },
-        perceived_by=["npc"],
-        understood_by=["npc"],
-        activate_actor_ids=["npc"],
-        response_required_actor_ids={"npc"},
+        event={"type": "speech", "speaker_actor_id": "pc", "content": "Secret words."},
+        audience_facts=audience,
+        expected_revision=0,
+        idempotency_key="ingest-1",
     )
+    assert [item["actor_id"] for item in ingested["activations"]] == ["npc"]
     activation = ingested["activations"][0]
-
-    reloaded = ConversationStore(tmp_path / "conversations")
-    session = reloaded.require_owner(
-        conversation_id, campaign_id="campaign", principal_id="dm"
-    )
-    capsule = reloaded.checkout(
-        session,
-        activation_id=activation["activation_id"],
-        worker_handle=activation["worker_handle"],
+    capsule = store.checkout(
+        store.get(opened["conversation_id"]),
+        activation_ref=activation["activation_ref"],
         cursor=0,
         include_bootstrap=True,
+        expected_revision=1,
+        idempotency_key="claim-1",
     )
-    assert capsule["bootstrap"]["actor"]["id"] == "npc"
-    assert [item["content"] for item in capsule["inbox"]] == [
-        "I know you went to the docks."
-    ]
-    assert capsule["constraints"]["may_call_tools"] is False
-
-    proposal = _proposal(
-        conversation_id=conversation_id,
-        activation_id=activation["activation_id"],
-        actor_runtime_id=activation["actor_runtime_id"],
-    )
-    result = reloaded.submit(
-        session,
-        activation_id=activation["activation_id"],
-        worker_handle=activation["worker_handle"],
-        lease_id=capsule["lease_id"],
-        proposal=normalize_conversation_proposal(proposal),
-    )
-    assert result["status"] == "published"
-    assert result["publication"]["speech"] == "I never went to the docks."
-    status = reloaded.public_status(reloaded.get(conversation_id))
-    assert status["publication_count"] == 1
+    assert capsule["inbox"][0]["content"] == "Secret words."
+    event = store.get(opened["conversation_id"])["events"][0]
+    assert "Secret words." not in json.dumps(event["actor_inboxes"]["npc-2"])
+    assert event["actor_inboxes"]["npc-2"]["comprehension"] == "perceived_only"
 
 
-def test_worker_handle_cannot_checkout_another_activation(tmp_path) -> None:
+def test_submit_validation_keeps_lease_and_success_waits_for_publication(tmp_path) -> None:
     store = ConversationStore(tmp_path / "conversations")
-    opened = store.open(
-        campaign_id="campaign",
-        branch_id="branch",
-        principal_id="dm",
-        scope_id="party",
-        scene_id="scene",
-        authority={"campaign_revision": 5},
-        participants=[
-            {"actor_id": "npc", "name": "Mara", "kind": "npc"},
-            {"actor_id": "npc-2", "name": "Tomas", "kind": "npc"},
-            {"actor_id": "pc", "name": "Aria", "kind": "pc"},
-        ],
-        actor_contexts={"npc": _context(), "npc-2": _context()},
-    )
-    session = store.get(opened["conversation_id"])
+    opened = _open(store)
     ingested = store.append_event(
-        session,
-        event={"type": "speech", "speaker_actor_id": "pc", "content": "Answer me."},
-        perceived_by=["npc", "npc-2"],
-        understood_by=["npc", "npc-2"],
-        activate_actor_ids=["npc", "npc-2"],
-        response_required_actor_ids={"npc", "npc-2"},
-    )
-    first, second = ingested["activations"]
-    with pytest.raises(PermissionError, match="worker handle"):
-        store.checkout(
-            store.get(opened["conversation_id"]),
-            activation_id=second["activation_id"],
-            worker_handle=first["worker_handle"],
-            cursor=0,
-            include_bootstrap=True,
-        )
-
-
-def test_resolution_event_resumes_a_suspended_conversation(tmp_path) -> None:
-    store = ConversationStore(tmp_path / "conversations")
-    opened = store.open(
-        campaign_id="campaign",
-        branch_id="branch",
-        principal_id="dm",
-        scope_id="party",
-        scene_id="scene",
-        authority={"campaign_revision": 5},
-        participants=[
-            {"actor_id": "npc", "name": "Mara", "kind": "npc"},
-            {"actor_id": "pc", "name": "Aria", "kind": "pc"},
-        ],
-        actor_contexts={"npc": _context()},
-    )
-    session = store.get(opened["conversation_id"])
-    ingested = store.append_event(
-        session,
-        event={"type": "action", "speaker_actor_id": "pc", "content": "Grab the ledger."},
-        perceived_by=["npc", "pc"],
-        understood_by=["npc", "pc"],
-        activate_actor_ids=["npc"],
-        response_required_actor_ids={"npc"},
+        store.get(opened["conversation_id"]),
+        event={"type": "speech", "speaker_actor_id": "pc", "content": "Answer."},
+        audience_facts=_audience(),
+        expected_revision=0,
+        idempotency_key="ingest-1",
     )
     activation = ingested["activations"][0]
     capsule = store.checkout(
         store.get(opened["conversation_id"]),
-        activation_id=activation["activation_id"],
-        worker_handle=activation["worker_handle"],
-        cursor=0,
-        include_bootstrap=True,
+        activation_ref=activation["activation_ref"], cursor=0, include_bootstrap=True,
+        expected_revision=1, idempotency_key="claim-1",
     )
-    proposal = _proposal(
+    bad = _proposal(schema_version=2)
+    rejected = store.submit(
+        store.get(opened["conversation_id"]),
+        activation_ref=activation["activation_ref"], lease_id=capsule["lease_id"],
+        proposal=bad, expected_revision=2, idempotency_key="submit-bad",
+    )
+    assert rejected["status"] == "validation_failed"
+    assert rejected["lease_retained"] is True
+    good = _proposal(
         conversation_id=opened["conversation_id"],
-        activation_id=activation["activation_id"],
-        actor_runtime_id=activation["actor_runtime_id"],
-        utterance_segments=[],
-        proposed_action={
-            "kind": "other",
-            "target_ref": "actor:pc",
-            "summary": "Resist the grab.",
-        },
-        resolution_requests=[
-            {
-                "kind": "contest",
-                "reason": "Resolve possession of the ledger.",
-                "actor_ids": ["npc", "pc"],
-            }
-        ],
-        visible_cues=[],
+        activation_id=capsule["activation_id"],
+        actor_runtime_id=capsule["actor_runtime_id"],
     )
     submitted = store.submit(
         store.get(opened["conversation_id"]),
-        activation_id=activation["activation_id"],
-        worker_handle=activation["worker_handle"],
-        lease_id=capsule["lease_id"],
-        proposal=normalize_conversation_proposal(proposal),
+        activation_ref=activation["activation_ref"], lease_id=capsule["lease_id"],
+        proposal=good, expected_revision=2, idempotency_key="submit-good",
     )
-    assert submitted["status"] == "resolution_required"
-    resumed = store.append_event(
+    assert submitted["status"] == "publication_ready"
+    assert len(store.get(opened["conversation_id"])["events"]) == 1
+    publication_audience = _audience(
+        response=(), understood=("npc", "pc"), perceived=("npc", "pc")
+    )
+    publication_audience["decision_id"] = "audience-2"
+    published = store.publish(
         store.get(opened["conversation_id"]),
-        event={"type": "resolution", "content": "Mara keeps the ledger."},
-        perceived_by=["npc", "pc"],
-        understood_by=["npc", "pc"],
-        activate_actor_ids=["npc"],
-        response_required_actor_ids={"npc"},
+        publication_id=submitted["publication"]["publication_id"],
+        audience_facts=publication_audience,
+        expected_revision=3,
+        idempotency_key="publish-1",
     )
-    assert resumed["activations"]
-    assert store.get(opened["conversation_id"])["status"] == "open"
+    assert published["status"] == "published"
+    assert len(store.get(opened["conversation_id"])["events"]) == 2
+
+
+def test_every_mutation_requires_current_revision_and_replays_identically(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    opened = _open(store)
+    kwargs = {
+        "event": {"type": "speech", "speaker_actor_id": "pc", "content": "Answer."},
+        "audience_facts": _audience(),
+        "expected_revision": 0,
+        "idempotency_key": "ingest-1",
+    }
+    first = store.append_event(store.get(opened["conversation_id"]), **kwargs)
+    replay = store.append_event(store.get(opened["conversation_id"]), **kwargs)
+    assert replay == first
+    with pytest.raises(ValueError, match="REVISION_CONFLICT"):
+        store.append_event(
+            store.get(opened["conversation_id"]),
+            event={"type": "speech", "speaker_actor_id": "pc", "content": "Too late."},
+            audience_facts={**_audience(), "decision_id": "audience-2"},
+            expected_revision=0,
+            idempotency_key="ingest-2",
+        )

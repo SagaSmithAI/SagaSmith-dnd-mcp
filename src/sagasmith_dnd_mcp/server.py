@@ -8,6 +8,7 @@ import inspect
 import json
 import math
 import re
+import secrets
 import time
 import unicodedata
 from collections import Counter
@@ -475,6 +476,7 @@ from sagasmith_dnd_mcp.npc_conversations import (
     ACTIVE_CONVERSATION_STATUSES,
     NPC_CONVERSATION_CONTRACT,
     ConversationStore,
+    normalize_audience_facts,
     normalize_conversation_proposal,
 )
 from sagasmith_dnd_mcp.npc_turns import (
@@ -514,6 +516,7 @@ from sagasmith_dnd_mcp.tool_budget import (
 from sagasmith_dnd_mcp.tool_profiles import (
     CORE_TOOLS,
     GROUP_BY_ID,
+    HOST_PRIVATE_TOOLS,
     PROFILE_COMBAT,
     PROFILE_LOBBY,
     PROFILE_PLAY,
@@ -3527,6 +3530,8 @@ class SessionExposureFastMCP(FastMCP):
         session_key, _ = request
         await self._refresh(session_key)
         arguments = self._bind_configured_principal(name, arguments)
+        if name in HOST_PRIVATE_TOOLS:
+            return await super().call_tool(name, arguments)
         exposure = self.exposure_registry.active(session_key)
         if name not in CORE_TOOLS and exposure is None:
             raise ExposureError(
@@ -10989,12 +10994,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ),
             },
             "npc_conversations": {
-                "schema_version": 1,
+                "schema_version": 2,
                 "contract": NPC_CONVERSATION_CONTRACT,
                 "phase": "play",
                 "execution_mode": "client_subagents_required",
-                "proposal_contract": "npc-conversation-proposal.v2",
-                "actor_scoped_worker_handles": True,
+                "proposal_contract": "npc-conversation-proposal.v3",
+                "public_tool": "npc_conversation",
+                "public_actions": ["open", "get", "ingest", "publish", "close", "abort"],
+                "host_transport": "private_authenticated_unlisted",
+                "actor_scoped_activation_refs": True,
+                "agent_resolved_audience": True,
+                "per_actor_redacted_inbox": True,
+                "selective_response_activation": True,
+                "conversation_revision": True,
+                "write_idempotency": True,
+                "actor_local_authority_refresh": True,
+                "local_resolution_waits": True,
                 "incremental_actor_context": True,
                 "durable_semantic_journal": True,
                 "server_managed_inference": False,
@@ -29486,20 +29501,25 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError("SESSION_STALE: close or abort and open a new conversation")
         if session.get("status") not in ACTIVE_CONVERSATION_STATUSES:
             raise ValueError(f"conversation is not active: {session.get('status')}")
-        campaign = campaigns.get(str(session["campaign_id"]))
         authority = dict(session["authority"])
         reasons = []
-        if campaign.revision != int(authority["campaign_revision"]):
-            reasons.append("campaign_revision")
         current_branch_id = readable_branch(
             str(session["campaign_id"]), str(session["branch_id"]), str(session["principal_id"])
         )
         if current_branch_id != session["branch_id"]:
             reasons.append("branch_id")
-        if npc_turn_latest_event_sequence(
-            str(session["campaign_id"]), str(session["branch_id"])
-        ) != int(authority["latest_event_sequence"]):
-            reasons.append("latest_event_sequence")
+        scene = npc_turn_scene_projection(
+            modules.current_scene(
+                str(session["campaign_id"]), scope_id=str(session["scope_id"])
+            )
+        )
+        if str((scene or {}).get("scene_id") or "") != str(session.get("scene_id") or ""):
+            reasons.append("scene_id")
+        elif int((scene or {}).get("state_version") or 0) != int(
+            authority.get("scene_state_version") or 0
+        ):
+            reasons.append("scene_state_version")
+        refreshed_actor_ids: list[str] = []
         for actor_id, expected_revision in dict(authority["actor_revisions"]).items():
             try:
                 actor = characters.get(str(actor_id))
@@ -29507,7 +29527,39 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 reasons.append(f"actor:{actor_id}:missing")
                 continue
             if actor.revision != int(expected_revision):
-                reasons.append(f"actor:{actor_id}:revision")
+                runtime = session["actor_runtimes"].get(str(actor_id))
+                if runtime is None:
+                    continue
+                bundle = continuity_context(
+                    campaign_id=str(session["campaign_id"]),
+                    query="",
+                    actor_id=str(actor_id),
+                    scope_id=str(session["scope_id"]),
+                    audience="dm",
+                    purpose="npc_turn",
+                    interlocutor_actor_ids=[
+                        item for item in session["participant_ids"] if item != actor_id
+                    ],
+                    stimulus=None,
+                    branch_id=str(session["branch_id"]),
+                    principal_id=str(session["principal_id"]),
+                )
+                runtime["context"] = npc_conversation_private_context(bundle)
+                runtime["actor_runtime_id"] = (
+                    f"{session['conversation_id']}:{actor_id}:r{actor.revision}"
+                )
+                runtime["working_deltas"] = {
+                    "facts": [], "actor_knowledge": [], "commitments": []
+                }
+                runtime["working_state_revision"] += 1
+                for activation in session["activations"].values():
+                    if activation["actor_id"] == actor_id and activation["status"] in {
+                        "pending", "claimed"
+                    }:
+                        activation["status"] = "invalidated"
+                        activation["lease"] = None
+                authority["actor_revisions"][actor_id] = actor.revision
+                refreshed_actor_ids.append(str(actor_id))
         if reasons:
             session["status"] = "stale"
             session["stale_reasons"] = reasons
@@ -29516,14 +29568,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError(
                 "SESSION_STALE: authoritative state changed: " + ", ".join(reasons)
             )
-
-    def npc_conversation_participant_languages(actor: Any) -> set[str]:
-        sheet = validate_character_sheet(actor.sheet)
-        return {
-            str(item).strip().casefold()
-            for item in list(dict(sheet.get("traits") or {}).get("languages") or [])
-            if str(item).strip()
-        }
+        if refreshed_actor_ids:
+            session["authority"] = authority
+            session["refreshed_actor_ids"] = refreshed_actor_ids
+            session["updated_at_ns"] = time.time_ns()
+            npc_conversations.save(session)
 
     def npc_conversation_private_context(bundle: dict[str, Any]) -> dict[str, Any]:
         context = {
@@ -29532,7 +29581,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         context["purpose"] = "npc_conversation"
         context["constraints"] = {
             **dict(context["constraints"]),
-            "output_contract": "npc-conversation-proposal.v2",
+            "output_contract": "npc-conversation-proposal.v3",
         }
         context["delegation"] = {
             "schema_version": 1,
@@ -29543,7 +29592,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "tools_exposed": False,
             "persist_worker_session": True,
             "authoritative_result": False,
-            "output_contract": "npc-conversation-proposal.v2",
+            "output_contract": "npc-conversation-proposal.v3",
         }
         actor_id = str(dict(context["actor"])["id"])
         commitments = [
@@ -29559,10 +29608,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         context["commitments"] = commitments
         return context
 
-    @public_tool()
+    @internal_operation
     def conversation_open(
         campaign_id: str,
         participant_actor_ids: list[str],
+        idempotency_key: str,
         scope_id: str = "party",
         query: str = "",
         branch_id: str | None = None,
@@ -29571,7 +29621,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Open one Play conversation and materialize each NPC's private runtime once."""
 
         membership = access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
-        require_facade_phase(campaign_id, "conversation_open", PROFILE_PLAY)
+        require_facade_phase(campaign_id, "npc_conversation", PROFILE_PLAY)
         branch_id = require_current_branch(campaign_id, branch_id)
         actor_ids = [str(item).strip() for item in participant_actor_ids]
         if not actor_ids or any(not item for item in actor_ids):
@@ -29639,15 +29689,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 for actor in actors
             ],
             actor_contexts=actor_contexts,
+            idempotency_key=idempotency_key,
         )
         opened["role"] = membership.role
         opened["next_step"] = (
-            "Append a player-observable event with conversation_ingest, then dispatch each "
-            "returned activation to an isolated NPC worker."
+            "Call npc_conversation(action='ingest') with Agent-resolved audience_facts, "
+            "then dispatch only the returned activation_refs to npc_conversation_worker."
         )
         return opened
 
-    @public_tool()
+    @internal_operation
     def conversation_status(
         campaign_id: str,
         conversation_id: str,
@@ -29664,16 +29715,31 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         result = npc_conversations.public_status(session)
         if session.get("status") == "stale":
             result["stale_reasons"] = list(session.get("stale_reasons") or [])
+        result["activations"] = npc_conversations.list_activations(session)
+        result["pending_publications"] = [
+            {
+                key: deepcopy(value)
+                for key, value in item.items()
+                if key not in {"speaker_actor_id"}
+            }
+            for item in session["publications"]
+            if item.get("status") == "pending_audience"
+        ]
+        result["pending_resolutions"] = deepcopy(session.get("pending_resolutions") or [])
+        result["refreshed_actor_ids"] = list(session.get("refreshed_actor_ids") or [])
         return result
 
-    @public_tool()
+    @internal_operation
     def conversation_ingest(
         campaign_id: str,
         conversation_id: str,
         event: dict[str, Any],
+        audience_facts: dict[str, Any],
+        expected_conversation_revision: int,
+        idempotency_key: str,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
-        """Append one public stimulus and derive hearing, understanding, and activations."""
+        """Append one stimulus using explicit Agent-resolved audience facts."""
 
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         session = npc_conversations.require_owner(
@@ -29712,28 +29778,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         ):
             raise ValueError("declared conversation targets must be unique participants")
         language = str(raw.get("language") or "").strip()
-        delivery = str(raw.get("delivery") or "normal").strip()
-        if delivery not in {"normal", "quiet", "whisper", "shout"}:
-            raise ValueError("conversation delivery must be normal, quiet, whisper, or shout")
-        perceived_by = (
-            sorted({speaker_actor_id, *target_actor_ids})
-            if delivery == "whisper"
-            else list(session["participant_ids"])
+        delivery = str(raw.get("delivery") or "").strip()
+        audience = normalize_audience_facts(
+            audience_facts,
+            participant_ids=set(session["participant_ids"]),
+            response_actor_ids=set(session["actor_runtimes"]),
         )
-        perceived_by = [item for item in perceived_by if item]
-        understood_by = []
-        for actor_id in perceived_by:
-            actor = characters.get(actor_id)
-            languages = npc_conversation_participant_languages(actor)
-            if (
-                event_type != "speech"
-                or not language
-                or language.casefold() in languages
-                or (language.casefold() == "common" and not languages)
-            ):
-                understood_by.append(actor_id)
-        npc_ids = set(session["actor_runtimes"])
-        activate_actor_ids = sorted((set(perceived_by) & npc_ids) - {speaker_actor_id})
         result = npc_conversations.append_event(
             session,
             event={
@@ -29744,15 +29794,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "delivery": delivery,
                 "declared_target_actor_ids": target_actor_ids,
             },
-            perceived_by=perceived_by,
-            understood_by=understood_by,
-            activate_actor_ids=activate_actor_ids,
-            response_required_actor_ids=set(target_actor_ids) & npc_ids,
+            audience_facts=audience,
+            expected_revision=expected_conversation_revision,
+            idempotency_key=idempotency_key,
         )
-        result["conversation_id"] = conversation_id
         return result
 
-    @public_tool()
+    @internal_operation
     def conversation_activations(
         campaign_id: str,
         conversation_id: str,
@@ -29770,12 +29818,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "activations": npc_conversations.list_activations(session),
         }
 
-    @public_tool()
+    @internal_operation
     def npc_activation_checkout(
         campaign_id: str,
         conversation_id: str,
-        activation_id: str,
-        worker_handle: str,
+        activation_ref: str,
+        expected_conversation_revision: int,
+        idempotency_key: str,
         cursor: int = 0,
         include_bootstrap: bool = True,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
@@ -29789,20 +29838,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         npc_conversation_require_fresh(session)
         return npc_conversations.checkout(
             session,
-            activation_id=activation_id,
-            worker_handle=worker_handle,
+            activation_ref=activation_ref,
             cursor=cursor,
             include_bootstrap=include_bootstrap,
+            expected_revision=expected_conversation_revision,
+            idempotency_key=idempotency_key,
         )
 
-    @public_tool()
+    @internal_operation
     def npc_activation_submit(
         campaign_id: str,
         conversation_id: str,
-        activation_id: str,
-        worker_handle: str,
+        activation_ref: str,
         lease_id: str,
         proposal: dict[str, Any],
+        expected_conversation_revision: int,
+        idempotency_key: str,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Validate one NPC proposal and return only a server-derived publication."""
@@ -29814,10 +29865,61 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         npc_conversation_require_fresh(session)
         return npc_conversations.submit(
             session,
-            activation_id=activation_id,
-            worker_handle=worker_handle,
+            activation_ref=activation_ref,
             lease_id=lease_id,
-            proposal=normalize_conversation_proposal(proposal),
+            proposal=proposal,
+            expected_revision=expected_conversation_revision,
+            idempotency_key=idempotency_key,
+        )
+
+    @internal_operation
+    def npc_activation_cancel(
+        campaign_id: str,
+        conversation_id: str,
+        activation_ref: str,
+        lease_id: str,
+        expected_conversation_revision: int,
+        idempotency_key: str,
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+    ) -> dict[str, Any]:
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        session = npc_conversations.require_owner(
+            conversation_id, campaign_id=campaign_id, principal_id=principal_id
+        )
+        return npc_conversations.cancel_activation(
+            session,
+            activation_ref=activation_ref,
+            lease_id=lease_id,
+            expected_revision=expected_conversation_revision,
+            idempotency_key=idempotency_key,
+        )
+
+    @internal_operation
+    def conversation_publish(
+        campaign_id: str,
+        conversation_id: str,
+        publication_id: str,
+        audience_facts: dict[str, Any],
+        expected_conversation_revision: int,
+        idempotency_key: str,
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+    ) -> dict[str, Any]:
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        session = npc_conversations.require_owner(
+            conversation_id, campaign_id=campaign_id, principal_id=principal_id
+        )
+        npc_conversation_require_fresh(session)
+        audience = normalize_audience_facts(
+            audience_facts,
+            participant_ids=set(session["participant_ids"]),
+            response_actor_ids=set(session["actor_runtimes"]),
+        )
+        return npc_conversations.publish(
+            session,
+            publication_id=publication_id,
+            audience_facts=audience,
+            expected_revision=expected_conversation_revision,
+            idempotency_key=idempotency_key,
         )
 
     def npc_conversation_select_indexes(
@@ -29832,10 +29934,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             selected.append(deepcopy(values[index]))
         return selected
 
-    @public_tool()
+    @internal_operation
     def conversation_close(
         campaign_id: str,
         conversation_id: str,
+        expected_conversation_revision: int,
         accepted_working_deltas: dict[str, Any] | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
@@ -29845,13 +29948,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for conversation_close")
-        session = npc_conversations.require_owner(
+        npc_conversations.require_owner(
             conversation_id, campaign_id=campaign_id, principal_id=principal_id
         )
-        if session.get("status") == "closed":
-            if session.get("close_idempotency_key") != idempotency_key:
-                raise ValueError("conversation is already closed with another idempotency key")
-            return deepcopy(session["commit_result"])
+        session, replay = npc_conversations.begin_mutation(
+            conversation_id,
+            expected_revision=expected_conversation_revision,
+            idempotency_key=idempotency_key,
+            operation="close",
+            payload={"accepted_working_deltas": accepted_working_deltas or {}},
+        )
+        if replay is not None:
+            return replay
         npc_conversation_require_fresh(session)
         if session.get("status") != "open":
             raise ValueError("conversation must resolve suspended work before closing")
@@ -29987,6 +30095,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "transcript": transcript,
                         "retrieval_summary": "\n".join(retrieval_lines),
                         "accepted_commitments": accepted_commitments,
+                        "unresolved_resolution_requests": deepcopy(
+                            session.get("pending_resolutions") or []
+                        ),
                         "authority_at_open": deepcopy(session["authority"]),
                     },
                 },
@@ -29994,13 +30105,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "actor_knowledge": knowledge_data,
             },
             principal_id,
-            int(session["authority"]["campaign_revision"]),
+            campaigns.get(campaign_id).revision,
             idempotency_key,
         )
         session["status"] = "closed"
-        session["close_idempotency_key"] = idempotency_key
-        session["commit_result"] = deepcopy(commit)
-        session["updated_at_ns"] = time.time_ns()
         for runtime in session["actor_runtimes"].values():
             runtime["status"] = "closed"
             runtime["context"] = {}
@@ -30009,13 +30117,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "actor_knowledge": [],
                 "commitments": [],
             }
-        npc_conversations.save(session)
-        return commit
+        return npc_conversations.finish_mutation(session, commit)
 
-    @public_tool()
+    @internal_operation
     def conversation_abort(
         campaign_id: str,
         conversation_id: str,
+        expected_conversation_revision: int,
+        idempotency_key: str,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Discard an uncommitted conversation draft and every private actor capsule."""
@@ -30026,8 +30135,132 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         if session.get("status") == "closed":
             raise ValueError("a committed conversation cannot be aborted")
-        npc_conversations.delete(conversation_id)
-        return {"conversation_id": conversation_id, "status": "aborted", "recoverable": False}
+        session, replay = npc_conversations.begin_mutation(
+            conversation_id,
+            expected_revision=expected_conversation_revision,
+            idempotency_key=idempotency_key,
+            operation="abort",
+            payload={},
+        )
+        if replay is not None:
+            return replay
+        session["status"] = "aborted"
+        for runtime in session["actor_runtimes"].values():
+            runtime["context"] = {}
+            runtime["working_deltas"] = {
+                "facts": [], "actor_knowledge": [], "commitments": []
+            }
+        return npc_conversations.finish_mutation(
+            session,
+            {"conversation_id": conversation_id, "status": "aborted", "recoverable": False},
+        )
+
+    @public_tool()
+    def npc_conversation(
+        campaign_id: str,
+        action: Literal["open", "get", "ingest", "publish", "close", "abort"],
+        payload: dict[str, Any],
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+    ) -> dict[str, Any]:
+        """Run the complete public NPC conversation workflow through one facade."""
+
+        data = dict(payload or {})
+        if action == "open":
+            return conversation_open(
+                campaign_id=campaign_id,
+                participant_actor_ids=list(data["participant_actor_ids"]),
+                idempotency_key=str(data["idempotency_key"]),
+                scope_id=str(data.get("scope_id") or "party"),
+                query=str(data.get("query") or ""),
+                branch_id=data.get("branch_id"),
+                principal_id=principal_id,
+            )
+        conversation_id = str(data["conversation_id"])
+        if action == "get":
+            return conversation_status(campaign_id, conversation_id, principal_id)
+        if action == "ingest":
+            return conversation_ingest(
+                campaign_id,
+                conversation_id,
+                dict(data["event"]),
+                dict(data["audience_facts"]),
+                int(data["expected_conversation_revision"]),
+                str(data["idempotency_key"]),
+                principal_id,
+            )
+        if action == "publish":
+            return conversation_publish(
+                campaign_id,
+                conversation_id,
+                str(data["publication_id"]),
+                dict(data["audience_facts"]),
+                int(data["expected_conversation_revision"]),
+                str(data["idempotency_key"]),
+                principal_id,
+            )
+        if action == "close":
+            return conversation_close(
+                campaign_id,
+                conversation_id,
+                int(data["expected_conversation_revision"]),
+                dict(data.get("accepted_working_deltas") or {}),
+                principal_id,
+                str(data["idempotency_key"]),
+            )
+        if action == "abort":
+            return conversation_abort(
+                campaign_id,
+                conversation_id,
+                int(data["expected_conversation_revision"]),
+                str(data["idempotency_key"]),
+                principal_id,
+            )
+        raise ValueError(f"unsupported npc_conversation action: {action}")
+
+    @public_tool()
+    def npc_conversation_transport(
+        campaign_id: str,
+        conversation_id: str,
+        action: Literal["claim_activation", "submit_proposal", "cancel_activation"],
+        payload: dict[str, Any],
+        host_token: str,
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+    ) -> dict[str, Any]:
+        """Host-private activation transport; never exposed to a model tool profile."""
+
+        if not config.npc_host_token or not secrets.compare_digest(
+            host_token, config.npc_host_token
+        ):
+            raise PermissionError("NPC host transport authentication failed")
+        data = dict(payload or {})
+        common = {
+            "campaign_id": campaign_id,
+            "conversation_id": conversation_id,
+            "activation_ref": str(data["activation_ref"]),
+            "expected_conversation_revision": int(
+                data["expected_conversation_revision"]
+            ),
+            "idempotency_key": str(data["idempotency_key"]),
+            "principal_id": principal_id,
+        }
+        if action == "claim_activation":
+            return npc_activation_checkout(
+                **common,
+                cursor=int(data.get("cursor") or 0),
+                include_bootstrap=bool(data.get("include_bootstrap", True)),
+            )
+        if action == "submit_proposal":
+            return npc_activation_submit(
+                **common,
+                lease_id=str(data["lease_id"]),
+                proposal=dict(data["proposal"]),
+            )
+        if action == "cancel_activation":
+            return npc_activation_cancel(
+                **common,
+                lease_id=str(data["lease_id"]),
+            )
+        raise ValueError(f"unsupported NPC host transport action: {action}")
 
     @public_tool()
     def bounded_evaluation(

@@ -32,6 +32,7 @@ class McpConfig:
     module_ocr_model: str = "medium"
     bound_principal_id: str | None = None
     document_cache_dir: Path | None = None
+    npc_host_token: str | None = None
 
     @classmethod
     def from_environment(cls) -> "McpConfig":
@@ -119,6 +120,11 @@ class McpConfig:
             document_cache_dir=(
                 Path(raw_document_cache).expanduser().resolve()
                 if raw_document_cache
+                else None
+            ),
+            npc_host_token=(
+                value.strip()
+                if (value := os.environ.get("SAGASMITH_NPC_HOST_TOKEN", "")).strip()
                 else None
             ),
         )

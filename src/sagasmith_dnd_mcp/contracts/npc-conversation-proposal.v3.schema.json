@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sagasmith.ai/contracts/npc-conversation-proposal.v3.schema.json",
+  "title": "SagaSmith NPC Conversation Proposal v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "conversation_id", "activation_id", "actor_runtime_id", "response_bid", "private_intent", "utterance_segments", "proposed_action", "resolution_requests", "working_deltas", "visible_cues", "decision_summary"],
+  "properties": {
+    "schema_version": {"const": 3},
+    "conversation_id": {"type": "string", "minLength": 1, "maxLength": 100},
+    "activation_id": {"type": "string", "minLength": 1, "maxLength": 100},
+    "actor_runtime_id": {"type": "string", "minLength": 1, "maxLength": 220},
+    "response_bid": {
+      "type": "object", "additionalProperties": false,
+      "required": ["should_respond", "urgency", "reason"],
+      "properties": {
+        "should_respond": {"type": "boolean"},
+        "urgency": {"type": "integer", "minimum": 0, "maximum": 100},
+        "reason": {"type": "string", "maxLength": 500}
+      }
+    },
+    "private_intent": {"type": "string", "maxLength": 1000},
+    "utterance_segments": {
+      "type": "array", "maxItems": 12,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["text", "speech_act", "truth_posture", "basis_refs", "targets", "language", "delivery"],
+        "properties": {
+          "text": {"type": "string", "minLength": 1, "maxLength": 2000},
+          "speech_act": {"type": "string", "minLength": 1, "maxLength": 40},
+          "truth_posture": {"enum": ["believes_true", "uncertain", "intentional_deception", "opinion", "nonfactual"]},
+          "basis_refs": {"type": "array", "uniqueItems": true, "items": {"type": "string", "maxLength": 300}},
+          "targets": {"type": "array", "uniqueItems": true, "items": {"type": "string", "maxLength": 200}},
+          "language": {"type": "string", "maxLength": 100},
+          "delivery": {"type": "string", "maxLength": 500}
+        }
+      }
+    },
+    "proposed_action": {
+      "type": "object", "additionalProperties": false,
+      "required": ["summary", "target_refs", "settlement", "mechanic_hint"],
+      "properties": {
+        "summary": {"type": "string", "maxLength": 1000},
+        "target_refs": {"type": "array", "uniqueItems": true, "items": {"type": "string", "maxLength": 300}},
+        "settlement": {"enum": ["narrative", "mechanical"]},
+        "mechanic_hint": {"type": "string", "maxLength": 500}
+      }
+    },
+    "resolution_requests": {
+      "type": "array", "maxItems": 8,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["kind", "reason", "actor_ids"],
+        "properties": {
+          "kind": {"enum": ["ability_check", "contest", "saving_throw", "attack", "dm_adjudication"]},
+          "reason": {"type": "string", "minLength": 1, "maxLength": 1000},
+          "actor_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string", "maxLength": 200}}
+        }
+      }
+    },
+    "working_deltas": {
+      "type": "object", "additionalProperties": false,
+      "required": ["facts", "actor_knowledge", "commitments"],
+      "properties": {
+        "facts": {"type": "array", "maxItems": 20, "items": {"type": "object"}},
+        "actor_knowledge": {"type": "array", "maxItems": 20, "items": {"type": "object"}},
+        "commitments": {"type": "array", "maxItems": 20, "items": {"type": "object"}}
+      }
+    },
+    "visible_cues": {"type": "array", "uniqueItems": true, "items": {"type": "string", "maxLength": 500}},
+    "decision_summary": {"type": "string", "maxLength": 500}
+  }
+}
