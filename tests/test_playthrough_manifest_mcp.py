@@ -150,6 +150,28 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
                     "idempotency_key": "invalid-manifest-chunk",
                 },
             )
+        portable_chunk_manifest = deepcopy(manifest)
+        portable_chunk_manifest["source_refs"][0]["chunk_id"] = (
+            "campaign/scene/opening/chunk/0-portable-key"
+        )
+        with pytest.raises(
+            Exception,
+            match=(
+                "source_refs\\[0\\]: source_ref chunk_id is not an active runtime "
+                "chunk; after Pack activation call module_search"
+            ),
+        ):
+            await _call(
+                server,
+                "playthrough_manifest",
+                {
+                    "campaign_id": campaign_id,
+                    "action": "initialize",
+                    "payload": {"manifest": portable_chunk_manifest},
+                    "expected_revision": current["revision"],
+                    "idempotency_key": "portable-manifest-chunk",
+                },
+            )
         invalid_asset_manifest = deepcopy(manifest)
         invalid_asset_manifest["source_refs"][0]["asset_sha256"] = "0" * 64
         with pytest.raises(Exception, match="source asset"):

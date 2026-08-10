@@ -3063,7 +3063,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 not isinstance(item, str) or not item.strip() for item in heading_path
             ):
                 raise ValueError("source_ref heading_path must be a string list")
-        expanded = modules.expand(str(source["chunk_id"]))
+        try:
+            expanded = modules.expand(str(source["chunk_id"]))
+        except (LookupError, NoResultFound) as error:
+            raise LookupError(
+                "source_ref chunk_id is not an active runtime chunk; after Pack "
+                "activation call module_search and copy the exact source_ref from "
+                "module_expand"
+            ) from error
         if str(expanded.get("campaign_id")) != campaign_id:
             raise ValueError("source_ref chunk does not belong to the campaign")
         if str(dict(expanded.get("module") or {}).get("id")) != str(source["module_id"]):
