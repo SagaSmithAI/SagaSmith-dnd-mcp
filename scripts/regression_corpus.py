@@ -312,6 +312,9 @@ def _declared_records(
     path: Path, workspace: Path
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     manifest = _load_json(path)
+    edition = str(manifest.get("edition") or "").strip()
+    if not edition:
+        raise ValueError(f"declared corpus is missing edition: {path}")
     root = workspace / "reference" / "DnD-Books" / "5e" / "Campaign"
     records: list[dict[str, Any]] = []
     units: list[dict[str, Any]] = []
@@ -335,6 +338,7 @@ def _declared_records(
                 ),
                 "campaign_line_id": str(line["id"]),
                 "title": str(line["title"]),
+                "edition": edition,
                 "exists": source.is_file(),
             }
             if source.is_file():
@@ -348,6 +352,7 @@ def _declared_records(
                 "module_sha256": [item["sha256"] for item in module_records],
                 "module_paths": [item["path"] for item in module_records],
                 "status": "runnable",
+                "edition": edition,
                 "evidence": ["declared_corpus"],
             }
         )
@@ -408,6 +413,7 @@ def _pack_record(path: Path, workspace: Path) -> dict[str, Any]:
     readiness = dict(descriptor.get("readiness") or {})
     metadata = dict(descriptor.get("metadata") or {})
     manifest = dict(descriptor.get("manifest") or {})
+    compatibility = dict(manifest.get("compatibility") or {})
     finalization = metadata.get("agent_finalization")
     record.update(
         {
@@ -420,6 +426,7 @@ def _pack_record(path: Path, workspace: Path) -> dict[str, Any]:
                 dict(manifest.get("content_summary") or {}).get("endings") or 0
             ),
             "classification": manifest.get("classification"),
+            "editions": list(compatibility.get("editions") or []),
         }
     )
     if not record["readiness_complete"] or not record["agent_finalized"]:
@@ -497,6 +504,7 @@ def _raw_records(
                     "size": path.stat().st_size,
                     "classification": decision.get("classification", "unreviewed"),
                     "system_id": decision.get("system_id"),
+                    "edition": decision.get("edition"),
                     "disposition": decision.get("disposition", "pending"),
                     "reason_code": decision.get("reason_code", "unreviewed_source_candidate"),
                     "campaign_line_id": decision.get("campaign_line_id"),
@@ -676,6 +684,7 @@ async def build_report(args: argparse.Namespace) -> dict[str, Any]:
                 "module_sha256": [record["sha256"]],
                 "module_paths": [record["path"]],
                 "status": record["disposition"],
+                "edition": record.get("edition"),
                 "evidence": ["raw_source_decision"],
             }
             units.append(unit)

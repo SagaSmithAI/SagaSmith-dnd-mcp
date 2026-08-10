@@ -428,6 +428,42 @@ def test_preparation_requires_finalize_import_activate_order() -> None:
     ] is True
 
 
+def test_preparation_requires_explicit_source_matching_campaign_edition() -> None:
+    route = {"scenarios": []}
+    shared = [
+        _call("skill_query"),
+        _call("exposure", arguments={"action": "open"}),
+        *_player_grants(),
+        _ready_manifest_call(),
+    ]
+    omitted = [*shared, _call("campaign_create", arguments={"name": "campaign"})]
+    wrong = [
+        *shared,
+        _call("campaign_create", arguments={"name": "campaign", "edition": "2024"}),
+    ]
+    matching = [
+        *shared,
+        _call("campaign_create", arguments={"name": "campaign", "edition": "2014"}),
+    ]
+
+    for calls in (omitted, wrong):
+        audit = _coverage_audit(
+            route,
+            calls,
+            process_count=1,
+            list_changed_count=1,
+            expected_edition="2014",
+        )
+        assert "preparation:campaign_edition_unverified_or_mismatch" in audit["gaps"]
+    assert "preparation:campaign_edition_unverified_or_mismatch" not in _coverage_audit(
+        route,
+        matching,
+        process_count=1,
+        list_changed_count=1,
+        expected_edition="2014",
+    )["gaps"]
+
+
 def test_combat_coverage_requires_a_non_party_participant() -> None:
     route = {
         "scenarios": [
@@ -571,6 +607,7 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
         unit={
             "module_paths": ["reference/module.pdf"],
             "module_sha256": ["c" * 64],
+            "edition": "2014",
         },
         route=route,
         player_principal="player",
@@ -588,6 +625,7 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "A prefix-only asset read is not proof" in prompt
     assert "never a campaign UUID" in prompt
     assert "Open exposure without a campaign" in prompt
+    assert 'explicit `edition="2014"`' in prompt
     assert '"decision"' not in prompt
     assert '"outcome"' not in prompt
 

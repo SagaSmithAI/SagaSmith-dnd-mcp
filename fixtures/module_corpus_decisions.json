@@ -420,6 +420,7 @@
     "7068355b6f9b07926557ce7dc8c8fb6e598458a5d025156907b9ac70d789640b": {
       "classification": "adventure_module",
       "system_id": "dnd5e",
+      "edition": "2014",
       "disposition": "runnable_installed_pack_required",
       "reason_code": "active_install_missing_reproducible_finalized_pack",
       "campaign_line_id": "descent-into-avernus-zh",

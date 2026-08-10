@@ -92,6 +92,7 @@ def test_declared_campaign_lines_are_data_driven(tmp_path: Path) -> None:
     checksum = hashlib.sha256(source.read_bytes()).hexdigest()
     manifest = {
         "schema_version": 1,
+        "edition": "2014",
         "campaign_lines": [
             {
                 "id": "new-adventure",
@@ -116,6 +117,7 @@ def test_declared_campaign_lines_are_data_driven(tmp_path: Path) -> None:
 
     assert [unit["id"] for unit in units] == ["new-adventure"]
     assert units[0]["module_sha256"] == [checksum]
+    assert units[0]["edition"] == "2014"
     assert records[0]["checksum_valid"] is True
     assert records[0]["disposition"] == "runnable"
 
@@ -134,6 +136,7 @@ def test_unknown_raw_source_is_reported_pending(tmp_path: Path) -> None:
             "size": source.stat().st_size,
             "classification": "unreviewed",
             "system_id": None,
+            "edition": None,
             "disposition": "pending",
             "reason_code": "unreviewed_source_candidate",
             "campaign_line_id": None,
