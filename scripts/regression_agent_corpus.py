@@ -727,7 +727,10 @@ When the current gaps include `preparation`, do not initialize the playthrough
 manifest or enter Play: read the finalized draft artifact, complete a successful
 `content_pack(import, kind="module")`, and activate only the new module id
 returned by that import. A prior activation without a successful Pack import
-does not satisfy preparation.
+does not satisfy preparation. Here `preparation` means a scenario gap ending in
+`:preparation`; the separate
+`preparation:player_membership_or_actor_grant_missing` gap requires only the
+missing campaign/actor grants and never authorizes rebuilding the Pack or party.
 After every exposure open, seeing only core tools is expected, not a blocker:
 search and set the next required native tool. A cycle that only lists state or
 opens exposure has made no progress. Unless a true external boundary is reached,
