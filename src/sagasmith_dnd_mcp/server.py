@@ -29634,7 +29634,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         }
 
     @internal_operation
-    def conversation_open(
+    def npc_conversation_open_impl(
         campaign_id: str,
         participant_actor_ids: list[str],
         idempotency_key: str,
@@ -29728,7 +29728,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return opened
 
     @internal_operation
-    def conversation_status(
+    def npc_conversation_status_impl(
         campaign_id: str,
         conversation_id: str,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
@@ -29760,7 +29760,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return result
 
     @internal_operation
-    def conversation_ingest(
+    def npc_conversation_ingest_impl(
         campaign_id: str,
         conversation_id: str,
         event: dict[str, Any],
@@ -29831,25 +29831,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return result
 
     @internal_operation
-    def conversation_activations(
-        campaign_id: str,
-        conversation_id: str,
-        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
-    ) -> dict[str, Any]:
-        """List pending actor-scoped work without exposing private character context."""
-
-        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
-        session = npc_conversations.require_owner(
-            conversation_id, campaign_id=campaign_id, principal_id=principal_id
-        )
-        npc_conversation_require_fresh(session)
-        return {
-            "conversation_id": conversation_id,
-            "activations": npc_conversations.list_activations(session),
-        }
-
-    @internal_operation
-    def npc_activation_checkout(
+    def npc_activation_claim_impl(
         campaign_id: str,
         conversation_id: str,
         activation_ref: str,
@@ -29876,7 +29858,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @internal_operation
-    def npc_activation_submit(
+    def npc_proposal_submit_impl(
         campaign_id: str,
         conversation_id: str,
         activation_ref: str,
@@ -29903,7 +29885,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @internal_operation
-    def npc_activation_cancel(
+    def npc_activation_cancel_impl(
         campaign_id: str,
         conversation_id: str,
         activation_ref: str,
@@ -29925,7 +29907,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @internal_operation
-    def conversation_publish(
+    def npc_conversation_publish_impl(
         campaign_id: str,
         conversation_id: str,
         publication_id: str,
@@ -29975,7 +29957,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return selected
 
     @internal_operation
-    def conversation_close(
+    def npc_conversation_close_impl(
         campaign_id: str,
         conversation_id: str,
         expected_conversation_revision: int,
@@ -29987,7 +29969,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if not idempotency_key:
-            raise ValueError("idempotency_key is required for conversation_close")
+            raise ValueError("idempotency_key is required for npc_conversation(close)")
         owned = npc_conversations.require_owner(
             conversation_id, campaign_id=campaign_id, principal_id=principal_id
         )
@@ -30178,7 +30160,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return npc_conversations.finish_mutation(session, commit)
 
     @internal_operation
-    def conversation_abort(
+    def npc_conversation_abort_impl(
         campaign_id: str,
         conversation_id: str,
         expected_conversation_revision: int,
@@ -30222,7 +30204,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
         data = dict(payload or {})
         if action == "open":
-            return conversation_open(
+            return npc_conversation_open_impl(
                 campaign_id=campaign_id,
                 participant_actor_ids=list(data["participant_actor_ids"]),
                 idempotency_key=str(data["idempotency_key"]),
@@ -30233,9 +30215,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         conversation_id = str(data["conversation_id"])
         if action == "get":
-            return conversation_status(campaign_id, conversation_id, principal_id)
+            return npc_conversation_status_impl(campaign_id, conversation_id, principal_id)
         if action == "ingest":
-            return conversation_ingest(
+            return npc_conversation_ingest_impl(
                 campaign_id,
                 conversation_id,
                 dict(data["event"]),
@@ -30245,7 +30227,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 principal_id,
             )
         if action == "publish":
-            return conversation_publish(
+            return npc_conversation_publish_impl(
                 campaign_id,
                 conversation_id,
                 str(data["publication_id"]),
@@ -30256,7 +30238,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 principal_id,
             )
         if action == "close":
-            return conversation_close(
+            return npc_conversation_close_impl(
                 campaign_id,
                 conversation_id,
                 int(data["expected_conversation_revision"]),
@@ -30265,7 +30247,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 str(data["idempotency_key"]),
             )
         if action == "abort":
-            return conversation_abort(
+            return npc_conversation_abort_impl(
                 campaign_id,
                 conversation_id,
                 int(data["expected_conversation_revision"]),
@@ -30299,19 +30281,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "principal_id": principal_id,
         }
         if action == "claim_activation":
-            return npc_activation_checkout(
+            return npc_activation_claim_impl(
                 **common,
                 cursor=int(data.get("cursor") or 0),
                 include_bootstrap=bool(data.get("include_bootstrap", True)),
             )
         if action == "submit_proposal":
-            return npc_activation_submit(
+            return npc_proposal_submit_impl(
                 **common,
                 lease_id=str(data["lease_id"]),
                 proposal=dict(data["proposal"]),
             )
         if action == "cancel_activation":
-            return npc_activation_cancel(
+            return npc_activation_cancel_impl(
                 **common,
                 lease_id=str(data["lease_id"]),
             )
