@@ -324,12 +324,18 @@ def test_coverage_requires_real_ordered_boundaries_retries_and_recovery() -> Non
         _call("npc_conversation", arguments={"action": "open"}),
         _call("combat_start", ok=False),
         _call("npc_conversation", arguments={"action": "close"}),
-        _call("combat_start", arguments={"positioning_mode": "agent"}),
+        _call(
+            "combat_start",
+            arguments={"positioning_mode": "agent", "participant_ids": ["pc-1", "enemy-1"]},
+        ),
         _call("combat_end"),
         _call("chase", arguments={"action": "start"}),
         _call("combat_start", ok=False),
         _call("chase", arguments={"action": "end"}),
-        _call("combat_start", arguments={"positioning_mode": "agent"}),
+        _call(
+            "combat_start",
+            arguments={"positioning_mode": "agent", "participant_ids": ["pc-1", "enemy-1"]},
+        ),
         _call("combat_query", arguments={"view": "render"}),
         _call("combat_end"),
         _call("campaign_event", arguments=retry),
@@ -405,6 +411,32 @@ def test_preparation_requires_finalize_import_activate_order() -> None:
     assert _coverage_audit(route, complete, process_count=1, list_changed_count=1)[
         "complete"
     ] is True
+
+
+def test_combat_coverage_requires_a_non_party_participant() -> None:
+    route = {
+        "scenarios": [
+            {"id": "fight", "mechanisms": ["combat", "combat_render"], "positioning_mode": "grid"}
+        ]
+    }
+    calls = [
+        _call("skill_query"),
+        _call("exposure", arguments={"action": "open"}),
+        *_player_grants(),
+        _ready_manifest_call(),
+        _call(
+            "combat_start",
+            arguments={"positioning_mode": "grid", "participant_ids": ["pc-1"]},
+        ),
+        _call("combat_query", arguments={"view": "render"}),
+        _call("combat_end"),
+    ]
+
+    audit = _coverage_audit(route, calls, process_count=1, list_changed_count=1)
+
+    assert "fight:combat" in audit["gaps"]
+    assert "fight:combat_render" in audit["gaps"]
+    assert "fight:positioning_mode:grid" in audit["gaps"]
 
 
 def test_phase_transition_rejects_exposure_reopen_as_refresh() -> None:

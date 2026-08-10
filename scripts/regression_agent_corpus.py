@@ -464,6 +464,47 @@ def _manifest_party_ready(calls: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _manifest_party_ids(calls: list[dict[str, Any]]) -> set[str]:
+    for call in reversed(calls):
+        if call.get("tool") != "playthrough_manifest" or not call.get("ok"):
+            continue
+        for node in _walk(call.get("result")):
+            if not isinstance(node, dict) or not isinstance(node.get("manifest"), dict):
+                continue
+            members = (node["manifest"].get("party") or {}).get("members") or []
+            return {
+                str(member.get("actor_id"))
+                for member in members
+                if isinstance(member, dict) and member.get("actor_id")
+            }
+    return set()
+
+
+def _source_combat_sequence(
+    calls: list[dict[str, Any]], *, mode: str | None = None, require_render: bool = False
+) -> bool:
+    party_ids = _manifest_party_ids(calls)
+    if not party_ids:
+        return False
+    for index, call in enumerate(calls):
+        arguments = call.get("arguments") or {}
+        participants = {str(item) for item in arguments.get("participant_ids") or []}
+        if (
+            not call.get("ok")
+            or call.get("tool") != "combat_start"
+            or (mode is not None and arguments.get("positioning_mode") != mode)
+            or not (participants & party_ids)
+            or not (participants - party_ids)
+        ):
+            continue
+        later = calls[index + 1 :]
+        if require_render and not _call_matches(later, "combat_query", action="render"):
+            continue
+        if _call_matches(later, "combat_end"):
+            return True
+    return False
+
+
 def _mechanism_covered(mechanism: str, calls: list[dict[str, Any]]) -> bool:
     if mechanism == "preparation":
         return _ordered_success(
@@ -487,6 +528,10 @@ def _mechanism_covered(mechanism: str, calls: list[dict[str, Any]]) -> bool:
                 ("npc_conversation", "open"),
             ],
         )
+    if mechanism == "combat":
+        return _source_combat_sequence(calls)
+    if mechanism == "combat_render":
+        return _source_combat_sequence(calls, require_render=True)
     if mechanism == "conversation_to_combat":
         return _ordered_pattern(
             calls,
@@ -513,8 +558,6 @@ def _mechanism_covered(mechanism: str, calls: list[dict[str, Any]]) -> bool:
         "npc_conversation": (("npc_conversation", None),),
         "resource_settlement": (("campaign_change", None), ("character_action", None)),
         "chase": (("chase", None),),
-        "combat": (("combat_start", None), ("combat_end", None)),
-        "combat_render": (("combat_query", "render"),),
         "ending": (("playthrough_manifest", "verify_ending"),),
         "save_restore": (("snapshot_restore", None),),
         "phase_exposure_refresh": (("exposure", "search"), ("exposure", "set")),
@@ -541,7 +584,7 @@ def _coverage_audit(
         if (
             "combat" in mechanisms
             and mode in {"grid", "agent"}
-            and not _call_matches(calls, "combat_start", argument=("positioning_mode", mode))
+            and not _source_combat_sequence(calls, mode=mode)
         ):
             scenario_gaps.append(f"positioning_mode:{mode}")
         audience = scenario.get("audience")
