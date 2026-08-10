@@ -234,8 +234,8 @@ async def _attach_asset(
         "module_draft",
         {
             "campaign_id": campaign_id,
-            "action": "attach_asset",
-            "payload": payload,
+            "action": "edit",
+            "payload": {"operation": "asset", **payload},
             "idempotency_key": f"full-campaign-attach-{identity}",
         },
     )

@@ -61,6 +61,12 @@ def test_exposure_domain_preserves_random_stream_receipt() -> None:
     }
 
 
+def test_exposure_domain_accepts_current_direct_structured_result() -> None:
+    campaign = {"id": "campaign-1", "revision": 1, "name": "Fresh campaign"}
+
+    assert _domain_value(campaign) == campaign
+
+
 def test_module_stage_identity_changes_with_source_or_normalizer() -> None:
     common = {
         "run_id": "run-1",

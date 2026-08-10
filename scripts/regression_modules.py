@@ -95,7 +95,19 @@ def _facade_value(payload: Any) -> Any:
 
 
 def _domain_value(wrapped: dict[str, Any]) -> Any:
-    value = _facade_value(wrapped["result"])
+    inner = wrapped.get("result")
+    if isinstance(inner, dict) and (
+        "action" in inner
+        or "view" in inner
+        or "host_context_binding" in inner
+        or set(inner) == {"result"}
+    ):
+        # Older MCP SDKs wrapped the facade document one extra time.
+        value = _facade_value(inner)
+    else:
+        # Current structuredContent is already the authoritative facade or
+        # domain result and must not be indexed through a synthetic envelope.
+        value = _facade_value(wrapped)
     receipt = wrapped.get("random_stream_receipt")
     if isinstance(value, dict) and isinstance(receipt, dict):
         value = {**value, "random_stream_receipt": deepcopy(receipt)}
@@ -374,20 +386,9 @@ async def _import_document(
         },
     )
     stage_seconds = perf_counter() - stage_started
-    job_id = str(staged["job"]["id"])
-
-    inspect_started = perf_counter()
-    inspected = await client.domain(
-        "module_draft",
-        {
-            "campaign_id": campaign_id,
-            "action": "get",
-            "payload": {"job_id": job_id},
-            "idempotency_key": f"module-corpus-inspect-{identity}",
-        },
-    )
-    inspect_seconds = perf_counter() - inspect_started
-    preview = dict(inspected["preview"])
+    job = dict(staged["job"])
+    job_id = str(job["id"])
+    preview = dict(staged["inspection"])
     warnings = list(preview.get("warnings") or [])
     audit = _preview_audit(preview)
     if args.fail_on_warning and warnings:
@@ -395,48 +396,13 @@ async def _import_document(
     if not preview.get("valid"):
         raise RuntimeError("; ".join(preview.get("errors") or ["module preview is invalid"]))
 
-    validated = await client.domain(
-        "module_draft",
-        {
-            "campaign_id": campaign_id,
-            "action": "edit", "payload": {"operation": "advance","job_id": job_id},
-            "idempotency_key": f"module-corpus-validate-{identity}",
-        },
-    )
-    if not validated["validation"]["valid"]:
+    validation = dict(staged["validation"])
+    if not validation.get("valid"):
         raise RuntimeError("module validation rejected the inspected preview")
-
-    ingest_started = perf_counter()
-    ingested = await client.domain(
-        "module_draft",
-        {
-            "campaign_id": campaign_id,
-            "action": "edit", "payload": {"operation": "advance","job_id": job_id},
-            "idempotency_key": f"module-corpus-ingest-{identity}",
-        },
-    )
-    ingest_seconds = perf_counter() - ingest_started
-    campaign = _facade_value(
-        await client.core(
-            "campaign_query",
-            {
-                "view": "get",
-                "payload": {"campaign_id": campaign_id},
-                "principal_id": PRINCIPAL_ID,
-            },
-        )
-    )
-    activated = await client.domain(
-        "module_draft",
-        {
-            "campaign_id": campaign_id,
-            "action": "get",
-            "payload": {"job_id": job_id},
-            "expected_revision": campaign["revision"],
-            "idempotency_key": f"module-corpus-activate-{identity}",
-        },
-    )
-    module_id = str(activated["activation"]["module_id"])
+    module_id = str(staged.get("module_id") or "")
+    if not module_id or job.get("state") != "imported":
+        raise RuntimeError("module draft did not complete its mechanical import")
+    ingested = dict(job.get("result") or {})
     module_index = await client.domain(
         "module_query",
         {"campaign_id": campaign_id, "view": "index", "payload": {"module_id": module_id}},
@@ -469,8 +435,8 @@ async def _import_document(
         "campaign_id": campaign_id,
         "module_id": module_id,
         "job_id": job_id,
-        "checksum": staged.get("checksum"),
-        "artifact": staged.get("artifact"),
+        "checksum": source_checksum,
+        "artifact": job.get("artifact"),
         "page_count": preview.get("page_count"),
         "warnings": warnings,
         "metadata": preview.get("metadata"),
@@ -498,8 +464,8 @@ async def _import_document(
         },
         "seconds": round(perf_counter() - started, 3),
         "stage_seconds": round(stage_seconds, 3),
-        "inspect_seconds": round(inspect_seconds, 3),
-        "ingest_seconds": round(ingest_seconds, 3),
+        "inspect_seconds": None,
+        "ingest_seconds": None,
     }
 
 
