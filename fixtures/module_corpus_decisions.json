@@ -320,7 +320,7 @@
           "chapter_or_scene": "Chapter 5: Cradle of the Death God",
           "evidence_id": "encounter",
           "mechanisms": ["resource_settlement", "conversation_to_combat", "combat", "combat_render"],
-          "positioning_mode": "grid",
+          "positioning_mode": "agent",
           "audience": "player",
           "path": "normal"
         },
