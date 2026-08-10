@@ -167,6 +167,17 @@ def test_bundled_rule_seed_reports_complete_multilingual_corpus(tmp_path: Path) 
                 "idempotency_key": "bundled-search-campaign",
             },
         )
+        _, filtered = await server.call_tool(
+            "rule_seed_status",
+            {
+                "campaign_id": campaign["id"],
+                "query": "10-monsters",
+                "limit": 5,
+            },
+        )
+        assert filtered["edition"] == "2014"
+        assert filtered["source_count"] == 1
+        assert filtered["sources"][0]["source_key"] == "bundled:srd2014:en:10-monsters"
 
         _, response = await server.call_tool(
             "rule_search",

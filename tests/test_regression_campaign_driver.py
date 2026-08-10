@@ -439,14 +439,14 @@ class _RuleStatblockClient:
                     }
                 }
             raise AssertionError(arguments)
-        if tool_id == "content_pack":
-            if arguments["action"] == "list":
-                assert arguments["payload"] == {
-                    "kind": "source",
-                    "system_id": "dnd5e",
-                    "edition": "2014",
-                }
-                return [
+        if tool_id == "rule_seed_status":
+            assert arguments == {
+                "campaign_id": "campaign-1",
+                "edition": "2014",
+                "limit": 200,
+            }
+            return {
+                "sources": [
                     {
                         "id": "source-1",
                         "system_id": "dnd5e",
@@ -454,13 +454,17 @@ class _RuleStatblockClient:
                         "title": "Commoner",
                     }
                 ]
-            assert arguments["action"] == "get"
+            }
+        if tool_id == "rule_search":
             return [
                 {
                     "id": "kenku-chunk",
                     "content": "KENKU\nMedium humanoid (kenku), chaotic neutral",
-                    "page_start": 195,
-                    "page_end": 195,
+                    "metadata": {
+                        "ordinal": 12,
+                        "page_start": 195,
+                        "page_end": 195,
+                    },
                 }
             ]
         if tool_id == "character_query":
@@ -921,14 +925,14 @@ def test_prepare_rule_statblock_discovers_chunks_by_source_page_and_text(
     query_call = next(
         arguments
         for scope, tool_id, arguments in client.calls
-        if scope == "domain" and tool_id == "content_pack"
+        if scope == "domain" and tool_id == "rule_search"
     )
-    assert query_call["payload"] == {
-        "kind": "source",
-        "source_id": "source-1",
+    assert query_call == {
+        "campaign_id": "campaign-1",
         "query": "Kenku",
+        "source_ids": ["source-1"],
         "page": 195,
-        "limit": 200,
+        "top_k": 200,
     }
     create_call = next(
         arguments
@@ -952,18 +956,24 @@ def test_discover_rule_chunks_returns_boundaries_without_creating_an_actor(
     report = asyncio.run(_discover_rule_chunks(args))
 
     assert report["query"] == {
-        "kind": "source",
-        "source_id": "source-1",
+        "campaign_id": "campaign-1",
         "query": "Kenku",
+        "source_ids": ["source-1"],
         "page": 195,
-        "limit": 200,
+        "top_k": 200,
     }
     assert report["chunks"] == [
         {
             "id": "kenku-chunk",
             "content": "KENKU\nMedium humanoid (kenku), chaotic neutral",
+            "ordinal": 12,
             "page_start": 195,
             "page_end": 195,
+            "metadata": {
+                "ordinal": 12,
+                "page_start": 195,
+                "page_end": 195,
+            },
         }
     ]
     assert not any(
@@ -1002,9 +1012,8 @@ def test_discover_rule_sources_uses_public_lobby_query(
     assert report["selected_import_job"] is None
     assert any(
         scope == "domain"
-        and tool_id == "content_pack"
-        and arguments["action"] == "list"
-        and arguments["payload"]["kind"] == "source"
+        and tool_id == "rule_seed_status"
+        and arguments["campaign_id"] == "campaign-1"
         for scope, tool_id, arguments in client.calls
     )
 

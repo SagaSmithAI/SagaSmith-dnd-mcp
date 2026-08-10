@@ -10619,10 +10619,47 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return {"status": "ok", "database": storage.database.url}
 
     @public_tool()
-    def rule_seed_status() -> dict[str, Any]:
-        """Return whether the bundled SRD corpus is indexed."""
+    def rule_seed_status(
+        campaign_id: str | None = None,
+        edition: str | None = None,
+        query: str = "",
+        limit: int = 100,
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+    ) -> dict[str, Any]:
+        """Return a bounded inventory of indexed D&D rule sources."""
+
+        if campaign_id is not None:
+            access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+            campaign_edition = campaign_rules_edition(campaign_id)
+            if edition is not None and normalize_dnd_edition(edition) != campaign_edition:
+                raise ValueError("edition does not match the campaign rule profile")
+            edition = campaign_edition
+        elif edition is not None:
+            edition = normalize_dnd_edition(edition)
+        if not 1 <= limit <= 200:
+            raise ValueError("limit must be between 1 and 200")
+        normalized_query = str(query or "").strip().casefold()
+        sources = rules.sources(system_id=DND5E.id, edition=edition)
+        if normalized_query:
+            sources = [
+                item
+                for item in sources
+                if normalized_query
+                in " ".join(
+                    str(item.get(field) or "")
+                    for field in (
+                        "title",
+                        "source_key",
+                        "publication_id",
+                        "authority",
+                    )
+                ).casefold()
+            ]
         return {
-            "sources": rules.sources(system_id=DND5E.id),
+            "sources": sources[:limit],
+            "source_count": len(sources),
+            "edition": edition,
+            "query": str(query or "").strip(),
             "auto_seed": config.auto_seed_rules,
             "coverage": bundled_rule_seed_status(),
         }
@@ -30907,11 +30944,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         publications: list[str] | None = None,
         source_ids: list[str] | None = None,
         source_keys: list[str] | None = None,
+        page: int | None = None,
         top_k: int = 8,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> list[dict[str, Any]]:
         """Search only rules visible to the current campaign ruleset."""
         access.require_campaign(campaign_id, principal_id)
+        if not str(query or "").strip():
+            raise ValueError("rule_search query is required")
+        if not 1 <= top_k <= 200:
+            raise ValueError("rule_search top_k must be between 1 and 200")
+        if page is not None and page < 1:
+            raise ValueError("rule_search page must be positive")
         allowed_source_ids = campaign_rule_source_ids(campaign_id)
         if source_ids is not None:
             requested = {str(item) for item in source_ids}
@@ -30936,7 +30980,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             embedder=embedder,
             vector_store=vectors,
         )
-        return [asdict(hit) for hit in hits]
+        values = [asdict(hit) for hit in hits]
+        if page is not None:
+            values = [
+                item
+                for item in values
+                if int(dict(item.get("metadata") or {}).get("page_start") or 0) <= page
+                <= int(dict(item.get("metadata") or {}).get("page_end") or 0)
+            ]
+        return values
 
     @public_tool()
     def rule_expand(
@@ -42897,8 +42949,9 @@ boundary.
                 raise ValueError(
                     "payload.source_id must identify an indexed rule source; "
                     "module ids are not rule source ids. Discover rule sources with "
-                    "content_pack(action='list', payload={kind:'source', system_id:'dnd5e', "
-                    "edition:<campaign edition>}) before using mode='statblock'."
+                    "rule_search(campaign_id=<campaign id>, query=<exact creature>) or "
+                    "rule_seed_status(campaign_id=<campaign id>, query=<source title>) "
+                    "before using mode='statblock'."
                 ) from error
             if str(source.get("system_id") or "") != DND5E.id:
                 raise ValueError("statblock source must belong to the dnd5e rule corpus")

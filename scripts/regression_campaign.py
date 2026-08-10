@@ -3287,21 +3287,24 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                     page_chunks = list(
                         _facade_value(
                             await client.domain(
-                                "content_pack",
+                                "rule_search",
                                 {
-                                    "action": "get",
-                                    "payload": {
-                                        "kind": "source",
-                                        "source_id": source_id,
-                                        "query": "",
-                                        "page": source_page,
-                                        "limit": 200,
-                                    },
+                                    "campaign_id": args.campaign_id,
+                                    "query": source_statblock_name,
+                                    "source_ids": [source_id],
+                                    "page": source_page,
+                                    "top_k": 200,
                                 },
                             )
                         )
                     )
-                    chunks_by_id = {str(item["id"]): dict(item) for item in page_chunks}
+                    chunks_by_id = {
+                        str(item["id"]): {
+                            **dict(item),
+                            **dict(item.get("metadata") or {}),
+                        }
+                        for item in page_chunks
+                    }
                     missing_evidence = [
                         chunk_id for chunk_id in explicit_chunk_ids if chunk_id not in chunks_by_id
                     ]
@@ -3346,24 +3349,25 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 source_query or (source_page is not None and not explicit_chunk_ids)
             ):
                 chunk_query_payload: dict[str, Any] = {
-                    "kind": "source",
-                    "source_id": source_id,
-                    "query": source_query,
-                    "limit": 200,
+                    "campaign_id": args.campaign_id,
+                    "query": source_query or source_statblock_name,
+                    "source_ids": [source_id],
+                    "top_k": 200,
                 }
                 if source_page is not None:
                     chunk_query_payload["page"] = source_page
-                selected_source_chunks = list(
+                source_hits = list(
                     _facade_value(
                         await client.domain(
-                            "content_pack",
-                            {
-                                "action": "get",
-                                "payload": chunk_query_payload,
-                            },
+                            "rule_search",
+                            chunk_query_payload,
                         )
                     )
                 )
+                selected_source_chunks = [
+                    {**dict(item), **dict(item.get("metadata") or {})}
+                    for item in source_hits
+                ]
                 selected_chunk_ids = [str(item["id"]) for item in selected_source_chunks]
                 if not selected_chunk_ids:
                     raise RuntimeError(
@@ -3632,24 +3636,27 @@ async def _discover_rule_chunks(args: argparse.Namespace) -> dict[str, Any]:
                         )
                     )
                 )
-            await client.open()
             await client.load()
             query_payload: dict[str, Any] = {
-                "kind": "source",
-                "source_id": str(args.source_id),
-                "query": source_query,
-                "limit": 200,
+                "campaign_id": args.campaign_id,
+                "query": source_query or str(args.source_statblock_name),
+                "source_ids": [str(args.source_id)],
+                "top_k": 200,
             }
             if source_page is not None:
                 query_payload["page"] = source_page
-            chunks = list(
+            source_hits = list(
                 _facade_value(
                     await client.domain(
-                        "content_pack",
-                        {"action": "get", "payload": query_payload},
+                        "rule_search",
+                        query_payload,
                     )
                 )
             )
+            chunks = [
+                {**dict(item), **dict(item.get("metadata") or {})}
+                for item in source_hits
+            ]
             if initial_phase != "lobby":
                 campaign = _facade_value(
                     await client.core(
@@ -3742,17 +3749,16 @@ async def _discover_rule_sources(args: argparse.Namespace) -> dict[str, Any]:
                         )
                     )
                 )
-            await client.open()
             await client.load()
-            query_payload = {"kind": "source", "system_id": "dnd5e", "edition": "2014"}
-            sources = list(
-                _facade_value(
-                    await client.domain(
-                        "content_pack",
-                        {"action": "list", "payload": query_payload},
-                    )
-                )
+            query_payload = {
+                "campaign_id": args.campaign_id,
+                "edition": "2014",
+                "limit": 200,
+            }
+            source_status = _facade_value(
+                await client.domain("rule_seed_status", query_payload)
             )
+            sources = list(source_status["sources"])
             import_jobs = list(
                 _facade_value(
                     await client.domain(
