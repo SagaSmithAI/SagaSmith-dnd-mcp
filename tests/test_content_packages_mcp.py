@@ -1,21 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import hashlib
 from pathlib import Path
 
 import pytest
 from mcp.server.fastmcp.exceptions import ToolError
 from sagasmith_core.content_pack import dumps_content_archive
-from sagasmith_core.portable import build_rule_pack, portable_rule_chunk_key
+from sagasmith_core.indexed_source import rule_chunk_key
 from sagasmith_dnd.character_schema import default_character_notes, default_character_sheet
+from sagasmith_dnd.content_actors import build_dnd_content_actor
 from sagasmith_dnd.content_packages import build_rule_content_package
-from sagasmith_dnd.content_validation import (
-    build_catalog_review,
-    build_selection_contract,
-)
-from sagasmith_dnd.portable_cards import build_dnd_actor_card
 
 import sagasmith_dnd_mcp.server as server_module
 from sagasmith_dnd_mcp.config import McpConfig
@@ -23,10 +18,7 @@ from sagasmith_dnd_mcp.server import (
     _artifact_statblock_source_chunks,
     _cached_rapidocr_provider,
     _index_statblock_source_chunks,
-    audit_dnd_addon_semantics,
-    audit_dnd_addon_validation_components,
     create_server,
-    finalize_dnd_addon_resolution_components,
 )
 from tests.authoring_helpers import finalize_and_activate_module
 
@@ -130,419 +122,6 @@ def test_immutable_review_page_render_is_reused_until_the_file_changes(
     assert first is replay
     assert changed is not first
     assert len(calls) == 2
-
-
-def _passing_catalog_decisions() -> list[dict]:
-    checks = {
-        "identity": True,
-        "classification": True,
-        "entry_boundary": True,
-        "references": True,
-    }
-    return [
-        {
-            "role": "primary",
-            "reviewer": "deterministic:catalog-parser",
-            "method": "deterministic",
-            "checks": checks,
-            "notes": "Exact source entry passed structural validation.",
-        },
-        {
-            "role": "critic",
-            "reviewer": "deterministic:reference-auditor",
-            "method": "deterministic",
-            "checks": checks,
-            "notes": "Independent boundary and reference audit passed.",
-        },
-    ]
-
-
-def test_addon_validation_recomputes_all_four_dimensions_from_content() -> None:
-    pack_id = "dnd5e.example.ready-addon"
-    source_text = "A harmless imported creature description."
-    source_hash = hashlib.sha256(source_text.encode()).hexdigest()
-    source_key = "example.ready-addon"
-    chunk_key = f"{source_key}/section-0/chunk-0-{source_hash[:16]}"
-    artifact = {
-        "id": f"{pack_id}.statblock.harmless",
-        "kind": "statblock",
-        "application_state": "catalog_only",
-        "mechanical_scope": "descriptive",
-        "execution_state": "descriptive_ready",
-        "card": {
-            "name": "Harmless",
-            "description": source_text,
-        },
-        "rule_clauses": [
-            {
-                "schema_version": 1,
-                "id": "description",
-                "title": "Harmless",
-                "scope": "descriptive",
-                "source_citations": [
-                    {
-                        "source": f"rule-source:{source_key}",
-                        "source_ref": {"chunk_key": chunk_key},
-                        "source_excerpt": source_text,
-                    }
-                ],
-                "settlement": {"mode": "descriptive"},
-            }
-        ],
-        "semantic_resolution": {
-            "status": "resolved",
-            "mode": "descriptive",
-            "first_use_compilation_required": False,
-            "clause_ids": ["description"],
-        },
-    }
-    artifact["catalog_review"] = build_catalog_review(
-        artifact,
-        decisions=_passing_catalog_decisions(),
-    )
-    artifact["selection_contract"] = build_selection_contract(
-        artifact,
-        status="not_applicable",
-    )
-    component = build_rule_pack(
-        portable_id=pack_id,
-        version="1.0.0",
-        system_id="dnd5e",
-        manifest={
-            "id": pack_id,
-            "version": "1.0.0",
-            "title": "Ready Addon",
-            "namespace": pack_id,
-            "system_id": "dnd5e",
-            "editions": ["2014"],
-            "dependencies": [],
-            "conflicts": [],
-            "capabilities": [],
-            "content_kinds": ["statblock"],
-        },
-        artifacts=[artifact],
-        mechanics=[],
-        provenance={"distribution": "private"},
-        sources=[
-            {
-                "source_key": source_key,
-                "title": "Ready Addon Source",
-                "edition": "2014",
-                "locale": "en",
-                "version": "1.0.0",
-                "publication_id": source_key,
-                "authority": "supplement",
-                "canonical_source_key": None,
-                "checksum": source_hash,
-                "metadata": {},
-                "sections": [
-                    {
-                        "ordinal": 0,
-                        "parent_ordinal": None,
-                        "level": 1,
-                        "title": "Harmless",
-                        "path": ["Harmless"],
-                        "content": source_text,
-                        "content_hash": source_hash,
-                        "start_offset": 0,
-                        "end_offset": len(source_text),
-                        "chunks": [
-                            {
-                                "key": chunk_key,
-                                "ordinal": 0,
-                                "heading_path": ["Harmless"],
-                                "content": source_text,
-                                "content_hash": source_hash,
-                                "token_count": 5,
-                                "metadata": {},
-                            }
-                        ],
-                    }
-                ],
-            }
-        ],
-        metadata={"distribution": "private"},
-        dependencies=[],
-    )
-
-    report = audit_dnd_addon_validation_components([component])
-
-    assert report["complete"] is True
-    assert report["source"]["verified_count"] == 1
-    assert report["catalog"]["reviewed_count"] == 1
-    assert report["selection"] == {
-        "applicable_count": 0,
-        "ready_count": 0,
-        "not_applicable_count": 1,
-        "complete": True,
-        "blockers": [],
-    }
-    assert report["runtime"]["modes"] == {"descriptive": 1}
-
-    blocked = copy.deepcopy(component)
-    blocked_artifact = blocked["payload"]["artifacts"][0]
-    blocked_artifact["selection_contract"] = build_selection_contract(
-        blocked_artifact,
-        status="blocked",
-        blockers=["reviewed card is not selection-ready"],
-    )
-    blocked_report = audit_dnd_addon_validation_components([blocked])
-    assert blocked_report["selection"]["complete"] is False
-    assert blocked_report["selection"]["blockers"][0]["reason"] == (
-        "reviewed card is not selection-ready"
-    )
-
-    stale = copy.deepcopy(component)
-    stale["payload"]["artifacts"][0]["card"]["name"] = "Changed"
-    stale_report = audit_dnd_addon_validation_components([stale])
-    assert stale_report["catalog"]["complete"] is False
-    assert "stale" in stale_report["catalog"]["blockers"][0]["reason"]
-
-
-def test_addon_resolution_audit_ignores_items_without_semantic_effects() -> None:
-    report = audit_dnd_addon_semantics(
-        [
-            {
-                "kind": "preset_pack",
-                "id": "example.actors",
-                "payload": {
-                    "cards": [
-                        {
-                            "id": "example.guard",
-                            "payload": {
-                                "name": "Guard",
-                                "sheet": {
-                                    "content": {},
-                                    "inventory": {
-                                        "items": [
-                                            {
-                                                "id": "chain-shirt",
-                                                "name": "Chain Shirt",
-                                                "kind": "armor",
-                                                "mechanics": {
-                                                    "armor_class_base": 13,
-                                                },
-                                            }
-                                        ]
-                                    },
-                                },
-                            },
-                        }
-                    ]
-                },
-            }
-        ]
-    )
-
-    assert report["complete"] is True
-    assert report["actor_entry_count"] == 0
-    assert report["unresolved"] == []
-
-
-def test_addon_resolution_audit_is_independent_of_component_order() -> None:
-    empty_semantic_validation = {
-        "schema_version": 1,
-        "complete": True,
-        "artifact_count": 0,
-        "resolved_count": 0,
-        "modes": {},
-        "unresolved": [],
-        "first_use_compilation_required": False,
-    }
-
-    def component(component_id: str) -> dict:
-        return {
-            "kind": "rule_pack",
-            "id": component_id,
-            "version": "1.0.0",
-            "payload": {
-                "manifest": {
-                    "resolution_policy": "build_time_complete",
-                    "semantic_validation": copy.deepcopy(empty_semantic_validation),
-                },
-                "artifacts": [],
-                "mechanics": [],
-            },
-        }
-
-    first = component("dnd5e.example.first")
-    second = component("dnd5e.example.second")
-
-    forward = audit_dnd_addon_semantics([first, second])
-    reverse = audit_dnd_addon_semantics([second, first])
-
-    assert reverse == forward
-    assert [item["id"] for item in reverse["rule_packs"]] == [
-        "dnd5e.example.first",
-        "dnd5e.example.second",
-    ]
-
-
-def test_addon_resolution_audit_rejects_partial_mechanic_refs_without_ruling() -> None:
-    report = audit_dnd_addon_semantics(
-        [
-            {
-                "kind": "preset_pack",
-                "id": "example.actors",
-                "payload": {
-                    "cards": [
-                        {
-                            "id": "example.odd-mage",
-                            "payload": {
-                                "name": "Odd Mage",
-                                "sheet": {
-                                    "content": {
-                                        "features": [
-                                            {
-                                                "id": "odd-aura",
-                                                "name": "Odd Aura",
-                                                "description": (
-                                                    "Creatures in the aura suffer the "
-                                                    "source-defined effect."
-                                                ),
-                                                "mechanic_refs": [
-                                                    "dnd5e.core.activity.resource_accounting"
-                                                ],
-                                            }
-                                        ]
-                                    },
-                                    "inventory": {"items": []},
-                                },
-                            },
-                        }
-                    ]
-                },
-            }
-        ]
-    )
-
-    assert report["complete"] is False
-    assert report["actor_entry_count"] == 1
-    assert report["unresolved"][0]["artifact_id"] == "Odd Mage:odd-aura"
-
-
-def test_addon_export_finalizes_stale_resolved_agent_state() -> None:
-    pack_id = "dnd5e.example.resolved-addon"
-    source_text = "Use the exact source-defined procedure."
-    source_hash = hashlib.sha256(source_text.encode()).hexdigest()
-    source_key = "example.resolved-addon"
-    source = {
-        "source_key": source_key,
-        "title": "Resolved Addon Source",
-        "edition": "2014",
-        "locale": "en",
-        "version": "1.0.0",
-        "publication_id": source_key,
-        "authority": "supplement",
-        "canonical_source_key": None,
-        "checksum": source_hash,
-        "metadata": {},
-        "sections": [
-            {
-                "ordinal": 0,
-                "parent_ordinal": None,
-                "level": 1,
-                "title": "Odd Device",
-                "path": ["Odd Device"],
-                "content": source_text,
-                "content_hash": source_hash,
-                "start_offset": 0,
-                "end_offset": len(source_text),
-                "chunks": [
-                    {
-                        "key": f"{source_key}/section-0/chunk-0-{source_hash[:16]}",
-                        "ordinal": 0,
-                        "heading_path": ["Odd Device"],
-                        "content": source_text,
-                        "content_hash": source_hash,
-                        "token_count": 7,
-                        "metadata": {},
-                    }
-                ],
-            }
-        ],
-    }
-    component = build_rule_pack(
-        portable_id=pack_id,
-        version="1.0.0",
-        system_id="dnd5e",
-        manifest={
-            "id": pack_id,
-            "version": "1.0.0",
-            "title": "Resolved Addon",
-            "namespace": pack_id,
-            "system_id": "dnd5e",
-            "editions": ["2014"],
-            "dependencies": [],
-            "conflicts": [],
-            "capabilities": [],
-            "content_kinds": ["feature"],
-        },
-        artifacts=[
-            {
-                "id": f"{pack_id}.feature.odd-device",
-                "kind": "feature",
-                "application_state": "catalog_only",
-                "mechanical_scope": "mechanical",
-                "execution_state": "agent_resolution_required",
-                "card": {
-                    "name": "Odd Device",
-                    "description": "Use the exact source-defined procedure.",
-                },
-                "rule_clauses": [
-                    {
-                        "schema_version": 1,
-                        "id": "source-resolution",
-                        "title": "Odd Device",
-                        "scope": "mechanical",
-                        "source_citations": [
-                            {
-                                "source": "rule-source:example",
-                                "source_ref": {"page_number": 1},
-                                "source_excerpt": ("Use the exact source-defined procedure."),
-                            }
-                        ],
-                        "settlement": {
-                            "mode": "agent_ruling",
-                            "default_resolver": "agent",
-                            "ruling_kind": "agent_dm_adjudication",
-                            "reason": (
-                                "The exact imported procedure is resolved by the "
-                                "Agent-as-DM boundary."
-                            ),
-                        },
-                    }
-                ],
-                "semantic_resolution": {
-                    "status": "resolved",
-                    "mode": "agent_ruling",
-                    "first_use_compilation_required": False,
-                    "clause_ids": ["source-resolution"],
-                },
-            }
-        ],
-        mechanics=[],
-        provenance={"distribution": "private"},
-        sources=[source],
-        metadata={"distribution": "private"},
-        dependencies=[],
-    )
-
-    before = audit_dnd_addon_semantics([component])
-    finalized = finalize_dnd_addon_resolution_components([component])
-
-    artifact = finalized[0]["payload"]["artifacts"][0]
-    manifest = finalized[0]["payload"]["manifest"]
-    assert artifact["execution_state"] == "ruling_ready"
-    assert before["complete"] is False
-    assert any(
-        item["artifact_id"].endswith(":resolution-manifest") for item in before["unresolved"]
-    )
-    assert manifest["resolution_policy"] == "build_time_complete"
-    assert manifest["semantic_validation"]["complete"] is True
-    assert manifest["semantic_validation"]["unresolved"] == []
-    assert finalized[0]["checksum"] != component["checksum"]
-    assert audit_dnd_addon_semantics(finalized)["complete"] is True
 
 
 async def _call(server, name: str, arguments: dict):
@@ -859,12 +438,12 @@ def test_bundled_srd_monster_presets_are_catalog_imports(tmp_path: Path) -> None
 
 def test_unified_addon_archive_import_reexport_and_actor_creation(tmp_path: Path) -> None:
     source_text = "# Archive Rule\nA source-backed archive rule."
-    chunk_key = portable_rule_chunk_key("example.archive-source", 0, 0, source_text)
-    component = build_rule_pack(
-        portable_id="dnd5e.example.archive-rules",
-        version="2.0.0",
-        system_id="dnd5e",
-        manifest={
+    chunk_key = rule_chunk_key("example.archive-source", 0, 0, source_text)
+    component = {
+        "id": "dnd5e.example.archive-rules",
+        "version": "2.0.0",
+        "system_id": "dnd5e",
+        "manifest": {
             "id": "dnd5e.example.archive-rules",
             "version": "2.0.0",
             "title": "Archive Rules",
@@ -875,9 +454,9 @@ def test_unified_addon_archive_import_reexport_and_actor_creation(tmp_path: Path
             "conflicts": [],
             "capabilities": [],
         },
-        artifacts=[],
-        mechanics=[],
-        sources=[
+        "artifacts": [],
+        "mechanics": [],
+        "sources": [
             {
                 "source_key": "example.archive-source",
                 "title": "Archive Source",
@@ -920,20 +499,13 @@ def test_unified_addon_archive_import_reexport_and_actor_creation(tmp_path: Path
                 ],
             }
         ],
-        metadata={"distribution": "private"},
-    )
-    component = {
-        "id": component["id"],
-        "version": component["version"],
-        "system_id": component["system_id"],
-        **component["payload"],
-        "metadata": component["metadata"],
-        "dependencies": component["dependencies"],
+        "metadata": {"distribution": "private"},
+        "dependencies": [],
     }
     notes = default_character_notes()
     notes["profile"]["summary"] = "A source-backed archive actor."
-    card = build_dnd_actor_card(
-        portable_id="dnd5e.example.archive-actor",
+    card = build_dnd_content_actor(
+        actor_id="dnd5e.example.archive-actor",
         version="2.0.0",
         actor_type="monster",
         name="Archive Actor",
@@ -958,7 +530,7 @@ def test_unified_addon_archive_import_reexport_and_actor_creation(tmp_path: Path
             },
         },
         rule_descriptors=[component],
-        preset_cards=[card],
+        preset_actors=[card],
         metadata={
             "distribution": "private",
             "license": "user-supplied",
@@ -1046,3 +618,4 @@ def test_unified_addon_archive_import_reexport_and_actor_creation(tmp_path: Path
         assert created["actor_knowledge_imported"] is False
 
     asyncio.run(exercise())
+

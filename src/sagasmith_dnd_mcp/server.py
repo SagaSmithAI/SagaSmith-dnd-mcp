@@ -79,10 +79,6 @@ from sagasmith_core.modules import (
 from sagasmith_core.modules import (
     normalize_source_evidence_text as _normalize_source_evidence_text,
 )
-from sagasmith_core.portable import (
-    build_rule_pack,
-    validate_addon_validation,
-)
 from sagasmith_core.rule_packs import RulePackError, RulesetUnavailableError
 from sagasmith_core.systems import SystemRegistry
 from sagasmith_core.text import ascii_slug, compact_ascii_key
@@ -218,6 +214,16 @@ from sagasmith_dnd.conditions import (
     condition_ids,
 )
 from sagasmith_dnd.consumables import HEALING_POTION_MECHANIC_ID, healing_potion_formula
+from sagasmith_dnd.content_actors import (
+    SRD2014_PRESET_PACK_ID,
+    SRD2014_PRESET_PACK_VERSION,
+    SRD2024_PRESET_PACK_ID,
+    SRD2024_PRESET_PACK_VERSION,
+    build_dnd_content_actor,
+    build_srd2014_preset_actors,
+    build_srd2024_preset_actors,
+    validate_dnd_content_actor,
+)
 from sagasmith_dnd.content_import import (
     artifact_with_direct_resolution,
     audit_release_semantic_validation,
@@ -302,17 +308,6 @@ from sagasmith_dnd.module_profile import DndModuleProfile
 from sagasmith_dnd.playthrough import (
     playthrough_source_bindings,
     validate_playthrough_manifest,
-)
-from sagasmith_dnd.portable_cards import (
-    SRD2014_PRESET_PACK_ID,
-    SRD2014_PRESET_PACK_VERSION,
-    SRD2024_PRESET_PACK_ID,
-    SRD2024_PRESET_PACK_VERSION,
-    build_dnd_actor_card,
-    build_srd2014_preset_pack,
-    build_srd2024_preset_pack,
-    validate_dnd_actor_card,
-    validate_dnd_content_actor,
 )
 from sagasmith_dnd.progression import (
     advance_single_class_level,
@@ -2472,341 +2467,6 @@ def _subclass_spell_grants(card: dict[str, Any]) -> list[dict[str, Any]]:
     return grants
 
 
-def audit_dnd_addon_semantics(
-    components: list[dict[str, Any]],
-) -> dict[str, Any]:
-    """Fail closed when a D&D addon still needs first-use semantic compilation."""
-
-    rule_reports: list[dict[str, Any]] = []
-    unresolved: list[dict[str, str]] = []
-    actor_entries = 0
-    modes: dict[str, int] = {}
-    for component in components:
-        kind = str(component.get("kind") or "")
-        payload = dict(component.get("payload") or {})
-        if kind == "rule_pack":
-            report = audit_release_semantic_validation(
-                list(payload.get("artifacts") or []),
-                settled_mechanic_ids=_rule_payload_settled_mechanic_ids(payload),
-            )
-            component_manifest = dict(payload.get("manifest") or {})
-            rule_reports.append(
-                {
-                    "id": str(component.get("id") or ""),
-                    "version": str(component.get("version") or ""),
-                    **report,
-                }
-            )
-            for mode, count in report["modes"].items():
-                modes[mode] = modes.get(mode, 0) + int(count)
-            unresolved.extend(
-                {
-                    "component_id": str(component.get("id") or ""),
-                    **item,
-                }
-                for item in report["unresolved"]
-            )
-            if (
-                component_manifest.get("resolution_policy") != "build_time_complete"
-                or component_manifest.get("semantic_validation") != report
-            ):
-                unresolved.append(
-                    {
-                        "component_id": str(component.get("id") or ""),
-                        "artifact_id": (f"{str(component.get('id') or '')}:resolution-manifest"),
-                        "reason": (
-                            "rule component lacks an exact build-time-complete "
-                            "semantic resolution manifest"
-                        ),
-                    }
-                )
-            continue
-        if kind == "preset_pack":
-            actor_cards = list(payload.get("cards") or [])
-        elif kind == "module_pack":
-            actor_cards = list(payload.get("actors") or [])
-        else:
-            continue
-        for portable_card in actor_cards:
-            card_payload = dict(dict(portable_card).get("payload") or {})
-            actor_name = str(card_payload.get("name") or portable_card.get("id") or "")
-            sheet = dict(card_payload.get("sheet") or {})
-            content = dict(sheet.get("content") or {})
-            actor_sections = [
-                (section, entry)
-                for section in ("activities", "features", "feats", "spells")
-                for entry in content.get(section) or []
-            ]
-            actor_sections.extend(
-                ("items", entry) for entry in dict(sheet.get("inventory") or {}).get("items") or []
-            )
-            for section, entry in actor_sections:
-                if not isinstance(entry, dict):
-                    continue
-                description = str(
-                    (dict(entry.get("mechanics") or {}).get("on_hit_effect") or "")
-                    if section == "items"
-                    else (
-                        entry.get("description")
-                        or dict(entry.get("definition") or {}).get("effect")
-                        or ""
-                    )
-                ).strip()
-                if not description:
-                    continue
-                actor_entries += 1
-                entry_id = str(entry.get("id") or entry.get("name") or "")
-                if entry.get("resolution_plan") is not None:
-                    modes["primitive_plan"] = modes.get("primitive_plan", 0) + 1
-                    continue
-                mechanic_refs = {
-                    str(item) for item in entry.get("mechanic_refs") or [] if str(item)
-                }
-                if (
-                    entry.get("resolution") is not None
-                    or str(entry.get("id") or "") in ENGINE_OWNED_STANDARD_ACTIVITY_IDS
-                    or bool(mechanic_refs & ENGINE_SETTLED_CARD_MECHANIC_IDS)
-                ):
-                    modes["kernel_mechanic"] = modes.get("kernel_mechanic", 0) + 1
-                    continue
-                manual = dict(dict(entry.get("choices") or {}).get("manual_ruling") or {})
-                requirements = list(entry.get("ruling_requirements") or [])
-                directly_ruled = bool(
-                    manual.get("default_resolver") == "agent"
-                    and str(manual.get("source_excerpt") or "").strip()
-                ) or any(
-                    isinstance(item, dict)
-                    and item.get("default_resolver") == "agent"
-                    and str(item.get("source_excerpt") or "").strip()
-                    and str(item.get("policy_ref") or "")
-                    in {"actor_card.import.v1", "rule_clause.v1"}
-                    for item in requirements
-                )
-                if directly_ruled:
-                    modes["agent_ruling"] = modes.get("agent_ruling", 0) + 1
-                    continue
-                unresolved.append(
-                    {
-                        "component_id": str(component.get("id") or ""),
-                        "artifact_id": f"{actor_name}:{entry_id}",
-                        "reason": ("actor-card entry has no build-time semantic resolution"),
-                    }
-                )
-    # Addon envelopes canonicalize their embedded components by kind, id, and
-    # version.  The semantic audit is persisted before that transport step and
-    # recomputed after it, so its evidence lists must not depend on the caller's
-    # component order.  Otherwise a multi-pack addon can be complete yet fail
-    # closed on import solely because the envelope sorted its components.
-    rule_reports.sort(key=lambda item: (str(item["id"]), str(item["version"])))
-    unresolved.sort(
-        key=lambda item: (
-            str(item.get("component_id") or ""),
-            str(item.get("artifact_id") or ""),
-            str(item.get("reason") or ""),
-        )
-    )
-    return {
-        "schema_version": 1,
-        "complete": not unresolved,
-        "rule_packs": rule_reports,
-        "actor_entry_count": actor_entries,
-        "modes": dict(sorted(modes.items())),
-        "unresolved": unresolved,
-        "first_use_compilation_required": False if not unresolved else True,
-    }
-
-
-def _addon_validation_issue(
-    component_id: str,
-    item_id: str | None,
-    reason: str,
-) -> dict[str, str | None]:
-    return {"component_id": component_id, "item_id": item_id, "reason": reason}
-
-
-def _portable_rule_chunk_content(payload: dict[str, Any]) -> dict[str, str]:
-    chunks: dict[str, str] = {}
-    for source in payload.get("sources") or []:
-        if not isinstance(source, dict):
-            continue
-        for section in source.get("sections") or []:
-            if not isinstance(section, dict):
-                continue
-            for chunk in section.get("chunks") or []:
-                if isinstance(chunk, dict) and str(chunk.get("key") or ""):
-                    chunks[str(chunk["key"])] = str(chunk.get("content") or "")
-    return chunks
-
-
-def _artifact_source_is_verified(
-    artifact: dict[str, Any],
-    *,
-    chunks: dict[str, str],
-) -> bool:
-    citations = [item for item in artifact.get("source_citations") or [] if isinstance(item, dict)]
-    card = dict(artifact.get("card") or {})
-    for clause in artifact.get("rule_clauses", card.get("rule_clauses")) or []:
-        if isinstance(clause, dict):
-            citations.extend(
-                item for item in clause.get("source_citations") or [] if isinstance(item, dict)
-            )
-    for citation in citations:
-        source_ref = dict(citation.get("source_ref") or {})
-        chunk_key = str(source_ref.get("chunk_key") or citation.get("chunk_key") or "")
-        excerpt = " ".join(str(citation.get("source_excerpt") or "").split())
-        source_text = " ".join(str(chunks.get(chunk_key) or "").split())
-        if (
-            chunk_key in chunks
-            and len(excerpt) >= 10
-            and excerpt.casefold() in source_text.casefold()
-        ):
-            return True
-    return False
-
-
-def _actor_source_is_verified(portable_card: dict[str, Any]) -> bool:
-    payload = dict(portable_card.get("payload") or {})
-    provenance = dict(payload.get("provenance") or {})
-    source_refs = [str(item) for item in provenance.get("source_refs") or [] if str(item)]
-    source_text = str(provenance.get("source_text") or "")
-    source_checksum = str(provenance.get("source_checksum") or "")
-    return bool(
-        source_refs
-        and source_text
-        and source_checksum
-        and hashlib.sha256(source_text.encode("utf-8")).hexdigest() == source_checksum
-    )
-
-
-def _actor_catalog_artifact(portable_card: dict[str, Any]) -> dict[str, Any]:
-    payload = deepcopy(dict(portable_card.get("payload") or {}))
-    provenance = deepcopy(dict(payload.get("provenance") or {}))
-    review = provenance.pop("catalog_review", None)
-    payload["provenance"] = provenance
-    return {
-        "id": str(portable_card.get("id") or payload.get("name") or "actor-card"),
-        "kind": f"actor_card:{str(payload.get('actor_type') or 'unknown')}",
-        "card": payload,
-        "catalog_review": review,
-    }
-
-
-def _resolved_rule_artifact_mode(
-    artifact: dict[str, Any],
-    *,
-    settled_mechanic_ids: set[str],
-) -> str:
-    card = dict(artifact.get("card") or {})
-    if artifact.get("resolution_plan", card.get("resolution_plan")) is not None or (
-        artifact.get("resolution_plans", card.get("resolution_plans")) is not None
-    ):
-        return "primitive_plan"
-    raw_clauses = artifact.get("rule_clauses", card.get("rule_clauses"))
-    if isinstance(raw_clauses, list) and raw_clauses:
-        modes = {
-            str(dict(clause.get("settlement") or {}).get("mode") or "")
-            for clause in raw_clauses
-            if isinstance(clause, dict)
-        }
-        modes.discard("")
-        return next(iter(modes)) if len(modes) == 1 else "mixed"
-    semantic = dict(artifact.get("semantic_resolution") or {})
-    if (
-        semantic.get("status") == "resolved"
-        and semantic.get("first_use_compilation_required") is False
-        and str(semantic.get("mode") or "")
-    ):
-        return str(semantic["mode"])
-    if card.get("resolution") is not None:
-        return "kernel_mechanic"
-    mechanic_refs = {
-        str(item)
-        for item in [
-            *list(artifact.get("mechanic_refs") or []),
-            *list(card.get("mechanic_refs") or []),
-        ]
-        if str(item)
-    }
-    return "kernel_mechanic" if mechanic_refs and mechanic_refs <= settled_mechanic_ids else ""
-
-
-def _actor_runtime_entries(
-    component: dict[str, Any],
-) -> list[tuple[str, str, str]]:
-    """Return ``(item_id, mode, blocker)`` for semantic actor-card entries."""
-
-    kind = str(component.get("kind") or "")
-    payload = dict(component.get("payload") or {})
-    actor_cards = (
-        list(payload.get("cards") or [])
-        if kind == "preset_pack"
-        else list(payload.get("actors") or [])
-        if kind == "module_pack"
-        else []
-    )
-    entries: list[tuple[str, str, str]] = []
-    for portable_card in actor_cards:
-        card_payload = dict(dict(portable_card).get("payload") or {})
-        actor_name = str(card_payload.get("name") or portable_card.get("id") or "")
-        sheet = dict(card_payload.get("sheet") or {})
-        content = dict(sheet.get("content") or {})
-        actor_sections = [
-            (section, entry)
-            for section in ("activities", "features", "feats", "spells")
-            for entry in content.get(section) or []
-        ]
-        actor_sections.extend(
-            ("items", entry) for entry in dict(sheet.get("inventory") or {}).get("items") or []
-        )
-        for section, entry in actor_sections:
-            if not isinstance(entry, dict):
-                continue
-            description = str(
-                dict(entry.get("mechanics") or {}).get("on_hit_effect") or ""
-                if section == "items"
-                else entry.get("description")
-                or dict(entry.get("definition") or {}).get("effect")
-                or ""
-            ).strip()
-            if not description:
-                continue
-            entry_id = str(entry.get("id") or entry.get("name") or "")
-            item_id = f"{actor_name}:{entry_id}"
-            if entry.get("resolution_plan") is not None:
-                entries.append((item_id, "primitive_plan", ""))
-                continue
-            mechanic_refs = {str(item) for item in entry.get("mechanic_refs") or [] if str(item)}
-            if (
-                entry.get("resolution") is not None
-                or str(entry.get("id") or "") in ENGINE_OWNED_STANDARD_ACTIVITY_IDS
-                or bool(mechanic_refs & ENGINE_SETTLED_CARD_MECHANIC_IDS)
-            ):
-                entries.append((item_id, "kernel_mechanic", ""))
-                continue
-            manual = dict(dict(entry.get("choices") or {}).get("manual_ruling") or {})
-            requirements = list(entry.get("ruling_requirements") or [])
-            directly_ruled = bool(
-                manual.get("default_resolver") == "agent"
-                and str(manual.get("source_excerpt") or "").strip()
-            ) or any(
-                isinstance(item, dict)
-                and item.get("default_resolver") == "agent"
-                and str(item.get("source_excerpt") or "").strip()
-                and str(item.get("policy_ref") or "") in {"actor_card.import.v1", "rule_clause.v1"}
-                for item in requirements
-            )
-            entries.append(
-                (
-                    item_id,
-                    "agent_ruling" if directly_ruled else "",
-                    ""
-                    if directly_ruled
-                    else "actor-card entry has no build-time semantic resolution",
-                )
-            )
-    return entries
-
-
 def _rule_payload_settled_mechanic_ids(payload: dict[str, Any]) -> set[str]:
     """Return only mechanics proven by this pack's compiled/native definition."""
 
@@ -2914,341 +2574,6 @@ def _rebind_transported_content_attestations(
             raise ValueError("transported catalog_review must be an object")
         rebound.append(artifact)
     return rebound
-
-
-def audit_dnd_addon_validation_components(
-    components: list[dict[str, Any]],
-) -> dict[str, Any]:
-    """Recompute source, catalog, selection, and runtime validation from content."""
-
-    source_items = source_verified = 0
-    catalog_items = catalog_reviewed = 0
-    selection_applicable = selection_ready = selection_not_applicable = 0
-    runtime_items = runtime_resolved = 0
-    source_blockers: list[dict[str, str | None]] = []
-    catalog_blockers: list[dict[str, str | None]] = []
-    selection_blockers: list[dict[str, str | None]] = []
-    runtime_blockers: list[dict[str, str | None]] = []
-    runtime_modes: dict[str, int] = {}
-
-    for component in components:
-        component_id = str(component.get("id") or "component")
-        kind = str(component.get("kind") or "")
-        payload = dict(component.get("payload") or {})
-        if kind == "rule_pack":
-            artifacts = [
-                dict(item) for item in payload.get("artifacts") or [] if isinstance(item, dict)
-            ]
-            chunks = _portable_rule_chunk_content(payload)
-            settled_mechanic_ids = _rule_payload_settled_mechanic_ids(payload)
-            runtime_report = audit_release_semantic_validation(
-                artifacts,
-                settled_mechanic_ids=settled_mechanic_ids,
-            )
-            unresolved = {
-                str(item["artifact_id"]): str(item["reason"])
-                for item in runtime_report["unresolved"]
-            }
-            for artifact in artifacts:
-                artifact_id = str(artifact.get("id") or "artifact")
-                source_items += 1
-                if _artifact_source_is_verified(artifact, chunks=chunks):
-                    source_verified += 1
-                else:
-                    source_blockers.append(
-                        _addon_validation_issue(
-                            component_id,
-                            artifact_id,
-                            "artifact lacks an exact excerpt from a referenced source chunk",
-                        )
-                    )
-
-                catalog_items += 1
-                review_errors = catalog_review_errors(artifact)
-                if not review_errors:
-                    catalog_reviewed += 1
-                else:
-                    catalog_blockers.append(
-                        _addon_validation_issue(
-                            component_id,
-                            artifact_id,
-                            "; ".join(review_errors),
-                        )
-                    )
-
-                contract = artifact.get("selection_contract")
-                contract_status = (
-                    str(dict(contract).get("status") or "") if isinstance(contract, dict) else ""
-                )
-                contract_errors = selection_contract_errors(artifact)
-                declared_blockers = (
-                    [
-                        str(item).strip()
-                        for item in dict(contract).get("blockers") or []
-                        if str(item).strip()
-                    ]
-                    if isinstance(contract, dict)
-                    else []
-                )
-                if contract_status == "not_applicable" and not contract_errors:
-                    selection_not_applicable += 1
-                else:
-                    selection_applicable += 1
-                    if contract_status == "ready" and not contract_errors:
-                        selection_ready += 1
-                    else:
-                        selection_blockers.append(
-                            _addon_validation_issue(
-                                component_id,
-                                artifact_id,
-                                "; ".join(dict.fromkeys([*contract_errors, *declared_blockers]))
-                                or "selection contract is blocked",
-                            )
-                        )
-
-                runtime_items += 1
-                if artifact_id in unresolved:
-                    runtime_blockers.append(
-                        _addon_validation_issue(
-                            component_id,
-                            artifact_id,
-                            unresolved[artifact_id],
-                        )
-                    )
-                else:
-                    mode = _resolved_rule_artifact_mode(
-                        artifact,
-                        settled_mechanic_ids=settled_mechanic_ids,
-                    )
-                    if mode:
-                        runtime_resolved += 1
-                        runtime_modes[mode] = runtime_modes.get(mode, 0) + 1
-                    else:
-                        runtime_blockers.append(
-                            _addon_validation_issue(
-                                component_id,
-                                artifact_id,
-                                "resolved artifact has no canonical runtime mode",
-                            )
-                        )
-            continue
-
-        actor_cards = (
-            list(payload.get("cards") or [])
-            if kind == "preset_pack"
-            else list(payload.get("actors") or [])
-            if kind == "module_pack"
-            else []
-        )
-        for portable_card in actor_cards:
-            if not isinstance(portable_card, dict):
-                continue
-            actor_id = str(portable_card.get("id") or "actor-card")
-            source_items += 1
-            if _actor_source_is_verified(portable_card):
-                source_verified += 1
-            else:
-                source_blockers.append(
-                    _addon_validation_issue(
-                        component_id,
-                        actor_id,
-                        "actor card lacks checksum-bound source text and references",
-                    )
-                )
-            catalog_items += 1
-            review_errors = catalog_review_errors(_actor_catalog_artifact(portable_card))
-            if not review_errors:
-                catalog_reviewed += 1
-            else:
-                catalog_blockers.append(
-                    _addon_validation_issue(
-                        component_id,
-                        actor_id,
-                        "; ".join(review_errors),
-                    )
-                )
-
-        if kind == "module_pack":
-            for scene in payload.get("scene_atlas") or []:
-                if not isinstance(scene, dict):
-                    continue
-                scene_id = str(scene.get("stable_key") or "module-scene")
-                source_items += 1
-                source_verified += 1
-                catalog_items += 1
-                scene_metadata = dict(scene.get("metadata") or {})
-                scene_artifact = {
-                    "id": scene_id,
-                    "kind": "module_scene",
-                    "card": {
-                        key: deepcopy(value) for key, value in scene.items() if key != "metadata"
-                    },
-                    "metadata": {
-                        key: deepcopy(value)
-                        for key, value in scene_metadata.items()
-                        if key != "catalog_review"
-                    },
-                    "catalog_review": scene_metadata.get("catalog_review"),
-                }
-                review_errors = catalog_review_errors(scene_artifact)
-                if not review_errors:
-                    catalog_reviewed += 1
-                else:
-                    catalog_blockers.append(
-                        _addon_validation_issue(
-                            component_id,
-                            scene_id,
-                            "; ".join(review_errors),
-                        )
-                    )
-
-        for item_id, mode, blocker in _actor_runtime_entries(component):
-            runtime_items += 1
-            if blocker:
-                runtime_blockers.append(_addon_validation_issue(component_id, item_id, blocker))
-            else:
-                runtime_resolved += 1
-                runtime_modes[mode] = runtime_modes.get(mode, 0) + 1
-
-    source_complete = source_verified == source_items and not source_blockers
-    catalog_complete = catalog_reviewed == catalog_items and not catalog_blockers
-    selection_complete = selection_ready == selection_applicable and not selection_blockers
-    runtime_complete = runtime_resolved == runtime_items and not runtime_blockers
-    report = {
-        "schema_version": 1,
-        "source": {
-            "item_count": source_items,
-            "verified_count": source_verified,
-            "complete": source_complete,
-            "blockers": source_blockers,
-        },
-        "catalog": {
-            "item_count": catalog_items,
-            "reviewed_count": catalog_reviewed,
-            "complete": catalog_complete,
-            "blockers": catalog_blockers,
-        },
-        "selection": {
-            "applicable_count": selection_applicable,
-            "ready_count": selection_ready,
-            "not_applicable_count": selection_not_applicable,
-            "complete": selection_complete,
-            "blockers": selection_blockers,
-        },
-        "runtime": {
-            "item_count": runtime_items,
-            "resolved_count": runtime_resolved,
-            "modes": dict(sorted(runtime_modes.items())),
-            "complete": runtime_complete,
-            "blockers": runtime_blockers,
-        },
-        "complete": all(
-            (
-                source_complete,
-                catalog_complete,
-                selection_complete,
-                runtime_complete,
-            )
-        ),
-    }
-    return validate_addon_validation(report)
-
-
-def _finalize_rule_artifact_resolution_states(
-    artifacts: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], bool]:
-    """Canonicalize already-resolved artifact states without packaging them."""
-
-    finalized = deepcopy(artifacts)
-    changed = False
-    for artifact in finalized:
-        execution_state = str(artifact.get("execution_state") or "")
-        semantic = dict(artifact.get("semantic_resolution") or {})
-        clauses = list(artifact.get("rule_clauses") or [])
-        if (
-            execution_state
-            not in {
-                "",
-                "agent_resolution_required",
-                "clause_ready",
-                "content_authoring_required",
-                "first_use_compilation_required",
-            }
-            or semantic.get("status") != "resolved"
-            or semantic.get("first_use_compilation_required") is not False
-            or not clauses
-        ):
-            continue
-        modes = {
-            str(dict(clause.get("settlement") or {}).get("mode") or "")
-            for clause in clauses
-            if isinstance(clause, dict)
-        }
-        if modes == {"agent_ruling"}:
-            artifact["execution_state"] = "ruling_ready"
-        elif modes == {"descriptive"}:
-            artifact["execution_state"] = "descriptive_ready"
-        else:
-            artifact["execution_state"] = "clause_ready"
-        changed = True
-    return finalized, changed
-
-
-def finalize_dnd_addon_resolution_components(
-    components: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Canonicalize verified build-time resolution states before addon export.
-
-    Older import jobs can already carry an exact rule clause and a resolved
-    semantic contract while retaining the extraction-time
-    ``agent_resolution_required`` label.  That stale label must not escape in
-    a detached addon: it tells a receiving Agent to author content that has
-    already been reviewed.  Only a fully resolved clause is eligible for this
-    state-only migration; missing or invalid semantics remain audit blockers.
-    """
-
-    finalized: list[dict[str, Any]] = []
-    for raw_component in components:
-        component = deepcopy(dict(raw_component))
-        if str(component.get("kind") or "") != "rule_pack":
-            finalized.append(component)
-            continue
-        payload = deepcopy(dict(component.get("payload") or {}))
-        artifacts, changed = _finalize_rule_artifact_resolution_states(
-            list(payload.get("artifacts") or [])
-        )
-        manifest = deepcopy(dict(payload.get("manifest") or {}))
-        validation = audit_release_semantic_validation(
-            artifacts,
-            settled_mechanic_ids=_rule_payload_settled_mechanic_ids(payload),
-        )
-        if (
-            manifest.get("resolution_policy") != "build_time_complete"
-            or manifest.get("semantic_validation") != validation
-        ):
-            manifest["resolution_policy"] = "build_time_complete"
-            manifest["semantic_validation"] = deepcopy(validation)
-            changed = True
-        if not changed:
-            finalized.append(component)
-            continue
-        metadata = deepcopy(dict(component.get("metadata") or {}))
-        metadata.pop("definition_checksum", None)
-        finalized.append(
-            build_rule_pack(
-                portable_id=str(component["id"]),
-                version=str(component["version"]),
-                system_id=str(component["system_id"]),
-                manifest=manifest,
-                artifacts=artifacts,
-                mechanics=list(payload.get("mechanics") or []),
-                provenance=dict(payload.get("provenance") or {}),
-                sources=list(payload.get("sources") or []),
-                metadata=metadata,
-                dependencies=list(component.get("dependencies") or []),
-            )
-        )
-    return finalized
 
 
 class SessionExposureFastMCP(FastMCP):
@@ -4334,10 +3659,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def ensure_actor_preset_pack(
         pack_id: str,
         version: str,
-        builder: Callable[[Path], dict[str, Any]],
+        builder: Callable[[Path], list[dict[str, Any]]],
         source: str,
+        *,
+        title: str,
+        edition: str,
     ) -> None:
-        """Install checksum-validated portable SRD actor cards as catalog presets."""
+        """Install bundled actor-card.v3 values as one preset package."""
 
         if not config.dnd_skills_dir.exists():
             return
@@ -4347,31 +3675,30 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 return
         except LookupError:
             pass
-        legacy_package = builder(config.dnd_skills_dir)
-        if not legacy_package:
+        actors = builder(config.dnd_skills_dir)
+        if not actors:
             return
         package, _blobs = build_preset_content_package(
             package_id=pack_id,
             version=version,
             system_id=DND5E.id,
-            title=str(legacy_package["metadata"].get("title") or pack_id),
-            cards=list(legacy_package["payload"]["cards"]),
-            metadata=dict(legacy_package["metadata"]),
-            dependencies=[],
+            title=title,
+            cards=actors,
+            metadata={
+                "title": title,
+                "edition": edition,
+                "distribution": "shareable",
+                "license": "CC-BY-4.0",
+                "attribution": (
+                    "Includes material from the Dungeons & Dragons System Reference "
+                    "Document by Wizards of the Coast LLC, licensed under CC-BY-4.0."
+                ),
+                "content_kinds": ["npc", "monster"],
+            },
         )
         manifest, artifacts = content_actor_catalog_definition(package)
-        # Keep the long-standing public preset identifiers while migrating the
-        # cards themselves to the unified actor-card schema.
         manifest["id"] = pack_id
         manifest["namespace"] = pack_id
-        semantic_validation = audit_dnd_addon_semantics([legacy_package])
-        if not semantic_validation["complete"]:
-            raise ValueError(
-                f"bundled actor preset pack {pack_id}@{version} has unresolved "
-                f"semantics: {semantic_validation['unresolved']}"
-            )
-        manifest["resolution_policy"] = "build_time_complete"
-        manifest["semantic_validation"] = deepcopy(semantic_validation)
         result = rule_packs.save_draft(
             manifest=manifest,
             artifacts=artifacts,
@@ -4392,14 +3719,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ensure_actor_preset_pack(
         SRD2014_PRESET_PACK_ID,
         SRD2014_PRESET_PACK_VERSION,
-        build_srd2014_preset_pack,
+        build_srd2014_preset_actors,
         "bundled-srd2014-actor-presets",
+        title="D&D 5e SRD 5.1 Actor Presets",
+        edition="2014",
     )
     ensure_actor_preset_pack(
         SRD2024_PRESET_PACK_ID,
         SRD2024_PRESET_PACK_VERSION,
-        build_srd2024_preset_pack,
+        build_srd2024_preset_actors,
         "bundled-srd2024-actor-presets",
+        title="D&D 5e SRD 5.2.1 Actor Presets",
+        edition="2024",
     )
 
     def default_preset_actor_card(artifact_id: str) -> dict[str, Any]:
@@ -4418,14 +3749,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 if content_actor:
                     matches.append(content_actor)
                     continue
-                portable = dict(card.get("portable_card") or {})
-                if portable:
-                    matches.append(portable)
         if len(matches) != 1:
             raise ValueError("artifact_id must resolve to exactly one installed actor preset")
-        if matches[0].get("schema") == "sagasmith.actor-card.v3":
-            return validate_dnd_content_actor(matches[0])
-        return validate_dnd_actor_card(matches[0])
+        return validate_dnd_content_actor(matches[0])
 
     def refresh_portable_resolution_plans(value: Any) -> Any:
         """Re-fingerprint plans after stable/local source locators are remapped."""
@@ -4544,7 +3870,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         chunk_key_by_id: dict[str, str] = {}
         for source_id in source_ids:
             try:
-                source = rules.export_portable_source(source_id)
+                source = rules.export_indexed_source(source_id)
             except LookupError as error:
                 raise ValueError(
                     f"rule pack references unavailable rule source {source_id}"
@@ -4652,9 +3978,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
         portable_definition = refresh_portable_resolution_plans(
             canonicalize_portable_evidence(make_portable(definition))
-        )
-        portable_definition["artifacts"], _resolution_states_changed = (
-            _finalize_rule_artifact_resolution_states(list(portable_definition["artifacts"]))
         )
         portable_definition["artifacts"] = _rebind_transported_content_attestations(
             list(portable_definition["artifacts"])
@@ -4847,8 +4170,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         **dict(binding.get("metadata") or {}),
                         "content_package_checksum": normalized["checksum"],
                         "content_actor_version": actor["version"],
-                        "portable_provenance": deepcopy(actor.get("provenance") or {}),
-                        "portable_metadata": deepcopy(actor.get("metadata") or {}),
+                        "content_actor_provenance": deepcopy(actor.get("provenance") or {}),
+                        "content_actor_metadata": deepcopy(actor.get("metadata") or {}),
                     },
                 )
                 binding_ids.append(saved["id"])
@@ -28266,51 +27589,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return asdict(result)
 
-    def require_rule_pack_semantic_validation(
-        pack_id: str,
-        version: str,
-    ) -> dict[str, Any]:
-        """Recompute the immutable semantic audit before any public install."""
-
-        pack = rule_packs.get_version(pack_id, version)
-        manifest = dict(pack.manifest)
-        if "actor_card" in {str(item) for item in manifest.get("content_kinds") or []}:
-            cards = [
-                deepcopy(dict(dict(artifact.get("card") or {}).get("portable_card") or {}))
-                for artifact in pack.artifacts
-                if dict(artifact.get("card") or {}).get("portable_card")
-            ]
-            validation = audit_dnd_addon_semantics(
-                [
-                    {
-                        "kind": "preset_pack",
-                        "id": pack_id,
-                        "version": version,
-                        "payload": {"cards": cards},
-                    }
-                ]
-            )
-        else:
-            validation = audit_release_semantic_validation(
-                [deepcopy(item) for item in pack.artifacts],
-                settled_mechanic_ids=_rule_payload_settled_mechanic_ids(
-                    {
-                        "manifest": manifest,
-                        "mechanics": [deepcopy(item) for item in pack.mechanics],
-                    }
-                ),
-            )
-        if (
-            manifest.get("resolution_policy") != "build_time_complete"
-            or manifest.get("semantic_validation") != validation
-            or not validation["complete"]
-        ):
-            raise ValueError(
-                f"rule pack {pack_id}@{version} lacks an exact "
-                "build-time-complete semantic resolution audit"
-            )
-        return validation
-
     @internal_operation
     def memory_list(
         campaign_id: str,
@@ -34669,7 +33947,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @internal_operation
     def rule_pack_install(pack_id: str, version: str) -> dict[str, Any]:
         """Install one validated immutable version without enabling it for a campaign."""
-        require_rule_pack_semantic_validation(pack_id, version)
         return asdict(rule_packs.install(pack_id, version))
 
     @internal_operation
@@ -41110,7 +40387,7 @@ boundary.
         descriptor = modules.export_content_descriptor(
             campaign_id,
             str(required(data, "module_id")),
-            portable_id=str(required(data, "pack_id")),
+            package_id=str(required(data, "pack_id")),
             version=str(data.get("version") or "1.0.0"),
             metadata=dict(data.get("metadata") or {}),
             dependencies=list(data.get("dependencies") or []),
@@ -41122,22 +40399,20 @@ boundary.
         )
         finalized_actors = []
         for actor_card in descriptor["actors"]:
-            card = validate_dnd_actor_card(actor_card)
-            card_payload = card["payload"]
+            card = validate_dnd_content_actor(actor_card)
             finalized_actors.append(
-                build_dnd_actor_card(
-                    portable_id=card["id"],
+                build_dnd_content_actor(
+                    actor_id=card["id"],
                     version=card["version"],
-                    actor_type=card_payload["actor_type"],
-                    name=card_payload["name"],
-                    player_name=card_payload["player_name"],
-                    summary=card_payload["summary"],
-                    sheet=finalize_actor_sheet_rulings(card_payload["sheet"], campaign_id),
-                    notes=card_payload["notes"],
-                    provenance=card_payload.get("provenance") or {},
-                    bindings=card_payload.get("bindings") or [],
+                    actor_type=card["actor_type"],
+                    name=card["name"],
+                    player_name=card["player_name"],
+                    summary=card["summary"],
+                    sheet=finalize_actor_sheet_rulings(card["sheet"], campaign_id),
+                    notes=card["notes"],
+                    provenance=card.get("provenance") or {},
+                    bindings=card.get("bindings") or [],
                     metadata=card.get("metadata") or {},
-                    dependencies=card.get("dependencies") or [],
                 )
             )
         descriptor["actors"] = finalized_actors
@@ -41242,27 +40517,48 @@ boundary.
     ) -> Any:
         data = facade_payload(payload)
         edition = normalize_dnd_edition(str(required(data, "edition")))
-        package = (
-            build_srd2014_preset_pack(config.dnd_skills_dir)
+        cards = (
+            build_srd2014_preset_actors(config.dnd_skills_dir)
             if edition == "2014"
-            else build_srd2024_preset_pack(config.dnd_skills_dir)
+            else build_srd2024_preset_actors(config.dnd_skills_dir)
         )
-        if not package:
+        if not cards:
             raise ValueError("bundled D&D actor presets are unavailable")
         artifact_id = str(data.get("artifact_id") or "").strip()
-        cards = list(package["payload"]["cards"])
         if artifact_id:
             matches = [card for card in cards if card["id"] == artifact_id]
             if len(matches) != 1:
                 raise ValueError("artifact_id is not present in the actor preset pack")
-            cards = [validate_dnd_actor_card(matches[0])]
+            cards = [validate_dnd_content_actor(matches[0])]
+        package_id = (
+            SRD2014_PRESET_PACK_ID if edition == "2014" else SRD2024_PRESET_PACK_ID
+        )
+        package_version = (
+            SRD2014_PRESET_PACK_VERSION
+            if edition == "2014"
+            else SRD2024_PRESET_PACK_VERSION
+        )
+        title = (
+            "D&D 5e SRD 5.1 Actor Presets"
+            if edition == "2014"
+            else "D&D 5e SRD 5.2.1 Actor Presets"
+        )
         package, package_blobs = build_preset_content_package(
-            package_id=str(package["id"]),
-            version=str(package["version"]),
+            package_id=package_id,
+            version=package_version,
             system_id=DND5E.id,
-            title=str(package["metadata"].get("title") or package["id"]),
+            title=title,
             cards=cards,
-            metadata=dict(package["metadata"]),
+            metadata={
+                "title": title,
+                "edition": edition,
+                "distribution": "shareable",
+                "license": "CC-BY-4.0",
+                "attribution": (
+                    "Includes material from the Dungeons & Dragons System Reference "
+                    "Document by Wizards of the Coast LLC, licensed under CC-BY-4.0."
+                ),
+            },
         )
         artifact = storage.write_content_archive(package, package_blobs)
         if artifact_id:

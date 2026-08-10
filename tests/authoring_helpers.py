@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from sagasmith_core.content_pack import dumps_content_archive
-from sagasmith_core.portable import build_rule_pack, portable_rule_chunk_key
+from sagasmith_core.indexed_source import rule_chunk_key
 from sagasmith_dnd.content_packages import build_rule_content_package
 
 CallTool = Callable[[Any, str, dict[str, Any]], Awaitable[Any]]
@@ -59,7 +59,7 @@ async def import_and_activate_addon_fixture(
         for name in names
     )
     source_checksum = hashlib.sha256(source_text.encode()).hexdigest()
-    chunk_key = portable_rule_chunk_key(source_key, 0, 0, source_text)
+    chunk_key = rule_chunk_key(source_key, 0, 0, source_text)
     citation = {
         "source": f"rule-source:{source_key}",
         "source_key": source_key,
@@ -79,11 +79,11 @@ async def import_and_activate_addon_fixture(
         mechanic = copy.deepcopy(raw)
         mechanic["citations"] = [copy.deepcopy(citation)]
         bound_mechanics.append(mechanic)
-    component = build_rule_pack(
-        portable_id=package_id,
-        version=version,
-        system_id="dnd5e",
-        manifest={
+    descriptor = {
+        "id": package_id,
+        "version": version,
+        "system_id": "dnd5e",
+        "manifest": {
             **package_manifest,
             "system_id": "dnd5e",
             "dependencies": [
@@ -95,9 +95,9 @@ async def import_and_activate_addon_fixture(
                 for item in rule_dependencies
             ],
         },
-        artifacts=bound_artifacts,
-        mechanics=bound_mechanics,
-        sources=[
+        "artifacts": bound_artifacts,
+        "mechanics": bound_mechanics,
+        "sources": [
             {
                 "source_key": source_key,
                 "title": str(manifest.get("title") or package_id),
@@ -140,16 +140,8 @@ async def import_and_activate_addon_fixture(
                 ],
             }
         ],
-        metadata={"distribution": "private"},
-        dependencies=rule_dependencies,
-    )
-    descriptor = {
-        "id": component["id"],
-        "version": component["version"],
-        "system_id": component["system_id"],
-        **component["payload"],
-        "metadata": component["metadata"],
-        "dependencies": component["dependencies"],
+        "metadata": {"distribution": "private"},
+        "dependencies": rule_dependencies,
     }
     package, blobs = build_rule_content_package(
         package_id=package_id,

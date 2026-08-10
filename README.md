@@ -279,22 +279,6 @@ ruff check .
 $env:PYTHONPATH = "$PWD\src;$PWD\..\sagasmith-core\src;$PWD\..\sagasmith-dnd\src"
 python scripts\smoke_seed.py --home C:\tmp\sagasmith-dnd-smoke-01
 
-# 对白名单目录中的全部 PDF/Markdown/text 跑公开 staged facade 回归；
-# 再把每个来源约束的私有描述性探针迁移到隔离实例并逐字节复导出
-python scripts\regression_rulebooks.py C:\path\to\DnD-Books\5e\Books `
-  --home C:\tmp\sagasmith-dnd-rulebook-regression `
-  --run-id full-content-v1 `
-  --content-roundtrip `
-  --content-target-home C:\tmp\sagasmith-dnd-rulebook-receiver `
-  --output C:\tmp\sagasmith-dnd-rulebook-report.json
-
-# 修复后只重跑匹配的文档；glob 大小写不敏感并可重复传入
-python scripts\regression_rulebooks.py C:\path\to\DnD-Books\5e\Books `
-  --home C:\tmp\sagasmith-dnd-rulebook-regression `
-  --run-id focused-v2 `
-  --include "*Sword Coast*.pdf" `
-  --output C:\tmp\sagasmith-dnd-focused-report.json
-
 # 对已经脱离原始 PDF 的一组 addon 做一次全新实例总验收；整个导入、启用、
 # catalog 暴露、停用和精确重导出过程仍只调用公开 MCP 工具
 python scripts\regression_addons.py C:\private\core-addons C:\private\book-addons `

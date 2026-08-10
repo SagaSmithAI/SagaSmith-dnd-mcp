@@ -19,7 +19,6 @@ from sagasmith_dnd.statblocks import parse_2014_statblock
 import sagasmith_dnd_mcp.server as server_module
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import (
-    _artifact_source_is_verified,
     _artifact_source_pages,
     _bounded_ocr_heading_equivalent,
     _bundled_mm2014_actor_card,
@@ -46,22 +45,6 @@ from sagasmith_dnd_mcp.server import (
     create_server,
 )
 from tests.authoring_helpers import finalize_and_activate_module
-
-
-def test_addon_source_verification_accepts_portable_chunk_key_citations() -> None:
-    chunks = {"source/section/chunk": "Exact portable source excerpt."}
-    artifact = {
-        "source_citations": [
-            {
-                "chunk_key": "source/section/chunk",
-                "source_excerpt": "portable source excerpt",
-            }
-        ]
-    }
-
-    assert _artifact_source_is_verified(artifact, chunks=chunks) is True
-    artifact["source_citations"][0]["source_excerpt"] = "invented replacement"
-    assert _artifact_source_is_verified(artifact, chunks=chunks) is False
 
 
 def _catalog_review_decision(role: str, reviewer: str) -> dict:
