@@ -2,11 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from copy import deepcopy
+from io import BytesIO
 from pathlib import Path
 
 import pytest
 from mcp.server.fastmcp.exceptions import ToolError
-from sagasmith_core.content_pack import dumps_content_archive
+from PIL import Image
+from sagasmith_core.content_pack import (
+    blob_descriptor,
+    build_content_package,
+    dumps_content_archive,
+)
 from sagasmith_core.indexed_source import rule_chunk_key
 from sagasmith_dnd.character_schema import default_character_notes, default_character_sheet
 from sagasmith_dnd.content_actors import build_dnd_content_actor
@@ -522,6 +529,39 @@ def test_unified_addon_archive_import_reexport_and_actor_creation(tmp_path: Path
             "attribution": "Test source",
         },
     )
+    portrait_output = BytesIO()
+    Image.new("RGB", (16, 20), "#315a72").save(portrait_output, format="PNG")
+    portrait = portrait_output.getvalue()
+    portrait_asset = blob_descriptor(
+        asset_key="actor.archive-actor.image",
+        kind="actor_image",
+        name="archive-actor.png",
+        media_type="image/png",
+        content=portrait,
+        license="user-supplied",
+        attribution="Test source",
+        source_refs=package["actors"][0]["provenance"]["source_refs"],
+    )
+    actor = deepcopy(package["actors"][0])
+    actor["image"] = {
+        "asset_key": portrait_asset["asset_key"],
+        "alt": "Archive Actor portrait",
+    }
+    package = build_content_package(
+        kind=package["kind"],
+        package_id=package["id"],
+        version=package["version"],
+        system_id=package["system_id"],
+        manifest=package["manifest"],
+        sources=package["sources"],
+        assets=[*package["assets"], portrait_asset],
+        content_reviews=package["content_reviews"],
+        actors=[actor],
+        content=package["content"],
+        dependencies=package["dependencies"],
+        metadata=package["metadata"],
+    )
+    blobs[portrait_asset["checksum"]] = portrait
     archive_dir = tmp_path / "archives"
     archive_dir.mkdir()
     archive_path = archive_dir / "archive-addon.sagasmith-pack"
@@ -601,5 +641,22 @@ def test_unified_addon_archive_import_reexport_and_actor_creation(tmp_path: Path
         )
         assert created["character"]["name"] == "Archive Actor"
         assert created["actor_knowledge_imported"] is False
+        assert created["content_actor"]["image_retained_by_runtime"] is True
+        portrait_ref = created["character"]["notes"]["profile"]["portrait_ref"]
+        assert portrait_ref == {
+            "asset_key": portrait_asset["asset_key"],
+            "checksum": portrait_asset["checksum"],
+            "media_type": "image/png",
+            "alt": "Archive Actor portrait",
+            "source": {
+                "kind": "content_pack",
+                "package_id": package["id"],
+                "package_version": package["version"],
+                "package_checksum": package["checksum"],
+            },
+        }
+        assert (
+            tmp_path / "home" / "artifacts" / "actor-images" / portrait_asset["checksum"]
+        ).read_bytes() == portrait
 
     asyncio.run(exercise())
