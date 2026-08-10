@@ -42,6 +42,7 @@ ERROR_PREFIXES = (
     "(MCP tool call failed:",
     "(no output)",
 )
+ERROR_SENTINELS = ("\n\n[Analyze the error above",)
 
 
 def _arguments() -> argparse.Namespace:
@@ -97,7 +98,7 @@ def _decode_tool_content(content: Any) -> Any:
     if not isinstance(content, str):
         return content
     text = content.strip()
-    if not text or text.startswith(ERROR_PREFIXES):
+    if not text or _is_tool_error(text):
         return None
     try:
         value = json.loads(text)
@@ -109,6 +110,14 @@ def _decode_tool_content(content: Any) -> Any:
         except json.JSONDecodeError:
             return value
     return value
+
+
+def _is_tool_error(content: Any) -> bool:
+    if not isinstance(content, str):
+        return False
+    return content.startswith(ERROR_PREFIXES) or any(
+        sentinel in content for sentinel in ERROR_SENTINELS
+    )
 
 
 def _walk(value: Any) -> Iterable[Any]:
@@ -185,11 +194,9 @@ def _tool_timeline(rows: list[dict[str, Any]], *, principal: str) -> list[dict[s
         entry.update(
             {
                 "completed_at": row.get("timestamp"),
-                "ok": not (isinstance(content, str) and content.startswith(ERROR_PREFIXES)),
+                "ok": not _is_tool_error(content),
                 "result": _decode_tool_content(content),
-                "error": content
-                if isinstance(content, str) and content.startswith(ERROR_PREFIXES)
-                else None,
+                "error": content if _is_tool_error(content) else None,
             }
         )
         timeline.append(entry)

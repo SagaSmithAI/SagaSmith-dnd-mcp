@@ -106,6 +106,38 @@ def test_session_parser_treats_no_output_as_failure() -> None:
     assert timeline[0]["result"] is None
 
 
+def test_session_parser_treats_bare_host_error_as_failure() -> None:
+    rows = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "bare-error",
+                    "function": {
+                        "name": "mcp_sagasmith_dnd_module_expand",
+                        "arguments": "{}",
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "bare-error",
+            "name": "mcp_sagasmith_dnd_module_expand",
+            "content": (
+                "No row was found when one was required\n\n"
+                "[Analyze the error above and try a different approach.]"
+            ),
+        },
+    ]
+
+    timeline = _tool_timeline(rows, principal="dm")
+
+    assert timeline[0]["ok"] is False
+    assert timeline[0]["result"] is None
+    assert "No row was found" in timeline[0]["error"]
+
+
 def test_append_only_tool_audit_survives_context_barrier(tmp_path: Path) -> None:
     path = tmp_path / "audit.jsonl"
     path.write_text(
