@@ -215,6 +215,42 @@ def test_module_start_finalize_writes_a_finalized_module_pack(tmp_path: Path) ->
             "chunk_hash": evidence_chunks[0]["content_hash"],
             "note": "Agent-reviewed source fixture.",
         }
+        malformed = await _call(
+            server,
+            "module_draft",
+            {
+                "campaign_id": campaign["id"],
+                "action": "edit",
+                "payload": {
+                    "job_id": started["job"]["id"],
+                    "operation": "package",
+                    "narrative": {"endings": "The end"},
+                },
+                "expected_revision": started["job"]["revision"],
+                "idempotency_key": "module-malformed-narrative",
+            },
+        )
+        with pytest.raises(
+            Exception,
+            match="module narrative is missing required fields: dossiers",
+        ):
+            await _call(
+                server,
+                "module_draft",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "finalize",
+                    "payload": {
+                        "job_id": started["job"]["id"],
+                        "pack_id": "dnd5e.module.malformed",
+                        "confirmation": {
+                            "confirmed": True,
+                            "note": "This malformed draft must not finalize.",
+                        },
+                    },
+                    "idempotency_key": "reject-malformed-narrative",
+                },
+            )
         edited = await _call(
             server,
             "module_draft",
@@ -225,6 +261,7 @@ def test_module_start_finalize_writes_a_finalized_module_pack(tmp_path: Path) ->
                     "job_id": started["job"]["id"],
                     "operation": "package",
                     "note": "All publication dimensions were reviewed.",
+                    "narrative": {"dossiers": [], "endings": []},
                     "manifest": {
                         "title": "Three Tool Module",
                         "classification": "adventure",
@@ -261,7 +298,7 @@ def test_module_start_finalize_writes_a_finalized_module_pack(tmp_path: Path) ->
                         "content_summary": {},
                     },
                 },
-                "expected_revision": started["job"]["revision"],
+                "expected_revision": malformed["job"]["revision"],
                 "idempotency_key": "module-package-edit",
             },
         )
