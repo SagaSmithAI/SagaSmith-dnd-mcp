@@ -325,6 +325,13 @@ def test_coverage_requires_real_ordered_boundaries_retries_and_recovery() -> Non
         _call("combat_start", ok=False),
         _call("npc_conversation", arguments={"action": "close"}),
         _call(
+            "character_create_from",
+            arguments={"mode": "statblock"},
+            result={
+                "character": {"id": "enemy-1", "character_type": "monster"}
+            },
+        ),
+        _call(
             "combat_start",
             arguments={"positioning_mode": "agent", "participant_ids": ["pc-1", "enemy-1"]},
         ),
@@ -437,6 +444,7 @@ def test_combat_coverage_requires_a_non_party_participant() -> None:
     assert "fight:combat" in audit["gaps"]
     assert "fight:combat_render" in audit["gaps"]
     assert "fight:positioning_mode:grid" in audit["gaps"]
+    assert "fight:source_opposition_missing" in audit["gaps"]
 
 
 def test_phase_transition_rejects_exposure_reopen_as_refresh() -> None:

@@ -480,11 +480,36 @@ def _manifest_party_ids(calls: list[dict[str, Any]]) -> set[str]:
     return set()
 
 
+def _source_combat_actor_ids(calls: list[dict[str, Any]]) -> set[str]:
+    authoritative_modes = {
+        "statblock",
+        "reviewed_rule_statblock",
+        "module_statblock",
+        "content_actor",
+    }
+    actor_ids: set[str] = set()
+    for call in calls:
+        if (
+            call.get("tool") != "character_create_from"
+            or not call.get("ok")
+            or (call.get("arguments") or {}).get("mode") not in authoritative_modes
+        ):
+            continue
+        for node in _walk(call.get("result")):
+            if not isinstance(node, dict) or not isinstance(node.get("character"), dict):
+                continue
+            character = node["character"]
+            if character.get("character_type") in {"npc", "monster"} and character.get("id"):
+                actor_ids.add(str(character["id"]))
+    return actor_ids
+
+
 def _source_combat_sequence(
     calls: list[dict[str, Any]], *, mode: str | None = None, require_render: bool = False
 ) -> bool:
     party_ids = _manifest_party_ids(calls)
-    if not party_ids:
+    source_actor_ids = _source_combat_actor_ids(calls)
+    if not party_ids or not source_actor_ids:
         return False
     for index, call in enumerate(calls):
         arguments = call.get("arguments") or {}
@@ -494,7 +519,7 @@ def _source_combat_sequence(
             or call.get("tool") != "combat_start"
             or (mode is not None and arguments.get("positioning_mode") != mode)
             or not (participants & party_ids)
-            or not (participants - party_ids)
+            or not (participants & source_actor_ids)
         ):
             continue
         later = calls[index + 1 :]
@@ -587,6 +612,8 @@ def _coverage_audit(
             and not _source_combat_sequence(calls, mode=mode)
         ):
             scenario_gaps.append(f"positioning_mode:{mode}")
+        if "combat" in mechanisms and not _source_combat_actor_ids(calls):
+            scenario_gaps.append("source_opposition_missing")
         audience = scenario.get("audience")
         if audience == "player" and not any(call.get("principal") == "player" for call in calls):
             scenario_gaps.append("audience:player")
