@@ -41,6 +41,27 @@ def _call(
     }
 
 
+def _player_grants(principal: str = "cli:player") -> list[dict[str, object]]:
+    return [
+        _call(
+            "access_grant",
+            arguments={
+                "scope": "campaign",
+                "principal_id": principal,
+                "payload": {"role": "player"},
+            },
+        ),
+        _call(
+            "access_grant",
+            arguments={
+                "scope": "actor",
+                "principal_id": principal,
+                "payload": {"actor_id": "pc-1", "can_control": True},
+            },
+        ),
+    ]
+
+
 def test_wrapped_mcp_text_is_decoded_without_losing_artifacts() -> None:
     value = _decode_tool_content(
         json.dumps(
@@ -192,7 +213,7 @@ def test_resume_cycles_preserve_existing_process_artifacts(tmp_path: Path) -> No
 
 def test_player_starts_only_after_successful_actor_grant() -> None:
     principal = "regression-player-module"
-    grant = _call(
+    actor_grant = _call(
         "access_grant",
         arguments={
             "scope": "actor",
@@ -200,11 +221,20 @@ def test_player_starts_only_after_successful_actor_grant() -> None:
             "payload": {"actor_id": "actor-1", "can_control": True},
         },
     )
-    assert _player_ready([grant], principal_id=principal) is True
-    assert _player_ready([{**grant, "ok": False}], principal_id=principal) is False
+    campaign_grant = _call(
+        "access_grant",
+        arguments={
+            "scope": "campaign",
+            "principal_id": f"cli:{principal}",
+            "payload": {"role": "player"},
+        },
+    )
+    assert _player_ready([campaign_grant, actor_grant], principal_id=principal) is True
+    assert _player_ready([actor_grant], principal_id=principal) is False
+    assert _player_ready([campaign_grant], principal_id=principal) is False
     assert (
         _player_ready(
-            [{**grant, "arguments": {**grant["arguments"], "scope": "campaign"}}],
+            [{**actor_grant, "ok": False}, campaign_grant],
             principal_id=principal,
         )
         is False
@@ -275,6 +305,7 @@ def test_coverage_requires_real_ordered_boundaries_retries_and_recovery() -> Non
             arguments={"action": "verify_ending"},
             result={"status": "completed", "achieved": True},
         ),
+        *_player_grants(),
         _call("campaign_query", principal="player"),
     ]
     audit = _coverage_audit(route, calls, process_count=4, list_changed_count=3)
@@ -320,11 +351,14 @@ def test_preparation_requires_finalize_import_activate_order() -> None:
         *bypassed[:3],
         _call("content_pack", arguments={"action": "import"}),
         bypassed[3],
+        *_player_grants(),
     ]
 
-    assert _coverage_audit(route, bypassed, process_count=1, list_changed_count=1)[
-        "complete"
-    ] is False
+    bypassed_audit = _coverage_audit(
+        route, bypassed, process_count=1, list_changed_count=1
+    )
+    assert bypassed_audit["complete"] is False
+    assert "preparation:player_membership_or_actor_grant_missing" in bypassed_audit["gaps"]
     assert _coverage_audit(route, complete, process_count=1, list_changed_count=1)[
         "complete"
     ] is True

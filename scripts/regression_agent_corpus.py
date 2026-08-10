@@ -207,9 +207,17 @@ def _tool_timeline(rows: list[dict[str, Any]], *, principal: str) -> list[dict[s
 
 
 def _player_ready(calls: list[dict[str, Any]], *, principal_id: str) -> bool:
-    """Return true only after a successful actor grant for the player exists."""
+    """Return true only after campaign membership and actor control both exist."""
     trusted_id = f"cli:{principal_id}"
-    return any(
+    campaign_grant = any(
+        call.get("ok")
+        and call.get("tool") == "access_grant"
+        and (call.get("arguments") or {}).get("scope") == "campaign"
+        and (call.get("arguments") or {}).get("principal_id") == trusted_id
+        and ((call.get("arguments") or {}).get("payload") or {}).get("role") == "player"
+        for call in calls
+    )
+    actor_grant = any(
         call.get("ok")
         and call.get("tool") == "access_grant"
         and (call.get("arguments") or {}).get("scope") == "actor"
@@ -217,6 +225,27 @@ def _player_ready(calls: list[dict[str, Any]], *, principal_id: str) -> bool:
         and bool(((call.get("arguments") or {}).get("payload") or {}).get("actor_id"))
         for call in calls
     )
+    return campaign_grant and actor_grant
+
+
+def _has_player_access_pair(calls: list[dict[str, Any]]) -> bool:
+    campaign_principals = {
+        (call.get("arguments") or {}).get("principal_id")
+        for call in calls
+        if call.get("ok")
+        and call.get("tool") == "access_grant"
+        and (call.get("arguments") or {}).get("scope") == "campaign"
+        and ((call.get("arguments") or {}).get("payload") or {}).get("role") == "player"
+    }
+    actor_principals = {
+        (call.get("arguments") or {}).get("principal_id")
+        for call in calls
+        if call.get("ok")
+        and call.get("tool") == "access_grant"
+        and (call.get("arguments") or {}).get("scope") == "actor"
+        and bool(((call.get("arguments") or {}).get("payload") or {}).get("actor_id"))
+    }
+    return bool(campaign_principals & actor_principals)
 
 
 def _phase_exposure_timeline(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -514,6 +543,8 @@ def _coverage_audit(
         gaps.append("cold_start:skill_query_missing")
     if not _call_matches(calls, "exposure", action="open"):
         gaps.append("cold_start:exposure_open_missing")
+    if not _has_player_access_pair(calls):
+        gaps.append("preparation:player_membership_or_actor_grant_missing")
     if list_changed_count < 1:
         gaps.append("host:list_changed_not_observed")
     if _has_exposure_reopen_after_transition(calls):
@@ -670,12 +701,20 @@ managed_sources={json.dumps(_managed_source_summary(unit), ensure_ascii=False)}
 evidence={json.dumps(_evidence_summary(route), ensure_ascii=False)}
 scenarios={json.dumps(route.get("scenarios") or [], ensure_ascii=False)}
 
+Treat the current evidence-gap list below as authoritative for what remains;
+prior Agent narration is not proof of a blocker. Query current state first and
+do not repeat a prerequisite that is no longer listed. In particular, when no
+`preparation` gap remains, do not start, finalize, import, or activate another
+module and do not rebuild the existing party.
+
 Prepare/finalize/import/activate the current Pack through the public lifecycle;
 before any module authoring write, read the current
 `dnd:full/references/skill-groups/lobby/modules-import.md` asset and follow its
 public request shapes exactly;
 create or resume one reproducibly seeded campaign; create the source-sized legal
-party; grant the named player principal one PC; then progress the source-backed
+party; grant the named player principal both campaign membership with role
+`player` and explicit control of one PC through separate public `access_grant`
+calls; then progress the source-backed
 route to one legal verified ending. Exercise the listed Play, NPC, chase,
 combat, audience, and recovery obligations at genuine scene boundaries. Keep
 NPC workers isolated and close/abort before mechanics or combat. Use both
