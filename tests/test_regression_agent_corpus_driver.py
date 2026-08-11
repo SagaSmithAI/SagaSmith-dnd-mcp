@@ -970,7 +970,9 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert '`character_create_from`' in prompt
     assert "compare any active encounter's immutable participants" in prompt
     assert 'read each required actor individually with `view="get"`' in prompt
-    assert "Do not grind irrelevant turns" in prompt
+    assert '`outcome.status="interrupted"`' in prompt
+    assert "`combat_end_turn` only passes one actor's turn" in prompt
+    assert "do not grind irrelevant turns" in prompt
     assert '"decision"' not in prompt
     assert '"outcome"' not in prompt
 

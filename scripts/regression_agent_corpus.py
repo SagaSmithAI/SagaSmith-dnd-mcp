@@ -1147,7 +1147,12 @@ bounded summary of the nested encounter exposed its hydrated cards or
 qualify because it contains the wrong actor revision, lacks the required
 hydrated card, or used non-matching source evidence, end it through
 `combat_end` and rebuild the qualifying encounter once from current actors.
-Do not grind irrelevant turns or replace participants inside active Combat.
+Search and load the exact `combat_end` tool, then close immediately with a
+truthful `outcome.status="interrupted"` and a summary naming the nonqualifying
+evidence. `combat_end_turn` only passes one actor's turn and must not be repeated
+to simulate ending the encounter. Resolve a genuinely blocking pending window
+first, but do not grind irrelevant turns or replace participants inside active
+Combat.
 
 Prepare/finalize/import/activate the current Pack through the public lifecycle;
 before any module authoring write, read the current
