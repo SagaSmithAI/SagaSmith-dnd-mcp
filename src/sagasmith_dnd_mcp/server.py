@@ -42640,6 +42640,29 @@ boundary.
                     + "; allowed fields: "
                     + ", ".join(sorted(allowed_module_statblock_fields))
                 )
+        elif mode == "statblock":
+            allowed_statblock_fields = {
+                "campaign_id",
+                "source_id",
+                "chunk_ids",
+                "source_statblock_name",
+                "name",
+                "character_type",
+                "player_name",
+                "summary",
+                "notes",
+                "replace_character_id",
+                "expected_revision",
+                "variant",
+            }
+            unsupported_statblock_fields = sorted(set(data) - allowed_statblock_fields)
+            if unsupported_statblock_fields:
+                raise ValueError(
+                    "rule statblock payload contains unsupported fields: "
+                    + ", ".join(unsupported_statblock_fields)
+                    + "; allowed fields: "
+                    + ", ".join(sorted(allowed_statblock_fields))
+                )
         if scoped_campaign_id:
             require_facade_phase(scoped_campaign_id, "character_create_from", PROFILE_LOBBY)
         if mode == "content_actor":

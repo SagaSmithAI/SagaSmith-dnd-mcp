@@ -1091,7 +1091,8 @@ enabled rule sources. Later exact filters belong only inside the optional
 `filters` object. If a filtered lookup returns no hits, retry the minimal shape
 before any module draft operation. When an enabled canonical rule source
 contains the exact printed card, use `character_create_from(mode="statblock")`
-with its returned `source_id`, exact chunks, and `source_statblock_name`; give
+with its returned `source_id`, exact `payload.chunk_ids` (never
+`exact_chunks`), and `source_statblock_name`; give
 repeated instances distinct names and verify returned
 `statblock.source_identity`. Only when the card exists exclusively in the module
 and its active Pack lacks the review is new Pack data mechanically indispensable.

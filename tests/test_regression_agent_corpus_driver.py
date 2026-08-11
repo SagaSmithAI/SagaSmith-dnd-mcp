@@ -960,6 +960,7 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "start an explicit new draft/version from the same managed source" in prompt
     assert "Do not send `filters` on that first lookup" in prompt
     assert "retry the minimal shape" in prompt
+    assert "exact `payload.chunk_ids` (never" in prompt
     assert "Never guess a review id" in prompt
     assert "module_set_progress` is only narrative progress metadata" in prompt
     assert '`character_create_from`' in prompt

@@ -666,6 +666,23 @@ def test_rule_statblock_recovers_split_text_layout_without_images(tmp_path: Path
             },
         )
 
+        with pytest.raises(ToolError, match="unsupported fields: exact_chunks"):
+            await _call(
+                server,
+                "character_create_from",
+                {
+                    "mode": "statblock",
+                    "payload": {
+                        "campaign_id": campaign["id"],
+                        "source_id": ingested["source_id"],
+                        "exact_chunks": [item["id"] for item in chunks],
+                        "source_statblock_name": "Guard",
+                        "name": "Invalid Guard",
+                    },
+                    "idempotency_key": "reject-exact-chunks",
+                },
+            )
+
         created = await _call(
             server,
             "character_create_from",
