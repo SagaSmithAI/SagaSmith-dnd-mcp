@@ -482,7 +482,11 @@ def test_coverage_requires_real_ordered_boundaries_retries_and_recovery() -> Non
         ),
         _call("combat_query", arguments={"view": "render"}),
         _call("combat_cast_spell"),
-        _call("combat_choice", arguments={"action": "execute_plan"}),
+        _call(
+            "combat_choice",
+            arguments={"action": "execute_plan"},
+            result={"status": "committed"},
+        ),
         _call("combat_end"),
         _call("chase", arguments={"action": "start"}),
         _call("combat_start", ok=False),
@@ -818,6 +822,17 @@ def test_combat_coverage_requires_execution_inside_the_same_encounter() -> None:
         )
         is False
     )
+    assert (
+        _mechanism_covered(
+            "combat",
+            [
+                *prefix,
+                _call("combat_cast_spell", result={"status": "pending_ruling"}),
+                _call("combat_end"),
+            ],
+        )
+        is False
+    )
 
     executed = [
         *prefix,
@@ -827,6 +842,13 @@ def test_combat_coverage_requires_execution_inside_the_same_encounter() -> None:
     ]
     assert _mechanism_covered("combat", executed) is True
     assert _mechanism_covered("combat_render", executed) is True
+
+    committed_spell = [
+        *prefix,
+        _call("combat_cast_spell", result={"status": "committed"}),
+        _call("combat_end"),
+    ]
+    assert _mechanism_covered("combat", committed_spell) is True
 
     different_encounter = [
         *prefix,
@@ -1116,6 +1138,8 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "every remaining Combat-specific mechanism are already" in prompt
     assert "at least one successful" in prompt
     assert "`combat_start` alone never" in prompt
+    assert "A `pending_ruling` response" in prompt
+    assert "Never guess or cache" in prompt
     assert '`module_draft(action="get")` with no payload' in prompt
     assert "matching unfinished job and preserve its public ids" in prompt
     assert "same parallel tool batch as an `exposure(set)`" in prompt

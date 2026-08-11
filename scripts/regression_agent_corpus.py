@@ -840,27 +840,32 @@ def _source_combat_sequence(
             encounter_calls, "combat_query", action="render"
         ):
             continue
-        if not any(
-            item.get("ok")
-            and (
-                item.get("tool")
-                in {
-                    "combat_cast_spell",
-                    "combat_common_action",
-                    "combat_reaction_attack",
-                    "combat_resolve_attack",
-                    "combat_use_activity",
-                }
-                or (
-                    item.get("tool") == "combat_choice"
-                    and (item.get("arguments") or {}).get("action") == "execute_plan"
-                )
-            )
-            for item in encounter_calls
-        ):
+        if not any(_committed_combat_execution(item) for item in encounter_calls):
             continue
         return True
     return False
+
+
+def _committed_combat_execution(call: dict[str, Any]) -> bool:
+    if not call.get("ok"):
+        return False
+    tool = call.get("tool")
+    if tool == "combat_cast_spell":
+        return any(
+            isinstance(node, dict) and node.get("status") == "committed"
+            for node in _walk(call.get("result"))
+        )
+    if tool == "combat_choice":
+        return (call.get("arguments") or {}).get("action") == "execute_plan" and any(
+            isinstance(node, dict) and node.get("status") == "committed"
+            for node in _walk(call.get("result"))
+        )
+    return tool in {
+        "combat_common_action",
+        "combat_reaction_attack",
+        "combat_resolve_attack",
+        "combat_use_activity",
+    }
 
 
 def _mechanism_covered(mechanism: str, calls: list[dict[str, Any]]) -> bool:
@@ -1244,6 +1249,14 @@ card, and current evidence; MCP must pay the action, slot or innate use and own
 all random results and mechanical state changes. Do not replace this obligation
 with a weapon attack, narration, a raw sheet edit, or a spell whose
 parser-damaged name never produced a hydrated card.
+A `pending_ruling` response only returns the declaration contract and spends
+nothing; it is not a Combat execution receipt. Before the corrected submission,
+read `combat_query(status)`. If another actor owns the turn, call
+`combat_end_turn` only for the returned current actor with the latest revision,
+then query status again after every committed turn write. Never guess or cache
+the initiative sequence. Once the selected caster is current, submit the exact
+declaration and require `status="committed"`; do not end the encounter after a
+rejected or merely pending cast.
 On resume, compare any active encounter's immutable participants and source
 manifest with the remaining evidence before the first Combat mutation. Take
 participant ids from `combat_query(status)`, then load `character_query` and
