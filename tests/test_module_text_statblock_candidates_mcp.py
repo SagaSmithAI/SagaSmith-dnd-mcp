@@ -283,6 +283,23 @@ def test_agent_can_fill_custom_monster_multiattack_from_exact_module_source(
         assert requirements["required"] is True
         assert requirements["parser_authoritative"] is False
         assert requirements["allowed_resolutions"] == ["structured", "agent_ruling"]
+        assert requirements["submission_schema"]["root_fields"] == ["multiattack_options"]
+        assert requirements["submission_schema"]["declaration_fields"] == [
+            "activity_id",
+            "source_excerpt",
+            "reason",
+            "resolution",
+            "options",
+        ]
+        assert requirements["submission_schema"]["structured_option_fields"] == [
+            "id",
+            "attacks",
+        ]
+        assert requirements["submission_schema"]["attack_fields"] == [
+            "weapon_id",
+            "attack_mode",
+            "count",
+        ]
         assert requirements["multiattack_options"] == [
             {
                 "activity_id": activity["id"],

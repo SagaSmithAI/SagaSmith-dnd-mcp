@@ -6362,6 +6362,27 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "ruling_kind": "module_specific_procedure",
             "parser_authoritative": False,
             "allowed_resolutions": ["structured", "agent_ruling"],
+            "submission_schema": {
+                "root_fields": ["multiattack_options"],
+                "declaration_fields": [
+                    "activity_id",
+                    "source_excerpt",
+                    "reason",
+                    "resolution",
+                    "options",
+                ],
+                "structured_option_fields": ["id", "attacks"],
+                "attack_fields": ["weapon_id", "attack_mode", "count"],
+                "constraints": [
+                    "activity_id and source_excerpt must copy one returned multiattack option",
+                    "reason must contain 1 to 500 characters",
+                    "structured resolution requires one or more options",
+                    "option id must be a unique lowercase slug",
+                    "weapon_id must copy one returned available weapon id",
+                    "attack_mode must be melee or ranged and count must be positive",
+                    "agent_ruling resolution must omit options",
+                ],
+            },
             "multiattack_options": [
                 {
                     "activity_id": str(activity.get("id") or ""),
