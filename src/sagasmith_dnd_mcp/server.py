@@ -7147,6 +7147,35 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         value["review_requirements"] = requirements
         return value
 
+    def module_draft_handle_view(job: Any) -> dict[str, Any]:
+        """Return the bounded public identity needed to resume one module draft."""
+
+        value = asdict(job)
+        payload = dict(value.get("payload") or {})
+        result = dict(value.get("result") or {})
+        finalized = dict(result.get("finalized_package") or {})
+        pack_draft = dict(result.get("pack_draft") or {})
+        return {
+            "job_id": str(value.get("id") or ""),
+            "state": str(value.get("state") or ""),
+            "resumable": not bool(finalized),
+            "artifact": str(value.get("artifact") or ""),
+            "artifact_checksum": str(value.get("artifact_checksum") or ""),
+            "source_key": str(payload.get("source_key") or value.get("artifact") or ""),
+            "title": str(payload.get("title") or ""),
+            "module_id": str(value.get("module_id") or ""),
+            "revision": int(value.get("revision") or 0),
+            "created_at": value.get("created_at"),
+            "updated_at": value.get("updated_at"),
+            "pack_decision_fields": sorted(pack_draft),
+            "statblock_review_count": len(result.get("statblock_reviews") or []),
+            "finalized_pack_id": str(
+                dict(finalized.get("summary") or {}).get("id")
+                or dict(finalized.get("summary") or {}).get("package_id")
+                or ""
+            ),
+        }
+
     def require_write_contract(expected_revision: int | None, idempotency_key: str | None) -> None:
         if expected_revision is None:
             raise ValueError("expected_revision is required for this mutation")
@@ -41002,11 +41031,19 @@ boundary.
         require_facade_phase(campaign_id, f"module_draft({action})", PROFILE_LOBBY)
         if action == "get":
             data = facade_payload(payload)
-            jobs = (
-                [import_job_get(campaign_id, str(data["job_id"]), principal_id)]
-                if data.get("job_id")
-                else import_job_list(campaign_id, "module", principal_id)
-            )
+            if data.get("job_id"):
+                jobs = [import_job_get(campaign_id, str(data["job_id"]), principal_id)]
+            else:
+                access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+                return facade_result(
+                    action,
+                    {
+                        "jobs": [
+                            module_draft_handle_view(item)
+                            for item in import_jobs.list(campaign_id, kind="module")
+                        ]
+                    },
+                )
             for job_view in jobs:
                 job_result = dict(job_view.get("result") or {})
                 finalized = dict(job_result.get("finalized_package") or {})

@@ -458,6 +458,74 @@ def test_module_start_finalize_writes_a_finalized_module_pack(tmp_path: Path) ->
     asyncio.run(exercise())
 
 
+def test_module_get_lists_compact_restart_handles(tmp_path: Path) -> None:
+    import_root = tmp_path / "imports"
+    import_root.mkdir()
+    source = import_root / "restart.md"
+    source.write_text("# Chapter\n\n## Scene\n\nResume this draft.\n", encoding="utf-8")
+
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path, import_root))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Restart handles", "idempotency_key": "campaign"},
+        )
+        started = await _call(
+            server,
+            "module_draft",
+            {
+                "campaign_id": campaign["id"],
+                "action": "start",
+                "payload": {
+                    "source_path": str(source),
+                    "source_key": "restart-source",
+                    "title": "Restart Source",
+                },
+                "idempotency_key": "restart-start",
+            },
+        )
+
+        listed = await _call(
+            server,
+            "module_draft",
+            {"campaign_id": campaign["id"], "action": "get"},
+        )
+        assert listed["jobs"] == [
+            {
+                "job_id": started["job_id"],
+                "state": "imported",
+                "resumable": True,
+                "artifact": started["job"]["artifact"],
+                "artifact_checksum": started["job"]["artifact_checksum"],
+                "source_key": "restart-source",
+                "title": "Restart Source",
+                "module_id": started["module_id"],
+                "revision": started["job"]["revision"],
+                "created_at": started["job"].get("created_at"),
+                "updated_at": started["job"].get("updated_at"),
+                "pack_decision_fields": [],
+                "statblock_review_count": 0,
+                "finalized_pack_id": "",
+            }
+        ]
+        assert "inspection" not in listed["jobs"][0]
+        assert "result" not in listed["jobs"][0]
+        detailed = await _call(
+            server,
+            "module_draft",
+            {
+                "campaign_id": campaign["id"],
+                "action": "get",
+                "payload": {"job_id": started["job_id"]},
+            },
+        )
+        assert detailed["job"]["id"] == started["job_id"]
+        assert detailed["job"]["inspection"]
+
+    asyncio.run(exercise())
+
+
 def test_content_pack_activation_applies_agent_scene_key_remaps(tmp_path: Path) -> None:
     import_root = tmp_path / "imports"
     import_root.mkdir()
