@@ -43,7 +43,7 @@ def test_role_refresh_crops_loaded_tools_without_changing_phase() -> None:
     )
     registry.set_tools(
         exposure,
-        add=["character_check", "character_create_from", "character_content_apply"],
+        add=["character_check", "character_content_apply"],
     )
 
     changed = registry.refresh_phase(
@@ -57,10 +57,9 @@ def test_role_refresh_crops_loaded_tools_without_changing_phase() -> None:
     assert exposure.loaded_tools == {"character_check"}
 
 
-def test_play_authoring_facades_are_dm_only_and_recovery_survives_combat() -> None:
-    assert policy_for_tool("character_create_from").roles("play") == frozenset(
-        CAMPAIGN_DM_ROLES
-    )
+def test_character_creation_is_lobby_only_and_recovery_survives_combat() -> None:
+    assert policy_for_tool("character_create_from").phases == frozenset({"lobby"})
+    assert policy_for_tool("character_create_from").roles("lobby") == frozenset()
     assert policy_for_tool("character_content_apply").roles("play") == frozenset(
         CAMPAIGN_DM_ROLES
     )
@@ -120,7 +119,7 @@ def test_role_demotion_refreshes_only_the_affected_native_session(tmp_path: Path
         )
         server.exposure_registry.set_tools(
             exposure,
-            add=["character_check", "character_create_from", "character_content_apply"],
+            add=["character_check", "character_content_apply"],
         )
         owner_exposure = server.exposure_registry.open(
             session_key="owner-session",
@@ -130,7 +129,7 @@ def test_role_demotion_refreshes_only_the_affected_native_session(tmp_path: Path
         )
         server.exposure_registry.set_tools(
             owner_exposure,
-            add=["character_create_from"],
+            add=["character_content_apply"],
         )
 
         class Session:
@@ -157,7 +156,7 @@ def test_role_demotion_refreshes_only_the_affected_native_session(tmp_path: Path
         assert await server._refresh("player-session", campaign["id"]) is True
         assert exposure.loaded_tools == {"character_check"}
         assert session.notifications == 1
-        assert owner_exposure.loaded_tools == {"character_create_from"}
+        assert owner_exposure.loaded_tools == {"character_content_apply"}
         assert owner_session.notifications == 0
 
     asyncio.run(exercise())
@@ -714,6 +713,120 @@ def test_stdio_session_mutates_native_tool_list_and_calls_tools_directly(
                 assert json.loads(retained.content[0].text)["exposure_id"] == rebound_payload[
                     "exposure_id"
                 ]
+
+    asyncio.run(exercise())
+
+
+def test_stdio_play_transition_removes_character_creation_and_rejects_stale_call(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        notifications: list[str] = []
+
+        async def on_message(message) -> None:
+            notifications.append(type(getattr(message, "root", message)).__name__)
+
+        env = dict(os.environ)
+        env.update(
+            {
+                "SAGASMITH_DND_MCP_HOME": str(tmp_path / "home"),
+                "SAGASMITH_DND_MCP_AUTO_SEED": "0",
+            }
+        )
+        params = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "sagasmith_dnd_mcp.server"],
+            cwd=Path(__file__).parents[1],
+            env=env,
+        )
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write, message_handler=on_message) as session:
+                await session.initialize()
+                principal_id = "discord:lobby-builder"
+                await session.call_tool(
+                    "exposure", {"action": "open", "principal_id": principal_id}
+                )
+                await session.call_tool(
+                    "exposure",
+                    {
+                        "action": "set",
+                        "add_tool_ids": ["campaign_create"],
+                        "principal_id": principal_id,
+                    },
+                )
+                created = await session.call_tool(
+                    "campaign_create",
+                    {"name": "Lobby creation boundary", "idempotency_key": "create"},
+                )
+                campaign_id = json.loads(created.content[0].text)["id"]
+                await session.call_tool(
+                    "exposure",
+                    {
+                        "action": "open",
+                        "campaign_id": campaign_id,
+                        "principal_id": principal_id,
+                    },
+                )
+                loaded = await session.call_tool(
+                    "exposure",
+                    {
+                        "action": "set",
+                        "add_tool_ids": ["character_create_from"],
+                        "principal_id": principal_id,
+                    },
+                )
+                assert not loaded.isError
+                assert "character_create_from" in {
+                    tool.name for tool in (await session.list_tools()).tools
+                }
+                current = await session.call_tool(
+                    "campaign_query",
+                    {
+                        "view": "get",
+                        "payload": {"campaign_id": campaign_id},
+                        "principal_id": principal_id,
+                    },
+                )
+                revision = json.loads(current.content[0].text)["result"]["revision"]
+                notifications.clear()
+
+                entered = await session.call_tool(
+                    "game_phase",
+                    {
+                        "campaign_id": campaign_id,
+                        "action": "set",
+                        "tool_profile": "play",
+                        "expected_revision": revision,
+                        "idempotency_key": "enter-play",
+                    },
+                )
+                assert not entered.isError
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                assert "ToolListChangedNotification" in notifications
+                assert "character_create_from" not in {
+                    tool.name for tool in (await session.list_tools()).tools
+                }
+
+                stale_call = await session.call_tool(
+                    "character_create_from",
+                    {
+                        "mode": "direct",
+                        "payload": {"campaign_id": campaign_id, "name": "Late Actor"},
+                        "idempotency_key": "late-actor",
+                    },
+                )
+                assert stale_call.isError
+
+                stale_load = await session.call_tool(
+                    "exposure",
+                    {
+                        "action": "set",
+                        "add_tool_ids": ["character_create_from"],
+                        "principal_id": principal_id,
+                    },
+                )
+                assert stale_load.isError
 
     asyncio.run(exercise())
 

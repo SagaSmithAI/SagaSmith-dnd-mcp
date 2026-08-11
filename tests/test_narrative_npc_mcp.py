@@ -95,22 +95,6 @@ async def _campaign_with_narrative_module(tmp_path: Path):
         "heading_path": expanded["heading_path"],
         "content_sha256": hashlib.sha256(expanded["content"].encode("utf-8")).hexdigest(),
     }
-    current = await _call(
-        server,
-        "campaign_query",
-        {"view": "get", "payload": {"campaign_id": campaign["id"]}},
-    )
-    await _call(
-        server,
-        "game_phase",
-        {
-            "campaign_id": campaign["id"],
-            "action": "set",
-            "tool_profile": "play",
-            "expected_revision": current["revision"],
-            "idempotency_key": "begin-play",
-        },
-    )
     return server, campaign["id"], source_ref
 
 
@@ -222,6 +206,15 @@ def test_narrative_npc_is_source_bound_and_explicitly_noncombat(
                     "idempotency_key": "narrative-combat",
                 },
             )
+        with pytest.raises(Exception, match="only available during lobby"):
+            await _call(
+                server,
+                "character_create_from",
+                {
+                    **arguments,
+                    "idempotency_key": "narrative-qelline-during-play",
+                },
+            )
 
     asyncio.run(exercise())
 
@@ -292,7 +285,6 @@ def test_narrative_npc_reports_missing_and_unsupported_request_fields(
                     "idempotency_key": "incomplete-narrative-npc",
                 },
             )
-
     asyncio.run(exercise())
 
 

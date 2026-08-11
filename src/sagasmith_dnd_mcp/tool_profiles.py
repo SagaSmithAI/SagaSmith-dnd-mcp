@@ -71,7 +71,7 @@ PHASE_TOOLS = {
         """
         actor_knowledge_change actor_knowledge_query addon_actor_instantiate bounded_evaluation
         branch_query campaign_change campaign_event campaign_rules character_action
-        character_check character_content_apply character_create_from character_metadata_update
+        character_check character_content_apply character_metadata_update
         character_query character_state_change chase combat_start content_solution
         continuity_context dnd_ability_roll dnd_check dnd_dice_roll inventory_change
         inventory_transfer memory_change memory_query module_expand module_query module_search
@@ -106,7 +106,7 @@ PHASE_DM_TOOLS = {
     PROFILE_PLAY: _names(
         """
         actor_knowledge_change addon_actor_instantiate campaign_change campaign_event
-        campaign_rules character_content_apply character_create_from chase
+        campaign_rules character_content_apply chase
         combat_start content_solution memory_change memory_query module_set_progress
         npc_conversation playthrough_manifest snapshot_create snapshot_query state_revision
         """

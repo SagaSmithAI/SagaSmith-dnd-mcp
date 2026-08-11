@@ -42506,8 +42506,6 @@ boundary.
                 raise ValueError("narrative NPC campaign_id must be a non-empty string")
             if not idempotency_key:
                 raise ValueError("idempotency_key is required for narrative NPC creation")
-            if authoritative_phase(scoped_campaign_id) != PROFILE_PLAY:
-                raise CombatEngineError("narrative NPCs can be created only during play")
         elif mode == "build":
             allowed_build_fields = {
                 "campaign_id",
@@ -42526,10 +42524,8 @@ boundary.
                     "character_ability_apply and exact character_content_apply "
                     "catalog artifacts"
                 )
-        elif scoped_campaign_id and authoritative_phase(scoped_campaign_id) != PROFILE_LOBBY:
-            raise CombatEngineError(
-                "character authoring and content import are available only in lobby"
-            )
+        if scoped_campaign_id:
+            require_facade_phase(scoped_campaign_id, "character_create_from", PROFILE_LOBBY)
         if mode == "content_actor":
             data = facade_payload(payload)
             artifact_id = str(data.get("artifact_id") or "").strip()
