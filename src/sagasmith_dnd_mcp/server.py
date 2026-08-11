@@ -31226,7 +31226,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if (str(source.get("source_key") or ""), str(source.get("checksum") or ""))
             in bundled_identities
             and str(source.get("edition") or "") == str(profile.edition)
-            and str(source.get("locale") or "") == str(profile.locale)
         }
 
         def collect(value: Any) -> None:
@@ -31320,6 +31319,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
         edition = optional_text("edition")
         locale = optional_text("locale")
+        if locale is None:
+            profile = rule_profiles.get(campaign_id)
+            if profile is None:
+                raise RulesetUnavailableError("campaign has no authoritative rule profile")
+            locale = str(profile.locale)
         publications = optional_text_list("publications")
         source_ids = optional_text_list("source_ids")
         source_keys = optional_text_list("source_keys")

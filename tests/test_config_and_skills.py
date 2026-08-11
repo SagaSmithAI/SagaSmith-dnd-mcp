@@ -205,6 +205,85 @@ def test_bundled_rule_seed_reports_complete_multilingual_corpus(tmp_path: Path) 
         assert any(item["source_id"] == monster_source_id for item in response["result"])
         assert response_with_empty_optional_filters["result"] == response["result"]
 
+        _, zh_campaign = await server.call_tool(
+            "campaign_create",
+            {
+                "name": "Bundled cross-locale search",
+                "edition": "2014",
+                "locale": "zh",
+                "idempotency_key": "bundled-cross-locale-campaign",
+            },
+        )
+        _, default_zh = await server.call_tool(
+            "rule_search",
+            {
+                "campaign_id": zh_campaign["id"],
+                "query": "Swarm of Rats",
+                "top_k": 8,
+            },
+        )
+        assert default_zh["result"]
+        assert {
+            item["metadata"]["locale"] for item in default_zh["result"]
+        } == {"zh"}
+
+        _, explicit_en = await server.call_tool(
+            "rule_search",
+            {
+                "campaign_id": zh_campaign["id"],
+                "query": "Swarm of Rats",
+                "filters": {"edition": "2014", "locale": "en"},
+                "top_k": 30,
+            },
+        )
+        assert explicit_en["result"]
+        assert {
+            item["metadata"]["locale"] for item in explicit_en["result"]
+        } == {"en"}
+        rat_hits = [
+            item
+            for item in explicit_en["result"]
+            if any("Swarm of Rats" in value for value in item["heading_path"])
+        ]
+        single_card_root = next(
+            item["heading_path"][0]
+            for item in rat_hits
+            if item["heading_path"][0].startswith("Bundled source file:")
+        )
+        rat_chunks = [
+            item for item in rat_hits if item["heading_path"][0] == single_card_root
+        ]
+        rat_source_id = rat_chunks[0]["source_id"]
+        assert len(rat_chunks) >= 2
+        assert {item["source_id"] for item in rat_chunks} == {rat_source_id}
+
+        _, expanded_rat = await server.call_tool(
+            "rule_expand",
+            {
+                "campaign_id": zh_campaign["id"],
+                "chunk_id": rat_chunks[0]["id"],
+            },
+        )
+        assert expanded_rat["source"]["locale"] == "en"
+
+        _, created_rat = await server.call_tool(
+            "character_create_from",
+            {
+                "mode": "statblock",
+                "payload": {
+                    "campaign_id": zh_campaign["id"],
+                    "name": "Cross-locale Rat Swarm",
+                    "source_id": rat_source_id,
+                    "chunk_ids": [item["id"] for item in rat_chunks],
+                    "source_statblock_name": "Swarm of Rats",
+                },
+                "idempotency_key": "create-cross-locale-rat-swarm",
+            },
+        )
+        created_rat_result = created_rat["result"]
+        assert created_rat_result["statblock"]["source_identity"] == "Swarm of Rats"
+        assert created_rat_result["source"]["id"] == rat_source_id
+
     asyncio.run(inspect_seed())
 
 
