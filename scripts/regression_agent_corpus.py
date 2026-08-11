@@ -1158,6 +1158,13 @@ Prepare/finalize/import/activate the current Pack through the public lifecycle;
 before any module authoring write, read the current
 `dnd:full/references/skill-groups/lobby/modules-import.md` asset and follow its
 public request shapes exactly;
+when source review, opposition hydration, ending evidence, or another Pack
+authoring obligation remains, stay in or return to Lobby, search and load
+`module_draft`, and call `module_draft(action="get")` with no payload before
+creating an actor, starting another draft, or entering Play. Resume the newest
+matching unfinished job and preserve its public ids. Start a new draft only if
+that public list proves no matching resumable job exists or a finalized Pack
+requires an explicit new version.
 create or resume one reproducibly seeded campaign; create the source-sized legal
 party; grant the named player principal both campaign membership with role
 `player` and explicit control of one PC through separate public `access_grant`
@@ -1170,6 +1177,11 @@ Keep the campaign in Lobby until the current Pack is active, the party is ready,
 and the player grant exists. If an earlier interrupted cycle entered Play before
 those prerequisites, close any active Play workflow and return to Lobby before
 continuing preparation. Do not chase later matrix gaps ahead of prerequisites.
+Never issue `game_phase`, `combat_start`, `combat_end`, restore, checkout,
+undo, or redo in the same parallel tool batch as an `exposure(set)` built from
+the old native list. Wait for the authoritative transition, consume
+`tools/list_changed`, refresh the native list, and only then search/set the next
+phase's tools.
 When the current gaps include `preparation`, do not initialize the playthrough
 manifest or enter Play: read the finalized draft artifact, complete a successful
 `content_pack(import, kind="module")`, and activate only the new module id
