@@ -10333,7 +10333,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "execution_mode": "client_subagents_required",
                 "proposal_contract": "npc-conversation-proposal.v4",
                 "public_tool": "npc_conversation",
-                "public_actions": ["open", "get", "ingest", "publish", "close", "abort"],
+                "public_actions": [
+                    "open",
+                    "list",
+                    "get",
+                    "ingest",
+                    "publish",
+                    "close",
+                    "abort",
+                ],
                 "host_transport": "private_authenticated_unlisted",
                 "actor_scoped_activation_refs": True,
                 "agent_resolved_audience": True,
@@ -28779,6 +28787,26 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         result["refreshed_actor_ids"] = list(session.get("refreshed_actor_ids") or [])
         return result
 
+    def npc_conversation_list_impl(
+        campaign_id: str,
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+    ) -> dict[str, Any]:
+        """List this principal's active public conversation recovery handles."""
+
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        branch_id = require_current_branch(campaign_id, None)
+        conversations = npc_conversations.active_public_statuses(
+            campaign_id=campaign_id,
+            branch_id=branch_id,
+            principal_id=principal_id,
+        )
+        return {
+            "campaign_id": campaign_id,
+            "branch_id": branch_id,
+            "count": len(conversations),
+            "conversations": conversations,
+        }
+
     def npc_conversation_ingest_impl(
         campaign_id: str,
         conversation_id: str,
@@ -29227,7 +29255,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @public_tool()
     def npc_conversation(
         campaign_id: str,
-        action: Literal["open", "get", "ingest", "publish", "close", "abort"],
+        action: Literal["open", "list", "get", "ingest", "publish", "close", "abort"],
         payload: dict[str, Any],
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
@@ -29254,6 +29282,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 branch_id=data.get("branch_id"),
                 principal_id=principal_id,
             )
+        if action == "list":
+            return npc_conversation_list_impl(campaign_id, principal_id)
         conversation_id = str(data["conversation_id"])
         if action == "get":
             return npc_conversation_status_impl(campaign_id, conversation_id, principal_id)

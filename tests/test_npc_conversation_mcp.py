@@ -1,7 +1,12 @@
 import asyncio
+import json
+import os
+import sys
 from pathlib import Path
 
 import pytest
+from mcp import ClientSession
+from mcp.client.stdio import StdioServerParameters, stdio_client
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
@@ -130,6 +135,231 @@ def test_open_errors_explain_the_single_participant_array(tmp_path: Path) -> Non
                     },
                 },
             )
+
+    asyncio.run(exercise())
+
+
+def test_active_conversation_list_exposes_only_public_recovery_handles(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign, npc, pc = await _campaign_with_actors(server)
+        opened = await _call(
+            server,
+            "npc_conversation",
+            {
+                "campaign_id": campaign["id"],
+                "action": "open",
+                "payload": {
+                    "participant_actor_ids": [pc["id"], npc["id"]],
+                    "idempotency_key": "open-for-list",
+                },
+            },
+        )
+
+        listed = await _call(
+            server,
+            "npc_conversation",
+            {
+                "campaign_id": campaign["id"],
+                "action": "list",
+                "payload": {},
+            },
+        )
+        assert listed["count"] == 1
+        assert listed["conversations"][0]["conversation_id"] == opened["conversation_id"]
+        assert listed["conversations"][0]["conversation_revision"] == 0
+        assert "actor_contexts" not in str(listed)
+        assert "private" not in str(listed)
+
+        await _call(
+            server,
+            "npc_conversation",
+            {
+                "campaign_id": campaign["id"],
+                "action": "abort",
+                "payload": {
+                    "conversation_id": opened["conversation_id"],
+                    "expected_conversation_revision": 0,
+                    "idempotency_key": "abort-listed",
+                },
+            },
+        )
+        listed = await _call(
+            server,
+            "npc_conversation",
+            {
+                "campaign_id": campaign["id"],
+                "action": "list",
+                "payload": {},
+            },
+        )
+        assert listed["conversations"] == []
+
+    asyncio.run(exercise())
+
+
+def test_stdio_restart_lists_and_aborts_active_conversation(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        principal_id = "discord:npc-restart"
+        env = dict(os.environ)
+        env.update(
+            {
+                "SAGASMITH_DND_MCP_HOME": str(tmp_path / "home"),
+                "SAGASMITH_DND_MCP_AUTO_SEED": "0",
+            }
+        )
+        params = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "sagasmith_dnd_mcp.server"],
+            cwd=Path(__file__).parents[1],
+            env=env,
+        )
+
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                await session.call_tool(
+                    "exposure",
+                    {"action": "open", "principal_id": principal_id},
+                )
+                await session.call_tool(
+                    "exposure",
+                    {
+                        "action": "set",
+                        "add_tool_ids": ["campaign_create"],
+                        "principal_id": principal_id,
+                    },
+                )
+                created = await session.call_tool(
+                    "campaign_create",
+                    {"name": "NPC restart", "idempotency_key": "create"},
+                )
+                campaign_id = json.loads(created.content[0].text)["id"]
+                await session.call_tool(
+                    "exposure",
+                    {
+                        "action": "open",
+                        "campaign_id": campaign_id,
+                        "principal_id": principal_id,
+                    },
+                )
+                await session.call_tool(
+                    "exposure",
+                    {
+                        "action": "set",
+                        "add_tool_ids": ["character_create_from"],
+                        "principal_id": principal_id,
+                    },
+                )
+                npc_result = await session.call_tool(
+                    "character_create_from",
+                    {
+                        "mode": "direct",
+                        "payload": {
+                            "campaign_id": campaign_id,
+                            "name": "Mara",
+                            "character_type": "npc",
+                        },
+                        "idempotency_key": "npc",
+                    },
+                )
+                pc_result = await session.call_tool(
+                    "character_create_from",
+                    {
+                        "mode": "direct",
+                        "payload": {"campaign_id": campaign_id, "name": "Aria"},
+                        "idempotency_key": "pc",
+                    },
+                )
+                npc_id = json.loads(npc_result.content[0].text)["result"]["id"]
+                pc_id = json.loads(pc_result.content[0].text)["result"]["id"]
+                current = await session.call_tool(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": campaign_id}},
+                )
+                revision = json.loads(current.content[0].text)["result"]["revision"]
+                entered = await session.call_tool(
+                    "game_phase",
+                    {
+                        "campaign_id": campaign_id,
+                        "action": "set",
+                        "tool_profile": "play",
+                        "expected_revision": revision,
+                        "idempotency_key": "play",
+                    },
+                )
+                assert not entered.isError
+                await session.list_tools()
+                await session.call_tool(
+                    "exposure",
+                    {
+                        "action": "set",
+                        "add_tool_ids": ["npc_conversation"],
+                        "principal_id": principal_id,
+                    },
+                )
+                opened = await session.call_tool(
+                    "npc_conversation",
+                    {
+                        "campaign_id": campaign_id,
+                        "action": "open",
+                        "payload": {
+                            "participant_actor_ids": [pc_id, npc_id],
+                            "idempotency_key": "open",
+                        },
+                    },
+                )
+                assert not opened.isError
+                conversation_id = json.loads(opened.content[0].text)["conversation_id"]
+
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                await session.call_tool(
+                    "exposure",
+                    {
+                        "action": "open",
+                        "campaign_id": campaign_id,
+                        "principal_id": principal_id,
+                    },
+                )
+                await session.call_tool(
+                    "exposure",
+                    {
+                        "action": "set",
+                        "add_tool_ids": ["npc_conversation"],
+                        "principal_id": principal_id,
+                    },
+                )
+                listed = await session.call_tool(
+                    "npc_conversation",
+                    {"campaign_id": campaign_id, "action": "list", "payload": {}},
+                )
+                assert not listed.isError
+                recovery = json.loads(listed.content[0].text)
+                assert recovery["count"] == 1
+                assert recovery["conversations"][0]["conversation_id"] == conversation_id
+                assert "actor_contexts" not in str(recovery)
+                aborted = await session.call_tool(
+                    "npc_conversation",
+                    {
+                        "campaign_id": campaign_id,
+                        "action": "abort",
+                        "payload": {
+                            "conversation_id": conversation_id,
+                            "expected_conversation_revision": 0,
+                            "idempotency_key": "abort-after-restart",
+                        },
+                    },
+                )
+                assert not aborted.isError
+                listed = await session.call_tool(
+                    "npc_conversation",
+                    {"campaign_id": campaign_id, "action": "list", "payload": {}},
+                )
+                assert json.loads(listed.content[0].text)["conversations"] == []
 
     asyncio.run(exercise())
 

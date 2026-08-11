@@ -500,6 +500,26 @@ class ConversationStore:
                     result.append(str(session["conversation_id"]))
             return sorted(result)
 
+    def active_public_statuses(
+        self,
+        *,
+        campaign_id: str,
+        branch_id: str,
+        principal_id: str,
+    ) -> list[dict[str, Any]]:
+        """Return public recovery handles for conversations owned by one principal."""
+
+        with self._lock:
+            result = [
+                self.public_status(session)
+                for session in self._current_sessions()
+                if session.get("campaign_id") == campaign_id
+                and session.get("branch_id") == branch_id
+                and session.get("principal_id") == principal_id
+                and session.get("status") in ACTIVE_CONVERSATION_STATUSES
+            ]
+            return sorted(result, key=lambda item: str(item["conversation_id"]))
+
     @staticmethod
     def _fingerprint(value: Any) -> str:
         encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
