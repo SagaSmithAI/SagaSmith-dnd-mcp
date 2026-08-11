@@ -1191,34 +1191,34 @@ def test_rulebook_import_source_bound_pack_and_noncombat_settlement(tmp_path: Pa
             },
         )
         assert replayed == imported
-        with pytest.raises(Exception, match="edition must be omitted when unknown"):
+        with pytest.raises(Exception, match="filters.edition must be a non-empty string"):
             await call(
                 server,
                 "rule_search",
                 {
                     "campaign_id": campaign["id"],
                     "query": "Tools and Skills Together",
-                    "edition": "",
+                    "filters": {"edition": ""},
                 },
             )
-        with pytest.raises(Exception, match="publications must be omitted when unfiltered"):
+        with pytest.raises(Exception, match="filters.publications must be a non-empty"):
             await call(
                 server,
                 "rule_search",
                 {
                     "campaign_id": campaign["id"],
                     "query": "Tools and Skills Together",
-                    "publications": [],
+                    "filters": {"publications": []},
                 },
             )
-        with pytest.raises(Exception, match="page must be omitted when unknown"):
+        with pytest.raises(Exception, match="filters.page must be a positive integer"):
             await call(
                 server,
                 "rule_search",
                 {
                     "campaign_id": campaign["id"],
                     "query": "Tools and Skills Together",
-                    "page": 0,
+                    "filters": {"page": 0},
                 },
             )
         with pytest.raises(
@@ -1231,7 +1231,7 @@ def test_rulebook_import_source_bound_pack_and_noncombat_settlement(tmp_path: Pa
                 {
                     "campaign_id": campaign["id"],
                     "query": "Tools and Skills Together",
-                    "publications": ["guessed-retail-title"],
+                    "filters": {"publications": ["guessed-retail-title"]},
                 },
             )
         with pytest.raises(
@@ -1244,7 +1244,7 @@ def test_rulebook_import_source_bound_pack_and_noncombat_settlement(tmp_path: Pa
                 {
                     "campaign_id": campaign["id"],
                     "query": "Tools and Skills Together",
-                    "source_keys": ["guessed-source-key"],
+                    "filters": {"source_keys": ["guessed-source-key"]},
                 },
             )
         hits = await call(
@@ -1253,7 +1253,7 @@ def test_rulebook_import_source_bound_pack_and_noncombat_settlement(tmp_path: Pa
             {
                 "campaign_id": campaign["id"],
                 "query": "Tools and Skills Together",
-                "edition": "2014",
+                "filters": {"edition": "2014"},
                 "top_k": 1,
             },
         )
@@ -1273,7 +1273,7 @@ def test_rulebook_import_source_bound_pack_and_noncombat_settlement(tmp_path: Pa
             {
                 "campaign_id": other_campaign["id"],
                 "query": "Tools and Skills Together",
-                "edition": "2014",
+                "filters": {"edition": "2014"},
                 "top_k": 1,
             },
         ) == []

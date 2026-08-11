@@ -184,8 +184,7 @@ def test_bundled_rule_seed_reports_complete_multilingual_corpus(tmp_path: Path) 
             {
                 "campaign_id": campaign["id"],
                 "query": "Tarrasque",
-                "edition": "2014",
-                "locale": "en",
+                "filters": {"edition": "2014", "locale": "en"},
                 "top_k": 3,
             },
         )
@@ -194,11 +193,7 @@ def test_bundled_rule_seed_reports_complete_multilingual_corpus(tmp_path: Path) 
             {
                 "campaign_id": campaign["id"],
                 "query": "Tarrasque",
-                "edition": "2014",
-                "locale": "en",
-                "publications": [],
-                "source_ids": [],
-                "source_keys": [],
+                "filters": {"edition": "2014", "locale": "en"},
                 "top_k": 3,
             },
         )
@@ -508,8 +503,9 @@ def test_server_tools_keep_domain_context_metadata_without_host_profiles(tmp_pat
         )
         assert by_name["campaign_query"].meta["sagasmith_context_sync"] is True
         rule_properties = by_name["rule_search"].inputSchema["properties"]
-        assert "omit when unfiltered" in rule_properties["publications"]["description"]
-        assert "omit when unknown" in rule_properties["page"]["description"]
+        assert "Omit for the first lookup" in rule_properties["filters"]["description"]
+        assert "edition" not in rule_properties
+        assert "page" not in rule_properties
 
     asyncio.run(inspect_tools())
 

@@ -3291,8 +3291,10 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                                 {
                                     "campaign_id": args.campaign_id,
                                     "query": source_statblock_name,
-                                    "source_ids": [source_id],
-                                    "page": source_page,
+                                    "filters": {
+                                        "source_ids": [source_id],
+                                        "page": source_page,
+                                    },
                                     "top_k": 200,
                                 },
                             )
@@ -3351,11 +3353,11 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 chunk_query_payload: dict[str, Any] = {
                     "campaign_id": args.campaign_id,
                     "query": source_query or source_statblock_name,
-                    "source_ids": [source_id],
+                    "filters": {"source_ids": [source_id]},
                     "top_k": 200,
                 }
                 if source_page is not None:
-                    chunk_query_payload["page"] = source_page
+                    chunk_query_payload["filters"]["page"] = source_page
                 source_hits = list(
                     _facade_value(
                         await client.domain(
@@ -3640,11 +3642,11 @@ async def _discover_rule_chunks(args: argparse.Namespace) -> dict[str, Any]:
             query_payload: dict[str, Any] = {
                 "campaign_id": args.campaign_id,
                 "query": source_query or str(args.source_statblock_name),
-                "source_ids": [str(args.source_id)],
+                "filters": {"source_ids": [str(args.source_id)]},
                 "top_k": 200,
             }
             if source_page is not None:
-                query_payload["page"] = source_page
+                query_payload["filters"]["page"] = source_page
             source_hits = list(
                 _facade_value(
                     await client.domain(

@@ -749,7 +749,7 @@ def test_content_solution_accepts_only_exact_active_rule_chunk_evidence(
             {
                 "campaign_id": campaign["id"],
                 "query": "Moon Ribbon marks one creature",
-                "edition": "2014",
+                "filters": {"edition": "2014"},
                 "top_k": 1,
             },
         )

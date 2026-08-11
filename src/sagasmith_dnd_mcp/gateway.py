@@ -245,13 +245,17 @@ class DndGateway:
         campaign_id = request.query.get("campaign_id", "")
         if not campaign_id:
             raise web.HTTPBadRequest(text="campaign_id is required")
+        filters = {
+            key: value
+            for key in ("edition", "locale")
+            if (value := request.query.get(key))
+        }
         result = await self.call(
             "rule_search",
             {
                 "campaign_id": campaign_id,
                 "query": request.query.get("query", ""),
-                "edition": request.query.get("edition"),
-                "locale": request.query.get("locale"),
+                "filters": filters,
                 "top_k": min(int(request.query.get("limit", "8")), 50),
                 "principal_id": self.principal(request),
             },

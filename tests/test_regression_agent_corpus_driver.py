@@ -958,8 +958,8 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert '"selected": 5' in prompt
     assert "re-resolve its exact current Pack evidence" in prompt
     assert "start an explicit new draft/version from the same managed source" in prompt
-    assert "Do not send edition, locale, publications" in prompt
-    assert "retry the minimal shape before any module" in prompt
+    assert "Do not send `filters` on that first lookup" in prompt
+    assert "retry the minimal shape" in prompt
     assert "Never guess a review id" in prompt
     assert "module_set_progress` is only narrative progress metadata" in prompt
     assert '`character_create_from`' in prompt

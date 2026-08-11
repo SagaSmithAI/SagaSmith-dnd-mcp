@@ -31025,47 +31025,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def rule_search(
         campaign_id: str,
         query: str,
-        edition: Annotated[
-            str | None,
-            Field(description="Exact evidence-backed edition filter; omit when unknown."),
-        ] = None,
-        locale: Annotated[
-            str | None,
-            Field(description="Exact evidence-backed locale filter; omit when unknown."),
-        ] = None,
-        publications: Annotated[
-            list[str] | None,
+        filters: Annotated[
+            dict[str, Any] | None,
             Field(
                 description=(
-                    "Exact authoritative publication ids; omit when unfiltered. "
-                    "Never send an empty list or guess a retail title."
-                )
-            ),
-        ] = None,
-        source_ids: Annotated[
-            list[str] | None,
-            Field(
-                description=(
-                    "Exact rule source ids already returned by this campaign; "
-                    "omit when unfiltered and never send an empty list."
-                )
-            ),
-        ] = None,
-        source_keys: Annotated[
-            list[str] | None,
-            Field(
-                description=(
-                    "Exact rule source keys already returned by this campaign; "
-                    "omit when unfiltered and never send an empty list."
-                )
-            ),
-        ] = None,
-        page: Annotated[
-            int | None,
-            Field(
-                description=(
-                    "Exact positive source page supplied by evidence; omit when unknown. "
-                    "Never send 0, -1, or a guessed page."
+                    "Optional exact evidence-backed filters: edition, locale, publications, "
+                    "source_ids, source_keys, or positive page. Omit for the first lookup; "
+                    "an empty object means unfiltered."
                 )
             ),
         ] = None,
@@ -31078,27 +31044,58 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError("rule_search query is required")
         if not 1 <= top_k <= 200:
             raise ValueError("rule_search top_k must be between 1 and 200")
-        for field_name, value in (("edition", edition), ("locale", locale)):
-            if value is not None and not str(value).strip():
-                raise ValueError(
-                    f"rule_search {field_name} must be omitted when unknown; "
-                    "do not send an empty string"
-                )
-        for field_name, value in (
-            ("publications", publications),
-            ("source_ids", source_ids),
-            ("source_keys", source_keys),
-        ):
-            if value is not None and not value:
-                raise ValueError(
-                    f"rule_search {field_name} must be omitted when unfiltered; "
-                    "do not send an empty list"
-                )
-        if page is not None and page < 1:
+        filter_data = dict(filters or {})
+        allowed_filter_fields = {
+            "edition",
+            "locale",
+            "publications",
+            "source_ids",
+            "source_keys",
+            "page",
+        }
+        if unknown_fields := sorted(set(filter_data) - allowed_filter_fields):
             raise ValueError(
-                "rule_search page must be omitted when unknown; "
-                "do not replace an unknown page with 0 or 1"
+                "rule_search filters contain unsupported fields: "
+                + ", ".join(unknown_fields)
             )
+
+        def optional_text(field_name: str) -> str | None:
+            value = filter_data.get(field_name)
+            if value is None:
+                return None
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(
+                    f"rule_search filters.{field_name} must be a non-empty string"
+                )
+            return value.strip()
+
+        def optional_text_list(field_name: str) -> list[str] | None:
+            value = filter_data.get(field_name)
+            if value is None:
+                return None
+            if (
+                not isinstance(value, list)
+                or not value
+                or any(not isinstance(item, str) or not item.strip() for item in value)
+            ):
+                raise ValueError(
+                    f"rule_search filters.{field_name} must be a non-empty string list"
+                )
+            return [item.strip() for item in value]
+
+        edition = optional_text("edition")
+        locale = optional_text("locale")
+        publications = optional_text_list("publications")
+        source_ids = optional_text_list("source_ids")
+        source_keys = optional_text_list("source_keys")
+        page_value = filter_data.get("page")
+        if page_value is not None and (
+            not isinstance(page_value, int)
+            or isinstance(page_value, bool)
+            or page_value < 1
+        ):
+            raise ValueError("rule_search filters.page must be a positive integer")
+        page = int(page_value) if page_value is not None else None
         allowed_source_ids = campaign_rule_source_ids(campaign_id)
         allowed_sources = {
             str(source["id"]): source

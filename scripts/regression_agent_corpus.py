@@ -1086,10 +1086,10 @@ do not repeat a prerequisite that is no longer listed. In particular, when no
 unchanged Pack. A `source_opposition_missing` gap does not by itself prove that
 the active Pack needs a new review. In Lobby, first use exact `rule_search` with
 only `campaign_id`, the exact printed identity as `query`, and optional `top_k`.
-Do not send edition, locale, publications, source_ids, source_keys, or page on
-that first lookup: the campaign binding already scopes enabled rule sources. If
-a filtered lookup returns no hits, retry the minimal shape before any module
-draft operation. When an enabled canonical rule source
+Do not send `filters` on that first lookup: the campaign binding already scopes
+enabled rule sources. Later exact filters belong only inside the optional
+`filters` object. If a filtered lookup returns no hits, retry the minimal shape
+before any module draft operation. When an enabled canonical rule source
 contains the exact printed card, use `character_create_from(mode="statblock")`
 with its returned `source_id`, exact chunks, and `source_statblock_name`; give
 repeated instances distinct names and verify returned

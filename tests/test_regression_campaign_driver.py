@@ -930,8 +930,7 @@ def test_prepare_rule_statblock_discovers_chunks_by_source_page_and_text(
     assert query_call == {
         "campaign_id": "campaign-1",
         "query": "Kenku",
-        "source_ids": ["source-1"],
-        "page": 195,
+        "filters": {"source_ids": ["source-1"], "page": 195},
         "top_k": 200,
     }
     create_call = next(
@@ -958,8 +957,7 @@ def test_discover_rule_chunks_returns_boundaries_without_creating_an_actor(
     assert report["query"] == {
         "campaign_id": "campaign-1",
         "query": "Kenku",
-        "source_ids": ["source-1"],
-        "page": 195,
+        "filters": {"source_ids": ["source-1"], "page": 195},
         "top_k": 200,
     }
     assert report["chunks"] == [
@@ -1175,7 +1173,7 @@ def test_prepare_rule_statblock_uses_contiguous_agent_text_evidence(
                         for job_id in ("job-source-2", "job-source-1")
                     ]
                 }
-            if tool_id == "content_pack" and arguments["action"] == "get":
+            if tool_id == "rule_search":
                 self.calls.append(("domain", tool_id, arguments))
                 return [
                     {
@@ -1325,7 +1323,7 @@ def test_prepare_rule_statblock_rejects_noncontiguous_agent_text_evidence(
             if tool_id == "rulebook_draft" and arguments["action"] == "get":
                 self.calls.append(("domain", tool_id, arguments))
                 return {"jobs": [{"id": "job-1", "source_id": "source-1"}]}
-            if tool_id == "content_pack" and arguments["action"] == "get":
+            if tool_id == "rule_search":
                 self.calls.append(("domain", tool_id, arguments))
                 return [
                     {
