@@ -626,6 +626,30 @@ def test_stdio_session_mutates_native_tool_list_and_calls_tools_directly(
                 opened_payload = json.loads(opened.content[0].text)
                 assert opened_payload["campaign_id"] is None
                 assert {tool.name for tool in (await session.list_tools()).tools} == set(CORE_TOOLS)
+                broad = await session.call_tool(
+                    "exposure",
+                    {
+                        "action": "search",
+                        "query": "campaign_create system_list",
+                        "principal_id": principal_id,
+                    },
+                )
+                broad_payload = json.loads(broad.content[0].text)
+                assert broad_payload["matches"] == []
+                assert broad_payload["query_semantics"] == "all_terms_match_one_tool"
+                assert "Retry with one short capability phrase" in broad_payload["next"]
+                exact = await session.call_tool(
+                    "exposure",
+                    {
+                        "action": "search",
+                        "query": "campaign_create",
+                        "principal_id": principal_id,
+                    },
+                )
+                exact_payload = json.loads(exact.content[0].text)
+                assert [item["tool_id"] for item in exact_payload["matches"]] == [
+                    "campaign_create"
+                ]
                 loaded = await session.call_tool(
                     "exposure",
                     {

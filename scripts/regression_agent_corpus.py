@@ -917,6 +917,26 @@ def _managed_source_summary(unit: dict[str, Any]) -> list[dict[str, str]]:
     ]
 
 
+def _execution_order_gaps(gaps: list[str]) -> list[str]:
+    """Put mechanical prerequisites before outcomes and historical audit debt."""
+
+    return sorted(
+        gaps,
+        key=lambda gap: (
+            0
+            if gap.startswith("preparation:")
+            else 1
+            if gap.endswith(":source_opposition_missing")
+            else 3
+            if gap.endswith(":ending") or gap.endswith(":legal_ending_not_verified")
+            else 4
+            if gap == "exposure:reopened_after_transition"
+            else 2,
+            gap,
+        ),
+    )
+
+
 def _dm_prompt(
     *,
     run_id: str,
@@ -1036,7 +1056,11 @@ Stop only for a real external boundary or when the current cycle has exhausted
 its tool budget; in that case report the exact authoritative blocker and leave
 state resumable.
 
-Current evidence gaps from prior cycles: {json.dumps(gaps, ensure_ascii=False)}
+Current evidence gaps from prior cycles, ordered by execution dependency rather
+than alphabetically: {json.dumps(_execution_order_gaps(gaps), ensure_ascii=False)}
+`exposure:reopened_after_transition` is immutable historical audit debt in a
+resumed artifact. Do not repeat it, but finish the remaining mechanical route;
+the runner will require a clean fresh campaign after the route is complete.
 """
 
 

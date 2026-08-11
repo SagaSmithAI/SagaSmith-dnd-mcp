@@ -45692,7 +45692,11 @@ boundary.
         remove_tool_ids: list[str] | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
-        """Open, inspect, search, or mutate this session's native tool list."""
+        """Open, inspect, search, or mutate this session's native tool list.
+
+        Search requires every whitespace-delimited term to match one tool. Use
+        one short capability phrase or one exact tool id per search.
+        """
 
         campaign_id = str(campaign_id or "").strip() or None
         if config.bound_principal_id is not None:
@@ -45778,7 +45782,18 @@ boundary.
                         "roles": sorted(roles),
                     }
                 )
-            return {**exposures.status(current), "matches": matches}
+            result = {
+                **exposures.status(current),
+                "query_semantics": "all_terms_match_one_tool",
+                "matches": matches,
+            }
+            if terms and not matches:
+                result["next"] = (
+                    "No single current-phase tool matched every query term. "
+                    "Retry with one short capability phrase or one exact tool id; "
+                    "an empty match list does not mean the phase has no tools."
+                )
+            return result
 
         additions = list(add_tool_ids or [])
         removals = list(remove_tool_ids or [])

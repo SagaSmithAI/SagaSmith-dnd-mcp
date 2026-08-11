@@ -17,6 +17,7 @@ from scripts.regression_agent_corpus import (
     _coverage_audit,
     _decode_tool_content,
     _dm_prompt,
+    _execution_order_gaps,
     _next_cycle,
     _player_ready,
     _process_artifacts,
@@ -24,6 +25,24 @@ from scripts.regression_agent_corpus import (
     _runnable_units,
     _tool_timeline,
 )
+
+
+def test_execution_order_places_prerequisites_before_historical_audit_debt() -> None:
+    assert _execution_order_gaps(
+        [
+            "exposure:reopened_after_transition",
+            "ending:legal_ending_not_verified",
+            "fight:combat",
+            "fight:source_opposition_missing",
+            "preparation:manifest_party_not_ready",
+        ]
+    ) == [
+        "preparation:manifest_party_not_ready",
+        "fight:source_opposition_missing",
+        "fight:combat",
+        "ending:legal_ending_not_verified",
+        "exposure:reopened_after_transition",
+    ]
 
 
 def _call(
