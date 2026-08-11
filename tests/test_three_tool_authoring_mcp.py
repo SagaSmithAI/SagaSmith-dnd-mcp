@@ -512,6 +512,40 @@ def test_module_get_lists_compact_restart_handles(tmp_path: Path) -> None:
         ]
         assert "inspection" not in listed["jobs"][0]
         assert "result" not in listed["jobs"][0]
+
+        package_edit = await _call(
+            server,
+            "module_draft",
+            {
+                "campaign_id": campaign["id"],
+                "action": "edit",
+                "payload": {
+                    "job_id": started["job_id"],
+                    "operation": "package",
+                    "manifest": {"title": "Restart Source"},
+                },
+                "expected_revision": started["job"]["revision"],
+                "idempotency_key": "restart-package-edit",
+            },
+        )
+        package_view = await _call(
+            server,
+            "module_draft",
+            {
+                "campaign_id": campaign["id"],
+                "action": "get",
+                "payload": {"job_id": started["job_id"], "view": "package"},
+            },
+        )
+        assert package_view == {
+            "job": {
+                **listed["jobs"][0],
+                "revision": package_edit["job"]["revision"],
+                "pack_decision_fields": ["manifest"],
+            },
+            "pack_draft": {"manifest": {"title": "Restart Source"}},
+        }
+        assert "inspection" not in package_view["job"]
         detailed = await _call(
             server,
             "module_draft",

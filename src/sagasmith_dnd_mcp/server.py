@@ -41558,6 +41558,11 @@ boundary.
         require_facade_phase(campaign_id, f"module_draft({action})", PROFILE_LOBBY)
         if action == "get":
             data = facade_payload(payload)
+            view = str(data.get("view") or "full")
+            if view not in {"full", "package"}:
+                raise ValueError("module_draft(get) payload.view must be full or package")
+            if view == "package" and not data.get("job_id"):
+                raise ValueError("module_draft(get, view=package) requires payload.job_id")
             if data.get("job_id"):
                 jobs = [import_job_get(campaign_id, str(data["job_id"]), principal_id)]
             else:
@@ -41570,6 +41575,17 @@ boundary.
                             module_draft_handle_view(item)
                             for item in import_jobs.list(campaign_id, kind="module")
                         ]
+                    },
+                )
+            if view == "package":
+                job = require_import_job(campaign_id, str(data["job_id"]), "module")
+                return facade_result(
+                    action,
+                    {
+                        "job": module_draft_handle_view(job),
+                        "pack_draft": deepcopy(
+                            dict(dict(job.result or {}).get("pack_draft") or {})
+                        ),
                     },
                 )
             for job_view in jobs:
