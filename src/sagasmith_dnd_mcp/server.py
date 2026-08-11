@@ -31040,9 +31040,33 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError("rule_search query is required")
         if not 1 <= top_k <= 200:
             raise ValueError("rule_search top_k must be between 1 and 200")
+        for field_name, value in (("edition", edition), ("locale", locale)):
+            if value is not None and not str(value).strip():
+                raise ValueError(
+                    f"rule_search {field_name} must be omitted when unknown; "
+                    "do not send an empty string"
+                )
+        for field_name, value in (
+            ("publications", publications),
+            ("source_ids", source_ids),
+            ("source_keys", source_keys),
+        ):
+            if value is not None and not value:
+                raise ValueError(
+                    f"rule_search {field_name} must be omitted when unfiltered; "
+                    "do not send an empty list"
+                )
         if page is not None and page < 1:
-            raise ValueError("rule_search page must be positive")
+            raise ValueError(
+                "rule_search page must be omitted when unknown; "
+                "do not replace an unknown page with 0 or 1"
+            )
         allowed_source_ids = campaign_rule_source_ids(campaign_id)
+        allowed_sources = {
+            str(source["id"]): source
+            for source in rules.sources(system_id=DND5E.id)
+            if str(source["id"]) in allowed_source_ids
+        }
         if source_ids:
             requested = {str(item) for item in source_ids}
             if unknown := sorted(requested - allowed_source_ids):
@@ -31051,6 +31075,32 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     + ", ".join(unknown)
                 )
             allowed_source_ids &= requested
+        allowed_publications = {
+            str(source.get("publication_id") or "")
+            for source in allowed_sources.values()
+            if str(source.get("publication_id") or "")
+        }
+        if publications:
+            requested_publications = {str(item) for item in publications}
+            if unknown := sorted(requested_publications - allowed_publications):
+                raise ValueError(
+                    "rule_search publications are outside the current campaign ruleset: "
+                    + ", ".join(unknown)
+                    + "; omit publications unless exact source evidence supplies one"
+                )
+        allowed_source_keys = {
+            str(source.get("source_key") or "")
+            for source in allowed_sources.values()
+            if str(source.get("source_key") or "")
+        }
+        if source_keys:
+            requested_source_keys = {str(item) for item in source_keys}
+            if unknown := sorted(requested_source_keys - allowed_source_keys):
+                raise ValueError(
+                    "rule_search source_keys are outside the current campaign ruleset: "
+                    + ", ".join(unknown)
+                    + "; omit source_keys unless exact source evidence supplies one"
+                )
         if not allowed_source_ids:
             return []
         embedder, vectors = storage.dense_components()
