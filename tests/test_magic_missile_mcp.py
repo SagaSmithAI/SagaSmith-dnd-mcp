@@ -2,6 +2,7 @@ import asyncio
 import random
 from pathlib import Path
 
+import pytest
 from sagasmith_dnd.character_schema import default_character_sheet
 from sagasmith_dnd.engine import roll as engine_roll
 from sagasmith_dnd.spells import (
@@ -43,6 +44,56 @@ def _slots(value: int = 1) -> dict:
             "source_key": "wizard",
         }
     }
+
+
+def _agent_adjudicated_darkness() -> tuple[dict, str]:
+    excerpt = (
+        "Magical darkness spreads from a point you choose within range to fill a "
+        "15-foot radius sphere for the duration. A creature with darkvision can't "
+        "see through this darkness, and nonmagical light can't illuminate it."
+    )
+    return (
+        {
+            "id": "dnd5e.content.srd2014.spell.darkness",
+            "name": "Darkness",
+            "level": 2,
+            "grant": {
+                "source_type": "statblock",
+                "source_key": "test",
+                "method": "innate",
+            },
+            "access": {"known": True, "prepared": True},
+            "definition": {
+                "casting_time": "1 action",
+                "range": {"kind": "distance", "normal_ft": 60, "long_ft": 0},
+                "duration": {
+                    "kind": "timed",
+                    "value": 10,
+                    "unit": "minute",
+                    "concentration": True,
+                },
+                "components": {"verbal": True},
+                "effect": excerpt,
+            },
+            "pack_id": "dnd5e.content.srd2014",
+            "custom_definition": {
+                "innate_spellcasting": True,
+                "innate_resource_key": "innate_spell:test-darkness",
+            },
+            "rule_refs": ["bundled:srd2014/07_Spells/Spells_Each/Darkness.md"],
+            "ruling_requirements": [
+                {
+                    "kind": "effect_semantics",
+                    "reason": "Apply the exact persisted Agent-as-DM clause.",
+                    "source_excerpt": excerpt,
+                    "default_resolver": "agent",
+                    "ruling_kind": "generic_spell_effect",
+                    "policy_ref": "rule_clause.v1",
+                }
+            ],
+        },
+        excerpt,
+    )
 
 
 def _config(tmp_path: Path) -> McpConfig:
@@ -138,6 +189,106 @@ async def _campaign_with_combat(
         },
     )
     return {**campaign, "revision": started["campaign_revision"]}, actors
+
+
+def test_standard_agent_spell_ruling_pays_and_records_exact_clause(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        darkness, excerpt = _agent_adjudicated_darkness()
+        caster_sheet = default_character_sheet()
+        caster_sheet["resources"]["innate_spell:test-darkness"] = {
+            "label": "Darkness",
+            "value": 1,
+            "max": 1,
+            "recovers_on": "long_rest",
+        }
+        caster_sheet["content"]["spells"] = [darkness]
+        campaign, actors = await _campaign_with_combat(
+            server,
+            [("Caster", caster_sheet), ("Target", default_character_sheet())],
+        )
+        arguments = {
+            "campaign_id": campaign["id"],
+            "actor_id": actors[0]["id"],
+            "spell_id": darkness["id"],
+            "cast_level": 2,
+            "expected_revision": campaign["revision"],
+            "idempotency_key": "agent-darkness",
+        }
+        pending = await _raw(server, "combat_cast_spell", arguments)
+        assert pending["status"] == "pending_ruling"
+        assert pending["result"]["payment_required"] is True
+        contract = pending["result"]["agent_ruling_contract"]
+        assert contract["source_excerpt"] == excerpt
+        assert contract["source_card_id"] == darkness["id"]
+        assert contract["casting_source"] == {
+            "grant_method": "innate",
+            "instruction": (
+                "for grant_method=innate, omit signature_free_cast so the engine consumes "
+                "the recorded innate resource; for other grants, signature_free_cast is "
+                "legal only when the actor card records this spell as a Signature Spell"
+            ),
+        }
+
+        ruling = {
+            "application_id": "darkness-at-grid-origin",
+            "default_resolver": "agent",
+            "ruling_kind": "generic_spell_effect",
+            "decision": "The darkness originates at the declared encounter point.",
+            "reason": "The exact persisted spell clause permits an Agent-selected point.",
+            "source_excerpt": excerpt,
+        }
+        with pytest.raises(Exception, match="exact persisted source-card clause"):
+            await _raw(
+                server,
+                "combat_cast_spell",
+                {
+                    **arguments,
+                    "declaration": {
+                        "agent_ruling": {
+                            **ruling,
+                            "source_excerpt": "A remembered paraphrase is not evidence.",
+                        }
+                    },
+                    "idempotency_key": "agent-darkness-invalid",
+                },
+            )
+        committed_arguments = {
+            **arguments,
+            "declaration": {"agent_ruling": ruling},
+            "idempotency_key": "agent-darkness-commit",
+        }
+        committed = await _raw(server, "combat_cast_spell", committed_arguments)
+        assert committed["status"] == "committed"
+        assert committed["campaign_revision"] == campaign["revision"] + 1
+        assert committed["result"]["payment"]["economy"] == "innate_spell"
+        solution = committed["result"]["semantic_solution"]
+        assert solution["status"] == "agent_ruling_committed"
+        assert solution["payment_recorded"] is True
+        assert solution["agent_ruling"]["source_excerpt"] == excerpt
+
+        caster = await _call(
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": actors[0]["id"]},
+                "principal_id": "system:local",
+            },
+        )
+        assert caster["sheet"]["resources"]["innate_spell:test-darkness"]["value"] == 0
+        assert any(
+            effect.get("active")
+            and effect.get("concentration")
+            and effect.get("source_spell_id") == darkness["id"]
+            for effect in caster["sheet"]["effects"]
+        )
+        replay = await _raw(server, "combat_cast_spell", committed_arguments)
+        assert replay == committed
+
+    asyncio.run(exercise())
 
 
 def test_hidden_perceivable_cast_requires_dm_observer_matrix(tmp_path: Path) -> None:

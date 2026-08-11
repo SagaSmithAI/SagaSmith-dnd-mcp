@@ -401,6 +401,39 @@ def _ordered_success(
     return True
 
 
+def _has_agent_semantic_spell_ruling(calls: list[dict[str, Any]]) -> bool:
+    if _ordered_success(
+        calls,
+        [
+            ("content_solution", "compile"),
+            ("combat_cast_spell", None),
+            ("combat_choice", "execute_plan"),
+        ],
+    ):
+        return True
+    for call in calls:
+        if call.get("tool") != "combat_cast_spell" or not call.get("ok"):
+            continue
+        declaration = dict((call.get("arguments") or {}).get("declaration") or {})
+        ruling = declaration.get("agent_ruling")
+        if not isinstance(ruling, dict):
+            continue
+        if (
+            ruling.get("default_resolver") != "agent"
+            or ruling.get("ruling_kind") != "generic_spell_effect"
+            or not str(ruling.get("source_excerpt") or "").strip()
+        ):
+            continue
+        nodes = [node for node in _walk(call.get("result")) if isinstance(node, dict)]
+        if any(
+            node.get("status") == "agent_ruling_committed"
+            and node.get("payment_recorded") is True
+            for node in nodes
+        ):
+            return True
+    return False
+
+
 def _ordered_pattern(
     calls: list[dict[str, Any]],
     requirements: list[tuple[str, str | None, bool]],
@@ -790,14 +823,7 @@ def _mechanism_covered(mechanism: str, calls: list[dict[str, Any]]) -> bool:
             ],
         )
     if mechanism == "agent_semantic_spell_ruling":
-        return _ordered_success(
-            calls,
-            [
-                ("content_solution", "compile"),
-                ("combat_cast_spell", None),
-                ("combat_choice", "execute_plan"),
-            ],
-        )
+        return _has_agent_semantic_spell_ruling(calls)
     if mechanism == "chase_to_combat":
         return _ordered_pattern(
             calls,
@@ -1131,13 +1157,21 @@ than unsupported name filters or an empty batch.
 
 When a scenario requires `agent_semantic_spell_ruling`, inspect preflight's
 `ruling_spell_ids` and the actor's hydrated spell cards. Select one exact
-source-backed spell with an Agent-owned semantic resolution path, query and (if
-missing) compile its generic persisted `content_solution`, then actually cast it
-and settle the returned plan through `combat_choice(action="execute_plan")`.
-Bind the decision to the active scene and exact actor/rule evidence; MCP must pay
-the action, slot or innate use and own all rolls/state mutations. Do not replace
-this obligation with a weapon attack, narration, a raw sheet edit, or a spell
-whose parser-damaged name never produced a hydrated card.
+source-backed spell with an Agent-owned semantic resolution path. If its card is
+standard content with a persisted `agent_ruling` clause, do not call
+`content_solution`: first call `combat_cast_spell` without a declaration to read
+its exact `agent_ruling_contract`, then resubmit the cast with that exact source
+excerpt plus the Agent's bounded decision. Require the committed response to
+record payment and `semantic_solution.status="agent_ruling_committed"`. For a
+statblock/innate spell, omit `signature_free_cast`; the engine must consume its
+recorded innate resource. A custom/imported card lacking a persisted plan uses
+`content_solution(compile)`,
+followed by `combat_cast_spell` and
+`combat_choice(action="execute_plan")`. Bind either decision to the exact actor,
+card, and current evidence; MCP must pay the action, slot or innate use and own
+all random results and mechanical state changes. Do not replace this obligation
+with a weapon attack, narration, a raw sheet edit, or a spell whose
+parser-damaged name never produced a hydrated card.
 On resume, compare any active encounter's immutable participants and source
 manifest with the remaining evidence before the first Combat mutation. Take
 participant ids from `combat_query(status)`, then load `character_query` and

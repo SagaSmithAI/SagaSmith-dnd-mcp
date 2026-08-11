@@ -7492,6 +7492,82 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "character_revision": character_revision,
         }
 
+    def persisted_standard_spell_ruling_requirement(
+        source_card: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Return the exact persisted Agent clause for one standard spell card."""
+
+        if str(source_card.get("pack_id") or "") not in {
+            CORE_CONTENT_PACK_ID,
+            CORE_2024_CONTENT_PACK_ID,
+            STANDARD_2014_CONTENT_PACK_ID,
+        }:
+            return None
+        matches = [
+            dict(item)
+            for item in list(source_card.get("ruling_requirements") or [])
+            if isinstance(item, dict)
+            and item.get("default_resolver") == "agent"
+            and item.get("ruling_kind") == "generic_spell_effect"
+            and len(str(item.get("source_excerpt") or "").strip()) >= 10
+        ]
+        if len(matches) != 1:
+            return None
+        return matches[0]
+
+    def validate_persisted_standard_spell_ruling(
+        raw_ruling: Any,
+        *,
+        source_card: dict[str, Any],
+        requirement: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Validate Agent judgment against the immutable standard-card clause."""
+
+        if not isinstance(raw_ruling, dict):
+            raise CombatEngineError("standard spell agent_ruling must be an object")
+        allowed = {
+            "application_id",
+            "default_resolver",
+            "ruling_kind",
+            "decision",
+            "reason",
+            "source_excerpt",
+        }
+        unknown = set(raw_ruling) - allowed
+        application_id = str(raw_ruling.get("application_id") or "").strip()
+        decision = " ".join(str(raw_ruling.get("decision") or "").split())
+        reason = " ".join(str(raw_ruling.get("reason") or "").split())
+        source_excerpt = str(raw_ruling.get("source_excerpt") or "")
+        recorded_excerpt = str(requirement.get("source_excerpt") or "")
+        if (
+            unknown
+            or not application_id
+            or raw_ruling.get("default_resolver") != "agent"
+            or raw_ruling.get("ruling_kind") != "generic_spell_effect"
+            or not 10 <= len(decision) <= 1000
+            or not 10 <= len(reason) <= 500
+            or _normalize_source_evidence_text(source_excerpt)
+            != _normalize_source_evidence_text(recorded_excerpt)
+        ):
+            raise CombatEngineError(
+                "standard spell agent_ruling requires the exact persisted "
+                "source-card clause, application_id, decision, and reason"
+            )
+        return {
+            "application_id": application_id,
+            "default_resolver": "agent",
+            "ruling_kind": "generic_spell_effect",
+            "decision": decision,
+            "reason": reason,
+            "source_excerpt": recorded_excerpt,
+            "source_card_id": str(source_card.get("id") or ""),
+            "rule_refs": [
+                str(item)
+                for item in list(source_card.get("rule_refs") or [])
+                if str(item)
+            ],
+        }
+
     def validate_authored_content_plan(
         campaign_id: str,
         raw_plan: Any,
@@ -17232,6 +17308,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             else effective_spell_resolution(spell_entry)
         )
         compiled_spell_plan = None
+        standard_spell_agent_ruling: dict[str, Any] | None = None
         if isinstance(spell_entry.get("resolution_plan"), dict):
             if source_item_id:
                 raise CombatEngineError(
@@ -17328,23 +17405,88 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 spell_entry,
             )
         ):
-            return {
-                **_ruling_status(
-                    "pending_ruling",
-                    "generic_spell_effect",
-                ),
-                "result": {
-                    "spell_id": spell_id,
-                    "semantic_solution": unresolved_content_solution(
-                        spell_entry,
-                        source_card_id=spell_id,
-                        source_card_kind="spell",
-                        character_revision=current.revision,
+            persisted_requirement = persisted_standard_spell_ruling_requirement(
+                spell_entry
+            )
+            if persisted_requirement is None:
+                return {
+                    **_ruling_status(
+                        "pending_ruling",
+                        "generic_spell_effect",
                     ),
-                    "payment_required": False,
-                },
-                "campaign_revision": campaign.revision,
-            }
+                    "result": {
+                        "spell_id": spell_id,
+                        "semantic_solution": unresolved_content_solution(
+                            spell_entry,
+                            source_card_id=spell_id,
+                            source_card_kind="spell",
+                            character_revision=current.revision,
+                        ),
+                        "payment_required": False,
+                    },
+                    "campaign_revision": campaign.revision,
+                }
+            declared = dict(declaration or {})
+            if not declared:
+                return {
+                    **_ruling_status(
+                        "pending_ruling",
+                        "generic_spell_effect",
+                    ),
+                    "result": {
+                        "spell_id": spell_id,
+                        "payment_required": True,
+                        "agent_ruling_contract": {
+                            "required_fields": [
+                                "application_id",
+                                "default_resolver",
+                                "ruling_kind",
+                                "decision",
+                                "reason",
+                                "source_excerpt",
+                            ],
+                            "default_resolver": "agent",
+                            "ruling_kind": "generic_spell_effect",
+                            "source_excerpt": str(
+                                persisted_requirement["source_excerpt"]
+                            ),
+                            "source_card_id": spell_id,
+                            "casting_source": {
+                                "grant_method": str(
+                                    dict(spell_entry.get("grant") or {}).get("method")
+                                    or ""
+                                ),
+                                "instruction": (
+                                    "for grant_method=innate, omit signature_free_cast so "
+                                    "the engine consumes the recorded innate resource; for "
+                                    "other grants, signature_free_cast is legal only when the "
+                                    "actor card records this spell as a Signature Spell"
+                                ),
+                            },
+                            "rule_refs": [
+                                str(item)
+                                for item in list(spell_entry.get("rule_refs") or [])
+                                if str(item)
+                            ],
+                        },
+                    },
+                    "campaign_revision": campaign.revision,
+                }
+            if set(declared) != {"agent_ruling"}:
+                raise CombatEngineError(
+                    "an Agent-adjudicated standard spell accepts only agent_ruling"
+                )
+            access.require_campaign(
+                campaign_id,
+                principal_id,
+                roles=CAMPAIGN_DM_ROLES,
+            )
+            standard_spell_agent_ruling = validate_persisted_standard_spell_ruling(
+                declared.get("agent_ruling"),
+                source_card=spell_entry,
+                requirement=persisted_requirement,
+            )
+            declaration = {"agent_ruling": standard_spell_agent_ruling}
         structured_target: dict[str, Any] | None = None
         fly_target: dict[str, Any] | None = None
         invisibility_target: dict[str, Any] | None = None
@@ -17654,6 +17796,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 **(
                     {"agent_resolution_commitment": (semantic_plan_commitment)}
                     if semantic_plan_commitment is not None
+                    else {}
+                ),
+                **(
+                    {"agent_ruling": deepcopy(standard_spell_agent_ruling)}
+                    if standard_spell_agent_ruling is not None
                     else {}
                 ),
             },
@@ -18559,6 +18706,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "contract": resolution_plan_contract(compiled_spell_plan),
                 "commitment": deepcopy(semantic_plan_commitment),
             }
+        if standard_spell_agent_ruling is not None:
+            applied["semantic_solution"] = {
+                "status": "agent_ruling_committed",
+                "payment_recorded": True,
+                "source_card_id": spell_id,
+                "agent_ruling": deepcopy(standard_spell_agent_ruling),
+            }
         next_state = {**dict(campaign.state or {}), "combat": next_encounter}
         response = commit_campaign_state(
             campaign,
@@ -18571,7 +18725,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             payload=payload,
             response_fields={
                 **_ruling_status(
-                    ("committed" if applied.get("automatic_effect") else "pending_ruling"),
+                    (
+                        "committed"
+                        if applied.get("automatic_effect")
+                        or standard_spell_agent_ruling is not None
+                        else "pending_ruling"
+                    ),
                     "generic_spell_effect",
                 ),
                 "result": {key: value for key, value in applied.items() if key != "sheet"},

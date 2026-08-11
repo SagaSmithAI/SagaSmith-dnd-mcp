@@ -18,6 +18,7 @@ from scripts.regression_agent_corpus import (
     _decode_tool_content,
     _dm_prompt,
     _execution_order_gaps,
+    _mechanism_covered,
     _next_cycle,
     _player_ready,
     _process_artifacts,
@@ -492,6 +493,34 @@ def test_coverage_requires_real_ordered_boundaries_retries_and_recovery() -> Non
     audit = _coverage_audit(route, calls, process_count=4, list_changed_count=3)
     assert audit["complete"] is True
     assert audit["gaps"] == []
+
+
+def test_coverage_accepts_paid_standard_agent_spell_clause() -> None:
+    calls = [
+        _call(
+            "combat_cast_spell",
+            arguments={
+                "spell_id": "standard-darkness",
+                "declaration": {
+                    "agent_ruling": {
+                        "default_resolver": "agent",
+                        "ruling_kind": "generic_spell_effect",
+                        "source_excerpt": "Exact persisted standard spell source excerpt.",
+                    }
+                },
+            },
+            result={
+                "status": "committed",
+                "result": {
+                    "semantic_solution": {
+                        "status": "agent_ruling_committed",
+                        "payment_recorded": True,
+                    }
+                },
+            },
+        )
+    ]
+    assert _mechanism_covered("agent_semantic_spell_ruling", calls) is True
 
 
 def test_coverage_does_not_accept_narration_or_unordered_successes() -> None:
