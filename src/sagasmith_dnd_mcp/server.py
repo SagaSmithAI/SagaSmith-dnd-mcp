@@ -42531,6 +42531,30 @@ boundary.
                     "character_ability_apply and exact character_content_apply "
                     "catalog artifacts"
                 )
+        elif mode == "module_statblock":
+            allowed_module_statblock_fields = {
+                "campaign_id",
+                "review_id",
+                "source_identity",
+                "name",
+                "character_type",
+                "player_name",
+                "summary",
+                "notes",
+                "replace_character_id",
+                "expected_revision",
+                "variant",
+            }
+            unsupported_module_statblock_fields = sorted(
+                set(data) - allowed_module_statblock_fields
+            )
+            if unsupported_module_statblock_fields:
+                raise ValueError(
+                    "module statblock payload contains unsupported fields: "
+                    + ", ".join(unsupported_module_statblock_fields)
+                    + "; allowed fields: "
+                    + ", ".join(sorted(allowed_module_statblock_fields))
+                )
         if scoped_campaign_id:
             require_facade_phase(scoped_campaign_id, "character_create_from", PROFILE_LOBBY)
         if mode == "content_actor":
@@ -43007,6 +43031,20 @@ boundary.
             expected_content_kind = statblock_content_kind(campaign_edition)
             if review["content_kind"] != expected_content_kind:
                 raise ValueError("module content review does not match the campaign edition")
+            source_parsed = parse_edition_statblock(
+                review["normalized_content"],
+                edition=campaign_edition,
+                source_key=f"module-review:{review_id}",
+                rule_refs=[f"module-scene:{review['scene_id']}", f"module-review:{review_id}"],
+            )
+            source_identity = str(data.get("source_identity") or "").strip()
+            if source_identity and " ".join(source_identity.split()).casefold() != " ".join(
+                source_parsed.name.split()
+            ).casefold():
+                raise ValueError(
+                    "module statblock source_identity does not match the reviewed card: "
+                    f"expected {source_parsed.name!r}"
+                )
             parsed = parse_edition_statblock(
                 review["normalized_content"],
                 edition=campaign_edition,
@@ -43132,6 +43170,7 @@ boundary.
                 "character": character,
                 "source": review,
                 "statblock": {
+                    "source_identity": source_parsed.name,
                     "challenge_rating": challenge_rating,
                     "experience_points": experience_points,
                     **statblock_settlement(

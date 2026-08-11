@@ -640,6 +640,25 @@ def _source_combat_actor_ids(calls: list[dict[str, Any]]) -> set[str]:
     return actor_ids
 
 
+def _source_combat_actor_identities(calls: list[dict[str, Any]]) -> dict[str, str]:
+    identities: dict[str, str] = {}
+    for call in calls:
+        if (
+            call.get("tool") != "character_create_from"
+            or not call.get("ok")
+            or (call.get("arguments") or {}).get("mode") != "module_statblock"
+        ):
+            continue
+        for node in _walk(call.get("result")):
+            if not isinstance(node, dict) or not isinstance(node.get("character"), dict):
+                continue
+            character = node["character"]
+            statblock = dict(node.get("statblock") or {})
+            if character.get("id") and statblock.get("source_identity"):
+                identities[str(character["id"])] = str(statblock["source_identity"])
+    return identities
+
+
 def _scenario_source_opposition_covered(
     scenario: dict[str, Any], calls: list[dict[str, Any]]
 ) -> bool:
@@ -647,6 +666,7 @@ def _scenario_source_opposition_covered(
     if not expected_groups:
         return bool(_source_combat_actor_ids(calls))
     source_actor_ids = _source_combat_actor_ids(calls)
+    source_identities = _source_combat_actor_identities(calls)
     for call in calls:
         arguments = call.get("arguments") or {}
         if not call.get("ok") or call.get("tool") != "combat_start":
@@ -681,10 +701,21 @@ def _scenario_source_opposition_covered(
                 break
             index, actual = match
             actor_ids = {str(item) for item in actual.get("actor_ids") or []}
+            expected_identity = " ".join(
+                str(expected.get("statblock_source_identity") or "").split()
+            ).casefold()
             if (
                 len(actor_ids) != expected.get("required_count")
                 or not actor_ids <= source_actor_ids
                 or not actor_ids <= participants
+                or (
+                    expected_identity
+                    and any(
+                        " ".join(source_identities.get(actor_id, "").split()).casefold()
+                        != expected_identity
+                        for actor_id in actor_ids
+                    )
+                )
             ):
                 complete = False
                 break
@@ -1062,7 +1093,9 @@ artifact as a substitute for the new reviewed revision.
 When the active Pack already has the required immutable content review, do not
 author another revision. Return to Lobby, query that Pack with
 `module_query(view="content")`, load `character_create_from`, instantiate every
-required encounter actor with `mode="module_statblock"`, and re-read each actor
+required encounter actor with `mode="module_statblock"`, pass the exact printed
+card name as `payload.source_identity`, give repeated instances distinct names,
+and re-read each actor plus its returned `statblock.source_identity`
 before returning to Play. Writing a review id or opposition name into
 `module_set_progress` is only narrative progress metadata; it never creates or
 preflights a mechanical combat participant.

@@ -150,6 +150,36 @@ def test_text_module_statblock_candidate_can_create_a_source_bound_actor(
             },
         )
         assert reviewed["review"]["evidence"]["confidence"] == "reviewed_text"
+        with pytest.raises(Exception, match="source_identity.*expected 'GOBLIN'"):
+            await _call(
+                server,
+                "character_create_from",
+                {
+                    "mode": "module_statblock",
+                    "payload": {
+                        "campaign_id": campaign["id"],
+                        "review_id": reviewed["review"]["id"],
+                        "source_identity": "Giant Spider",
+                        "name": "Cragmaw Goblin",
+                        "character_type": "monster",
+                    },
+                    "idempotency_key": "reject-wrong-source-identity",
+                },
+            )
+        with pytest.raises(Exception, match="unsupported fields: source_ref"):
+            await _call(
+                server,
+                "character_create_from",
+                {
+                    "mode": "module_statblock",
+                    "payload": {
+                        "campaign_id": campaign["id"],
+                        "review_id": reviewed["review"]["id"],
+                        "source_ref": {"caller": "claim"},
+                    },
+                    "idempotency_key": "reject-pseudo-source-ref",
+                },
+            )
         created = await _call(
             server,
             "character_create_from",
@@ -158,6 +188,7 @@ def test_text_module_statblock_candidate_can_create_a_source_bound_actor(
                 "payload": {
                     "campaign_id": campaign["id"],
                     "review_id": reviewed["review"]["id"],
+                    "source_identity": "Goblin",
                     "name": "Cragmaw Goblin",
                     "character_type": "monster",
                 },
@@ -165,6 +196,7 @@ def test_text_module_statblock_candidate_can_create_a_source_bound_actor(
             },
         )
         assert created["character"]["name"] == "Cragmaw Goblin"
+        assert created["statblock"]["source_identity"] == "GOBLIN"
         assert created["character"]["derived"]["armor_class"] == 15
         assert created["character"]["derived"]["hit_points"]["max"] == 7
         attacks = {

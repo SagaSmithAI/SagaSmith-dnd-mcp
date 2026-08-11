@@ -706,8 +706,18 @@ def test_combat_coverage_requires_every_source_expected_group() -> None:
                 "mechanisms": ["combat"],
                 "positioning_mode": "grid",
                 "initial_source_groups": [
-                    {"role": "combatant", "required_count": 1, "source_excerpt": excerpt},
-                    {"role": "combatant", "required_count": 4, "source_excerpt": excerpt},
+                    {
+                        "role": "combatant",
+                        "required_count": 1,
+                        "source_excerpt": excerpt,
+                        "statblock_source_identity": "NEZZNAR THE BLACK SPIDER",
+                    },
+                    {
+                        "role": "combatant",
+                        "required_count": 4,
+                        "source_excerpt": excerpt,
+                        "statblock_source_identity": "GIANT SPIDER",
+                    },
                 ],
             }
         ]
@@ -720,7 +730,14 @@ def test_combat_coverage_requires_every_source_expected_group() -> None:
                 "character": {
                     "id": actor_id,
                     "character_type": "monster",
-                }
+                },
+                "statblock": {
+                    "source_identity": (
+                        "NEZZNAR THE BLACK SPIDER"
+                        if actor_id == "nezznar"
+                        else "GIANT SPIDER"
+                    )
+                },
             },
         )
         for actor_id in ("nezznar", "spider-1", "spider-2", "spider-3", "spider-4")
