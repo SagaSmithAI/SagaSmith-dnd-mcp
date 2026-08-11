@@ -304,6 +304,7 @@ from sagasmith_dnd.module_profile import DndModuleProfile
 from sagasmith_dnd.playthrough import (
     playthrough_source_bindings,
     validate_playthrough_manifest,
+    validate_source_defined_ending_condition,
 )
 from sagasmith_dnd.progression import (
     advance_single_class_level,
@@ -44925,6 +44926,7 @@ boundary.
                 condition = deepcopy(required(data, "condition"))
                 if not isinstance(condition, dict):
                     raise ValueError("payload.condition must be an object")
+                condition = validate_source_defined_ending_condition(condition)
                 condition_id = str(condition.get("id") or "").strip()
                 existing = next(
                     (
@@ -44935,14 +44937,17 @@ boundary.
                     None,
                 )
                 if existing is not None:
-                    if existing != condition:
+                    if existing == condition:
                         raise ValueError(
-                            f"ending condition {condition_id} already exists "
-                            "with different content"
+                            f"ending condition {condition_id} is already configured"
                         )
-                    raise ValueError(f"ending condition {condition_id} is already configured")
                 next_manifest = deepcopy(current_manifest)
-                next_manifest["ending"]["conditions"].append(condition)
+                next_manifest["ending"]["conditions"] = [
+                    condition if item["id"] == condition_id else item
+                    for item in next_manifest["ending"]["conditions"]
+                ]
+                if existing is None:
+                    next_manifest["ending"]["conditions"].append(condition)
                 next_manifest = validate_playthrough_manifest(next_manifest)
             elif action == "replace":
                 next_manifest = validate_playthrough_manifest(required(data, "manifest"))

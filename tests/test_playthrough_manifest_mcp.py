@@ -527,13 +527,27 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
             },
         )
         assert configured["manifest"]["ending"]["conditions"] == [ending_condition]
+        corrected_condition = deepcopy(ending_condition)
+        corrected_condition["label"] = "The source-defined campaign threat is defeated"
+        corrected = await _call(
+            server,
+            "playthrough_manifest",
+            {
+                "campaign_id": campaign_id,
+                "action": "configure_ending",
+                "payload": {"condition": corrected_condition},
+                "expected_revision": configured["campaign_revision"],
+                "idempotency_key": "correct-ending",
+            },
+        )
+        assert corrected["manifest"]["ending"]["conditions"] == [corrected_condition]
         synced = await _call(
             server,
             "playthrough_manifest",
             {
                 "campaign_id": campaign_id,
                 "action": "sync",
-                "expected_revision": configured["campaign_revision"],
+                "expected_revision": corrected["campaign_revision"],
                 "idempotency_key": "manifest-sync",
             },
         )

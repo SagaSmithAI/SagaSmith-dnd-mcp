@@ -51,6 +51,7 @@ from sagasmith_dnd.playthrough import (
     PARTY_MEMBER_SOURCES,
     PLAYTHROUGH_SOURCE_FIELDS,
     validate_playthrough_manifest,
+    validate_source_defined_ending_condition,
 )
 from sagasmith_dnd.spell_resolution import scaled_roll_expression
 from sagasmith_dnd.standard_spell_ids import (
@@ -10893,7 +10894,7 @@ async def _configure_ending_conditions(
     for index, raw in enumerate(conditions):
         if not isinstance(raw, dict):
             raise ValueError(f"ending-condition-json[{index}] must be an object")
-        condition = deepcopy(raw)
+        condition = validate_source_defined_ending_condition(raw)
         condition_id = str(condition.get("id") or "").strip()
         if not condition_id:
             raise ValueError(f"ending-condition-json[{index}] requires id")
