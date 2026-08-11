@@ -1,5 +1,19 @@
 # SagaSmith D&D MCP
 
+## Content Pack gateway
+
+The optional HTTP gateway projects the authoritative `content_pack` facade for the D&D UI.
+It exposes campaign-aware inventory and detail reads for `core_rules`, `addon`, `module`, and
+`preset`, streams `.sagasmith-pack` uploads into managed storage, and supports explicit
+activate/deactivate/export/remove operations. Safe inventory/detail reads remain available in
+Play and Combat; every write is still rejected outside Lobby by MCP. Import stores a finalized
+Pack but never activates it.
+
+Uploads default to 64 MiB and can be capped with
+`SAGASMITH_DND_GATEWAY_UPLOAD_LIMIT=<bytes>`. The browser first verifies the Catalog archive
+checksum, then MCP independently validates the schema-v2 descriptor, blobs, dependencies, and
+D&D semantics. Export downloads are served only after an MCP-authorized managed-artifact check.
+
 [平台总览](https://github.com/SagaSmithAI/.github/blob/main/profile/README.md) · [D&D runtime](https://github.com/SagaSmithAI/Sagasmith-dnd) · [D&D Skills](https://github.com/SagaSmithAI/SagaSmith-dnd-skills)
 
 **SagaSmithAI 的 D&D 5e Agent 能力服务。** 它通过标准 stdio MCP 将 SagaSmith Core、D&D 规则运行时、D&D Skills 和模组生成 Skill 组合成一个可被不同 Agent Host 复用的服务端边界。

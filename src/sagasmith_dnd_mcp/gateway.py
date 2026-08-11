@@ -579,6 +579,9 @@ class DndGateway:
             }
         }
         payload.update({"campaign_id": campaign_id, "kind": kind})
+        if kind == "preset" and action == "export":
+            campaign = await self.campaign_record(campaign_id, self.principal(request))
+            payload["edition"] = str(campaign.get("edition") or "2024")
         result = await self.call(
             "content_pack",
             {

@@ -313,6 +313,26 @@ def test_gateway_imports_and_projects_finalized_preset_inventory(tmp_path: Path)
             )
             assert detail.status == 200
             assert (await detail.json())["data"]["content_package"] == package
+
+            exported = await client.post(
+                f"/api/campaigns/{campaign['id']}/content-packs/action",
+                json={
+                    "kind": "preset",
+                    "action": "export",
+                    "pack_id": "example.gateway-presets.actors",
+                    "version": package["version"],
+                    "idempotency_key": "gateway-export-preset",
+                },
+            )
+            assert exported.status == 200
+            export_payload = await exported.json()
+            artifact = export_payload["data"]["artifact"]["artifact"]
+            downloaded = await client.get(
+                f"/api/campaigns/{campaign['id']}/content-packs/artifacts/{artifact}",
+                params={"kind": "preset"},
+            )
+            assert downloaded.status == 200
+            assert await downloaded.read() == archive
         finally:
             await client.close()
 
