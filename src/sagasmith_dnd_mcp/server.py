@@ -23580,13 +23580,32 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> list[dict[str, Any]]:
-        """List D&D characters, optionally restricted to a campaign."""
+        """List bounded actor identities; use get/batch for full authorized cards."""
         if campaign_id is not None:
             access.require_campaign(campaign_id, principal_id)
-        return [
-            visible_character_view(item, principal_id)
-            for item in characters.list(system_id=DND5E.id, campaign_id=campaign_id)
-        ]
+        result: list[dict[str, Any]] = []
+        for item in characters.list(system_id=DND5E.id, campaign_id=campaign_id):
+            visible = visible_character_view(item, principal_id)
+            result.append(
+                {
+                    key: deepcopy(visible[key])
+                    for key in (
+                        "id",
+                        "system_id",
+                        "campaign_id",
+                        "character_type",
+                        "name",
+                        "player_name",
+                        "summary",
+                        "revision",
+                        "created_at",
+                        "updated_at",
+                        "notes_redacted",
+                    )
+                    if key in visible
+                }
+            )
+        return result
 
     def character_library_list(
         character_type: str | None = None,

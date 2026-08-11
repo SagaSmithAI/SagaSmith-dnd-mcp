@@ -72,6 +72,21 @@ def test_character_batch_query_returns_targeted_campaign_actors_in_requested_ord
         assert [item["id"] for item in values] == list(reversed(actor_ids))
         assert all("sheet" in item and "derived" in item for item in values)
 
+        listed = await _call(
+            server,
+            "character_query",
+            {
+                "view": "list",
+                "payload": {"campaign_id": campaign["id"]},
+            },
+        )
+        assert [(item["id"], item["name"]) for item in listed] == [
+            (actor_ids[0], "Cleric"),
+            (actor_ids[1], "Fighter"),
+        ]
+        assert all("revision" in item for item in listed)
+        assert all("sheet" not in item and "derived" not in item for item in listed)
+
         with pytest.raises(Exception, match="unique"):
             await _call(
                 server,
