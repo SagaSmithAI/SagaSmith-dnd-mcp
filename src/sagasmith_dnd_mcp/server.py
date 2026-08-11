@@ -30732,6 +30732,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             source_key=f"module-review:{module_id}:{content_key}",
             name=None,
         )
+        agent_fill_requirements = statblock_agent_fill_requirements(parsed.sheet)
+        if agent_fill_requirements["required"] and agent_fill is None:
+            return {
+                "review": None,
+                "requires_agent_fill": True,
+                "validation": {
+                    "name": parsed.name,
+                    "challenge_rating": parsed.challenge_rating,
+                    "experience_points": parsed.experience_points,
+                    **statblock_settlement(parsed.warnings),
+                    "agent_fill": None,
+                    "resolved_warnings": [],
+                    "agent_fill_requirements": agent_fill_requirements,
+                },
+            }
         agent_fill_requirements = require_complete_statblock_agent_fill(
             parsed.sheet,
             agent_fill,

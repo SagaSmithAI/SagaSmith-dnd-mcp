@@ -294,25 +294,28 @@ def test_agent_can_fill_custom_monster_multiattack_from_exact_module_source(
             "shortbow",
         }
 
-        with pytest.raises(Exception, match="requires an Agent statblock fill"):
-            await _call(
-                server,
-                "module_draft",
-                {
-                    "campaign_id": campaign["id"],
-                    "action": "edit",
-                    "payload": {
-                        "operation": "content",
-                        "module_id": module_id,
-                        "scene_id": candidate["scene_id"],
-                        "content_key": "parser-only-goblin",
-                        "normalized_content": candidate["normalized_content"],
-                        "source_chunk_ids": candidate["source_chunk_ids"],
-                        "observation": "Attempted to trust the parser proposal.",
-                    },
-                    "idempotency_key": "reject-parser-only-goblin",
+        pending = await _call(
+            server,
+            "module_draft",
+            {
+                "campaign_id": campaign["id"],
+                "action": "edit",
+                "payload": {
+                    "operation": "content",
+                    "module_id": module_id,
+                    "scene_id": candidate["scene_id"],
+                    "content_key": "parser-only-goblin",
+                    "normalized_content": candidate["normalized_content"],
+                    "source_chunk_ids": candidate["source_chunk_ids"],
+                    "observation": "Request the explicit Agent-fill contract.",
                 },
-            )
+                "idempotency_key": "review-agent-filled-goblin",
+            },
+        )
+        assert pending["review"] is None
+        assert pending["requires_agent_fill"] is True
+        assert pending["validation"]["agent_fill"] is None
+        assert pending["validation"]["agent_fill_requirements"] == requirements
 
         reviewed = await _call(
             server,
@@ -361,6 +364,8 @@ def test_agent_can_fill_custom_monster_multiattack_from_exact_module_source(
                         ]
                     },
                 },
+                # The pending response was read-only, so the completed submission may
+                # retain the logical operation's idempotency key.
                 "idempotency_key": "review-agent-filled-goblin",
             },
         )
