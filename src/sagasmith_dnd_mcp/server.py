@@ -43455,6 +43455,11 @@ boundary.
                     "text_layout_recovery": text_layout_recovery,
                 },
                 "statblock": {
+                    **(
+                        {"source_identity": source_statblock_name}
+                        if source_statblock_name
+                        else {}
+                    ),
                     "challenge_rating": challenge_rating,
                     "experience_points": experience_points,
                     **statblock_settlement(

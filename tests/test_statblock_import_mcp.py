@@ -687,6 +687,7 @@ def test_rule_statblock_recovers_split_text_layout_without_images(tmp_path: Path
         assert recovery["profile"] == "deterministic-text-layout-v1"
         assert recovery["source_statblock_name"] == "Guard"
         assert created["source"]["chunk_ids"] == recovery["chunk_ids"]
+        assert created["statblock"]["source_identity"] == "Guard"
         assert len(recovery["chunk_ids"]) == 8
         assert all(
             "KNIGHT" not in next(item for item in chunks if item["id"] == chunk_id)["heading_path"]

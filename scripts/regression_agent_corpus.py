@@ -646,7 +646,8 @@ def _source_combat_actor_identities(calls: list[dict[str, Any]]) -> dict[str, st
         if (
             call.get("tool") != "character_create_from"
             or not call.get("ok")
-            or (call.get("arguments") or {}).get("mode") != "module_statblock"
+            or (call.get("arguments") or {}).get("mode")
+            not in {"statblock", "module_statblock"}
         ):
             continue
         for node in _walk(call.get("result")):
@@ -1081,13 +1082,18 @@ Treat the current evidence-gap list below as authoritative for what remains;
 prior Agent narration is not proof of a blocker. Query current state first and
 do not repeat a prerequisite that is no longer listed. In particular, when no
 `preparation` gap remains, do not rebuild the existing party or re-import an
-unchanged Pack. A `source_opposition_missing` or
-`legal_ending_not_verified` gap accompanied by an active Pack that lacks the
-required source-backed content review or structured ending is different: that
-is mechanically indispensable Pack data, not advisory readiness. Return to
-Lobby, start an explicit new draft/version from the same managed source, add
-only the evidence-backed missing review/package decisions, finalize it, import
-the new artifact, and activate only the module id returned by that import.
+unchanged Pack. A `source_opposition_missing` gap does not by itself prove that
+the active Pack needs a new review. In Lobby, first use exact `rule_search`
+without a guessed page or empty filters. When an enabled canonical rule source
+contains the exact printed card, use `character_create_from(mode="statblock")`
+with its returned `source_id`, exact chunks, and `source_statblock_name`; give
+repeated instances distinct names and verify returned
+`statblock.source_identity`. Only when the card exists exclusively in the module
+and its active Pack lacks the review is new Pack data mechanically indispensable.
+A missing structured ending likewise belongs in the Pack. For those Pack-only
+gaps, start an explicit new draft/version from the same managed source, add only
+the evidence-backed missing review/package decisions, finalize it, import the
+new artifact, and activate only the module id returned by that import.
 Never guess a review id, edit a finalized Pack in place, or re-import the old
 artifact as a substitute for the new reviewed revision.
 When the active Pack already has the required immutable content review, do not
