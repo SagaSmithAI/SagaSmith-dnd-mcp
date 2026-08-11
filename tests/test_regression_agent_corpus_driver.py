@@ -1117,8 +1117,9 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "coverage evidence and route intent, not a story answer" in prompt
     assert "Do not reduce or omit a group to make preflight pass" in prompt
     assert "A prefix-only asset read is not proof" in prompt
-    assert "localized rule hit" in prompt
-    assert "opaque source_id" in prompt
+    assert "dnd:full/skills/dnd-dm/references/OPPOSITION_HYDRATION.md" in prompt
+    assert "read the focused" in prompt
+    assert "localized-canonical-source sequence" in prompt
     assert "never a campaign UUID" in prompt
     assert "Open exposure without a campaign" in prompt
     assert 'explicit `edition="2014"`' in prompt
