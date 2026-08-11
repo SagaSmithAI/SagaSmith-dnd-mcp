@@ -855,6 +855,75 @@ def _scenario_source_opposition_covered(
     return False
 
 
+def _source_opposition_evidence_audit(
+    route: dict[str, Any], calls: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Expose why the latest successful source manifest still misses route evidence."""
+
+    audits: list[dict[str, Any]] = []
+    successful_starts = [
+        call for call in calls if call.get("tool") == "combat_start" and call.get("ok")
+    ]
+    for scenario in route.get("scenarios") or []:
+        expected_groups = list(scenario.get("initial_source_groups") or [])
+        if not expected_groups or _scenario_source_opposition_covered(scenario, calls):
+            continue
+        mode = scenario.get("positioning_mode")
+        matching_starts = [
+            call
+            for call in successful_starts
+            if mode not in {"grid", "agent"}
+            or (call.get("arguments") or {}).get("positioning_mode") == mode
+        ]
+        if not matching_starts:
+            continue
+        latest = matching_starts[-1]
+        actual_groups = list(
+            dict((latest.get("arguments") or {}).get("participant_manifest") or {}).get(
+                "groups"
+            )
+            or []
+        )
+        comparisons = []
+        for expected in expected_groups:
+            actual = next(
+                (
+                    item
+                    for item in actual_groups
+                    if item.get("role") == expected.get("role")
+                    and item.get("required_count") == expected.get("required_count")
+                    and str(item.get("label") or "").casefold()
+                    in {
+                        str(expected.get("subject") or "").casefold(),
+                        str(expected.get("statblock_source_identity") or "").casefold(),
+                    }
+                ),
+                None,
+            )
+            expected_excerpt = " ".join(str(expected.get("source_excerpt") or "").split())
+            actual_excerpt = " ".join(str((actual or {}).get("source_excerpt") or "").split())
+            comparisons.append(
+                {
+                    "subject": expected.get("subject"),
+                    "expected_source_excerpt": expected_excerpt,
+                    "actual_source_excerpt": actual_excerpt,
+                    "exact_excerpt_match": actual_excerpt.casefold()
+                    == expected_excerpt.casefold(),
+                    "actual_actor_ids": list((actual or {}).get("actor_ids") or []),
+                }
+            )
+        audits.append(
+            {
+                "scenario_id": scenario.get("id"),
+                "latest_successful_start_key": (latest.get("arguments") or {}).get(
+                    "idempotency_key"
+                ),
+                "groups": comparisons,
+            }
+        )
+    return audits
+
+
 def _source_combat_sequence(
     calls: list[dict[str, Any]], *, mode: str | None = None, require_render: bool = False
 ) -> bool:
@@ -1200,7 +1269,9 @@ def _dm_prompt(
     player_principal: str,
     cycle: int,
     gaps: list[str],
+    source_opposition_audit: list[dict[str, Any]] | None = None,
 ) -> str:
+    opposition_audit_json = json.dumps(source_opposition_audit or [], ensure_ascii=False)
     return f"""You are the DM Agent for a real full-campaign regression.
 Run id: {run_id}
 Campaign line label (never a campaign UUID): {line_id}
@@ -1239,6 +1310,7 @@ Retrieve and expand the exact managed source before deciding what happens:
 managed_sources={json.dumps(_managed_source_summary(unit), ensure_ascii=False)}
 evidence={json.dumps(_evidence_summary(route), ensure_ascii=False)}
 scenarios={json.dumps(route.get("scenarios") or [], ensure_ascii=False)}
+prior_source_opposition_evidence_audit={opposition_audit_json}
 When a combat scenario includes `initial_source_groups`, treat each entry as a
 source-backed audit expectation: re-read the cited source, preserve every listed
 group, exact count, source identity, and `required_variant` in preflight, and
@@ -1764,6 +1836,11 @@ def _run_unit(
                 player_principal=player_principal,
                 cycle=cycle,
                 gaps=list(audit.get("gaps") or []),
+                source_opposition_audit=_source_opposition_evidence_audit(
+                    route,
+                    _tool_timeline(_read_tool_audit(dm_audit), principal="dm")
+                    + _tool_timeline(_read_tool_audit(player_audit), principal="player"),
+                ),
             ),
             audit_path=dm_audit,
         )

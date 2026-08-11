@@ -24,6 +24,7 @@ from scripts.regression_agent_corpus import (
     _process_artifacts,
     _read_tool_audit,
     _runnable_units,
+    _source_opposition_evidence_audit,
     _tool_timeline,
 )
 
@@ -1008,6 +1009,63 @@ def test_combat_coverage_requires_every_source_expected_group() -> None:
     assert "fight:source_opposition_missing" not in _coverage_audit(
         route, complete, process_count=1, list_changed_count=1
     )["gaps"]
+
+
+def test_source_opposition_audit_exposes_exact_excerpt_mismatch() -> None:
+    route = {
+        "scenarios": [
+            {
+                "id": "fight",
+                "positioning_mode": "grid",
+                "initial_source_groups": [
+                    {
+                        "subject": "Flennis",
+                        "role": "combatant",
+                        "required_count": 1,
+                        "source_excerpt": "The managed source text.",
+                    }
+                ],
+            }
+        ]
+    }
+    calls = [
+        _call(
+            "combat_start",
+            arguments={
+                "positioning_mode": "grid",
+                "idempotency_key": "start",
+                "participant_manifest": {
+                    "groups": [
+                        {
+                            "label": "Flennis",
+                            "role": "combatant",
+                            "required_count": 1,
+                            "actor_ids": ["flennis"],
+                            "source_excerpt": "The corrupted Pack text.",
+                        }
+                    ]
+                },
+            },
+        )
+    ]
+
+    audit = _source_opposition_evidence_audit(route, calls)
+
+    assert audit == [
+        {
+            "scenario_id": "fight",
+            "latest_successful_start_key": "start",
+            "groups": [
+                {
+                    "subject": "Flennis",
+                    "expected_source_excerpt": "The managed source text.",
+                    "actual_source_excerpt": "The corrupted Pack text.",
+                    "exact_excerpt_match": False,
+                    "actual_actor_ids": ["flennis"],
+                }
+            ],
+        }
+    ]
 
 
 def test_combat_coverage_requires_source_backed_variant() -> None:
