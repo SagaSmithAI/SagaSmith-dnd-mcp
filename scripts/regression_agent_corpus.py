@@ -999,6 +999,13 @@ only the evidence-backed missing review/package decisions, finalize it, import
 the new artifact, and activate only the module id returned by that import.
 Never guess a review id, edit a finalized Pack in place, or re-import the old
 artifact as a substitute for the new reviewed revision.
+When the active Pack already has the required immutable content review, do not
+author another revision. Return to Lobby, query that Pack with
+`module_query(view="content")`, load `character_create_from`, instantiate every
+required encounter actor with `mode="module_statblock"`, and re-read each actor
+before returning to Play. Writing a review id or opposition name into
+`module_set_progress` is only narrative progress metadata; it never creates or
+preflights a mechanical combat participant.
 
 Prepare/finalize/import/activate the current Pack through the public lifecycle;
 before any module authoring write, read the current

@@ -824,6 +824,8 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "re-resolve its exact current Pack evidence" in prompt
     assert "start an explicit new draft/version from the same managed source" in prompt
     assert "Never guess a review id" in prompt
+    assert "module_set_progress` is only narrative progress metadata" in prompt
+    assert '`character_create_from`' in prompt
     assert '"decision"' not in prompt
     assert '"outcome"' not in prompt
 
