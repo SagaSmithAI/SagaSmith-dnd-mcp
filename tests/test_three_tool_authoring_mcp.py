@@ -3,9 +3,11 @@ from copy import deepcopy
 from pathlib import Path
 
 import pytest
+from sagasmith_core.rule_packs import RulePackService
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
+from sagasmith_dnd_mcp.storage import SagaSmithStorage
 from tests.authoring_helpers import finalize_and_activate_module
 
 
@@ -143,6 +145,319 @@ def test_rulebook_start_edit_finalize_builds_an_immutable_pack(tmp_path: Path) -
         assert {
             item["disposition"] for item in authoring_review["candidate_decisions"]
         } == {"exclude"}
+
+    asyncio.run(exercise())
+
+
+def test_rulebook_finalize_rejects_missing_manifest_without_freezing(tmp_path: Path) -> None:
+    import_root = tmp_path / "imports"
+    import_root.mkdir()
+    source = import_root / "rules.md"
+    source.write_text(
+        "# Optional Rules\n\n## Spark\n\nOne target takes 1 fire damage.\n",
+        encoding="utf-8",
+    )
+
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path, import_root))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Retryable rulebook finalize", "idempotency_key": "campaign"},
+        )
+        started = await _call(
+            server,
+            "rulebook_draft",
+            {
+                "campaign_id": campaign["id"],
+                "action": "start",
+                "payload": {
+                    "source_path": str(source),
+                    "source_key": "retryable-rules",
+                    "title": "Retryable Rules",
+                    "edition": "2014",
+                },
+                "idempotency_key": "draft-start",
+            },
+        )
+        before = started["job"]
+        confirmation = {
+            "confirmed": True,
+            "note": "Freeze the reviewed candidate set and build the immutable Pack.",
+        }
+        with pytest.raises(Exception, match="payload.manifest is required"):
+            await _call(
+                server,
+                "rulebook_draft",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "finalize",
+                    "payload": {"job_id": before["id"], "confirmation": confirmation},
+                    "expected_revision": before["revision"],
+                    "idempotency_key": "missing-manifest",
+                },
+            )
+        unchanged = await _call(
+            server,
+            "rulebook_draft",
+            {
+                "campaign_id": campaign["id"],
+                "action": "get",
+                "payload": {"job_id": before["id"]},
+            },
+        )
+        assert unchanged["job"]["state"] == before["state"]
+        assert unchanged["job"]["revision"] == before["revision"]
+        assert "review_finalization" not in unchanged["job"]["result"]
+
+        finalized = await _call(
+            server,
+            "rulebook_draft",
+            {
+                "campaign_id": campaign["id"],
+                "action": "finalize",
+                "payload": {
+                    "job_id": before["id"],
+                    "confirmation": confirmation,
+                    "manifest": {
+                        "id": "dnd5e.retryable-rules",
+                        "version": "1.0.0",
+                        "title": "Retryable Rules",
+                        "namespace": "dnd5e.retryable-rules",
+                        "system_id": "dnd5e",
+                        "editions": ["2014"],
+                    },
+                },
+                "expected_revision": before["revision"],
+                "idempotency_key": "valid-finalize",
+            },
+        )
+        assert finalized["job"]["state"] == "compiled"
+        assert finalized["draft"]["status"] == "validated"
+
+    asyncio.run(exercise())
+
+
+def test_rulebook_finalize_resumes_after_candidate_freeze(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import_root = tmp_path / "imports"
+    import_root.mkdir()
+    source = import_root / "rules.md"
+    source.write_text(
+        "# Optional Rules\n\n## Spark\n\nOne target takes 1 fire damage.\n",
+        encoding="utf-8",
+    )
+
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path, import_root))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Interrupted rulebook finalize", "idempotency_key": "campaign"},
+        )
+        started = await _call(
+            server,
+            "rulebook_draft",
+            {
+                "campaign_id": campaign["id"],
+                "action": "start",
+                "payload": {
+                    "source_path": str(source),
+                    "source_key": "interrupted-rules",
+                    "title": "Interrupted Rules",
+                    "edition": "2014",
+                },
+                "idempotency_key": "draft-start",
+            },
+        )
+        job = started["job"]
+        confirmation = {
+            "confirmed": True,
+            "note": "Freeze this candidate set once and resume Pack compilation safely.",
+        }
+        manifest = {
+            "id": "dnd5e.interrupted-rules",
+            "version": "1.0.0",
+            "title": "Interrupted Rules",
+            "namespace": "dnd5e.interrupted-rules",
+            "system_id": "dnd5e",
+            "editions": ["2014"],
+        }
+        original_save_draft = RulePackService.save_draft
+        interrupted = False
+
+        def interrupt_once(self, *args, **kwargs):
+            nonlocal interrupted
+            if not interrupted:
+                interrupted = True
+                raise RuntimeError("simulated compiler interruption")
+            return original_save_draft(self, *args, **kwargs)
+
+        monkeypatch.setattr(RulePackService, "save_draft", interrupt_once)
+        with pytest.raises(Exception, match="simulated compiler interruption"):
+            await _call(
+                server,
+                "rulebook_draft",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "finalize",
+                    "payload": {
+                        "job_id": job["id"],
+                        "confirmation": confirmation,
+                        "manifest": manifest,
+                    },
+                    "expected_revision": job["revision"],
+                    "idempotency_key": "interrupted-finalize",
+                },
+            )
+        frozen = await _call(
+            server,
+            "rulebook_draft",
+            {
+                "campaign_id": campaign["id"],
+                "action": "get",
+                "payload": {"job_id": job["id"]},
+            },
+        )
+        assert frozen["job"]["state"] == "reviewed"
+        frozen_revision = frozen["job"]["revision"]
+        candidate_revision = frozen["job"]["result"]["review_finalization"][
+            "candidate_revision"
+        ]
+        assert candidate_revision == frozen_revision
+
+        finalized = await _call(
+            server,
+            "rulebook_draft",
+            {
+                "campaign_id": campaign["id"],
+                "action": "finalize",
+                "payload": {
+                    "job_id": job["id"],
+                    "confirmation": confirmation,
+                    "manifest": manifest,
+                },
+                "expected_revision": frozen_revision,
+                "idempotency_key": "resumed-finalize",
+            },
+        )
+        assert finalized["job"]["state"] == "compiled"
+        assert finalized["draft"]["status"] == "validated"
+        assert finalized["job"]["result"]["review_finalization"][
+            "candidate_revision"
+        ] == candidate_revision
+        assert finalized["job"]["result"]["finalized_package"]["artifact"]
+
+    asyncio.run(exercise())
+
+
+def test_rulebook_finalize_resumes_after_archive_interruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import_root = tmp_path / "imports"
+    import_root.mkdir()
+    source = import_root / "rules.md"
+    source.write_text(
+        "# Optional Rules\n\n## Spark\n\nOne target takes 1 fire damage.\n",
+        encoding="utf-8",
+    )
+
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path, import_root))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Interrupted rulebook archive", "idempotency_key": "campaign"},
+        )
+        started = await _call(
+            server,
+            "rulebook_draft",
+            {
+                "campaign_id": campaign["id"],
+                "action": "start",
+                "payload": {
+                    "source_path": str(source),
+                    "source_key": "interrupted-archive-rules",
+                    "title": "Interrupted Archive Rules",
+                    "edition": "2014",
+                },
+                "idempotency_key": "draft-start",
+            },
+        )
+        job = started["job"]
+        confirmation = {
+            "confirmed": True,
+            "note": "Resume the same reviewed Pack after an archive write interruption.",
+        }
+        manifest = {
+            "id": "dnd5e.interrupted-archive-rules",
+            "version": "1.0.0",
+            "title": "Interrupted Archive Rules",
+            "namespace": "dnd5e.interrupted-archive-rules",
+            "system_id": "dnd5e",
+            "editions": ["2014"],
+        }
+        original_write_archive = SagaSmithStorage.write_content_archive
+        interrupted = False
+
+        def interrupt_once(self, *args, **kwargs):
+            nonlocal interrupted
+            if not interrupted:
+                interrupted = True
+                raise RuntimeError("simulated archive interruption")
+            return original_write_archive(self, *args, **kwargs)
+
+        monkeypatch.setattr(SagaSmithStorage, "write_content_archive", interrupt_once)
+        with pytest.raises(Exception, match="simulated archive interruption"):
+            await _call(
+                server,
+                "rulebook_draft",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "finalize",
+                    "payload": {
+                        "job_id": job["id"],
+                        "confirmation": confirmation,
+                        "manifest": manifest,
+                    },
+                    "expected_revision": job["revision"],
+                    "idempotency_key": "interrupted-finalize",
+                },
+            )
+        compiled = await _call(
+            server,
+            "rulebook_draft",
+            {
+                "campaign_id": campaign["id"],
+                "action": "get",
+                "payload": {"job_id": job["id"]},
+            },
+        )
+        assert compiled["job"]["state"] == "compiled"
+        compiled_revision = compiled["job"]["revision"]
+        assert compiled["job"]["validation"]["draft"]["status"] == "validated"
+        assert "finalized_package" not in compiled["job"]["result"]
+
+        finalized = await _call(
+            server,
+            "rulebook_draft",
+            {
+                "campaign_id": campaign["id"],
+                "action": "finalize",
+                "payload": {
+                    "job_id": job["id"],
+                    "confirmation": confirmation,
+                    "manifest": manifest,
+                },
+                "expected_revision": compiled_revision,
+                "idempotency_key": "resumed-finalize",
+            },
+        )
+        assert finalized["job"]["state"] == "compiled"
+        assert finalized["draft"]["status"] == "validated"
+        assert finalized["job"]["revision"] == compiled_revision + 1
+        assert finalized["job"]["result"]["finalized_package"]["artifact"]
 
     asyncio.run(exercise())
 

@@ -41425,17 +41425,51 @@ boundary.
         confirmation_note = str(confirmation.get("note") or "").strip()
         if not confirmation_note or len(confirmation_note) > 2000:
             raise ValueError("rulebook draft confirmation.note must contain 1 to 2000 characters")
+        manifest = required(data, "manifest")
+        if not isinstance(manifest, dict):
+            raise ValueError("payload.manifest must be an object")
+        for field in ("id", "version", "system_id"):
+            required(manifest, field)
+        editions = manifest.get("editions")
+        if not isinstance(editions, list) or not editions:
+            raise ValueError("payload.manifest.editions must be a non-empty array")
+        for field in ("mechanics",):
+            if data.get(field) is not None and not isinstance(data[field], list):
+                raise ValueError(f"payload.{field} must be an array")
+        for field in ("metadata", "provenance"):
+            if data.get(field) is not None and not isinstance(data[field], dict):
+                raise ValueError(f"payload.{field} must be an object")
         job = require_import_job(campaign_id, job_id, "rulebook")
         if dict(job.result or {}).get("finalized_package"):
             raise ValueError("a finalized rulebook draft is immutable")
-        finalized = import_job_finalize_candidates(
-            campaign_id,
-            job_id,
-            confirmation_note,
-            principal_id,
-            expected_revision,
-            f"{idempotency_key}:freeze",
-        )
+        review_finalization = dict(dict(job.result or {}).get("review_finalization") or {})
+        if job.state in {"extracted", "review_required"}:
+            finalized = import_job_finalize_candidates(
+                campaign_id,
+                job_id,
+                confirmation_note,
+                principal_id,
+                expected_revision,
+                f"{idempotency_key}:freeze",
+            )
+        elif job.state in {"reviewed", "failed", "compiled"} and review_finalization:
+            if expected_revision is None or expected_revision != job.revision:
+                raise ValueError(
+                    f"import job revision conflict: expected {expected_revision}, "
+                    f"found {job.revision}"
+                )
+            if str(review_finalization.get("confirmed_by") or "") != principal_id:
+                raise ValueError("rulebook draft finalization belongs to another principal")
+            if str(review_finalization.get("note") or "") != confirmation_note:
+                raise ValueError(
+                    "rulebook draft finalization confirmation cannot change after review"
+                )
+            finalized = {
+                "job": import_job_view(job),
+                "candidates": [import_candidate_view(item) for item in job.candidates],
+            }
+        else:
+            raise ValueError("only an editable or resumable rulebook draft may be finalized")
         finalized_job = dict(finalized["job"])
         review_finalization = dict(
             dict(finalized_job.get("result") or {}).get("review_finalization") or {}
@@ -41467,19 +41501,26 @@ boundary.
                 for candidate in finalized_job.get("candidates") or []
             ],
         }
-        compiled = rule_import_job_compile(
-            campaign_id,
-            job_id,
-            data["manifest"],
-            data.get("mechanics"),
-            data.get("provenance"),
-            principal_id,
-            f"{idempotency_key}:compile",
-        )
+        resumed_job = require_import_job(campaign_id, job_id, "rulebook")
+        if resumed_job.state == "compiled":
+            draft = deepcopy(dict(resumed_job.validation or {}).get("draft") or {})
+            if str(draft.get("status") or "") != "validated":
+                raise ValueError("compiled rulebook draft is missing its validated Pack receipt")
+            compiled = {"job": import_job_view(resumed_job), "draft": draft}
+        else:
+            compiled = rule_import_job_compile(
+                campaign_id,
+                job_id,
+                manifest,
+                data.get("mechanics"),
+                data.get("provenance"),
+                principal_id,
+                f"{idempotency_key}:compile",
+            )
         if str(dict(compiled.get("draft") or {}).get("status") or "") != "validated":
             raise ValueError("rulebook draft did not produce a valid immutable Pack")
-        pack_id = str(required(data["manifest"], "id"))
-        version = str(required(data["manifest"], "version"))
+        pack_id = str(required(manifest, "id"))
+        version = str(required(manifest, "version"))
         stored_pack = rule_pack_install(pack_id, version)
         stored = {**dict(stored_pack), "status": "stored"}
         archived = _content_pack_export_rule(
