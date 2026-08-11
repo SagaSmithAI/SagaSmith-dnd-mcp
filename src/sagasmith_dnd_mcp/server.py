@@ -41038,6 +41038,7 @@ boundary.
                 return facade_result(
                     action,
                     {
+                        "order": "newest_first",
                         "jobs": [
                             module_draft_handle_view(item)
                             for item in import_jobs.list(campaign_id, kind="module")

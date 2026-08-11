@@ -491,6 +491,7 @@ def test_module_get_lists_compact_restart_handles(tmp_path: Path) -> None:
             "module_draft",
             {"campaign_id": campaign["id"], "action": "get"},
         )
+        assert listed["order"] == "newest_first"
         assert listed["jobs"] == [
             {
                 "job_id": started["job_id"],
