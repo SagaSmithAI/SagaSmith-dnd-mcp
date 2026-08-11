@@ -969,8 +969,16 @@ scenarios={json.dumps(route.get("scenarios") or [], ensure_ascii=False)}
 Treat the current evidence-gap list below as authoritative for what remains;
 prior Agent narration is not proof of a blocker. Query current state first and
 do not repeat a prerequisite that is no longer listed. In particular, when no
-`preparation` gap remains, do not start, finalize, import, or activate another
-module and do not rebuild the existing party.
+`preparation` gap remains, do not rebuild the existing party or re-import an
+unchanged Pack. A `source_opposition_missing` or
+`legal_ending_not_verified` gap accompanied by an active Pack that lacks the
+required source-backed content review or structured ending is different: that
+is mechanically indispensable Pack data, not advisory readiness. Return to
+Lobby, start an explicit new draft/version from the same managed source, add
+only the evidence-backed missing review/package decisions, finalize it, import
+the new artifact, and activate only the module id returned by that import.
+Never guess a review id, edit a finalized Pack in place, or re-import the old
+artifact as a substitute for the new reviewed revision.
 
 Prepare/finalize/import/activate the current Pack through the public lifecycle;
 before any module authoring write, read the current
