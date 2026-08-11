@@ -43,7 +43,7 @@
           "id": "wave-echo-encounter",
           "chapter_or_scene": "Part 4: Wave Echo Cave / Keyed Encounters",
           "evidence_id": "encounter",
-          "mechanisms": ["resource_settlement", "conversation_to_combat", "combat", "combat_render"],
+          "mechanisms": ["resource_settlement", "conversation_to_combat", "agent_semantic_spell_ruling", "combat", "combat_render"],
           "positioning_mode": "grid",
           "audience": "player",
           "path": "normal",

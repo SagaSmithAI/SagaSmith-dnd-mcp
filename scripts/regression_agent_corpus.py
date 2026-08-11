@@ -789,6 +789,15 @@ def _mechanism_covered(mechanism: str, calls: list[dict[str, Any]]) -> bool:
                 ("combat_start", None, True),
             ],
         )
+    if mechanism == "agent_semantic_spell_ruling":
+        return _ordered_success(
+            calls,
+            [
+                ("content_solution", "compile"),
+                ("combat_cast_spell", None),
+                ("combat_choice", "execute_plan"),
+            ],
+        )
     if mechanism == "chase_to_combat":
         return _ordered_pattern(
             calls,
@@ -1111,6 +1120,24 @@ and re-read each actor plus its returned `statblock.source_identity`
 before returning to Play. Writing a review id or opposition name into
 `module_set_progress` is only narrative progress metadata; it never creates or
 preflights a mechanical combat participant.
+
+Before creating any opposition for a resumed campaign, call
+`character_query(view="list")` and reuse every existing actor whose returned
+source identity matches the required card. A coverage gap named
+`source_opposition_missing` means no qualifying completed `combat_start` is in
+the audit yet; it does not mean the actors are absent. Only create the exact
+shortfall, and use `character_query(view="get")` with a returned actor id rather
+than unsupported name filters or an empty batch.
+
+When a scenario requires `agent_semantic_spell_ruling`, inspect preflight's
+`ruling_spell_ids` and the actor's hydrated spell cards. Select one exact
+source-backed spell with an Agent-owned semantic resolution path, query and (if
+missing) compile its generic persisted `content_solution`, then actually cast it
+and settle the returned plan through `combat_choice(action="execute_plan")`.
+Bind the decision to the active scene and exact actor/rule evidence; MCP must pay
+the action, slot or innate use and own all rolls/state mutations. Do not replace
+this obligation with a weapon attack, narration, a raw sheet edit, or a spell
+whose parser-damaged name never produced a hydrated card.
 
 Prepare/finalize/import/activate the current Pack through the public lifecycle;
 before any module authoring write, read the current

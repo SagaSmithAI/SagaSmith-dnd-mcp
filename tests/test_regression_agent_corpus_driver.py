@@ -412,6 +412,7 @@ def test_coverage_requires_real_ordered_boundaries_retries_and_recovery() -> Non
                     "npc_conversation",
                     "conversation_to_mechanic",
                     "conversation_to_combat",
+                    "agent_semantic_spell_ruling",
                     "chase",
                     "chase_to_combat",
                     "combat",
@@ -453,10 +454,13 @@ def test_coverage_requires_real_ordered_boundaries_retries_and_recovery() -> Non
                 "character": {"id": "enemy-1", "character_type": "monster"}
             },
         ),
+        _call("content_solution", arguments={"action": "compile"}),
         _call(
             "combat_start",
             arguments={"positioning_mode": "agent", "participant_ids": ["pc-1", "enemy-1"]},
         ),
+        _call("combat_cast_spell"),
+        _call("combat_choice", arguments={"action": "execute_plan"}),
         _call("combat_end"),
         _call("chase", arguments={"action": "start"}),
         _call("combat_start", ok=False),
