@@ -1266,6 +1266,11 @@ combat, audience, and recovery obligations at genuine scene boundaries. Keep
     release any worker, and retry the same valid combat start at the refreshed
     revision. Require that retry to succeed, then immediately end the now-covered
     encounter truthfully as interrupted and return to Play.
+    Before opening the probe conversation, rebuild every participant and manifest
+    actor id from a fresh `character_query(view="list")`; never copy an id from a
+    prior failed request or narration. Construct the combat payload once and reuse
+    it verbatim for the rejected and successful calls, changing only
+    `expected_revision` and `idempotency_key`.
 Keep the campaign in Lobby until the current Pack is active, the party is ready,
 and the player grant exists. If an earlier interrupted cycle entered Play before
 those prerequisites, close any active Play workflow and return to Lobby before
