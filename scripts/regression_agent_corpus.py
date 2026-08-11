@@ -957,12 +957,19 @@ def _mechanism_covered(mechanism: str, calls: list[dict[str, Any]]) -> bool:
                 ("combat_start", None, True),
             ],
         )
+    if mechanism == "chase":
+        return _ordered_success(
+            calls,
+            [
+                ("chase", "start"),
+                ("chase", "end"),
+            ],
+        )
     mappings: dict[str, tuple[tuple[str, str | None], ...]] = {
         "play_scene": (("module_query", "scene"),),
         "noncombat_check": (("character_check", None),),
         "npc_conversation": (("npc_conversation", None),),
         "resource_settlement": (("campaign_change", None), ("character_action", None)),
-        "chase": (("chase", None),),
         "ending": (("playthrough_manifest", "verify_ending"),),
         "save_restore": (("snapshot_restore", None),),
         "phase_exposure_refresh": (("exposure", "search"), ("exposure", "set")),

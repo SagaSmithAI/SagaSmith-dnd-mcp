@@ -520,6 +520,43 @@ def test_coverage_requires_real_ordered_boundaries_retries_and_recovery() -> Non
     assert audit["gaps"] == []
 
 
+def test_chase_coverage_requires_successful_start_and_end_receipts() -> None:
+    assert (
+        _mechanism_covered(
+            "chase",
+            [_call("chase", arguments={"action": "query"}, result={"chase": None})],
+        )
+        is False
+    )
+    assert (
+        _mechanism_covered(
+            "chase",
+            [
+                _call("chase", arguments={"action": "start"}, ok=False),
+                _call("chase", arguments={"action": "query"}, result={"chase": None}),
+            ],
+        )
+        is False
+    )
+    assert (
+        _mechanism_covered(
+            "chase",
+            [_call("chase", arguments={"action": "start"})],
+        )
+        is False
+    )
+    assert (
+        _mechanism_covered(
+            "chase",
+            [
+                _call("chase", arguments={"action": "start"}),
+                _call("chase", arguments={"action": "end"}),
+            ],
+        )
+        is True
+    )
+
+
 def test_coverage_accepts_paid_standard_agent_spell_clause() -> None:
     calls = [
         _call(
