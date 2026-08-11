@@ -41579,13 +41579,19 @@ boundary.
                 )
             if view == "package":
                 job = require_import_job(campaign_id, str(data["job_id"]), "module")
+                job_result = dict(job.result or {})
+                finalized_package = deepcopy(
+                    dict(job_result.get("finalized_package") or {})
+                )
+                finalized_package.pop("package", None)
                 return facade_result(
                     action,
                     {
                         "job": module_draft_handle_view(job),
                         "pack_draft": deepcopy(
-                            dict(dict(job.result or {}).get("pack_draft") or {})
+                            dict(job_result.get("pack_draft") or {})
                         ),
+                        "finalized_package": finalized_package,
                     },
                 )
             for job_view in jobs:
