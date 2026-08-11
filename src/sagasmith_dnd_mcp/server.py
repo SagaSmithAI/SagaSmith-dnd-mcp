@@ -3627,6 +3627,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         manifest, artifacts = content_actor_catalog_definition(package)
         manifest["id"] = pack_id
         manifest["namespace"] = pack_id
+        manifest["editions"] = [edition]
         result = rule_packs.save_draft(
             manifest=manifest,
             artifacts=artifacts,
@@ -4415,6 +4416,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "source": f"content-package:{value['id']}",
                         "structured": True,
                         "content_package_checksum": value["checksum"],
+                        "content_package_kind": value["kind"],
+                        "content_package_id": value["id"],
+                        "content_package_version": value["version"],
+                        "content_package_editions": list(
+                            value["manifest"].get("editions")
+                            or (
+                                [value["metadata"]["edition"]]
+                                if value["metadata"].get("edition")
+                                else []
+                            )
+                        ),
+                        "content_archive_artifact": managed_archive["artifact"],
+                        "license": value["metadata"].get("license"),
+                        "attribution": value["metadata"].get("attribution"),
                     },
                 )
             if actor_pack.status == "validated":
@@ -40731,6 +40746,112 @@ boundary.
             }
         return result
 
+    def _content_pack_actor_preset_list(
+        payload: dict[str, Any] | None,
+        principal_id: str,
+    ) -> list[dict[str, Any]]:
+        """List installed preset catalogs without materializing their large archives."""
+
+        data = facade_payload(payload)
+        campaign_id = str(required(data, "campaign_id"))
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        edition = normalize_dnd_edition(str(required(data, "edition")))
+        result: list[dict[str, Any]] = []
+        for item in rule_packs.list_versions():
+            manifest = dict(item.manifest or {})
+            content_kinds = {str(value) for value in manifest.get("content_kinds") or []}
+            if item.status != "installed" or "actor_card" not in content_kinds:
+                continue
+            provenance = rule_packs.provenance(item.pack_id, item.version)
+            editions = {
+                str(value)
+                for value in (
+                    manifest.get("editions")
+                    or provenance.get("content_package_editions")
+                    or []
+                )
+            }
+            if editions and edition not in editions:
+                continue
+            source = str(provenance.get("source") or "")
+            package_kind = str(provenance.get("content_package_kind") or "")
+            if package_kind != "preset" and not source.startswith("bundled-srd"):
+                continue
+            package_id = str(provenance.get("content_package_id") or item.pack_id)
+            result.append(
+                {
+                    "pack_id": package_id,
+                    "local_ref": item.pack_id,
+                    "version": str(provenance.get("content_package_version") or item.version),
+                    "checksum": str(
+                        provenance.get("content_package_checksum") or item.checksum
+                    ),
+                    "status": "stored",
+                    "actors": len(item.artifacts),
+                    "artifact": provenance.get("content_archive_artifact"),
+                    "manifest": {
+                        **manifest,
+                        "id": package_id,
+                        "version": str(
+                            provenance.get("content_package_version") or item.version
+                        ),
+                    },
+                    "metadata": {
+                        "license": provenance.get("license"),
+                        "attribution": provenance.get("attribution"),
+                    },
+                }
+            )
+        return sorted(result, key=lambda value: (value["pack_id"], value["version"]))
+
+    def _content_pack_actor_preset_detail(
+        payload: dict[str, Any] | None,
+        principal_id: str,
+    ) -> Any:
+        """Read an installed preset from its authoritative finalized archive."""
+
+        data = facade_payload(payload)
+        pack_id = str(data.get("pack_id") or "").strip()
+        version = str(data.get("version") or "").strip()
+        if not pack_id:
+            return _content_pack_actor_presets(data, principal_id)
+        matches = [
+            item
+            for item in _content_pack_actor_preset_list(data, principal_id)
+            if pack_id in {str(item["pack_id"]), str(item["local_ref"])}
+            and (not version or version == str(item["version"]))
+        ]
+        if len(matches) != 1:
+            raise LookupError(pack_id)
+        match = matches[0]
+        archive_name = str(match.get("artifact") or "")
+        if not archive_name:
+            # Bundled SRD catalogs are reproducible and deliberately do not persist an archive.
+            return _content_pack_actor_presets(data, principal_id)
+        package, blobs = storage.read_content_archive(artifact=archive_name)
+        if package.get("kind") != "preset":
+            raise ValueError("installed actor catalog archive is not a preset Pack")
+        artifact_id = str(data.get("artifact_id") or "").strip()
+        if artifact_id:
+            cards = [item for item in package["actors"] if item["id"] == artifact_id]
+            if len(cards) != 1:
+                raise LookupError(artifact_id)
+            return {
+                "card": cards[0],
+                "artifact": storage.write_content_archive(package, blobs),
+            }
+        return {
+            "package": {
+                "id": package["id"],
+                "version": package["version"],
+                "checksum": package["checksum"],
+                "cards": len(package["actors"]),
+                "metadata": deepcopy(package["metadata"]),
+            },
+            "artifact": storage.write_content_archive(package, blobs),
+            **({"content_package": package} if data.get("include_package") is True else {}),
+        }
+
     def _content_pack_addons(
         payload: dict[str, Any] | None,
         principal_id: str,
@@ -41868,7 +41989,8 @@ boundary.
         data = facade_payload(payload)
         campaign_id = str(required(data, "campaign_id"))
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
-        require_facade_phase(campaign_id, f"content_pack({action})", PROFILE_LOBBY)
+        if action not in {"list", "get"}:
+            require_facade_phase(campaign_id, f"content_pack({action})", PROFILE_LOBBY)
         kind = str(required(data, "kind"))
         routing_kinds = {"core_rules", "addon", "module", "preset"}
         if kind not in routing_kinds:
@@ -41883,13 +42005,27 @@ boundary.
                         ),
                     }
                     for item in rule_pack_list(data.get("pack_id"))
+                    if "actor_card"
+                    not in {
+                        str(value)
+                        for value in dict(item.get("manifest") or {}).get("content_kinds")
+                        or []
+                    }
                 ]
             elif kind == "addon":
                 result = _content_pack_addons(data, principal_id)
             elif kind == "module":
-                result = module_list(campaign_id, principal_id)
+                result = [
+                    item
+                    for item in modules.list(campaign_id, include_retired=True)
+                    if str(item.get("parser_profile") or "") == "content-package"
+                ]
             else:
-                result = _content_pack_actor_presets(data, principal_id)
+                result = (
+                    _content_pack_actor_presets(data, principal_id)
+                    if data.get("include_package") is True
+                    else _content_pack_actor_preset_list(data, principal_id)
+                )
             return facade_result(action, result)
 
         if action == "get":
@@ -41928,14 +42064,15 @@ boundary.
                 module_id = str(required(data, "module_id"))
                 matches = [
                     item
-                    for item in module_list(campaign_id, principal_id)
+                    for item in modules.list(campaign_id, include_retired=True)
                     if str(item.get("id") or item.get("module_id") or "") == module_id
+                    and str(item.get("parser_profile") or "") == "content-package"
                 ]
                 if len(matches) != 1:
                     raise LookupError(module_id)
                 result = matches[0]
             else:
-                result = _content_pack_actor_presets(data, principal_id)
+                result = _content_pack_actor_preset_detail(data, principal_id)
             return facade_result(action, result)
 
         if action == "import":
@@ -41987,7 +42124,7 @@ boundary.
             elif kind == "addon":
                 result = _content_pack_addon(data, principal_id)
             else:
-                result = _content_pack_actor_presets(data, principal_id)
+                result = _content_pack_actor_preset_detail(data, principal_id)
             return facade_result(action, result)
 
         if action in {"activate", "deactivate"}:
@@ -42141,8 +42278,9 @@ boundary.
             module = next(
                 (
                     item
-                    for item in module_list(campaign_id, principal_id)
+                    for item in modules.list(campaign_id, include_retired=True)
                     if str(item.get("id") or item.get("module_id") or "") == module_id
+                    and str(item.get("parser_profile") or "") == "content-package"
                 ),
                 None,
             )

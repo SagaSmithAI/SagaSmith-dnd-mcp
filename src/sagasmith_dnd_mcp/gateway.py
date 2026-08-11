@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import hmac
 import json
 import logging
 import os
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from aiohttp import web
@@ -21,6 +24,7 @@ from sagasmith_dnd_mcp.server import create_server
 
 JsonHandler = Callable[[web.Request], Awaitable[web.StreamResponse]]
 LOGGER = logging.getLogger(__name__)
+CONTENT_PACK_KINDS = ("core_rules", "addon", "module", "preset")
 
 
 @dataclass(frozen=True)
@@ -28,6 +32,7 @@ class GatewayConfig:
     host: str = "127.0.0.1"
     port: int = 8766
     bearer_token: str | None = None
+    upload_limit_bytes: int = 64 * 1024 * 1024
     allowed_origins: tuple[str, ...] = (
         "http://127.0.0.1:4321",
         "http://localhost:4321",
@@ -47,6 +52,9 @@ class GatewayConfig:
             host=os.environ.get("SAGASMITH_DND_GATEWAY_HOST", "127.0.0.1"),
             port=int(os.environ.get("SAGASMITH_DND_GATEWAY_PORT", "8766")),
             bearer_token=os.environ.get("SAGASMITH_DND_GATEWAY_TOKEN") or None,
+            upload_limit_bytes=int(
+                os.environ.get("SAGASMITH_DND_GATEWAY_UPLOAD_LIMIT", str(64 * 1024 * 1024))
+            ),
             allowed_origins=origins,
         )
 
@@ -56,7 +64,73 @@ class DndGateway:
 
     def __init__(self, mcp_config: McpConfig, config: GatewayConfig):
         self.config = config
+        self.mcp_config = mcp_config
+        self.mcp_config.prepare()
         self.server = create_server(mcp_config)
+
+    @staticmethod
+    def pack_summary(kind: str, value: dict[str, Any]) -> dict[str, Any]:
+        """Project the four storage models into one stable UI summary."""
+
+        manifest = dict(value.get("manifest") or {})
+        metadata = dict(value.get("metadata") or {})
+        activation = value.get("activation")
+        if kind == "addon":
+            identifier = str(value.get("addon_id") or manifest.get("id") or "")
+        else:
+            identifier = str(
+                value.get("pack_id")
+                or value.get("id")
+                or value.get("module_id")
+                or manifest.get("id")
+                or ""
+            )
+        title = str(
+            value.get("title")
+            or manifest.get("title")
+            or metadata.get("title")
+            or identifier
+        )
+        status = str(value.get("status") or ("active" if value.get("active") else "stored"))
+        return {
+            "kind": kind,
+            "id": identifier,
+            "local_ref": str(
+                value.get("local_ref")
+                or value.get("id")
+                or value.get("module_id")
+                or identifier
+            ),
+            "version": str(value.get("version") or manifest.get("version") or ""),
+            "checksum": str(value.get("checksum") or ""),
+            "title": title,
+            "status": status,
+            "active": bool(
+                value.get("active")
+                or (isinstance(activation, dict) and activation.get("enabled"))
+            ),
+            "editions": list(manifest.get("editions") or metadata.get("editions") or []),
+            "classification": manifest.get("classification") or metadata.get("classification"),
+            "license": metadata.get("license") or value.get("license"),
+            "dependencies": list(manifest.get("dependencies") or []),
+            "component_counts": {
+                key: value[key]
+                for key in ("chapters", "scenes", "chunks")
+                if isinstance(value.get(key), int)
+            },
+            "warnings": list(value.get("warnings") or []),
+            "activation": activation if isinstance(activation, dict) else None,
+        }
+
+    async def campaign_record(self, campaign_id: str, principal_id: str) -> dict[str, Any]:
+        return await self.call(
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign_id},
+                "principal_id": principal_id,
+            },
+        )
 
     async def call(self, tool_id: str, arguments: dict[str, Any]) -> Any:
         value = await self.server.call_tool(tool_id, arguments)
@@ -239,7 +313,29 @@ class DndGateway:
                 "principal_id": self.principal(request),
             },
         )
-        return await self.envelope(request, result, campaign_id)
+        projected = []
+        for item in result if isinstance(result, list) else []:
+            manifest = dict(item.get("manifest") or {})
+            editions = list(manifest.get("editions") or [])
+            projected.append(
+                {
+                    "id": str(item.get("pack_id") or manifest.get("id") or ""),
+                    "source_key": str(item.get("pack_id") or manifest.get("id") or ""),
+                    "title": str(
+                        manifest.get("title")
+                        or item.get("pack_id")
+                        or manifest.get("id")
+                        or "Untitled rule Pack"
+                    ),
+                    "edition": str(editions[0] if editions else "all"),
+                    "locale": str(manifest.get("locale") or "en"),
+                    "version": str(item.get("version") or ""),
+                    "authority": str(manifest.get("classification") or "content_pack"),
+                    "status": str(item.get("status") or "stored"),
+                    "checksum": str(item.get("checksum") or ""),
+                }
+            )
+        return await self.envelope(request, projected, campaign_id)
 
     async def rule_search(self, request: web.Request) -> web.Response:
         campaign_id = request.query.get("campaign_id", "")
@@ -260,6 +356,323 @@ class DndGateway:
                 "principal_id": self.principal(request),
             },
         )
+        return await self.envelope(request, result, campaign_id)
+
+    async def content_packs(self, request: web.Request) -> web.Response:
+        campaign_id = request.match_info["campaign_id"]
+        principal_id = self.principal(request)
+        campaign = await self.campaign_record(campaign_id, principal_id)
+        requested_kind = request.query.get("kind")
+        if requested_kind and requested_kind not in CONTENT_PACK_KINDS:
+            raise web.HTTPBadRequest(text="kind must be core_rules, addon, module, or preset")
+        kinds = (requested_kind,) if requested_kind else CONTENT_PACK_KINDS
+        collections: dict[str, Any] = {}
+        summaries: list[dict[str, Any]] = []
+        for kind in kinds:
+            payload: dict[str, Any] = {"campaign_id": campaign_id, "kind": kind}
+            if kind == "preset":
+                payload["edition"] = str(campaign.get("edition") or "2024")
+            raw = await self.call(
+                "content_pack",
+                {
+                    "action": "list",
+                    "payload": payload,
+                    "principal_id": principal_id,
+                },
+            )
+            collections[kind] = raw
+            if kind == "preset":
+                for item in raw if isinstance(raw, list) else []:
+                    if isinstance(item, dict):
+                        summaries.append(self.pack_summary(kind, item))
+            else:
+                for item in raw if isinstance(raw, list) else []:
+                    if isinstance(item, dict):
+                        summaries.append(self.pack_summary(kind, item))
+        rule_context = await self.call(
+            "campaign_rules",
+            {
+                "campaign_id": campaign_id,
+                "action": "explain",
+                "payload": {},
+                "principal_id": principal_id,
+            },
+        )
+        active_rule_versions = {
+            (
+                str(dict(rule_context.get("core_pack") or {}).get("id") or ""),
+                str(dict(rule_context.get("core_pack") or {}).get("version") or ""),
+            ),
+            *{
+                (str(item.get("pack_id") or ""), str(item.get("version") or ""))
+                for item in rule_context.get("lock") or []
+                if isinstance(item, dict)
+            },
+        }
+        summaries = [
+            {
+                **item,
+                "active": (
+                    (item["id"], item["version"]) in active_rule_versions
+                    if item["kind"] == "core_rules"
+                    else item["active"]
+                ),
+            }
+            for item in summaries
+        ]
+        return await self.envelope(
+            request,
+            {
+                "campaign": {
+                    "id": campaign_id,
+                    "edition": campaign.get("edition"),
+                    "phase": dict(campaign.get("state") or {}).get("game_phase", "lobby"),
+                },
+                "packs": summaries,
+                "collections": collections,
+            },
+            campaign_id,
+        )
+
+    async def content_pack_detail(self, request: web.Request) -> web.Response:
+        campaign_id = request.match_info["campaign_id"]
+        principal_id = self.principal(request)
+        kind = request.query.get("kind", "")
+        if kind not in CONTENT_PACK_KINDS:
+            raise web.HTTPBadRequest(text="kind must be core_rules, addon, module, or preset")
+        payload: dict[str, Any] = {"campaign_id": campaign_id, "kind": kind}
+        if kind == "core_rules":
+            payload.update(
+                pack_id=request.query.get("pack_id"),
+                version=request.query.get("version"),
+            )
+        elif kind == "addon":
+            payload.update(
+                addon_id=request.query.get("pack_id"),
+                version=request.query.get("version"),
+                include_package=True,
+            )
+        elif kind == "module":
+            payload["module_id"] = request.query.get("local_ref") or request.query.get("pack_id")
+        else:
+            campaign = await self.campaign_record(campaign_id, principal_id)
+            payload.update(
+                edition=request.query.get("edition") or campaign.get("edition") or "2024",
+                pack_id=request.query.get("pack_id"),
+                version=request.query.get("version"),
+                artifact_id=request.query.get("artifact_id"),
+                include_package=True,
+            )
+        result = await self.call(
+            "content_pack",
+            {
+                "action": "get",
+                "payload": payload,
+                "principal_id": principal_id,
+            },
+        )
+        return await self.envelope(request, result, campaign_id)
+
+    async def content_pack_import(self, request: web.Request) -> web.Response:
+        campaign_id = request.match_info["campaign_id"]
+        reader = await request.multipart()
+        fields: dict[str, str] = {}
+        temporary_path: Path | None = None
+        archive_name = ""
+        archive_size = 0
+        archive_hash = hashlib.sha256()
+        try:
+            while part := await reader.next():
+                if part.name != "archive":
+                    fields[str(part.name)] = await part.text()
+                    continue
+                archive_name = str(part.filename or "")
+                if not archive_name.casefold().endswith(".sagasmith-pack"):
+                    raise web.HTTPBadRequest(text="archive must be a .sagasmith-pack file")
+                with tempfile.NamedTemporaryFile(
+                    mode="wb",
+                    prefix="gateway-upload-",
+                    suffix=".sagasmith-pack",
+                    dir=self.mcp_config.content_packages_dir,
+                    delete=False,
+                ) as target:
+                    temporary_path = Path(target.name)
+                    while chunk := await part.read_chunk(size=64 * 1024):
+                        archive_size += len(chunk)
+                        if archive_size > self.config.upload_limit_bytes:
+                            raise web.HTTPRequestEntityTooLarge(
+                                max_size=self.config.upload_limit_bytes,
+                                actual_size=archive_size,
+                            )
+                        archive_hash.update(chunk)
+                        target.write(chunk)
+            kind = fields.get("kind", "")
+            if kind not in CONTENT_PACK_KINDS:
+                raise web.HTTPBadRequest(
+                    text="kind must be core_rules, addon, module, or preset"
+                )
+            if temporary_path is None or not archive_size:
+                raise web.HTTPBadRequest(text="archive is required")
+            idempotency_key = fields.get("idempotency_key", "").strip()
+            if not idempotency_key:
+                raise web.HTTPBadRequest(text="idempotency_key is required")
+            payload: dict[str, Any] = {
+                "campaign_id": campaign_id,
+                "kind": kind,
+                "artifact": temporary_path.name,
+            }
+            if fields.get("progress_remaps"):
+                payload["progress_remaps"] = json.loads(fields["progress_remaps"])
+            result = await self.call(
+                "content_pack",
+                {
+                    "action": "import",
+                    "payload": payload,
+                    "principal_id": self.principal(request),
+                    "idempotency_key": idempotency_key,
+                },
+            )
+            return await self.envelope(
+                request,
+                {
+                    "archive": {
+                        "name": archive_name,
+                        "size": archive_size,
+                        "sha256": archive_hash.hexdigest(),
+                    },
+                    "import": result,
+                },
+                campaign_id,
+            )
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+
+    async def content_pack_action(self, request: web.Request) -> web.Response:
+        campaign_id = request.match_info["campaign_id"]
+        body = await request.json()
+        kind = str(body.get("kind") or "")
+        action = str(body.get("action") or "")
+        if kind not in CONTENT_PACK_KINDS:
+            raise web.HTTPBadRequest(text="invalid content Pack kind")
+        if action not in {"activate", "deactivate", "remove", "export"}:
+            raise web.HTTPBadRequest(text="invalid content Pack action")
+        payload = {
+            key: value
+            for key, value in body.items()
+            if key
+            in {
+                "pack_id",
+                "addon_id",
+                "module_id",
+                "version",
+                "enabled",
+                "options",
+                "branch_id",
+                "progress_remaps",
+                "metadata",
+                "manifest",
+                "dependencies",
+                "catalogs",
+                "narrative",
+                "include_package",
+            }
+        }
+        payload.update({"campaign_id": campaign_id, "kind": kind})
+        result = await self.call(
+            "content_pack",
+            {
+                "action": action,
+                "payload": payload,
+                "principal_id": self.principal(request),
+                "expected_revision": body.get("expected_revision"),
+                "idempotency_key": body.get("idempotency_key"),
+            },
+        )
+        return await self.envelope(request, result, campaign_id)
+
+    async def content_pack_artifact(self, request: web.Request) -> web.StreamResponse:
+        campaign_id = request.match_info["campaign_id"]
+        artifact = request.match_info["artifact"]
+        kind = request.query.get("kind", "")
+        if kind not in CONTENT_PACK_KINDS or Path(artifact).name != artifact:
+            raise web.HTTPBadRequest(text="invalid content Pack artifact request")
+        await self.call(
+            "content_pack",
+            {
+                "action": "get",
+                "payload": {
+                    "campaign_id": campaign_id,
+                    "kind": kind,
+                    "artifact": artifact,
+                },
+                "principal_id": self.principal(request),
+            },
+        )
+        target = (self.mcp_config.content_packages_dir / artifact).resolve()
+        if target.parent != self.mcp_config.content_packages_dir.resolve() or not target.is_file():
+            raise web.HTTPNotFound(text="content Pack artifact is unavailable")
+        return web.FileResponse(
+            target,
+            headers={
+                "Cache-Control": "private, no-store",
+                "Content-Disposition": f'attachment; filename="{artifact}"',
+            },
+        )
+
+    async def actor_from_preset(self, request: web.Request) -> web.Response:
+        campaign_id = request.match_info["campaign_id"]
+        body = await request.json()
+        payload = {
+            "campaign_id": campaign_id,
+            "artifact_id": body.get("artifact_id"),
+        }
+        for field in ("name", "player_name"):
+            if body.get(field) is not None:
+                payload[field] = body[field]
+        result = await self.call(
+            "character_create_from",
+            {
+                "mode": "content_actor",
+                "payload": payload,
+                "principal_id": self.principal(request),
+                "idempotency_key": body.get("idempotency_key"),
+            },
+        )
+        return await self.envelope(request, result, campaign_id)
+
+    async def rule_context(self, request: web.Request) -> web.Response:
+        campaign_id = request.match_info["campaign_id"]
+        result = await self.call(
+            "campaign_rules",
+            {
+                "campaign_id": campaign_id,
+                "action": "explain",
+                "payload": {},
+                "principal_id": self.principal(request),
+                "branch_id": request.query.get("branch_id"),
+            },
+        )
+        return await self.envelope(request, result, campaign_id)
+
+    async def drafts(self, request: web.Request) -> web.Response:
+        campaign_id = request.match_info["campaign_id"]
+        principal_id = self.principal(request)
+        kind = request.query.get("kind")
+        if kind not in {None, "rulebook", "module"}:
+            raise web.HTTPBadRequest(text="kind must be rulebook or module")
+        kinds = (kind,) if kind else ("rulebook", "module")
+        result: dict[str, Any] = {}
+        for draft_kind in kinds:
+            result[draft_kind] = await self.call(
+                f"{draft_kind}_draft",
+                {
+                    "campaign_id": campaign_id,
+                    "action": "get",
+                    "payload": {},
+                    "principal_id": principal_id,
+                },
+            )
         return await self.envelope(request, result, campaign_id)
 
     async def combat(self, request: web.Request) -> web.Response:
@@ -404,7 +817,11 @@ def create_app(
                 raise
             except IdempotencyConflictError as exc:
                 response = web.json_response({"error": str(exc)}, status=409)
-            except (KeyError, TypeError, ValueError, PermissionError) as exc:
+            except PermissionError as exc:
+                response = web.json_response({"error": str(exc)}, status=403)
+            except LookupError as exc:
+                response = web.json_response({"error": str(exc)}, status=404)
+            except (KeyError, TypeError, ValueError) as exc:
                 response = web.json_response({"error": str(exc)}, status=400)
             except Exception:
                 LOGGER.exception("unhandled D&D gateway request failure")
@@ -439,7 +856,10 @@ def create_app(
     async def lineage(request: web.Request) -> web.Response:
         return await gateway.snapshots(request, "lineage")
 
-    app = web.Application(middlewares=[boundary])
+    app = web.Application(
+        middlewares=[boundary],
+        client_max_size=config.upload_limit_bytes,
+    )
     app[GATEWAY_KEY] = gateway
     app.router.add_route("OPTIONS", "/{tail:.*}", options)
     app.router.add_get("/api/health", gateway.health)
@@ -473,6 +893,38 @@ def create_app(
     )
     app.router.add_get("/api/campaigns/{campaign_id}/events", gateway.events)
     app.router.add_get("/api/campaigns/{campaign_id}/search", gateway.module_search)
+    app.router.add_get(
+        "/api/campaigns/{campaign_id}/content-packs",
+        gateway.content_packs,
+    )
+    app.router.add_get(
+        "/api/campaigns/{campaign_id}/content-packs/detail",
+        gateway.content_pack_detail,
+    )
+    app.router.add_post(
+        "/api/campaigns/{campaign_id}/content-packs/import",
+        gateway.content_pack_import,
+    )
+    app.router.add_post(
+        "/api/campaigns/{campaign_id}/content-packs/action",
+        gateway.content_pack_action,
+    )
+    app.router.add_get(
+        "/api/campaigns/{campaign_id}/content-packs/artifacts/{artifact}",
+        gateway.content_pack_artifact,
+    )
+    app.router.add_post(
+        "/api/campaigns/{campaign_id}/actors/from-preset",
+        gateway.actor_from_preset,
+    )
+    app.router.add_get(
+        "/api/campaigns/{campaign_id}/rule-context",
+        gateway.rule_context,
+    )
+    app.router.add_get(
+        "/api/campaigns/{campaign_id}/drafts",
+        gateway.drafts,
+    )
     app.router.add_get("/api/campaigns/{campaign_id}/combat", gateway.combat)
     app.router.add_get(
         "/api/campaigns/{campaign_id}/combat/render",

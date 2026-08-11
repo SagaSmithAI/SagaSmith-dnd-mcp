@@ -17,7 +17,10 @@ from sagasmith_core.content_pack import (
 from sagasmith_core.indexed_source import rule_chunk_key
 from sagasmith_dnd.character_schema import default_character_notes, default_character_sheet
 from sagasmith_dnd.content_actors import build_dnd_content_actor
-from sagasmith_dnd.content_packages import build_rule_content_package
+from sagasmith_dnd.content_packages import (
+    build_preset_content_package,
+    build_rule_content_package,
+)
 
 import sagasmith_dnd_mcp.server as server_module
 from sagasmith_dnd_mcp.config import McpConfig
@@ -424,6 +427,108 @@ def test_bundled_srd_monster_presets_are_catalog_imports(tmp_path: Path) -> None
         assert imported_from_shared_pack["content_actor"]["id"] in {
             actor["id"] for actor in shared["content_package"]["actors"]
         }
+
+    asyncio.run(exercise())
+
+
+def test_imported_preset_inventory_and_detail_remain_readable_in_play(tmp_path: Path) -> None:
+    notes = default_character_notes()
+    notes["profile"]["summary"] = "A portable third-party preset."
+    card = build_dnd_content_actor(
+        actor_id="example.preset.scout",
+        version="1.0.0",
+        actor_type="npc",
+        name="Preset Scout",
+        sheet=default_character_sheet(),
+        notes=notes,
+    )
+    package, blobs = build_preset_content_package(
+        package_id="example.preset-library",
+        version="1.0.0",
+        system_id="dnd5e",
+        title="Example Preset Library",
+        cards=[card],
+        metadata={
+            "edition": "2014",
+            "distribution": "private",
+            "license": "user-supplied",
+            "attribution": "Test fixture",
+        },
+    )
+    archive_dir = tmp_path / "archives"
+    archive_dir.mkdir()
+    archive_path = archive_dir / "preset.sagasmith-pack"
+    archive_path.write_bytes(dumps_content_archive(package, blobs))
+
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path, rule_import_roots=(archive_dir,)))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Preset inventory",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        imported = await _call(
+            server,
+            "content_pack",
+            {
+                "action": "import",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "kind": "preset",
+                    "source_path": str(archive_path),
+                },
+                "idempotency_key": "import-preset",
+            },
+        )
+        assert imported["actor_catalog"]["id"] == "example.preset-library.actors"
+        await _call(
+            server,
+            "game_phase",
+            {
+                "campaign_id": campaign["id"],
+                "action": "set",
+                "tool_profile": "play",
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "enter-play",
+            },
+        )
+        listed = await _call(
+            server,
+            "content_pack",
+            {
+                "action": "list",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "kind": "preset",
+                    "edition": "2014",
+                },
+            },
+        )
+        installed = next(item for item in listed if item["pack_id"] == package["id"])
+        assert installed["local_ref"] == "example.preset-library.actors"
+        assert installed["version"] == package["version"]
+        assert installed["checksum"] == package["checksum"]
+        assert installed["actors"] == 1
+        detail = await _call(
+            server,
+            "content_pack",
+            {
+                "action": "get",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "kind": "preset",
+                    "edition": "2014",
+                    "pack_id": package["id"],
+                    "version": package["version"],
+                    "include_package": True,
+                },
+            },
+        )
+        assert detail["content_package"] == package
 
     asyncio.run(exercise())
 

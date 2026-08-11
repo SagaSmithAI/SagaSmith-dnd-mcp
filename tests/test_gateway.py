@@ -4,9 +4,14 @@ import hashlib
 import json
 from pathlib import Path
 
+from aiohttp import FormData
 from aiohttp.test_utils import TestClient, TestServer
 from mcp.types import CallToolResult, ImageContent, TextContent
+from sagasmith_core.content_pack import dumps_content_archive
 from sagasmith_core.idempotency import IdempotencyConflictError
+from sagasmith_dnd.character_schema import default_character_notes, default_character_sheet
+from sagasmith_dnd.content_actors import build_dnd_content_actor
+from sagasmith_dnd.content_packages import build_preset_content_package
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.gateway import GATEWAY_KEY, GatewayConfig, create_app
@@ -221,5 +226,94 @@ def test_gateway_exposes_known_errors_and_hides_unknown_failures(tmp_path: Path)
                 assert await response.json() == {"error": expected_message}
             finally:
                 await client.close()
+
+    asyncio.run(exercise())
+
+
+def test_gateway_imports_and_projects_finalized_preset_inventory(tmp_path: Path) -> None:
+    notes = default_character_notes()
+    notes["profile"]["summary"] = "Gateway preset actor."
+    actor = build_dnd_content_actor(
+        actor_id="example.gateway.actor",
+        version="1.0.0",
+        actor_type="npc",
+        name="Gateway Actor",
+        sheet=default_character_sheet(),
+        notes=notes,
+    )
+    package, blobs = build_preset_content_package(
+        package_id="example.gateway-presets",
+        version="1.0.0",
+        system_id="dnd5e",
+        title="Gateway Presets",
+        cards=[actor],
+        metadata={
+            "edition": "2024",
+            "distribution": "private",
+            "license": "user-supplied",
+            "attribution": "Gateway test fixture",
+        },
+    )
+    archive = dumps_content_archive(package, blobs)
+
+    async def exercise() -> None:
+        app = create_app(config(tmp_path), GatewayConfig())
+        gateway = app[GATEWAY_KEY]
+        campaign = await gateway.call(
+            "campaign_create",
+            {
+                "name": "Gateway content",
+                "edition": "2024",
+                "idempotency_key": "gateway-content-campaign",
+            },
+        )
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            form = FormData()
+            form.add_field("kind", "preset")
+            form.add_field("idempotency_key", "gateway-import-preset")
+            form.add_field(
+                "archive",
+                archive,
+                filename="gateway.sagasmith-pack",
+                content_type="application/octet-stream",
+            )
+            imported = await client.post(
+                f"/api/campaigns/{campaign['id']}/content-packs/import",
+                data=form,
+            )
+            assert imported.status == 200
+            import_payload = await imported.json()
+            assert import_payload["data"]["archive"]["sha256"] == hashlib.sha256(
+                archive
+            ).hexdigest()
+            assert import_payload["data"]["import"]["stored"] is True
+
+            inventory = await client.get(
+                f"/api/campaigns/{campaign['id']}/content-packs"
+            )
+            assert inventory.status == 200
+            inventory_payload = await inventory.json()
+            preset = next(
+                item
+                for item in inventory_payload["data"]["packs"]
+                if item["kind"] == "preset" and item["id"] == package["id"]
+            )
+            assert preset["local_ref"] == "example.gateway-presets.actors"
+            assert preset["active"] is False
+
+            detail = await client.get(
+                f"/api/campaigns/{campaign['id']}/content-packs/detail",
+                params={
+                    "kind": "preset",
+                    "pack_id": package["id"],
+                    "version": package["version"],
+                },
+            )
+            assert detail.status == 200
+            assert (await detail.json())["data"]["content_package"] == package
+        finally:
+            await client.close()
 
     asyncio.run(exercise())
