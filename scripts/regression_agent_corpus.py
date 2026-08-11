@@ -1380,6 +1380,11 @@ prerequisite before stopping the cycle.
 Stop only for a real external boundary or when the current cycle has exhausted
 its tool budget; in that case report the exact authoritative blocker and leave
 state resumable.
+When the first current gap ends in `source_opposition_missing`, search the
+CAMPAIGN_REGRESSION asset for the exact terms `localized rule hit`,
+`opaque source_id`, and `chunk_id`, then read that bounded match before choosing
+rule-source hydration, reviewed rulebook repair, or module review. This routes
+to reusable Skill procedure; it supplies no creature identity or module answer.
 
 Current evidence gaps from prior cycles, ordered by execution dependency rather
 than alphabetically: {json.dumps(_execution_order_gaps(gaps), ensure_ascii=False)}
