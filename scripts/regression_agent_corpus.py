@@ -1239,6 +1239,8 @@ instantiate all of its canonical actors before `combat_start`. A variant must
 cite the requested managed `variant_source_kind`. For `module-chunk`, use
 `module_search` on the exact heading or printed phrase, expand the chosen hit,
 and copy its returned chunk id; a scenario/evidence id is never a chunk id.
+When `statblock_evidence` is present, retrieve that exact page and heading before
+concluding the mechanical card is absent or starting its Pack review.
 Do not reduce or omit a group to make preflight pass, and do not omit a printed
 override.
 

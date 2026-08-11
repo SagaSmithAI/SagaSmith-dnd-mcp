@@ -368,3 +368,8 @@ def test_checked_in_routes_cover_every_fixture_declared_runnable_unit() -> None:
         ("Master of Souls", 1, None, None),
         ("Swarm of Rats", 1, {"creature_type": "undead"}, "module-chunk"),
     ]
+    assert morgue["initial_source_groups"][0]["statblock_evidence"] == {
+        "page_start": 182,
+        "page_end": 182,
+        "heading_path": ["Appendix", "驭魂者 Master of Souls"],
+    }
