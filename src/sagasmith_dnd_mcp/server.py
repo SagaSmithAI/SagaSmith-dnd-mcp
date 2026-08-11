@@ -6133,7 +6133,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if not separator or not identifier:
                 raise ValueError("statblock variant source refs must identify managed sources")
             if kind == "module-chunk":
-                expanded = modules.expand(identifier)
+                try:
+                    expanded = modules.expand(identifier)
+                except (LookupError, NoResultFound) as error:
+                    raise ValueError(
+                        "statblock variant module chunk is unavailable; call "
+                        "module_search and module_expand, then copy the exact returned "
+                        "chunk id instead of a route label, heading, page, or scene id"
+                    ) from error
                 if str(expanded.get("campaign_id") or "") != campaign_id:
                     raise ValueError("statblock variant module chunk does not belong to campaign")
                 return {

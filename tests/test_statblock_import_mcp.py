@@ -470,6 +470,28 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
         assert {item["source_id"] for item in variant["variant_evidence"]["sources"]} == {
             ingested["source_id"]
         }
+        with pytest.raises(
+            ToolError,
+            match="module_search and module_expand.*route label",
+        ):
+            await _call(
+                server,
+                "character_create_from",
+                {
+                    "mode": "statblock",
+                    "payload": {
+                        "campaign_id": campaign["id"],
+                        "source_id": ingested["source_id"],
+                        "name": "Invalid Route Label Variant",
+                        "character_type": "npc",
+                        "variant": {
+                            "source_ref": "module-chunk:encounter",
+                            "creature_type": "undead",
+                        },
+                    },
+                    "idempotency_key": "invalid-route-label-variant",
+                },
+            )
         current_campaign = await _call(
             server,
             "campaign_query",

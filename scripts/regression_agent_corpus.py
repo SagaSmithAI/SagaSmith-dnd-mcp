@@ -1236,7 +1236,9 @@ When a combat scenario includes `initial_source_groups`, treat each entry as a
 source-backed audit expectation: re-read the cited source, preserve every listed
 group, exact count, source identity, and `required_variant` in preflight, and
 instantiate all of its canonical actors before `combat_start`. A variant must
-cite the requested managed `variant_source_kind`.
+cite the requested managed `variant_source_kind`. For `module-chunk`, use
+`module_search` on the exact heading or printed phrase, expand the chosen hit,
+and copy its returned chunk id; a scenario/evidence id is never a chunk id.
 Do not reduce or omit a group to make preflight pass, and do not omit a printed
 override.
 
