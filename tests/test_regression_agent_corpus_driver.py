@@ -53,13 +53,14 @@ def _call(
     ok: bool = True,
     result: object | None = None,
     principal: str = "dm",
+    error: str | None = None,
 ) -> dict[str, object]:
     return {
         "tool": tool,
         "arguments": arguments or {},
         "ok": ok,
         "result": result,
-        "error": None if ok else "Error executing tool: revision conflict",
+        "error": None if ok else error or "Error executing tool: revision conflict",
         "principal": principal,
     }
 
@@ -437,6 +438,13 @@ def test_coverage_requires_real_ordered_boundaries_retries_and_recovery() -> Non
         ]
     }
     retry = {"action": "write", "idempotency_key": "same-key", "expected_revision": 7}
+    conversation_combat = {
+        "campaign_id": "campaign-1",
+        "positioning_mode": "agent",
+        "participant_ids": ["pc-1", "enemy-1"],
+        "expected_revision": 7,
+        "idempotency_key": "conversation-probe",
+    }
     calls = [
         _call("skill_query"),
         _call("exposure", arguments={"action": "open"}),
@@ -446,8 +454,16 @@ def test_coverage_requires_real_ordered_boundaries_retries_and_recovery() -> Non
         _call("npc_conversation", arguments={"action": "close"}),
         _call("character_check"),
         _call("npc_conversation", arguments={"action": "open"}),
-        _call("combat_start", ok=False),
-        _call("npc_conversation", arguments={"action": "close"}),
+        _call(
+            "combat_start",
+            arguments=conversation_combat,
+            ok=False,
+            error=(
+                "Error executing tool combat_start: close or abort the active NPC "
+                "conversation before starting combat"
+            ),
+        ),
+        _call("npc_conversation", arguments={"action": "abort"}),
         _call(
             "character_create_from",
             arguments={"mode": "statblock"},
@@ -458,7 +474,11 @@ def test_coverage_requires_real_ordered_boundaries_retries_and_recovery() -> Non
         _call("content_solution", arguments={"action": "compile"}),
         _call(
             "combat_start",
-            arguments={"positioning_mode": "agent", "participant_ids": ["pc-1", "enemy-1"]},
+            arguments={
+                **conversation_combat,
+                "expected_revision": 8,
+                "idempotency_key": "conversation-retry",
+            },
         ),
         _call("combat_cast_spell"),
         _call("combat_choice", arguments={"action": "execute_plan"}),
@@ -547,6 +567,46 @@ def test_coverage_does_not_accept_narration_or_unordered_successes() -> None:
     assert any("idempotent_retry" in gap for gap in audit["gaps"])
     assert any("legal_ending_not_verified" in gap for gap in audit["gaps"])
     assert "host:list_changed_not_observed" in audit["gaps"]
+
+
+def test_conversation_combat_probe_requires_same_valid_retry_payload() -> None:
+    base = {
+        "campaign_id": "campaign-1",
+        "participant_ids": ["pc-1", "npc-correct"],
+        "positioning_mode": "agent",
+        "expected_revision": 3,
+        "idempotency_key": "probe",
+    }
+    active_error = (
+        "Error executing tool combat_start: close or abort the active NPC conversation "
+        "before starting combat"
+    )
+    invalid_probe = [
+        _call("npc_conversation", arguments={"action": "open"}),
+        _call(
+            "combat_start",
+            arguments={**base, "participant_ids": ["pc-1", "npc-typo"]},
+            ok=False,
+            error=active_error,
+        ),
+        _call("npc_conversation", arguments={"action": "abort"}),
+        _call(
+            "combat_start",
+            arguments={**base, "expected_revision": 4, "idempotency_key": "retry"},
+        ),
+    ]
+    assert _mechanism_covered("conversation_to_combat", invalid_probe) is False
+
+    valid_probe = [
+        _call("npc_conversation", arguments={"action": "open"}),
+        _call("combat_start", arguments=base, ok=False, error=active_error),
+        _call("npc_conversation", arguments={"action": "close"}),
+        _call(
+            "combat_start",
+            arguments={**base, "expected_revision": 4, "idempotency_key": "retry"},
+        ),
+    ]
+    assert _mechanism_covered("conversation_to_combat", valid_probe) is True
 
 
 def test_preparation_requires_finalize_import_activate_order() -> None:

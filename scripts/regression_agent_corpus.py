@@ -456,6 +456,54 @@ def _ordered_pattern(
     return True
 
 
+def _combat_start_probe_payload(arguments: dict[str, Any]) -> str:
+    """Return the mechanically stable portion of a combat-start retry."""
+
+    payload = deepcopy(arguments)
+    payload.pop("expected_revision", None)
+    payload.pop("idempotency_key", None)
+    return json.dumps(payload, sort_keys=True, ensure_ascii=False)
+
+
+def _conversation_to_combat_covered(calls: list[dict[str, Any]]) -> bool:
+    """Require the exact rejected open-conversation probe to succeed after closure."""
+
+    for open_index, opened in enumerate(calls):
+        opened_args = opened.get("arguments") or {}
+        if (
+            opened.get("tool") != "npc_conversation"
+            or not opened.get("ok")
+            or opened_args.get("action") != "open"
+        ):
+            continue
+        for failed_index in range(open_index + 1, len(calls)):
+            failed = calls[failed_index]
+            error = str(failed.get("error") or "")
+            if failed.get("tool") != "combat_start" or failed.get("ok"):
+                continue
+            if "active npc conversation" not in error.casefold():
+                continue
+            failed_payload = _combat_start_probe_payload(failed.get("arguments") or {})
+            closed = False
+            for retry in calls[failed_index + 1 :]:
+                retry_args = retry.get("arguments") or {}
+                if (
+                    retry.get("tool") == "npc_conversation"
+                    and retry.get("ok")
+                    and retry_args.get("action") in {"close", "abort"}
+                ):
+                    closed = True
+                    continue
+                if (
+                    closed
+                    and retry.get("tool") == "combat_start"
+                    and retry.get("ok")
+                    and _combat_start_probe_payload(retry_args) == failed_payload
+                ):
+                    return True
+    return False
+
+
 def _ending_completed(calls: list[dict[str, Any]]) -> bool:
     for call in calls:
         if call.get("tool") != "playthrough_manifest" or not call.get("ok"):
@@ -813,15 +861,7 @@ def _mechanism_covered(mechanism: str, calls: list[dict[str, Any]]) -> bool:
     if mechanism == "combat_render":
         return _source_combat_sequence(calls, require_render=True)
     if mechanism == "conversation_to_combat":
-        return _ordered_pattern(
-            calls,
-            [
-                ("npc_conversation", "open", True),
-                ("combat_start", None, False),
-                ("npc_conversation", "close", True),
-                ("combat_start", None, True),
-            ],
-        )
+        return _conversation_to_combat_covered(calls)
     if mechanism == "agent_semantic_spell_ruling":
         return _has_agent_semantic_spell_ruling(calls)
     if mechanism == "chase_to_combat":
