@@ -44857,6 +44857,7 @@ boundary.
             "initialize",
             "replace",
             "extend_modules",
+            "configure_ending",
             "sync",
             "verify_ending",
         ],
@@ -44916,7 +44917,34 @@ boundary.
             if not current_manifest:
                 raise LookupError("campaign has no full-playthrough manifest")
             current_manifest = validate_playthrough_manifest(current_manifest)
-            if action == "replace":
+            if action == "configure_ending":
+                if current_manifest["status"] == "completed":
+                    raise RuntimeError(
+                        "completed playthrough ending conditions cannot be changed"
+                    )
+                condition = deepcopy(required(data, "condition"))
+                if not isinstance(condition, dict):
+                    raise ValueError("payload.condition must be an object")
+                condition_id = str(condition.get("id") or "").strip()
+                existing = next(
+                    (
+                        item
+                        for item in current_manifest["ending"]["conditions"]
+                        if item["id"] == condition_id
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    if existing != condition:
+                        raise ValueError(
+                            f"ending condition {condition_id} already exists "
+                            "with different content"
+                        )
+                    raise ValueError(f"ending condition {condition_id} is already configured")
+                next_manifest = deepcopy(current_manifest)
+                next_manifest["ending"]["conditions"].append(condition)
+                next_manifest = validate_playthrough_manifest(next_manifest)
+            elif action == "replace":
                 next_manifest = validate_playthrough_manifest(required(data, "manifest"))
                 immutable = ("run_id", "campaign_line_id", "module_ids")
                 if any(next_manifest[key] != current_manifest[key] for key in immutable):

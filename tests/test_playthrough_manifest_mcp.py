@@ -479,23 +479,21 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
             "scene_title": str(opening_scene.get("title") or ""),
             "objective": "Complete the source-defined ending.",
         }
-        updated_manifest["ending"]["conditions"] = [
-            {
-                "id": "victory",
-                "label": "The campaign threat is defeated",
-                "source_ref": source_ref,
-                "all_of": [
-                    {
-                        "kind": "manifest_value",
-                        "path": "world_state.victory",
-                        "actor_id": "",
-                        "fact_key": "",
-                        "operator": "equals",
-                        "value": True,
-                    }
-                ],
-            }
-        ]
+        ending_condition = {
+            "id": "victory",
+            "label": "The campaign threat is defeated",
+            "source_ref": source_ref,
+            "all_of": [
+                {
+                    "kind": "manifest_value",
+                    "path": "world_state.victory",
+                    "actor_id": "",
+                    "fact_key": "",
+                    "operator": "equals",
+                    "value": True,
+                }
+            ],
+        }
         before_replace = await _call(
             server,
             "campaign_query",
@@ -517,13 +515,25 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
         assert replaced["manifest"]["random_stream"]["position"] == 0
         assert replaced["manifest"]["party"]["members"][0]["status"] == "active"
         assert replaced["manifest"]["current"]["scene_id"] == current_revision_scene["scene_id"]
+        configured = await _call(
+            server,
+            "playthrough_manifest",
+            {
+                "campaign_id": campaign_id,
+                "action": "configure_ending",
+                "payload": {"condition": ending_condition},
+                "expected_revision": replaced["campaign_revision"],
+                "idempotency_key": "configure-ending",
+            },
+        )
+        assert configured["manifest"]["ending"]["conditions"] == [ending_condition]
         synced = await _call(
             server,
             "playthrough_manifest",
             {
                 "campaign_id": campaign_id,
                 "action": "sync",
-                "expected_revision": replaced["campaign_revision"],
+                "expected_revision": configured["campaign_revision"],
                 "idempotency_key": "manifest-sync",
             },
         )
