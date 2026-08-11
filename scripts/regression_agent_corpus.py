@@ -1139,7 +1139,11 @@ the action, slot or innate use and own all rolls/state mutations. Do not replace
 this obligation with a weapon attack, narration, a raw sheet edit, or a spell
 whose parser-damaged name never produced a hydrated card.
 On resume, compare any active encounter's immutable participants and source
-manifest with the remaining evidence before spending turns. If it cannot
+manifest with the remaining evidence before the first Combat mutation. Take
+participant ids from `combat_query(status)`, then load `character_query` and
+read each required actor individually with `view="get"`; do not assume a host's
+bounded summary of the nested encounter exposed its hydrated cards or
+`ruling_spell_ids`. If it cannot
 qualify because it contains the wrong actor revision, lacks the required
 hydrated card, or used non-matching source evidence, end it through
 `combat_end` and rebuild the qualifying encounter once from current actors.
