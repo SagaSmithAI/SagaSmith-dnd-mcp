@@ -223,6 +223,17 @@ def test_standard_agent_spell_ruling_pays_and_records_exact_clause(
         contract = pending["result"]["agent_ruling_contract"]
         assert contract["source_excerpt"] == excerpt
         assert contract["source_card_id"] == darkness["id"]
+        assert contract["submission_parameter"] == "declaration"
+        assert contract["submission_shape"] == {
+            "agent_ruling": {
+                "application_id": "<unique stable application id>",
+                "default_resolver": "agent",
+                "ruling_kind": "generic_spell_effect",
+                "decision": "<bounded Agent decision>",
+                "reason": "<source-grounded reason>",
+                "source_excerpt": excerpt,
+            }
+        }
         assert contract["casting_source"] == {
             "grant_method": "innate",
             "instruction": (
@@ -240,6 +251,32 @@ def test_standard_agent_spell_ruling_pays_and_records_exact_clause(
             "reason": "The exact persisted spell clause permits an Agent-selected point.",
             "source_excerpt": excerpt,
         }
+        with pytest.raises(
+            Exception,
+            match=r'declaration=\{"agent_ruling": \{\.\.\.\}\}',
+        ):
+            await _raw(
+                server,
+                "combat_cast_spell",
+                {
+                    **arguments,
+                    "component_ruling": ruling,
+                    "idempotency_key": "agent-darkness-wrong-parameter",
+                },
+            )
+        with pytest.raises(
+            Exception,
+            match=r'declaration=\{"agent_ruling": \{\.\.\.\}\}',
+        ):
+            await _raw(
+                server,
+                "combat_cast_spell",
+                {
+                    **arguments,
+                    "declaration": ruling,
+                    "idempotency_key": "agent-darkness-wrong-shape",
+                },
+            )
         with pytest.raises(Exception, match="exact persisted source-card clause"):
             await _raw(
                 server,

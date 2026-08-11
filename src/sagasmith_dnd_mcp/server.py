@@ -17427,7 +17427,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "campaign_revision": campaign.revision,
                 }
             declared = dict(declaration or {})
+            if component_ruling and not declared:
+                raise CombatEngineError(
+                    "an Agent-adjudicated standard spell effect must be submitted as "
+                    'declaration={"agent_ruling": {...}}; component_ruling only '
+                    "describes casting-component evidence"
+                )
             if not declared:
+                source_excerpt = str(persisted_requirement["source_excerpt"])
                 return {
                     **_ruling_status(
                         "pending_ruling",
@@ -17437,6 +17444,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "spell_id": spell_id,
                         "payment_required": True,
                         "agent_ruling_contract": {
+                            "submission_parameter": "declaration",
+                            "submission_shape": {
+                                "agent_ruling": {
+                                    "application_id": "<unique stable application id>",
+                                    "default_resolver": "agent",
+                                    "ruling_kind": "generic_spell_effect",
+                                    "decision": "<bounded Agent decision>",
+                                    "reason": "<source-grounded reason>",
+                                    "source_excerpt": source_excerpt,
+                                }
+                            },
                             "required_fields": [
                                 "application_id",
                                 "default_resolver",
@@ -17447,9 +17465,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             ],
                             "default_resolver": "agent",
                             "ruling_kind": "generic_spell_effect",
-                            "source_excerpt": str(
-                                persisted_requirement["source_excerpt"]
-                            ),
+                            "source_excerpt": source_excerpt,
                             "source_card_id": spell_id,
                             "casting_source": {
                                 "grant_method": str(
@@ -17474,7 +17490,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 }
             if set(declared) != {"agent_ruling"}:
                 raise CombatEngineError(
-                    "an Agent-adjudicated standard spell accepts only agent_ruling"
+                    "an Agent-adjudicated standard spell accepts exactly "
+                    'declaration={"agent_ruling": {...}}; do not place ruling fields '
+                    "directly under declaration or send them through component_ruling"
                 )
             access.require_campaign(
                 campaign_id,
