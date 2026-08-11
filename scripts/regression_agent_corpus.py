@@ -640,6 +640,60 @@ def _source_combat_actor_ids(calls: list[dict[str, Any]]) -> set[str]:
     return actor_ids
 
 
+def _scenario_source_opposition_covered(
+    scenario: dict[str, Any], calls: list[dict[str, Any]]
+) -> bool:
+    expected_groups = list(scenario.get("initial_source_groups") or [])
+    if not expected_groups:
+        return bool(_source_combat_actor_ids(calls))
+    source_actor_ids = _source_combat_actor_ids(calls)
+    for call in calls:
+        arguments = call.get("arguments") or {}
+        if not call.get("ok") or call.get("tool") != "combat_start":
+            continue
+        if scenario.get("positioning_mode") in {"grid", "agent"} and arguments.get(
+            "positioning_mode"
+        ) != scenario.get("positioning_mode"):
+            continue
+        participants = {str(item) for item in arguments.get("participant_ids") or []}
+        manifest = arguments.get("participant_manifest") or {}
+        actual_groups = list(manifest.get("groups") or [])
+        matched_indexes: set[int] = set()
+        complete = True
+        for expected in expected_groups:
+            expected_excerpt = " ".join(
+                str(expected.get("source_excerpt") or "").split()
+            ).casefold()
+            match = next(
+                (
+                    (index, actual)
+                    for index, actual in enumerate(actual_groups)
+                    if index not in matched_indexes
+                    and actual.get("role") == expected.get("role")
+                    and actual.get("required_count") == expected.get("required_count")
+                    and " ".join(str(actual.get("source_excerpt") or "").split()).casefold()
+                    == expected_excerpt
+                ),
+                None,
+            )
+            if match is None:
+                complete = False
+                break
+            index, actual = match
+            actor_ids = {str(item) for item in actual.get("actor_ids") or []}
+            if (
+                len(actor_ids) != expected.get("required_count")
+                or not actor_ids <= source_actor_ids
+                or not actor_ids <= participants
+            ):
+                complete = False
+                break
+            matched_indexes.add(index)
+        if complete:
+            return True
+    return False
+
+
 def _source_combat_sequence(
     calls: list[dict[str, Any]], *, mode: str | None = None, require_render: bool = False
 ) -> bool:
@@ -750,7 +804,9 @@ def _coverage_audit(
             and not _source_combat_sequence(calls, mode=mode)
         ):
             scenario_gaps.append(f"positioning_mode:{mode}")
-        if "combat" in mechanisms and not _source_combat_actor_ids(calls):
+        if "combat" in mechanisms and not _scenario_source_opposition_covered(
+            scenario, calls
+        ):
             scenario_gaps.append("source_opposition_missing")
         audience = scenario.get("audience")
         if audience == "player" and not any(call.get("principal") == "player" for call in calls):
@@ -985,6 +1041,10 @@ Retrieve and expand the exact managed source before deciding what happens:
 managed_sources={json.dumps(_managed_source_summary(unit), ensure_ascii=False)}
 evidence={json.dumps(_evidence_summary(route), ensure_ascii=False)}
 scenarios={json.dumps(route.get("scenarios") or [], ensure_ascii=False)}
+When a combat scenario includes `initial_source_groups`, treat each entry as a
+source-backed audit expectation: re-read the cited source, preserve every listed
+group and exact count in preflight, and instantiate all of its canonical actors
+before `combat_start`. Do not reduce or omit a group to make preflight pass.
 
 Treat the current evidence-gap list below as authoritative for what remains;
 prior Agent narration is not proof of a blocker. Query current state first and

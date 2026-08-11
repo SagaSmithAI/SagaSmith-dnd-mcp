@@ -694,6 +694,102 @@ def test_combat_coverage_requires_a_non_party_participant() -> None:
     assert "fight:source_opposition_missing" in audit["gaps"]
 
 
+def test_combat_coverage_requires_every_source_expected_group() -> None:
+    excerpt = (
+        "Nezznar the Black Spider is joined by four giant spiders that defend "
+        "their master to the death."
+    )
+    route = {
+        "scenarios": [
+            {
+                "id": "fight",
+                "mechanisms": ["combat"],
+                "positioning_mode": "grid",
+                "initial_source_groups": [
+                    {"role": "combatant", "required_count": 1, "source_excerpt": excerpt},
+                    {"role": "combatant", "required_count": 4, "source_excerpt": excerpt},
+                ],
+            }
+        ]
+    }
+    source_actors = [
+        _call(
+            "character_create_from",
+            arguments={"mode": "module_statblock"},
+            result={
+                "character": {
+                    "id": actor_id,
+                    "character_type": "monster",
+                }
+            },
+        )
+        for actor_id in ("nezznar", "spider-1", "spider-2", "spider-3", "spider-4")
+    ]
+    shared = [
+        _call("skill_query"),
+        _call("exposure", arguments={"action": "open"}),
+        *_player_grants(),
+        _ready_manifest_call(),
+        *source_actors,
+    ]
+    incomplete = [
+        *shared,
+        _call(
+            "combat_start",
+            arguments={
+                "positioning_mode": "grid",
+                "participant_ids": ["pc-1", "nezznar"],
+                "participant_manifest": {
+                    "groups": [
+                        {
+                            "role": "combatant",
+                            "required_count": 1,
+                            "actor_ids": ["nezznar"],
+                            "source_excerpt": excerpt,
+                        }
+                    ]
+                },
+            },
+        ),
+        _call("combat_end"),
+    ]
+    complete_ids = ["nezznar", "spider-1", "spider-2", "spider-3", "spider-4"]
+    complete = [
+        *shared,
+        _call(
+            "combat_start",
+            arguments={
+                "positioning_mode": "grid",
+                "participant_ids": ["pc-1", *complete_ids],
+                "participant_manifest": {
+                    "groups": [
+                        {
+                            "role": "combatant",
+                            "required_count": 1,
+                            "actor_ids": ["nezznar"],
+                            "source_excerpt": excerpt,
+                        },
+                        {
+                            "role": "combatant",
+                            "required_count": 4,
+                            "actor_ids": complete_ids[1:],
+                            "source_excerpt": excerpt,
+                        },
+                    ]
+                },
+            },
+        ),
+        _call("combat_end"),
+    ]
+
+    assert "fight:source_opposition_missing" in _coverage_audit(
+        route, incomplete, process_count=1, list_changed_count=1
+    )["gaps"]
+    assert "fight:source_opposition_missing" not in _coverage_audit(
+        route, complete, process_count=1, list_changed_count=1
+    )["gaps"]
+
+
 def test_phase_transition_rejects_exposure_reopen_as_refresh() -> None:
     route = {"scenarios": []}
     calls = [
@@ -835,6 +931,7 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     )
     assert source_path.replace("\\", "\\\\") in prompt
     assert "coverage evidence and route intent, not a story answer" in prompt
+    assert "Do not reduce or omit a group to make preflight pass" in prompt
     assert "A prefix-only asset read is not proof" in prompt
     assert "never a campaign UUID" in prompt
     assert "Open exposure without a campaign" in prompt

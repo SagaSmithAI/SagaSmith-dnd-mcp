@@ -46,7 +46,21 @@
           "mechanisms": ["resource_settlement", "conversation_to_combat", "combat", "combat_render"],
           "positioning_mode": "grid",
           "audience": "player",
-          "path": "normal"
+          "path": "normal",
+          "initial_source_groups": [
+            {
+              "subject": "Nezznar the Black Spider",
+              "role": "combatant",
+              "required_count": 1,
+              "source_excerpt": "Nezznar the Black Spider is joined by four giant spiders that defend their master to the death."
+            },
+            {
+              "subject": "giant spiders",
+              "role": "combatant",
+              "required_count": 4,
+              "source_excerpt": "Nezznar the Black Spider is joined by four giant spiders that defend their master to the death."
+            }
+          ]
         },
         {
           "id": "wave-echo-conclusion",
