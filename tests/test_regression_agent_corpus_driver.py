@@ -1008,6 +1008,9 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "matching unfinished job and preserve its public ids" in prompt
     assert "same parallel tool batch as an `exposure(set)`" in prompt
     assert "`tools/list_changed`, refresh the native list" in prompt
+    assert "controlled negative invariant probe" in prompt
+    assert "fail specifically because the conversation is active" in prompt
+    assert "an unrelated" in prompt
     assert '"decision"' not in prompt
     assert '"outcome"' not in prompt
 

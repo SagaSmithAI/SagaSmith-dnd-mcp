@@ -1213,8 +1213,19 @@ party; grant the named player principal both campaign membership with role
 calls; then progress the source-backed
 route to one legal verified ending. Exercise the listed Play, NPC, chase,
 combat, audience, and recovery obligations at genuine scene boundaries. Keep
-NPC workers isolated and close/abort before mechanics or combat. Use both
-spatial modes only where assigned by the matrix. Let MCP own dice and state.
+    NPC workers isolated and close/abort before mechanics or combat. Use both
+    spatial modes only where assigned by the matrix. Let MCP own dice and state.
+    `conversation_to_combat` is a controlled negative invariant probe, not a
+    normal mechanic. For that remaining gap, open the authoritative conversation
+    but do not ingest, activate a worker, or close it yet. Submit an otherwise
+    valid, source-backed `combat_start` while the conversation is open and require
+    the call to fail specifically because the conversation is active; an unrelated
+    revision, participant, map, or coordinate error does not count. Because the
+    rejected call cannot mutate state, this probe does not violate the normal
+    close-before-mechanic rule. Then `get` and close/abort the conversation,
+    release any worker, and retry the same valid combat start at the refreshed
+    revision. Require that retry to succeed, then immediately end the now-covered
+    encounter truthfully as interrupted and return to Play.
 Keep the campaign in Lobby until the current Pack is active, the party is ready,
 and the player grant exists. If an earlier interrupted cycle entered Play before
 those prerequisites, close any active Play workflow and return to Lobby before
