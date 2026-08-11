@@ -1002,6 +1002,8 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert '`outcome.status="interrupted"`' in prompt
     assert "`combat_end_turn` only passes one actor's turn" in prompt
     assert "do not grind irrelevant turns" in prompt
+    assert "every remaining Combat-specific mechanism are already" in prompt
+    assert "do not spend actions" in prompt
     assert '`module_draft(action="get")` with no payload' in prompt
     assert "matching unfinished job and preserve its public ids" in prompt
     assert "same parallel tool batch as an `exposure(set)`" in prompt

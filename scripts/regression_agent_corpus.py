@@ -1158,10 +1158,12 @@ than unsupported name filters or an empty batch.
 When a scenario requires `agent_semantic_spell_ruling`, inspect preflight's
 `ruling_spell_ids` and the actor's hydrated spell cards. Select one exact
 source-backed spell with an Agent-owned semantic resolution path. If its card is
-standard content with a persisted `agent_ruling` clause, do not call
-`content_solution`: first call `combat_cast_spell` without a declaration to read
-its exact `agent_ruling_contract`, then resubmit the cast with that exact source
-excerpt plus the Agent's bounded decision. Require the committed response to
+    standard content with a persisted `agent_ruling` clause, do not call
+    `content_solution`: first call `combat_cast_spell` without a declaration to read
+    its exact `agent_ruling_contract`, then resubmit the cast as
+    `declaration={{"agent_ruling": {{...}}}}` with that exact source excerpt plus
+    the Agent's bounded decision. Do not flatten those fields or use
+    `component_ruling` for the spell effect. Require the committed response to
 record payment and `semantic_solution.status="agent_ruling_committed"`. For a
 statblock/innate spell, omit `signature_free_cast`; the engine must consume its
 recorded innate resource. A custom/imported card lacking a persisted plan uses
@@ -1182,11 +1184,17 @@ qualify because it contains the wrong actor revision, lacks the required
 hydrated card, or used non-matching source evidence, end it through
 `combat_end` and rebuild the qualifying encounter once from current actors.
 Search and load the exact `combat_end` tool, then close immediately with a
-truthful `outcome.status="interrupted"` and a summary naming the nonqualifying
-evidence. `combat_end_turn` only passes one actor's turn and must not be repeated
-to simulate ending the encounter. Resolve a genuinely blocking pending window
-first, but do not grind irrelevant turns or replace participants inside active
-Combat.
+    truthful `outcome.status="interrupted"` and a summary naming the nonqualifying
+    evidence. `combat_end_turn` only passes one actor's turn and must not be repeated
+    to simulate ending the encounter. Resolve a genuinely blocking pending window
+    first, but do not grind irrelevant turns or replace participants inside active
+    Combat.
+    If Combat coverage and every remaining Combat-specific mechanism are already
+    satisfied, an active encounter left by an interrupted regression cycle is no
+    longer part of the route. Query its authoritative status, then immediately use
+    `combat_end` with truthful `outcome.status="interrupted"`; do not spend actions,
+    advance turns, or replay a completed encounter before returning to the first
+    remaining Play/ending gap.
 
 Prepare/finalize/import/activate the current Pack through the public lifecycle;
 before any module authoring write, read the current
