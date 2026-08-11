@@ -149,6 +149,36 @@ def test_unknown_raw_source_is_reported_pending(tmp_path: Path) -> None:
     ]
 
 
+def test_raw_source_decision_carries_play_requirements(tmp_path: Path) -> None:
+    source = tmp_path / "reviewed-adventure.md"
+    source.write_text("# Reviewed adventure\n", encoding="utf-8")
+    checksum = hashlib.sha256(source.read_bytes()).hexdigest()
+    requirements = {
+        "recommended_party_size": {"minimum": 4, "maximum": 6, "selected": 4},
+        "advancement": {"selected": "milestone"},
+    }
+
+    records = _raw_records(
+        [tmp_path],
+        tmp_path,
+        {
+            checksum: {
+                "classification": "adventure_module",
+                "system_id": "dnd5e",
+                "edition": "2014",
+                "advancement_mode": "milestone",
+                "play_requirements": requirements,
+                "disposition": "runnable_installed_pack_required",
+                "campaign_line_id": "reviewed-adventure",
+            }
+        },
+        set(),
+    )
+
+    assert records[0]["advancement_mode"] == "milestone"
+    assert records[0]["play_requirements"] == requirements
+
+
 def test_unfinalized_module_pack_is_not_treated_as_runnable(tmp_path: Path) -> None:
     package = tmp_path / "module.sagasmith-pack"
     descriptor = {

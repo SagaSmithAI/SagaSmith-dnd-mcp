@@ -503,22 +503,23 @@ def _raw_records(
             if checksum in declared_hashes:
                 continue
             decision = dict(decisions.get(checksum) or {})
-            records.append(
-                {
-                    "source_kind": "raw_source",
-                    "path": _relative(path, workspace),
-                    "sha256": checksum,
-                    "size": path.stat().st_size,
-                    "classification": decision.get("classification", "unreviewed"),
-                    "system_id": decision.get("system_id"),
-                    "edition": decision.get("edition"),
-                    "advancement_mode": decision.get("advancement_mode"),
-                    "disposition": decision.get("disposition", "pending"),
-                    "reason_code": decision.get("reason_code", "unreviewed_source_candidate"),
-                    "campaign_line_id": decision.get("campaign_line_id"),
-                    "title": decision.get("title", path.stem),
-                }
-            )
+            record = {
+                "source_kind": "raw_source",
+                "path": _relative(path, workspace),
+                "sha256": checksum,
+                "size": path.stat().st_size,
+                "classification": decision.get("classification", "unreviewed"),
+                "system_id": decision.get("system_id"),
+                "edition": decision.get("edition"),
+                "advancement_mode": decision.get("advancement_mode"),
+                "disposition": decision.get("disposition", "pending"),
+                "reason_code": decision.get("reason_code", "unreviewed_source_candidate"),
+                "campaign_line_id": decision.get("campaign_line_id"),
+                "title": decision.get("title", path.stem),
+            }
+            if isinstance(decision.get("play_requirements"), dict):
+                record["play_requirements"] = dict(decision["play_requirements"])
+            records.append(record)
     return records
 
 
@@ -694,6 +695,7 @@ async def build_report(args: argparse.Namespace) -> dict[str, Any]:
                 "status": record["disposition"],
                 "edition": record.get("edition"),
                 "advancement_mode": record.get("advancement_mode"),
+                "play_requirements": dict(record.get("play_requirements") or {}),
                 "evidence": ["raw_source_decision"],
             }
             units.append(unit)

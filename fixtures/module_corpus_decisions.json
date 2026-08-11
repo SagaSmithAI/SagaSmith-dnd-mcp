@@ -421,6 +421,67 @@
       "classification": "adventure_module",
       "system_id": "dnd5e",
       "edition": "2014",
+      "advancement_mode": "milestone",
+      "play_requirements": {
+        "recommended_party_size": {
+          "status": "source_confirmed",
+          "minimum": 4,
+          "maximum": 6,
+          "selected": 4
+        },
+        "starting_level": {
+          "minimum": 1,
+          "maximum": 1,
+          "selected": 1
+        },
+        "ending_level": {
+          "minimum": 13,
+          "maximum": null
+        },
+        "advancement": {
+          "mode": "story_milestones",
+          "selected": "milestone",
+          "milestone_supported": true
+        },
+        "encounter_scaling": {
+          "mode": "source_only",
+          "blanket_adjustment_allowed": false
+        },
+        "pregenerated_characters": {
+          "official_sheets_present_in_corpus": false,
+          "associated_templates_present": 0,
+          "selection_policy": "legally create four level-1 characters, the source-confirmed minimum party size"
+        },
+        "source_refs": [
+          {
+            "purpose": "party_size_and_level_span",
+            "asset_path": "test_pdfs/DND5e_坠入阿弗纳斯精排校对版1.0（不包含地理志）.pdf",
+            "asset_sha256": "7068355b6f9b07926557ce7dc8c8fb6e598458a5d025156907b9ac70d789640b",
+            "page_start": 6,
+            "page_end": 6,
+            "heading_path": ["Front Matter", "关于冒险 About the Adventure"],
+            "content_sha256": "3b801112f7cfbcd60fcda60fb66c5f638d9005c0c50b6f276ccb4278225a2ab4"
+          },
+          {
+            "purpose": "story_milestone_advancement",
+            "asset_path": "test_pdfs/DND5e_坠入阿弗纳斯精排校对版1.0（不包含地理志）.pdf",
+            "asset_sha256": "7068355b6f9b07926557ce7dc8c8fb6e598458a5d025156907b9ac70d789640b",
+            "page_start": 140,
+            "page_end": 140,
+            "heading_path": ["第四章 宝剑的获得 Sword of Zariel", "角色升级 Character Advancement"],
+            "content_sha256": "64ef8af81260b7fbf145ead01e69a47bb8b651165645ca8f04daaa594478a896"
+          },
+          {
+            "purpose": "ending_level",
+            "asset_path": "test_pdfs/DND5e_坠入阿弗纳斯精排校对版1.0（不包含地理志）.pdf",
+            "asset_sha256": "7068355b6f9b07926557ce7dc8c8fb6e598458a5d025156907b9ac70d789640b",
+            "page_start": 146,
+            "page_end": 146,
+            "heading_path": ["第五章 逃离阿弗纳斯 Escape from Avernus", "角色升级 Character Advancement"],
+            "content_sha256": "f711c3b4421bfcec172186829bddba1642c423a888d019df1f23693704973af4"
+          }
+        ]
+      },
       "disposition": "runnable_installed_pack_required",
       "reason_code": "active_install_missing_reproducible_finalized_pack",
       "campaign_line_id": "descent-into-avernus-zh",
