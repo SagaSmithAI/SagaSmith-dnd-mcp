@@ -7236,6 +7236,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "updated_at": value.get("updated_at"),
             "pack_decision_fields": sorted(pack_draft),
             "statblock_review_count": len(result.get("statblock_reviews") or []),
+            "finalized_artifact": str(finalized.get("artifact") or ""),
             "finalized_pack_id": str(
                 dict(finalized.get("summary") or {}).get("id")
                 or dict(finalized.get("summary") or {}).get("package_id")

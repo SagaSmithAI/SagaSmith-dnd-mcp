@@ -403,6 +403,7 @@ def test_module_start_finalize_writes_a_finalized_module_pack(tmp_path: Path) ->
             },
         )
         assert package_view["job"]["state"] == "compiled"
+        assert package_view["job"]["finalized_artifact"] == finalized["artifact"]
         assert package_view["finalized_package"]["artifact"] == finalized["artifact"]
         assert "package" not in package_view["finalized_package"]
         with pytest.raises(Exception, match="imported from a finalized Pack artifact"):
@@ -519,6 +520,7 @@ def test_module_get_lists_compact_restart_handles(tmp_path: Path) -> None:
                 "updated_at": started["job"].get("updated_at"),
                 "pack_decision_fields": [],
                 "statblock_review_count": 0,
+                "finalized_artifact": "",
                 "finalized_pack_id": "",
             }
         ]
