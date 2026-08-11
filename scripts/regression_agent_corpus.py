@@ -962,6 +962,7 @@ def _configure_agent(
         raise ValueError("agent config template must define tools.mcp_servers.sagasmith_dnd")
     server["inject_principal"] = True
     server["enabled_tools"] = ["*"]
+    server["expose_resources_and_prompts"] = False
     env = server.setdefault("env", {})
     env["PYTHONUTF8"] = "1"
     env["SAGASMITH_DND_MCP_HOME"] = str(home.resolve())

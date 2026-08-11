@@ -892,6 +892,7 @@ def test_agent_config_uses_fresh_home_current_skills_and_real_native_tools(tmp_p
     config = json.loads(path.read_text(encoding="utf-8"))
     server = config["tools"]["mcp_servers"]["sagasmith_dnd"]
     assert server["enabled_tools"] == ["*"]
+    assert server["expose_resources_and_prompts"] is False
     assert server["inject_principal"] is True
     assert server["env"]["SAGASMITH_DND_MCP_HOME"] == str((tmp_path / "home").resolve())
     assert config["agents"]["defaults"]["dream"]["enabled"] is False
