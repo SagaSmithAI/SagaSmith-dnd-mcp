@@ -4086,12 +4086,29 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError(
                 "module actor cards do not match the campaign edition: " + ", ".join(mismatched)
             )
+        managed_archive = storage.write_content_archive(normalized, blobs)
         result = modules.import_content_package(
             campaign_id,
             normalized,
             blobs,
             activate=False,
             asset_writer=storage.store_content_module_asset,
+        )
+        modules.register_asset(
+            campaign_id=campaign_id,
+            module_id=result["module_id"],
+            source_path=str(
+                (config.content_packages_dir / managed_archive["artifact"]).resolve()
+            ),
+            media_type="application/vnd.sagasmith.content-package+zip",
+            checksum=str(managed_archive["archive_checksum"]),
+            metadata={
+                "asset_kind": "content_package_archive",
+                "content_package_id": normalized["id"],
+                "content_package_version": normalized["version"],
+                "content_package_checksum": normalized["checksum"],
+                "content_archive_artifact": managed_archive["artifact"],
+            },
         )
         actor_map: dict[str, str] = {}
         binding_ids = []
@@ -4143,6 +4160,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         result["actor_binding_ids"] = binding_ids
         result.pop("actors", None)
         result["dependencies"] = list(normalized["dependencies"])
+        result["artifact"] = managed_archive
         result["activated"] = False
         if activate:
             normalized_remaps: list[dict[str, str]] = []
@@ -4369,6 +4387,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                                 "package_checksum": value["checksum"],
                                 "definition_checksum": definition["definition_checksum"],
                             },
+                            "content_package_kind": value["kind"],
+                            "content_package_id": value["id"],
+                            "content_package_version": value["version"],
+                            "content_package_checksum": value["checksum"],
+                            "content_archive_artifact": managed_archive["artifact"],
                             "license": value["metadata"].get("license"),
                             "attribution": value["metadata"].get("attribution"),
                         },
@@ -40746,6 +40769,29 @@ boundary.
             }
         return result
 
+    def _content_pack_module_archive(
+        campaign_id: str,
+        module_id: str,
+    ) -> tuple[dict[str, Any], dict[str, bytes], dict[str, Any]] | None:
+        matches = [
+            item
+            for item in modules.list_assets(campaign_id, module_id)
+            if str(dict(item.get("metadata") or {}).get("asset_kind") or "")
+            == "content_package_archive"
+        ]
+        if not matches:
+            return None
+        if len(matches) != 1:
+            raise ValueError("module has multiple authoritative content Pack archives")
+        metadata = dict(matches[0].get("metadata") or {})
+        artifact = str(metadata.get("content_archive_artifact") or "")
+        if not artifact:
+            raise ValueError("module content Pack archive metadata is incomplete")
+        package, blobs = storage.read_content_archive(artifact=artifact)
+        if package.get("kind") != "module":
+            raise ValueError("installed module archive is not a module Pack")
+        return package, blobs, storage.write_content_archive(package, blobs)
+
     def _content_pack_actor_preset_list(
         payload: dict[str, Any] | None,
         principal_id: str,
@@ -40763,6 +40809,7 @@ boundary.
             if item.status != "installed" or "actor_card" not in content_kinds:
                 continue
             provenance = rule_packs.provenance(item.pack_id, item.version)
+            source = str(provenance.get("source") or "")
             editions = {
                 str(value)
                 for value in (
@@ -40771,9 +40818,12 @@ boundary.
                     or []
                 )
             }
+            if not editions and source.startswith("bundled-srd2014"):
+                editions = {"2014"}
+            elif not editions and source.startswith("bundled-srd2024"):
+                editions = {"2024"}
             if editions and edition not in editions:
                 continue
-            source = str(provenance.get("source") or "")
             package_kind = str(provenance.get("content_package_kind") or "")
             if package_kind != "preset" and not source.startswith("bundled-srd"):
                 continue
@@ -40792,6 +40842,7 @@ boundary.
                     "manifest": {
                         **manifest,
                         "id": package_id,
+                        "editions": sorted(editions),
                         "version": str(
                             provenance.get("content_package_version") or item.version
                         ),
@@ -40927,9 +40978,28 @@ boundary.
             "content_pack(export:rule)",
             PROFILE_LOBBY,
         )
+        pack_id = str(data["pack_id"])
+        version = str(data["version"])
+        provenance = rule_packs.provenance(pack_id, version)
+        archive_name = str(provenance.get("content_archive_artifact") or "")
+        if archive_name:
+            package, blobs = storage.read_content_archive(artifact=archive_name)
+            if package.get("kind") != "core_rules":
+                raise ValueError("installed rule Pack archive is not a core_rules Pack")
+            return {
+                "artifact": storage.write_content_archive(package, blobs),
+                "summary": {
+                    "artifacts": len(package["content"]["artifacts"]),
+                    "mechanics": len(package["content"]["mechanics"]),
+                    "sources": len(package["sources"]),
+                    "dependencies": len(package["dependencies"]),
+                    "distribution": package["metadata"]["distribution"],
+                },
+                **({"package": package} if data.get("include_package") is True else {}),
+            }
         rule_descriptor = rule_content_descriptor(
-            str(data["pack_id"]),
-            str(data["version"]),
+            pack_id,
+            version,
             metadata=dict(data.get("metadata") or {}),
         )
         component_manifest = dict(rule_descriptor["manifest"])
@@ -41997,21 +42067,40 @@ boundary.
             raise ValueError("payload.kind must be core_rules, addon, module, or preset")
         if action == "list":
             if kind == "core_rules":
-                result = [
-                    {
-                        **item,
-                        "status": (
-                            "stored" if item.get("status") == "installed" else item.get("status")
-                        ),
-                    }
-                    for item in rule_pack_list(data.get("pack_id"))
-                    if "actor_card"
-                    not in {
+                result = []
+                for item in rule_pack_list(data.get("pack_id")):
+                    if "actor_card" in {
                         str(value)
                         for value in dict(item.get("manifest") or {}).get("content_kinds")
                         or []
-                    }
-                ]
+                    }:
+                        continue
+                    provenance = rule_packs.provenance(
+                        str(item["pack_id"]), str(item["version"])
+                    )
+                    package_kind = str(provenance.get("content_package_kind") or "")
+                    if package_kind and package_kind != "core_rules":
+                        continue
+                    result.append(
+                        {
+                            **item,
+                            "pack_id": str(
+                                provenance.get("content_package_id") or item["pack_id"]
+                            ),
+                            "local_ref": str(item["pack_id"]),
+                            "version": str(
+                                provenance.get("content_package_version") or item["version"]
+                            ),
+                            "checksum": str(
+                                provenance.get("content_package_checksum") or item["checksum"]
+                            ),
+                            "status": (
+                                "stored"
+                                if item.get("status") == "installed"
+                                else item.get("status")
+                            ),
+                        }
+                    )
             elif kind == "addon":
                 result = _content_pack_addons(data, principal_id)
             elif kind == "module":
@@ -42047,17 +42136,38 @@ boundary.
                     raise ValueError("payload.kind does not match the finalized Pack archive")
                 result = package
             elif kind == "core_rules":
-                inspected = rule_pack_inspect(
-                    str(required(data, "pack_id")), str(required(data, "version"))
-                )
-                result = {
-                    **inspected,
-                    "status": (
-                        "stored"
-                        if inspected.get("status") == "installed"
-                        else inspected.get("status")
-                    ),
-                }
+                pack_id = str(required(data, "pack_id"))
+                version = str(required(data, "version"))
+                inspected = rule_pack_inspect(pack_id, version)
+                provenance = rule_packs.provenance(pack_id, version)
+                archive_name = str(provenance.get("content_archive_artifact") or "")
+                if data.get("include_package") is True and archive_name:
+                    package, blobs = storage.read_content_archive(artifact=archive_name)
+                    if package.get("kind") != "core_rules":
+                        raise ValueError(
+                            "installed rule Pack archive is not a core_rules Pack"
+                        )
+                    result = {
+                        "rule_pack": {
+                            **inspected,
+                            "status": (
+                                "stored"
+                                if inspected.get("status") == "installed"
+                                else inspected.get("status")
+                            ),
+                        },
+                        "artifact": storage.write_content_archive(package, blobs),
+                        "package": package,
+                    }
+                else:
+                    result = {
+                        **inspected,
+                        "status": (
+                            "stored"
+                            if inspected.get("status") == "installed"
+                            else inspected.get("status")
+                        ),
+                    }
             elif kind == "addon":
                 result = _content_pack_addon(data, principal_id)
             elif kind == "module":
@@ -42070,7 +42180,16 @@ boundary.
                 ]
                 if len(matches) != 1:
                     raise LookupError(module_id)
-                result = matches[0]
+                archived = _content_pack_module_archive(campaign_id, module_id)
+                if data.get("include_package") is True and archived is not None:
+                    package, _blobs, artifact = archived
+                    result = {
+                        "module": matches[0],
+                        "artifact": artifact,
+                        "package": package,
+                    }
+                else:
+                    result = matches[0]
             else:
                 result = _content_pack_actor_preset_detail(data, principal_id)
             return facade_result(action, result)
@@ -42120,7 +42239,25 @@ boundary.
             if kind == "core_rules":
                 result = _content_pack_export_rule(data, principal_id)
             elif kind == "module":
-                result = export_module_pack(campaign_id, data, principal_id)
+                module_id = str(required(data, "module_id"))
+                archived = _content_pack_module_archive(campaign_id, module_id)
+                if archived is not None:
+                    package, _blobs, artifact = archived
+                    result = {
+                        **artifact,
+                        "summary": {
+                            "scenes": len(package["content"]["scene_atlas"]),
+                            "actors": len(package["actors"]),
+                            "assets": len(package["assets"]),
+                        },
+                        **(
+                            {"package": package}
+                            if data.get("include_package") is True
+                            else {}
+                        ),
+                    }
+                else:
+                    result = export_module_pack(campaign_id, data, principal_id)
             elif kind == "addon":
                 result = _content_pack_addon(data, principal_id)
             else:

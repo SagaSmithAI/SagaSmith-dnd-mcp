@@ -233,12 +233,14 @@ def test_gateway_exposes_known_errors_and_hides_unknown_failures(tmp_path: Path)
 def test_gateway_imports_and_projects_finalized_preset_inventory(tmp_path: Path) -> None:
     notes = default_character_notes()
     notes["profile"]["summary"] = "Gateway preset actor."
+    sheet = default_character_sheet()
+    sheet["edition"] = "2024"
     actor = build_dnd_content_actor(
         actor_id="example.gateway.actor",
         version="1.0.0",
         actor_type="npc",
         name="Gateway Actor",
-        sheet=default_character_sheet(),
+        sheet=sheet,
         notes=notes,
     )
     package, blobs = build_preset_content_package(
@@ -313,6 +315,18 @@ def test_gateway_imports_and_projects_finalized_preset_inventory(tmp_path: Path)
             )
             assert detail.status == 200
             assert (await detail.json())["data"]["content_package"] == package
+
+            created = await client.post(
+                f"/api/campaigns/{campaign['id']}/actors/from-preset",
+                json={
+                    "pack_id": package["id"],
+                    "version": package["version"],
+                    "artifact_id": actor["id"],
+                    "idempotency_key": "gateway-create-preset-actor",
+                },
+            )
+            assert created.status == 200
+            assert (await created.json())["data"]["character"]["name"] == "Gateway Actor"
 
             exported = await client.post(
                 f"/api/campaigns/{campaign['id']}/content-packs/action",

@@ -346,6 +346,31 @@ def test_module_package_round_trip_recreates_cast_bindings(tmp_path: Path) -> No
                 "payload": {"module_id": imported["module_id"]},
             },
         )
+        detail = await _call(
+            server,
+            "content_pack",
+            {
+                "action": "get",
+                "payload": {
+                    "kind": "module",
+                    "campaign_id": target_campaign["id"],
+                    "module_id": imported["module_id"],
+                    "include_package": True,
+                },
+            },
+        )
+        reexported = await _call(
+            server,
+            "content_pack",
+            {
+                "action": "export",
+                "payload": {
+                    "kind": "module",
+                    "campaign_id": target_campaign["id"],
+                    "module_id": imported["module_id"],
+                },
+            },
+        )
 
         assert exported["summary"]["actors"] == 1
         assert imported["activated"] is False
@@ -357,6 +382,9 @@ def test_module_package_round_trip_recreates_cast_bindings(tmp_path: Path) -> No
         assert "portable_actor_id" not in bindings[0]
         assert bindings[0]["scene_key"] == scene_index[0]["stable_key"]
         assert bindings[0]["role"] == "gate guard"
+        assert detail["package"]["id"] == "example.keep"
+        assert detail["package"]["checksum"] == imported["artifact"]["checksum"]
+        assert reexported["artifact"] == imported["artifact"]["artifact"]
 
     asyncio.run(exercise())
 
@@ -731,6 +759,31 @@ def test_unified_addon_archive_import_reexport_and_actor_creation(tmp_path: Path
             },
         )
         assert listed[0]["status"] == "stored"
+        core_inventory = await _call(
+            server,
+            "content_pack",
+            {
+                "action": "list",
+                "payload": {
+                    "kind": "core_rules",
+                    "campaign_id": campaign["id"],
+                },
+            },
+        )
+        preset_inventory = await _call(
+            server,
+            "content_pack",
+            {
+                "action": "list",
+                "payload": {
+                    "kind": "preset",
+                    "campaign_id": campaign["id"],
+                    "edition": "2014",
+                },
+            },
+        )
+        assert all(item["pack_id"] != component["id"] for item in core_inventory)
+        assert all(item["pack_id"] != package["id"] for item in preset_inventory)
         created = await _call(
             server,
             "character_create_from",

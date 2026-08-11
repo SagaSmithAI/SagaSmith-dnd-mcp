@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from aiohttp import web
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ImageContent
 from sagasmith_core.access import LOCAL_SYSTEM_PRINCIPAL_ID
 from sagasmith_core.idempotency import IdempotencyConflictError
@@ -74,9 +75,16 @@ class DndGateway:
 
         manifest = dict(value.get("manifest") or {})
         metadata = dict(value.get("metadata") or {})
+        package_ref = (
+            dict(metadata.get("content_package") or {})
+            if kind == "module"
+            else {}
+        )
         activation = value.get("activation")
         if kind == "addon":
             identifier = str(value.get("addon_id") or manifest.get("id") or "")
+        elif kind == "module" and package_ref:
+            identifier = str(package_ref.get("id") or value.get("id") or "")
         else:
             identifier = str(
                 value.get("pack_id")
@@ -101,8 +109,13 @@ class DndGateway:
                 or value.get("module_id")
                 or identifier
             ),
-            "version": str(value.get("version") or manifest.get("version") or ""),
-            "checksum": str(value.get("checksum") or ""),
+            "version": str(
+                package_ref.get("version")
+                or value.get("version")
+                or manifest.get("version")
+                or ""
+            ),
+            "checksum": str(package_ref.get("checksum") or value.get("checksum") or ""),
             "title": title,
             "status": status,
             "active": bool(
@@ -133,7 +146,23 @@ class DndGateway:
         )
 
     async def call(self, tool_id: str, arguments: dict[str, Any]) -> Any:
-        value = await self.server.call_tool(tool_id, arguments)
+        try:
+            value = await self.server.call_tool(tool_id, arguments)
+        except ToolError as error:
+            cause = error.__cause__
+            if isinstance(
+                cause,
+                (
+                    IdempotencyConflictError,
+                    KeyError,
+                    LookupError,
+                    PermissionError,
+                    TypeError,
+                    ValueError,
+                ),
+            ):
+                raise cause
+            raise
         structured = value[1] if isinstance(value, tuple) and len(value) > 1 else value
         if isinstance(structured, dict) and set(structured) >= {"action", "result"}:
             return structured["result"]
@@ -301,7 +330,8 @@ class DndGateway:
         campaign_id = request.query.get("campaign_id", "")
         if not campaign_id:
             raise web.HTTPBadRequest(text="campaign_id is required")
-        result = await self.call(
+        principal_id = self.principal(request)
+        core_result = await self.call(
             "content_pack",
             {
                 "action": "list",
@@ -310,28 +340,62 @@ class DndGateway:
                     "campaign_id": campaign_id,
                     "pack_id": request.query.get("pack_id"),
                 },
-                "principal_id": self.principal(request),
+                "principal_id": principal_id,
+            },
+        )
+        addon_result = await self.call(
+            "content_pack",
+            {
+                "action": "list",
+                "payload": {
+                    "kind": "addon",
+                    "campaign_id": campaign_id,
+                    "addon_id": request.query.get("pack_id"),
+                },
+                "principal_id": principal_id,
             },
         )
         projected = []
-        for item in result if isinstance(result, list) else []:
+        values = [
+            ("core_rules", item)
+            for item in core_result if isinstance(core_result, list)
+        ] + [
+            ("addon", item)
+            for item in addon_result if isinstance(addon_result, list)
+        ]
+        for kind, item in values:
             manifest = dict(item.get("manifest") or {})
             editions = list(manifest.get("editions") or [])
+            identifier = str(
+                item.get("pack_id")
+                or item.get("addon_id")
+                or manifest.get("id")
+                or ""
+            )
             projected.append(
                 {
-                    "id": str(item.get("pack_id") or manifest.get("id") or ""),
-                    "source_key": str(item.get("pack_id") or manifest.get("id") or ""),
+                    "id": identifier,
+                    "source_key": identifier,
                     "title": str(
-                        manifest.get("title")
-                        or item.get("pack_id")
+                        item.get("title")
+                        or manifest.get("title")
+                        or identifier
                         or manifest.get("id")
                         or "Untitled rule Pack"
                     ),
                     "edition": str(editions[0] if editions else "all"),
                     "locale": str(manifest.get("locale") or "en"),
                     "version": str(item.get("version") or ""),
-                    "authority": str(manifest.get("classification") or "content_pack"),
-                    "status": str(item.get("status") or "stored"),
+                    "authority": str(
+                        manifest.get("classification")
+                        or ("addon" if kind == "addon" else "content_pack")
+                    ),
+                    "status": str(
+                        "active"
+                        if isinstance(item.get("activation"), dict)
+                        and item["activation"].get("enabled")
+                        else item.get("status") or "stored"
+                    ),
                     "checksum": str(item.get("checksum") or ""),
                 }
             )
@@ -413,7 +477,7 @@ class DndGateway:
             {
                 **item,
                 "active": (
-                    (item["id"], item["version"]) in active_rule_versions
+                    (item["local_ref"], item["version"]) in active_rule_versions
                     if item["kind"] == "core_rules"
                     else item["active"]
                 ),
@@ -443,8 +507,9 @@ class DndGateway:
         payload: dict[str, Any] = {"campaign_id": campaign_id, "kind": kind}
         if kind == "core_rules":
             payload.update(
-                pack_id=request.query.get("pack_id"),
+                pack_id=request.query.get("local_ref") or request.query.get("pack_id"),
                 version=request.query.get("version"),
+                include_package=True,
             )
         elif kind == "addon":
             payload.update(
@@ -454,6 +519,7 @@ class DndGateway:
             )
         elif kind == "module":
             payload["module_id"] = request.query.get("local_ref") or request.query.get("pack_id")
+            payload["include_package"] = True
         else:
             campaign = await self.campaign_record(campaign_id, principal_id)
             payload.update(
@@ -626,9 +692,32 @@ class DndGateway:
     async def actor_from_preset(self, request: web.Request) -> web.Response:
         campaign_id = request.match_info["campaign_id"]
         body = await request.json()
+        required_fields = ("pack_id", "version", "artifact_id")
+        if not all(str(body.get(field) or "").strip() for field in required_fields):
+            raise ValueError("pack_id, version, and artifact_id are required")
+        principal_id = self.principal(request)
+        campaign = await self.campaign_record(campaign_id, principal_id)
+        preset = await self.call(
+            "content_pack",
+            {
+                "action": "get",
+                "payload": {
+                    "campaign_id": campaign_id,
+                    "kind": "preset",
+                    "edition": str(campaign.get("edition") or "2024"),
+                    "pack_id": body.get("pack_id"),
+                    "version": body.get("version"),
+                },
+                "principal_id": principal_id,
+            },
+        )
+        artifact = str(dict(preset.get("artifact") or {}).get("artifact") or "")
+        if not artifact:
+            raise LookupError("installed preset has no finalized archive")
         payload = {
             "campaign_id": campaign_id,
             "artifact_id": body.get("artifact_id"),
+            "artifact": artifact,
         }
         for field in ("name", "player_name"):
             if body.get(field) is not None:
@@ -638,7 +727,7 @@ class DndGateway:
             {
                 "mode": "content_actor",
                 "payload": payload,
-                "principal_id": self.principal(request),
+                "principal_id": principal_id,
                 "idempotency_key": body.get("idempotency_key"),
             },
         )
