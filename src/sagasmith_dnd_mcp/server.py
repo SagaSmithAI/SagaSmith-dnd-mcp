@@ -30679,9 +30679,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if not isinstance(participant_manifest, dict):
             raise ValueError("participant_manifest must be an object")
-        unknown_manifest = set(participant_manifest) - {"schema_version", "groups", "notes"}
+        manifest_fields = {"schema_version", "groups", "notes"}
+        unknown_manifest = set(participant_manifest) - manifest_fields
         if unknown_manifest:
-            raise ValueError(f"unsupported participant manifest fields: {sorted(unknown_manifest)}")
+            raise ValueError(
+                f"unsupported participant manifest fields: {sorted(unknown_manifest)}; "
+                f"allowed fields: {sorted(manifest_fields)}"
+            )
         schema_version = participant_manifest.get("schema_version", 1)
         if schema_version != 1:
             raise ValueError("participant_manifest schema_version must be 1")
@@ -30711,7 +30715,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             }
             unknown = set(raw_group) - allowed
             if unknown:
-                raise ValueError(f"unsupported participant group fields: {sorted(unknown)}")
+                raise ValueError(
+                    f"unsupported participant group fields: {sorted(unknown)}; "
+                    f"allowed fields: {sorted(allowed)}"
+                )
             key = str(raw_group.get("key") or "").strip()
             if not key or key in group_keys:
                 raise ValueError("participant manifest group keys must be non-empty and unique")

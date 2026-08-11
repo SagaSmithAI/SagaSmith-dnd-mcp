@@ -85,6 +85,39 @@ def test_scene_preflight_blocks_only_missing_or_invalid_combatants(tmp_path: Pat
             if item["title"] == "Ambush"
         )
 
+        with pytest.raises(
+            Exception,
+            match=r"allowed fields: \['groups', 'notes', 'schema_version'\]",
+        ):
+            await _call(
+                server,
+                "module_query",
+                {
+                    "campaign_id": campaign["id"],
+                    "view": "preflight",
+                    "payload": {
+                        "scene_id": scene["scene_id"],
+                        "participant_manifest": {"actor_ids": []},
+                    },
+                },
+            )
+
+        with pytest.raises(Exception, match=r"allowed fields: .*'key'.*'role'"):
+            await _call(
+                server,
+                "module_query",
+                {
+                    "campaign_id": campaign["id"],
+                    "view": "preflight",
+                    "payload": {
+                        "scene_id": scene["scene_id"],
+                        "participant_manifest": {
+                            "groups": [{"name": "unsupported"}]
+                        },
+                    },
+                },
+            )
+
         actors = {}
         for key, character_type in (
             ("hero", "pc"),
