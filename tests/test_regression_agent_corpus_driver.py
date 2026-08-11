@@ -1071,6 +1071,8 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "controlled negative invariant probe" in prompt
     assert "fail specifically because the conversation is active" in prompt
     assert "an unrelated" in prompt
+    assert "Its payload uses `members`, not `actor_ids`" in prompt
+    assert "actually available, source-bound noncombat activity" in prompt
     assert '"decision"' not in prompt
     assert '"outcome"' not in prompt
 

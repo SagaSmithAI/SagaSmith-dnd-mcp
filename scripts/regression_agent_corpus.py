@@ -1271,6 +1271,17 @@ combat, audience, and recovery obligations at genuine scene boundaries. Keep
     prior failed request or narration. Construct the combat payload once and reuse
     it verbatim for the rejected and successful calls, changing only
     `expected_revision` and `idempotency_key`.
+    For a remaining `resource_settlement` gap in Play, first query the current
+    party cards and choose one actually available, source-bound noncombat activity
+    or spell; commit it through `character_action` with that actor's exact current
+    revision. Do not invent an activity merely to satisfy coverage. Then settle a
+    source-compatible party rest through `campaign_change(action="party_rest")`.
+    Its payload uses `members`, not `actor_ids`: each member object requires the
+    returned `character_id` and its exact `expected_revision`; `duration_minutes`
+    and `rest_type` are siblings of `members`. For a plain Long Rest, omit optional
+    prepared-spell and Hit Die choices unless the authoritative card and Agent
+    decision require them. Refresh every actor revision after the character action
+    and any preceding stabilization before constructing the one atomic rest.
 Keep the campaign in Lobby until the current Pack is active, the party is ready,
 and the player grant exists. If an earlier interrupted cycle entered Play before
 those prerequisites, close any active Play workflow and return to Lobby before
