@@ -95,6 +95,19 @@ async def _import_module(call, server, campaign_id: str, source_path: Path, key:
             "idempotency_key": f"{key}:finalize",
         },
     )
+    imported = await call(
+        server,
+        "content_pack",
+        {
+            "action": "import",
+            "payload": {
+                "campaign_id": campaign_id,
+                "kind": "module",
+                "artifact": finalized["artifact"],
+            },
+            "idempotency_key": f"{key}:import",
+        },
+    )
     campaign = await call(
         server,
         "campaign_query",
@@ -112,7 +125,7 @@ async def _import_module(call, server, campaign_id: str, source_path: Path, key:
             "payload": {
                 "campaign_id": campaign_id,
                 "kind": "module",
-                "module_id": finalized["job"]["module_id"],
+                "module_id": imported["module_id"],
             },
             "expected_revision": campaign["revision"],
             "idempotency_key": f"{key}:activate",
