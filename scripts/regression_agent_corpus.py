@@ -1053,9 +1053,22 @@ class AgentProcess:
     session_id: str
     cycle: int
     returncode: int
+    failure_kind: str | None
     stdout_path: Path
     stderr_path: Path
     audit_path: Path
+
+
+def _agent_failure_kind(stdout: str, stderr: str) -> str | None:
+    combined = f"{stdout}\n{stderr}".lower()
+    if (
+        "server_is_overloaded" in combined
+        or "our servers are currently overloaded" in combined
+    ):
+        return "provider_overloaded"
+    if "error calling codex" in combined or "llm returned error" in combined:
+        return "provider_error"
+    return None
 
 
 def _run_agent(
@@ -1110,10 +1123,14 @@ def _run_agent(
         returncode = completed.returncode
         stdout = completed.stdout
         stderr = completed.stderr
+        failure_kind = _agent_failure_kind(stdout, stderr)
+        if failure_kind is not None and returncode == 0:
+            returncode = 75
     except subprocess.TimeoutExpired as error:
         returncode = 124
         stdout = error.stdout or ""
         stderr = (error.stderr or "") + f"\nTimed out after {args.timeout_seconds}s\n"
+        failure_kind = "timeout"
     stdout_path.write_text(stdout, encoding="utf-8")
     stderr_path.write_text(stderr, encoding="utf-8")
     return AgentProcess(
@@ -1121,6 +1138,7 @@ def _run_agent(
         session_id=session_id,
         cycle=cycle,
         returncode=returncode,
+        failure_kind=failure_kind,
         stdout_path=stdout_path,
         stderr_path=stderr_path,
         audit_path=audit_path,
@@ -1146,6 +1164,7 @@ def _process_artifacts(
             "session_id": item.session_id,
             "cycle": item.cycle,
             "returncode": item.returncode,
+            "failure_kind": item.failure_kind,
             "stdout": str(item.stdout_path.resolve()),
             "stderr": str(item.stderr_path.resolve()),
             "tool_audit": str(item.audit_path.resolve()),
@@ -1155,15 +1174,26 @@ def _process_artifacts(
         stem = stdout_path.name.removesuffix(".stdout.txt")
         cycle_text, principal = stem.removeprefix("cycle-").split("-", 1)
         row = prior.get(str(stdout_path.resolve()), {})
+        stderr_path = process_dir / f"{stem}.stderr.txt"
+        failure_kind = row.get("failure_kind") or _agent_failure_kind(
+            stdout_path.read_text(encoding="utf-8", errors="replace"),
+            stderr_path.read_text(encoding="utf-8", errors="replace")
+            if stderr_path.is_file()
+            else "",
+        )
+        returncode = row.get("returncode")
+        if failure_kind is not None and not returncode:
+            returncode = 75 if failure_kind != "timeout" else 124
         artifacts.append(
             {
                 "principal": row.get("principal", principal),
                 "session_id": row.get("session_id"),
                 "cycle": int(row.get("cycle", cycle_text)),
-                "returncode": row.get("returncode"),
+                "returncode": returncode,
+                "failure_kind": failure_kind,
                 "stdout": str(stdout_path.resolve()),
                 "stderr": str(
-                    (process_dir / f"{stem}.stderr.txt").resolve()
+                    stderr_path.resolve()
                 ),
                 "tool_audit": row.get("tool_audit"),
             }

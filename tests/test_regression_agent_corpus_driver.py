@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from scripts.regression_agent_corpus import (
+    _agent_failure_kind,
     _aggregate_transcripts,
     _configure_agent,
     _coverage_audit,
@@ -299,6 +300,38 @@ def test_resume_cycles_preserve_existing_process_artifacts(tmp_path: Path) -> No
         encoding="utf-8",
     )
     assert _next_cycle(tmp_path) == 8
+
+
+def test_agent_provider_overload_is_machine_readable(tmp_path: Path) -> None:
+    process_dir = tmp_path / "process"
+    process_dir.mkdir()
+    stdout = process_dir / "cycle-004-regression-dm-module.stdout.txt"
+    stderr = process_dir / "cycle-004-regression-dm-module.stderr.txt"
+    stdout.write_text(
+        "Error calling Codex (RuntimeError): server_is_overloaded",
+        encoding="utf-8",
+    )
+    stderr.write_text(
+        "Our servers are currently overloaded. Please try again later.",
+        encoding="utf-8",
+    )
+
+    assert _agent_failure_kind(stdout.read_text(), stderr.read_text()) == (
+        "provider_overloaded"
+    )
+    artifacts = _process_artifacts(tmp_path)
+    assert artifacts == [
+        {
+            "principal": "regression-dm-module",
+            "session_id": None,
+            "cycle": 4,
+            "returncode": 75,
+            "failure_kind": "provider_overloaded",
+            "stdout": str(stdout.resolve()),
+            "stderr": str(stderr.resolve()),
+            "tool_audit": None,
+        }
+    ]
 
 
 def test_player_starts_only_after_successful_actor_grant() -> None:
