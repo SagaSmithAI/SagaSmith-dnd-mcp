@@ -1138,6 +1138,12 @@ Bind the decision to the active scene and exact actor/rule evidence; MCP must pa
 the action, slot or innate use and own all rolls/state mutations. Do not replace
 this obligation with a weapon attack, narration, a raw sheet edit, or a spell
 whose parser-damaged name never produced a hydrated card.
+On resume, compare any active encounter's immutable participants and source
+manifest with the remaining evidence before spending turns. If it cannot
+qualify because it contains the wrong actor revision, lacks the required
+hydrated card, or used non-matching source evidence, end it through
+`combat_end` and rebuild the qualifying encounter once from current actors.
+Do not grind irrelevant turns or replace participants inside active Combat.
 
 Prepare/finalize/import/activate the current Pack through the public lifecycle;
 before any module authoring write, read the current

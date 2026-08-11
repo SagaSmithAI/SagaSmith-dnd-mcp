@@ -968,6 +968,8 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "Never guess a review id" in prompt
     assert "module_set_progress` is only narrative progress metadata" in prompt
     assert '`character_create_from`' in prompt
+    assert "compare any active encounter's immutable participants" in prompt
+    assert "Do not grind irrelevant turns" in prompt
     assert '"decision"' not in prompt
     assert '"outcome"' not in prompt
 
