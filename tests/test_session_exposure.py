@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import sys
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -11,6 +12,7 @@ import pytest
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from sagasmith_core.access import CAMPAIGN_DM_ROLES
+from sagasmith_dnd.character_schema import default_character_sheet
 from sagasmith_dnd.combat_engine import NeedsRulingError
 from sagasmith_dnd.engine import roll
 from sagasmith_dnd.random_stream import (
@@ -583,6 +585,222 @@ def test_native_tool_list_starts_core_and_varies_per_session(tmp_path: Path) -> 
 
         server._request_session = lambda: ("mcp:second", object())  # type: ignore[method-assign]
         assert {tool.name for tool in await server.list_tools()} == set(CORE_TOOLS)
+
+    asyncio.run(exercise())
+
+
+def test_same_server_runs_two_campaign_sessions_without_cross_talk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def exercise() -> None:
+        server = create_server(
+            McpConfig(
+                home=tmp_path / "home",
+                database_url=None,
+                chroma_url=None,
+                chroma_path_override=None,
+                dnd_skills_dir=tmp_path / "dnd",
+                modulegen_skills_dir=tmp_path / "modulegen",
+                auto_seed_rules=False,
+            )
+        )
+
+        async def direct(name: str, arguments: dict) -> dict:
+            _, structured = await server.call_tool(name, arguments)
+            return structured.get("result", structured)
+
+        campaign_a = await direct(
+            "campaign_create",
+            {"name": "Parallel campaign A", "idempotency_key": "campaign-a"},
+        )
+        campaign_b = await direct(
+            "campaign_create",
+            {"name": "Parallel campaign B", "idempotency_key": "campaign-b"},
+        )
+        await direct(
+            "game_phase",
+            {
+                "campaign_id": campaign_a["id"],
+                "action": "set",
+                "tool_profile": "play",
+                "expected_revision": campaign_a["revision"],
+                "idempotency_key": "campaign-a-play",
+            },
+        )
+
+        class Session:
+            def __init__(self) -> None:
+                self.notifications = 0
+
+            async def send_tool_list_changed(self) -> None:
+                self.notifications += 1
+
+        session_a = Session()
+        session_b = Session()
+        request_session: ContextVar[tuple[str, Session]] = ContextVar("request_session")
+
+        def current_request() -> tuple[str, Session]:
+            key, session = request_session.get()
+            server._sessions[key] = session
+            return key, session
+
+        monkeypatch.setattr(server, "_request_session", current_request)
+
+        async def session_call(
+            key: str, session: Session, name: str, arguments: dict
+        ) -> dict:
+            token = request_session.set((key, session))
+            try:
+                _, structured = await server.call_tool(name, arguments)
+                return structured.get("result", structured)
+            finally:
+                request_session.reset(token)
+
+        async def session_tools(key: str, session: Session) -> set[str]:
+            token = request_session.set((key, session))
+            try:
+                return {tool.name for tool in await server.list_tools()}
+            finally:
+                request_session.reset(token)
+
+        assert await asyncio.gather(
+            session_tools("session:a", session_a),
+            session_tools("session:b", session_b),
+        ) == [set(CORE_TOOLS), set(CORE_TOOLS)]
+
+        await asyncio.gather(
+            session_call(
+                "session:a",
+                session_a,
+                "exposure",
+                {
+                    "action": "open",
+                    "campaign_id": campaign_a["id"],
+                    "principal_id": "system:local",
+                },
+            ),
+            session_call(
+                "session:b",
+                session_b,
+                "exposure",
+                {
+                    "action": "open",
+                    "campaign_id": campaign_b["id"],
+                    "principal_id": "system:local",
+                },
+            ),
+        )
+        await asyncio.gather(
+            session_call(
+                "session:a",
+                session_a,
+                "exposure",
+                {
+                    "action": "set",
+                    "add_tool_ids": ["character_check"],
+                    "principal_id": "system:local",
+                },
+            ),
+            session_call(
+                "session:b",
+                session_b,
+                "exposure",
+                {
+                    "action": "set",
+                    "add_tool_ids": ["character_create_from"],
+                    "principal_id": "system:local",
+                },
+            ),
+        )
+        assert "character_check" in await session_tools("session:a", session_a)
+        assert "character_create_from" not in await session_tools("session:a", session_a)
+        assert "character_create_from" in await session_tools("session:b", session_b)
+        assert "character_check" not in await session_tools("session:b", session_b)
+
+        # Holding campaign A's write lock must not serialize a public mutation for B.
+        campaign_a_lock = server._campaign_lock(campaign_a["id"])
+        await campaign_a_lock.acquire()
+        try:
+            actor_b = await asyncio.wait_for(
+                session_call(
+                    "session:b",
+                    session_b,
+                    "character_create_from",
+                    {
+                        "mode": "direct",
+                        "payload": {
+                            "campaign_id": campaign_b["id"],
+                            "name": "Parallel B Hero",
+                            "sheet": default_character_sheet(),
+                        },
+                        "idempotency_key": "campaign-b-actor",
+                    },
+                ),
+                timeout=5,
+            )
+        finally:
+            campaign_a_lock.release()
+        assert actor_b["campaign_id"] == campaign_b["id"]
+
+        binding_a, binding_b = await asyncio.gather(
+            session_call(
+                "session:a",
+                session_a,
+                "campaign_query",
+                {"view": "get", "payload": {"campaign_id": campaign_a["id"]}},
+            ),
+            session_call(
+                "session:b",
+                session_b,
+                "campaign_query",
+                {"view": "get", "payload": {"campaign_id": campaign_b["id"]}},
+            ),
+        )
+        assert binding_a["host_context_binding"]["campaign_id"] == campaign_a["id"]
+        assert binding_b["host_context_binding"]["campaign_id"] == campaign_b["id"]
+        assert (
+            binding_a["host_context_binding"]["context_epoch"]
+            != binding_b["host_context_binding"]["context_epoch"]
+        )
+
+        session_a.notifications = 0
+        session_b.notifications = 0
+        entered_b = await session_call(
+            "session:b",
+            session_b,
+            "game_phase",
+            {
+                "campaign_id": campaign_b["id"],
+                "action": "set",
+                "tool_profile": "play",
+                "expected_revision": binding_b["revision"],
+                "idempotency_key": "campaign-b-play",
+            },
+        )
+        assert entered_b["tool_profile"] == "play"
+        assert session_b.notifications >= 1
+        assert session_a.notifications == 0
+        assert "character_create_from" not in await session_tools("session:b", session_b)
+        assert "character_check" in await session_tools("session:a", session_a)
+
+        await session_call(
+            "session:b",
+            session_b,
+            "exposure",
+            {
+                "action": "set",
+                "add_tool_ids": ["character_query"],
+                "principal_id": "system:local",
+            },
+        )
+        queried_b = await session_call(
+            "session:b",
+            session_b,
+            "character_query",
+            {"view": "get", "payload": {"character_id": actor_b["id"]}},
+        )
+        assert queried_b["id"] == actor_b["id"]
+        assert queried_b["campaign_id"] == campaign_b["id"]
 
     asyncio.run(exercise())
 
