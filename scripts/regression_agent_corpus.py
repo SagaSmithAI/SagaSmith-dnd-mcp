@@ -1290,10 +1290,16 @@ preflights a mechanical combat participant.
 Before creating any opposition for a resumed campaign, call
 `character_query(view="list")` and reuse every existing actor whose returned
 source identity matches the required card. A coverage gap named
-`source_opposition_missing` means no qualifying completed `combat_start` is in
-the audit yet; it does not mean the actors are absent. Only create the exact
-shortfall, and use `character_query(view="get")` with a returned actor id rather
-than unsupported name filters or an empty batch.
+`source_opposition_missing` means no `combat_start` in the audit has matched the
+complete expected group evidence; it does not mean the actors are absent or
+that another combat action is needed. Compare the latest successful start's
+role, count, actor source identity, variant evidence, and exact normalized
+`source_excerpt` with `initial_source_groups`. If the only available Pack scene
+contains extraction-corrupted text that differs from the managed-source route,
+follow OPPOSITION_HYDRATION and repair that bounded page in a new Pack version
+before retrying. Only create the exact actor shortfall, and use
+`character_query(view="get")` with a returned actor id rather than unsupported
+name filters or an empty batch.
 
 When a scenario requires `agent_semantic_spell_ruling`, inspect preflight's
 `ruling_spell_ids` and the actor's hydrated spell cards. Select one exact
