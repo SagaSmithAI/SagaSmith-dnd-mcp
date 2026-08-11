@@ -353,6 +353,26 @@ def test_agent_provider_overload_is_machine_readable(tmp_path: Path) -> None:
     ]
 
 
+def test_recovered_provider_overload_does_not_override_successful_response() -> None:
+    stdout = """Using config: config.json
+
+nanobot
+Cycle completed and the authoritative state remains resumable.
+"""
+    stderr = """Codex API request failed: error_code=server_is_overloaded
+LLM transient error (attempt 1/3), retrying in 1s: server_is_overloaded
+"""
+
+    assert _agent_failure_kind(stdout, stderr) is None
+
+
+def test_terminal_provider_error_in_stderr_remains_machine_readable() -> None:
+    assert (
+        _agent_failure_kind("", "Error calling Codex: server_is_overloaded")
+        == "provider_overloaded"
+    )
+
+
 def test_player_starts_only_after_successful_actor_grant() -> None:
     principal = "regression-player-module"
     actor_grant = _call(

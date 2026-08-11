@@ -1099,7 +1099,13 @@ class AgentProcess:
 
 
 def _agent_failure_kind(stdout: str, stderr: str) -> str | None:
-    combined = f"{stdout}\n{stderr}".lower()
+    stdout_text = stdout.lower()
+    terminal_stderr = "\n".join(
+        line
+        for line in stderr.lower().splitlines()
+        if "retrying" not in line and "codex api request failed" not in line
+    )
+    combined = f"{stdout_text}\n{terminal_stderr}"
     if (
         "server_is_overloaded" in combined
         or "our servers are currently overloaded" in combined
