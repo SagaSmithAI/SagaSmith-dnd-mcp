@@ -236,6 +236,43 @@ def test_bundled_2014_class_catalog_can_complete_a_bootstrap_actor(tmp_path: Pat
         assert sheet["skills"]["athletics"]["proficiency"] == "proficient"
         assert sheet["content"]["selections"][0]["artifact_id"] == fighter["id"]
 
+        item_catalog = await _call(
+            server,
+            "character_query",
+            {
+                "view": "catalog",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "kind": "item",
+                    "query": "Chain mail",
+                },
+            },
+        )
+        chain_mail = next(item for item in item_catalog if item["name"] == "Chain mail")
+        assert chain_mail["application_state"] == "selection_ready"
+        equipped = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": actor["id"],
+                "artifact_id": chain_mail["id"],
+                "selection": {},
+                "expected_revision": applied["revision"],
+                "idempotency_key": "chain-mail",
+            },
+        )
+        inventory = equipped["sheet"]["inventory"]["items"]
+        assert len(inventory) == 1
+        assert inventory[0]["name"] == "Chain mail"
+        assert inventory[0]["kind"] == "armor"
+        assert inventory[0]["weight_oz"] == 880
+        assert inventory[0]["price_cp"] == 7500
+        assert inventory[0]["source_key"] == "dnd5e.content.srd2014.item.chain-mail"
+        assert inventory[0]["mechanics"]["base_ac"] == 16
+        assert inventory[0]["mechanics"]["dexterity_mode"] == "none"
+        assert inventory[0]["mechanics"]["stealth_disadvantage"] is True
+        assert equipped["sheet"]["content"]["selections"][-1]["artifact_id"] == chain_mail["id"]
+
     asyncio.run(exercise())
 
 
