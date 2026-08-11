@@ -1194,6 +1194,7 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "scenario/evidence id is never a chunk id" in prompt
     assert "statblock_evidence" in prompt
     assert "Pack-local stable slot" in prompt
+    assert "An empty candidate list is" in prompt
     assert "never a campaign UUID" in prompt
     assert "Open exposure without a campaign" in prompt
     assert 'explicit `edition="2014"`' in prompt

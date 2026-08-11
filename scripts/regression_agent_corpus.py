@@ -1352,9 +1352,13 @@ when source review, opposition hydration, ending evidence, or another Pack
 authoring obligation remains, stay in or return to Lobby, search and load
 `module_draft`, and call `module_draft(action="get")` with no payload before
 creating an actor, starting another draft, or entering Play. Resume the newest
-matching unfinished job and preserve its public ids. Start a new draft only if
-that public list proves no matching resumable job exists or a finalized Pack
-requires an explicit new version.
+matching unfinished job and preserve its public ids. An empty candidate list is
+not evidence that this matching draft is unusable and never authorizes another
+`start`; use the managed page/statblock recovery path on that job. If prior
+cycles already left duplicate matching unfinished jobs, resume only the first
+newest matching handle returned by the public list and create no more. Start a
+new draft only if that public list proves no matching resumable job exists or a
+finalized Pack requires an explicit new version.
 create or resume one reproducibly seeded campaign; create the source-sized legal
 party; grant the named player principal both campaign membership with role
 `player` and explicit control of one PC through separate public `access_grant`
