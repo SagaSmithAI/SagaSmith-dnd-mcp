@@ -507,6 +507,9 @@ def test_server_tools_keep_domain_context_metadata_without_host_profiles(tmp_pat
             for tool in by_name.values()
         )
         assert by_name["campaign_query"].meta["sagasmith_context_sync"] is True
+        rule_properties = by_name["rule_search"].inputSchema["properties"]
+        assert "omit when unfiltered" in rule_properties["publications"]["description"]
+        assert "omit when unknown" in rule_properties["page"]["description"]
 
     asyncio.run(inspect_tools())
 

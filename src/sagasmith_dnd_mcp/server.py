@@ -31025,16 +31025,54 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def rule_search(
         campaign_id: str,
         query: str,
-        edition: str | None = None,
-        locale: str | None = None,
-        publications: list[str] | None = None,
-        source_ids: list[str] | None = None,
-        source_keys: list[str] | None = None,
-        page: int | None = None,
+        edition: Annotated[
+            str | None,
+            Field(description="Exact evidence-backed edition filter; omit when unknown."),
+        ] = None,
+        locale: Annotated[
+            str | None,
+            Field(description="Exact evidence-backed locale filter; omit when unknown."),
+        ] = None,
+        publications: Annotated[
+            list[str] | None,
+            Field(
+                description=(
+                    "Exact authoritative publication ids; omit when unfiltered. "
+                    "Never send an empty list or guess a retail title."
+                )
+            ),
+        ] = None,
+        source_ids: Annotated[
+            list[str] | None,
+            Field(
+                description=(
+                    "Exact rule source ids already returned by this campaign; "
+                    "omit when unfiltered and never send an empty list."
+                )
+            ),
+        ] = None,
+        source_keys: Annotated[
+            list[str] | None,
+            Field(
+                description=(
+                    "Exact rule source keys already returned by this campaign; "
+                    "omit when unfiltered and never send an empty list."
+                )
+            ),
+        ] = None,
+        page: Annotated[
+            int | None,
+            Field(
+                description=(
+                    "Exact positive source page supplied by evidence; omit when unknown. "
+                    "Never send 0, -1, or a guessed page."
+                )
+            ),
+        ] = None,
         top_k: int = 8,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> list[dict[str, Any]]:
-        """Search only rules visible to the current campaign ruleset."""
+        """Search rules visible to the campaign; first lookup needs only id and query."""
         access.require_campaign(campaign_id, principal_id)
         if not str(query or "").strip():
             raise ValueError("rule_search query is required")
