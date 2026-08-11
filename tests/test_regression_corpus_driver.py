@@ -349,3 +349,22 @@ def test_checked_in_routes_cover_every_fixture_declared_runnable_unit() -> None:
         item["id"] for item in units
     }
     assert all(item["status"] == "complete" for item in coverage)
+
+    avernus = next(
+        item
+        for item in decisions["coverage_routes"]
+        if item["campaign_line_id"] == "descent-into-avernus-zh"
+    )
+    morgue = next(item for item in avernus["scenarios"] if item["id"] == "bathhouse-morgue")
+    assert [
+        (
+            item["statblock_source_identity"],
+            item["required_count"],
+            item.get("required_variant"),
+            item.get("variant_source_kind"),
+        )
+        for item in morgue["initial_source_groups"]
+    ] == [
+        ("Master of Souls", 1, None, None),
+        ("Swarm of Rats", 1, {"creature_type": "undead"}, "module-chunk"),
+    ]

@@ -407,7 +407,25 @@
           "mechanisms": ["resource_settlement", "conversation_to_combat", "combat", "combat_render"],
           "positioning_mode": "grid",
           "audience": "player",
-          "path": "normal"
+          "path": "normal",
+          "initial_source_groups": [
+            {
+              "subject": "Flennis",
+              "statblock_source_identity": "Master of Souls",
+              "role": "combatant",
+              "required_count": 1,
+              "source_excerpt": "这个一直在研究尸体的死灵法师叫福尼斯 Flennis。她是一个人类女性驭魂者 master of souls，她同时也是这个地域里米尔寇信徒的最高阶级。"
+            },
+            {
+              "subject": "skeletal swarm of rats",
+              "statblock_source_identity": "Swarm of Rats",
+              "role": "combatant",
+              "required_count": 1,
+              "required_variant": {"creature_type": "undead"},
+              "variant_source_kind": "module-chunk",
+              "source_excerpt": "对于福尼斯的骷髅鼠采用怪物图鉴中的鼠群 swarm of rats 数据，将它们的野兽标签替换成不死生物。"
+            }
+          ]
         },
         {
           "id": "redeeming-zariel",

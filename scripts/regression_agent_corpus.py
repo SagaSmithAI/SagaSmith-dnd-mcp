@@ -741,6 +741,28 @@ def _source_combat_actor_identities(calls: list[dict[str, Any]]) -> dict[str, st
     return identities
 
 
+def _source_combat_actor_variants(calls: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    variants: dict[str, dict[str, Any]] = {}
+    for call in calls:
+        if (
+            call.get("tool") != "character_create_from"
+            or not call.get("ok")
+            or (call.get("arguments") or {}).get("mode")
+            not in {"statblock", "module_statblock"}
+        ):
+            continue
+        for node in _walk(call.get("result")):
+            if not isinstance(node, dict) or not isinstance(node.get("character"), dict):
+                continue
+            actor_id = node["character"].get("id")
+            if actor_id:
+                variants[str(actor_id)] = {
+                    "variant": dict(node.get("variant") or {}),
+                    "evidence": dict(node.get("variant_evidence") or {}),
+                }
+    return variants
+
+
 def _scenario_source_opposition_covered(
     scenario: dict[str, Any], calls: list[dict[str, Any]]
 ) -> bool:
@@ -749,6 +771,7 @@ def _scenario_source_opposition_covered(
         return bool(_source_combat_actor_ids(calls))
     source_actor_ids = _source_combat_actor_ids(calls)
     source_identities = _source_combat_actor_identities(calls)
+    source_variants = _source_combat_actor_variants(calls)
     for call in calls:
         arguments = call.get("arguments") or {}
         if not call.get("ok") or call.get("tool") != "combat_start":
@@ -786,6 +809,8 @@ def _scenario_source_opposition_covered(
             expected_identity = " ".join(
                 str(expected.get("statblock_source_identity") or "").split()
             ).casefold()
+            required_variant = dict(expected.get("required_variant") or {})
+            variant_source_kind = str(expected.get("variant_source_kind") or "")
             if (
                 len(actor_ids) != expected.get("required_count")
                 or not actor_ids <= source_actor_ids
@@ -795,6 +820,29 @@ def _scenario_source_opposition_covered(
                     and any(
                         " ".join(source_identities.get(actor_id, "").split()).casefold()
                         != expected_identity
+                        for actor_id in actor_ids
+                    )
+                )
+                or (
+                    required_variant
+                    and any(
+                        any(
+                            source_variants.get(actor_id, {})
+                            .get("variant", {})
+                            .get(key)
+                            != value
+                            for key, value in required_variant.items()
+                        )
+                        for actor_id in actor_ids
+                    )
+                )
+                or (
+                    variant_source_kind
+                    and any(
+                        source_variants.get(actor_id, {})
+                        .get("evidence", {})
+                        .get("kind")
+                        != variant_source_kind
                         for actor_id in actor_ids
                     )
                 )
@@ -1186,8 +1234,11 @@ evidence={json.dumps(_evidence_summary(route), ensure_ascii=False)}
 scenarios={json.dumps(route.get("scenarios") or [], ensure_ascii=False)}
 When a combat scenario includes `initial_source_groups`, treat each entry as a
 source-backed audit expectation: re-read the cited source, preserve every listed
-group and exact count in preflight, and instantiate all of its canonical actors
-before `combat_start`. Do not reduce or omit a group to make preflight pass.
+group, exact count, source identity, and `required_variant` in preflight, and
+instantiate all of its canonical actors before `combat_start`. A variant must
+cite the requested managed `variant_source_kind`.
+Do not reduce or omit a group to make preflight pass, and do not omit a printed
+override.
 
 Treat the current evidence-gap list below as authoritative for what remains;
 prior Agent narration is not proof of a blocker. Query current state first and

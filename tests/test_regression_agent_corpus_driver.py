@@ -973,6 +973,75 @@ def test_combat_coverage_requires_every_source_expected_group() -> None:
     )["gaps"]
 
 
+def test_combat_coverage_requires_source_backed_variant() -> None:
+    excerpt = "Use swarm of rats statistics, replacing Beast with Undead."
+    route = {
+        "scenarios": [
+            {
+                "id": "fight",
+                "mechanisms": ["combat"],
+                "positioning_mode": "grid",
+                "initial_source_groups": [
+                    {
+                        "role": "combatant",
+                        "required_count": 1,
+                        "source_excerpt": excerpt,
+                        "statblock_source_identity": "Swarm of Rats",
+                        "required_variant": {"creature_type": "undead"},
+                        "variant_source_kind": "module-chunk",
+                    }
+                ],
+            }
+        ]
+    }
+    start = _call(
+        "combat_start",
+        arguments={
+            "positioning_mode": "grid",
+            "participant_ids": ["pc-1", "rats"],
+            "participant_manifest": {
+                "groups": [
+                    {
+                        "role": "combatant",
+                        "required_count": 1,
+                        "actor_ids": ["rats"],
+                        "source_excerpt": excerpt,
+                    }
+                ]
+            },
+        },
+    )
+    actor = _call(
+        "character_create_from",
+        arguments={"mode": "statblock"},
+        result={
+            "character": {"id": "rats", "character_type": "monster"},
+            "statblock": {"source_identity": "Swarm of Rats"},
+        },
+    )
+    shared = [
+        _call("skill_query"),
+        _call("exposure", arguments={"action": "open"}),
+        *_player_grants(),
+        _ready_manifest_call(),
+    ]
+
+    missing_variant = [*shared, actor, start, _call("combat_end")]
+    assert "fight:source_opposition_missing" in _coverage_audit(
+        route, missing_variant, process_count=1, list_changed_count=1
+    )["gaps"]
+
+    actor["result"]["variant"] = {
+        "source_ref": "module-chunk:d13",
+        "creature_type": "undead",
+    }
+    actor["result"]["variant_evidence"] = {"kind": "module-chunk", "id": "d13"}
+    complete = [*shared, actor, start, _call("combat_end")]
+    assert "fight:source_opposition_missing" not in _coverage_audit(
+        route, complete, process_count=1, list_changed_count=1
+    )["gaps"]
+
+
 def test_phase_transition_rejects_exposure_reopen_as_refresh() -> None:
     route = {"scenarios": []}
     calls = [
@@ -1120,6 +1189,8 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "dnd:full/skills/dnd-dm/references/OPPOSITION_HYDRATION.md" in prompt
     assert "read the focused" in prompt
     assert "localized-canonical-source sequence" in prompt
+    assert "required_variant" in prompt
+    assert "variant_source_kind" in prompt
     assert "never a campaign UUID" in prompt
     assert "Open exposure without a campaign" in prompt
     assert 'explicit `edition="2014"`' in prompt
