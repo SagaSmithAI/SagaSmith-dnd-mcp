@@ -480,6 +480,7 @@ def test_coverage_requires_real_ordered_boundaries_retries_and_recovery() -> Non
                 "idempotency_key": "conversation-retry",
             },
         ),
+        _call("combat_query", arguments={"view": "render"}),
         _call("combat_cast_spell"),
         _call("combat_choice", arguments={"action": "execute_plan"}),
         _call("combat_end"),
@@ -787,6 +788,56 @@ def test_combat_coverage_requires_a_non_party_participant() -> None:
     assert "fight:source_opposition_missing" in audit["gaps"]
 
 
+def test_combat_coverage_requires_execution_inside_the_same_encounter() -> None:
+    source_actor = _call(
+        "character_create_from",
+        arguments={"mode": "module_statblock"},
+        result={
+            "character": {"id": "monster-1", "character_type": "monster"},
+            "statblock": {"source_identity": "TEST MONSTER"},
+        },
+    )
+    start = _call(
+        "combat_start",
+        arguments={
+            "positioning_mode": "grid",
+            "participant_ids": ["pc-1", "monster-1"],
+        },
+    )
+    prefix = [_ready_manifest_call(), source_actor, start]
+
+    assert _mechanism_covered("combat", [*prefix, _call("combat_end")]) is False
+    assert (
+        _mechanism_covered(
+            "combat_render",
+            [
+                *prefix,
+                _call("combat_query", arguments={"view": "render"}),
+                _call("combat_end"),
+            ],
+        )
+        is False
+    )
+
+    executed = [
+        *prefix,
+        _call("combat_query", arguments={"view": "render"}),
+        _call("combat_resolve_attack"),
+        _call("combat_end"),
+    ]
+    assert _mechanism_covered("combat", executed) is True
+    assert _mechanism_covered("combat_render", executed) is True
+
+    different_encounter = [
+        *prefix,
+        _call("combat_end"),
+        _call("combat_resolve_attack"),
+        _call("combat_query", arguments={"view": "render"}),
+        _call("combat_end"),
+    ]
+    assert _mechanism_covered("combat", different_encounter) is False
+
+
 def test_combat_coverage_requires_every_source_expected_group() -> None:
     excerpt = (
         "Nezznar the Black Spider is joined by four giant spiders that defend "
@@ -1063,7 +1114,8 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "`combat_end_turn` only passes one actor's turn" in prompt
     assert "do not grind irrelevant turns" in prompt
     assert "every remaining Combat-specific mechanism are already" in prompt
-    assert "do not spend actions" in prompt
+    assert "at least one successful" in prompt
+    assert "`combat_start` alone never" in prompt
     assert '`module_draft(action="get")` with no payload' in prompt
     assert "matching unfinished job and preserve its public ids" in prompt
     assert "same parallel tool batch as an `exposure(set)`" in prompt

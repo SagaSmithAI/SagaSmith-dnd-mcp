@@ -825,11 +825,41 @@ def _source_combat_sequence(
             or not (participants & source_actor_ids)
         ):
             continue
-        later = calls[index + 1 :]
-        if require_render and not _call_matches(later, "combat_query", action="render"):
+        end_index = next(
+            (
+                later_index
+                for later_index in range(index + 1, len(calls))
+                if _call_matches([calls[later_index]], "combat_end")
+            ),
+            None,
+        )
+        if end_index is None:
             continue
-        if _call_matches(later, "combat_end"):
-            return True
+        encounter_calls = calls[index + 1 : end_index]
+        if require_render and not _call_matches(
+            encounter_calls, "combat_query", action="render"
+        ):
+            continue
+        if not any(
+            item.get("ok")
+            and (
+                item.get("tool")
+                in {
+                    "combat_cast_spell",
+                    "combat_common_action",
+                    "combat_reaction_attack",
+                    "combat_resolve_attack",
+                    "combat_use_activity",
+                }
+                or (
+                    item.get("tool") == "combat_choice"
+                    and (item.get("arguments") or {}).get("action") == "execute_plan"
+                )
+            )
+            for item in encounter_calls
+        ):
+            continue
+        return True
     return False
 
 
@@ -1231,10 +1261,17 @@ Search and load the exact `combat_end` tool, then close immediately with a
     Combat.
     If Combat coverage and every remaining Combat-specific mechanism are already
     satisfied, an active encounter left by an interrupted regression cycle is no
-    longer part of the route. Query its authoritative status, then immediately use
-    `combat_end` with truthful `outcome.status="interrupted"`; do not spend actions,
-    advance turns, or replay a completed encounter before returning to the first
-    remaining Play/ending gap.
+    longer part of the route. "Satisfied" requires audit receipts from one bounded
+    encounter: the qualifying source-backed `combat_start`, at least one successful
+    engine-owned attack/activity/spell execution before its `combat_end`, and a
+    `combat_query(view="render")` receipt when the scenario requires rendering.
+    Participants, a ready manifest, grid coordinates, or `combat_start` alone never
+    prove execution. An otherwise qualifying active encounter at round 1 with no
+    such action receipt is unfinished: resume it and perform the remaining Combat
+    mechanisms instead of closing it. Only after the receipts already exist should
+    you query status and use `combat_end` with truthful
+    `outcome.status="interrupted"`; do not replay a completed encounter before
+    returning to the first remaining Play/ending gap.
 
 Prepare/finalize/import/activate the current Pack through the public lifecycle;
 before any module authoring write, read the current
