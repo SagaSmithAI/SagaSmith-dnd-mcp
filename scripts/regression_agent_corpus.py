@@ -1265,6 +1265,9 @@ A missing structured ending likewise belongs in the Pack. For those Pack-only
 gaps, start an explicit new draft/version from the same managed source, add only
 the evidence-backed missing review/package decisions, finalize it, import the
 new artifact, and activate only the module id returned by that import.
+For an exact managed image-only card with no text candidate, `content_key` is a
+Pack-local stable slot chosen deterministically from the exact printed identity
+as lowercase ASCII words joined by hyphens; it is not an opaque server id.
 Never guess a review id, edit a finalized Pack in place, or re-import the old
 artifact as a substitute for the new reviewed revision.
 When the active Pack already has the required immutable content review, do not
