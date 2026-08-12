@@ -16,6 +16,7 @@ from scripts.regression_agent_corpus import (
     _aggregate_transcripts,
     _configure_agent,
     _coverage_audit,
+    _current_opposition_audit,
     _decision_timing,
     _decode_tool_content,
     _dm_prompt,
@@ -1196,6 +1197,45 @@ def test_source_opposition_audit_exposes_exact_excerpt_mismatch() -> None:
                     "actual_actor_ids": ["flennis"],
                 }
             ],
+        }
+    ]
+
+
+def test_current_opposition_audit_refreshes_changed_route_evidence() -> None:
+    route = {
+        "scenarios": [
+            {
+                "id": "fight",
+                "initial_source_groups": [
+                    {"subject": "Flennis", "source_excerpt": "Current source text."}
+                ],
+            }
+        ]
+    }
+    historical = [
+        {
+            "scenario_id": "fight",
+            "groups": [
+                {
+                    "subject": "Flennis",
+                    "expected_source_excerpt": "Superseded fixture text.",
+                    "actual_source_excerpt": "Current source text.",
+                    "exact_excerpt_match": False,
+                }
+            ],
+        }
+    ]
+
+    current = _current_opposition_audit(route, historical)
+
+    assert current[0]["groups"] == [
+        {
+            "subject": "Flennis",
+            "expected_source_excerpt": "Current source text.",
+            "actual_source_excerpt": "Current source text.",
+            "exact_excerpt_match": True,
+            "historical_expected_source_excerpt": "Superseded fixture text.",
+            "route_evidence_changed": True,
         }
     ]
 

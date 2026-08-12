@@ -1017,6 +1017,48 @@ def _source_opposition_evidence_audit(
     return audits
 
 
+def _current_opposition_audit(
+    route: dict[str, Any], audits: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Keep historical receipts diagnostic without presenting stale route truth."""
+
+    expected_by_scenario = {
+        str(scenario.get("id") or ""): {
+            str(group.get("subject") or ""): " ".join(
+                str(group.get("source_excerpt") or "").split()
+            )
+            for group in scenario.get("initial_source_groups") or []
+            if isinstance(group, dict)
+        }
+        for scenario in route.get("scenarios") or []
+        if isinstance(scenario, dict)
+    }
+    current: list[dict[str, Any]] = []
+    for audit in audits:
+        item = deepcopy(audit)
+        expected = expected_by_scenario.get(str(item.get("scenario_id") or ""), {})
+        groups = []
+        for group in item.get("groups") or []:
+            refreshed = deepcopy(group)
+            source_excerpt = expected.get(str(refreshed.get("subject") or ""))
+            if source_excerpt is not None:
+                previous = str(refreshed.get("expected_source_excerpt") or "")
+                if previous and previous != source_excerpt:
+                    refreshed["historical_expected_source_excerpt"] = previous
+                    refreshed["route_evidence_changed"] = True
+                refreshed["expected_source_excerpt"] = source_excerpt
+                actual = " ".join(
+                    str(refreshed.get("actual_source_excerpt") or "").split()
+                )
+                refreshed["exact_excerpt_match"] = (
+                    actual.casefold() == source_excerpt.casefold()
+                )
+            groups.append(refreshed)
+        item["groups"] = groups
+        current.append(item)
+    return current
+
+
 def _source_combat_sequence(
     calls: list[dict[str, Any]], *, mode: str | None = None, require_render: bool = False
 ) -> bool:
@@ -1931,10 +1973,15 @@ def _run_unit(
                 player_principal=player_principal,
                 cycle=cycle,
                 gaps=list(audit.get("gaps") or []),
-                source_opposition_audit=_source_opposition_evidence_audit(
+                source_opposition_audit=_current_opposition_audit(
                     route,
-                    _tool_timeline(_read_tool_audit(dm_audit), principal="dm")
-                    + _tool_timeline(_read_tool_audit(player_audit), principal="player"),
+                    _source_opposition_evidence_audit(
+                        route,
+                        _tool_timeline(_read_tool_audit(dm_audit), principal="dm")
+                        + _tool_timeline(
+                            _read_tool_audit(player_audit), principal="player"
+                        ),
+                    ),
                 ),
             ),
             audit_path=dm_audit,
