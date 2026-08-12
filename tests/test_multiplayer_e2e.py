@@ -279,3 +279,93 @@ def test_dm_two_players_restart_and_combat_projection(tmp_path: Path) -> None:
         assert [item["knowledge_key"] for item in bob_knowledge] == ["bell-code"]
 
     asyncio.run(exercise())
+
+
+def test_campaign_membership_revoke_removes_actor_authority_and_replays(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        server = create_server(config(tmp_path))
+        campaign = await call(
+            server,
+            "campaign_create",
+            {"name": "Revocation", "idempotency_key": "revoke-campaign"},
+        )
+        actor = await call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Removed PC"},
+                "idempotency_key": "revoke-actor",
+            },
+        )
+        await call(
+            server,
+            "access_grant",
+            {
+                "scope": "campaign",
+                "campaign_id": campaign["id"],
+                "principal_id": "player:removed",
+                "payload": {"role": "player"},
+                "by_principal_id": "system:local",
+            },
+        )
+        await call(
+            server,
+            "access_grant",
+            {
+                "scope": "actor",
+                "campaign_id": campaign["id"],
+                "principal_id": "player:removed",
+                "payload": {
+                    "actor_id": actor["id"],
+                    "can_control": True,
+                    "can_view_private": True,
+                },
+                "by_principal_id": "system:local",
+            },
+        )
+
+        revoked = await call(
+            server,
+            "access_revoke",
+            {
+                "campaign_id": campaign["id"],
+                "principal_id": "player:removed",
+                "by_principal_id": "system:local",
+            },
+        )
+        assert revoked["revoked"] is True
+        assert revoked["previous_role"] == "player"
+        assert revoked["revoked_actor_grants"] == 1
+        replay = await call(
+            server,
+            "access_revoke",
+            {
+                "campaign_id": campaign["id"],
+                "principal_id": "player:removed",
+                "by_principal_id": "system:local",
+            },
+        )
+        assert replay["revoked"] is False
+        with pytest.raises(Exception, match="cannot access campaign"):
+            await call(
+                server,
+                "campaign_query",
+                {
+                    "view": "get",
+                    "payload": {"campaign_id": campaign["id"]},
+                    "principal_id": "player:removed",
+                },
+            )
+        with pytest.raises(Exception, match="campaign owners cannot be revoked"):
+            await call(
+                server,
+                "access_revoke",
+                {
+                    "campaign_id": campaign["id"],
+                    "principal_id": "system:local",
+                    "by_principal_id": "system:local",
+                },
+            )
+
+    asyncio.run(exercise())

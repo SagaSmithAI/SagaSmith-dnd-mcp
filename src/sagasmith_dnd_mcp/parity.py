@@ -9,6 +9,7 @@ FULL_SKILL_CAPABILITIES: dict[str, frozenset[str]] = {
             "campaign_query",
             "campaign_change",
             "access_grant",
+            "access_revoke",
             "game_phase",
             "server_capabilities",
         }

@@ -590,6 +590,80 @@ def test_native_tool_list_starts_core_and_varies_per_session(tmp_path: Path) -> 
     asyncio.run(exercise())
 
 
+def test_membership_revoke_crops_loaded_tools_and_notifies_session(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        server = create_server(
+            McpConfig(
+                home=tmp_path / "home",
+                database_url=None,
+                chroma_url=None,
+                chroma_path_override=None,
+                dnd_skills_dir=tmp_path / "dnd",
+                modulegen_skills_dir=tmp_path / "modulegen",
+                auto_seed_rules=False,
+            )
+        )
+
+        async def call(name: str, arguments: dict):
+            _, result = await server.call_tool(name, arguments)
+            return result.get("result", result) if isinstance(result, dict) else result
+
+        campaign = await call(
+            "campaign_create",
+            {"name": "Membership refresh", "idempotency_key": "campaign"},
+        )
+        principal_id = "player:removed-exposure"
+        await call(
+            "access_grant",
+            {
+                "scope": "campaign",
+                "campaign_id": campaign["id"],
+                "principal_id": principal_id,
+                "payload": {"role": "player"},
+                "by_principal_id": "system:local",
+            },
+        )
+        exposure = server.exposure_registry.open(
+            session_key="removed-session",
+            principal_id=principal_id,
+            campaign_id=campaign["id"],
+            phase="lobby",
+        )
+        server.exposure_registry.set_tools(exposure, add=["character_query"])
+
+        class Session:
+            notifications = 0
+
+            async def send_tool_list_changed(self) -> None:
+                self.notifications += 1
+
+        native_session = Session()
+        server._sessions["removed-session"] = native_session
+        await call(
+            "access_revoke",
+            {
+                "campaign_id": campaign["id"],
+                "principal_id": principal_id,
+                "by_principal_id": "system:local",
+            },
+        )
+
+        assert await server._refresh("removed-session", campaign["id"]) is True
+        assert exposure.loaded_tools == set()
+        assert native_session.notifications == 1
+        with pytest.raises(Exception, match="cannot access campaign"):
+            await call(
+                "campaign_query",
+                {
+                    "view": "get",
+                    "payload": {"campaign_id": campaign["id"]},
+                    "principal_id": principal_id,
+                },
+            )
+
+    asyncio.run(exercise())
+
+
 def test_same_server_runs_two_campaign_sessions_without_cross_talk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

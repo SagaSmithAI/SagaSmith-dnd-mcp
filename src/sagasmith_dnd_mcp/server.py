@@ -64,7 +64,11 @@ from sagasmith_core import (
     render_pdf_page,
     validate_subject_context_fact,
 )
-from sagasmith_core.access import CAMPAIGN_DM_ROLES, LOCAL_SYSTEM_PRINCIPAL_ID
+from sagasmith_core.access import (
+    CAMPAIGN_DM_ROLES,
+    LOCAL_SYSTEM_PRINCIPAL_ID,
+    AccessDeniedError,
+)
 from sagasmith_core.context_anchors import normalize_context_entity_ref
 from sagasmith_core.idempotency import request_hash
 from sagasmith_core.integrity import canonical_json, json_sha256
@@ -2707,8 +2711,8 @@ class SessionExposureFastMCP(FastMCP):
     ) -> dict[str, Any]:
         """Keep an exposure bound to the principal that opened it.
 
-        ``access_grant`` is the lone public facade whose ``principal_id`` names
-        the grant target; its authenticated writer is ``by_principal_id``.
+        Access-management facades use ``principal_id`` for the target and
+        ``by_principal_id`` for their authenticated writer.
         """
         result = dict(arguments)
         principal_argument = self._principal_argument(tool_id)
@@ -4747,6 +4751,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Return tools the bound principal may still load in the current phase."""
 
         allowed = set(tools_for_phase(phase))
+        membership = (
+            access.membership(exposure.campaign_id, exposure.principal_id)
+            if exposure.campaign_id is not None
+            else None
+        )
         for tool_id in tuple(allowed):
             policy = policy_for_tool(tool_id)
             if policy is None:
@@ -4754,19 +4763,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if policy.local_only and exposure.principal_id != LOCAL_SYSTEM_PRINCIPAL_ID:
                 allowed.discard(tool_id)
                 continue
+            if policy.requires_campaign and membership is None:
+                allowed.discard(tool_id)
+                continue
             roles = policy.roles(phase)
             if not roles:
                 continue
-            if exposure.campaign_id is None:
-                allowed.discard(tool_id)
-                continue
-            try:
-                access.require_campaign(
-                    exposure.campaign_id,
-                    exposure.principal_id,
-                    roles=set(roles),
-                )
-            except (LookupError, PermissionError):
+            if membership is None or membership.role not in roles:
                 allowed.discard(tool_id)
         return allowed
 
@@ -12061,6 +12064,28 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         access.require_campaign(campaign_id, caller, roles=CAMPAIGN_DM_ROLES)
         access.ensure_principal(principal_id, platform="mcp", external_id=principal_id)
         return asdict(access.grant_campaign(campaign_id, principal_id, role=role))
+
+    def campaign_member_revoke(
+        campaign_id: str,
+        principal_id: str,
+        by_principal_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Revoke non-owner membership and its actor grants at one authority boundary."""
+
+        caller = by_principal_id or LOCAL_SYSTEM_PRINCIPAL_ID
+        caller_membership = access.require_campaign(
+            campaign_id, caller, roles=CAMPAIGN_DM_ROLES
+        )
+        target = access.membership(campaign_id, principal_id)
+        if target is not None and target.role == "owner":
+            raise AccessDeniedError("campaign owners cannot be revoked")
+        if (
+            target is not None
+            and target.role == "dm"
+            and caller_membership.role != "owner"
+        ):
+            raise AccessDeniedError("only a campaign owner can revoke a DM")
+        return asdict(access.revoke_campaign(campaign_id, principal_id))
 
     def actor_grant(
         campaign_id: str,
@@ -45467,6 +45492,19 @@ boundary.
                 by_principal_id,
             )
         return facade_result(scope, result)
+
+    @public_tool()
+    def access_revoke(
+        campaign_id: str,
+        principal_id: str,
+        by_principal_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Revoke one campaign member and all subordinate actor authority atomically."""
+
+        return facade_result(
+            "campaign",
+            campaign_member_revoke(campaign_id, principal_id, by_principal_id),
+        )
 
     @public_tool()
     def campaign_event(

@@ -55,8 +55,9 @@ def _names(value: str) -> frozenset[str]:
 PHASE_TOOLS = {
     PROFILE_LOBBY: _names(
         """
-        access_grant actor_knowledge_change actor_knowledge_query addon_actor_instantiate
-        bounded_evaluation branch_change branch_query campaign_change campaign_create
+        access_grant access_revoke actor_knowledge_change actor_knowledge_query
+        addon_actor_instantiate bounded_evaluation branch_change branch_query campaign_change
+        campaign_create
         campaign_event campaign_rules character_ability_apply character_action
         character_content_apply character_create_from character_metadata_update character_query
         character_sheet_replace character_spell_prepare character_state_change content_pack
@@ -96,8 +97,9 @@ PHASE_TOOLS = {
 PHASE_DM_TOOLS = {
     PROFILE_LOBBY: _names(
         """
-        access_grant actor_knowledge_change addon_actor_instantiate branch_change branch_query
-        campaign_change campaign_event campaign_rules content_pack content_solution memory_change
+        access_grant access_revoke actor_knowledge_change addon_actor_instantiate branch_change
+        branch_query campaign_change campaign_event campaign_rules content_pack content_solution
+        memory_change
         memory_query module_draft module_expand module_query module_search module_set_progress
         playthrough_manifest rule_expand rule_search rule_seed_bundled rule_seed_status
         rulebook_draft snapshot_create snapshot_query snapshot_restore state_revision
