@@ -21,6 +21,7 @@ from scripts.regression_agent_corpus import (
     _decode_tool_content,
     _dm_prompt,
     _execution_order_gaps,
+    _latest_combat_start_business_template,
     _mechanism_covered,
     _next_cycle,
     _player_ready,
@@ -761,6 +762,38 @@ def test_conversation_combat_probe_requires_same_valid_retry_payload() -> None:
         ),
     ]
     assert _mechanism_covered("conversation_to_combat", valid_probe) is True
+
+
+def test_latest_combat_start_template_uses_public_success_without_controls() -> None:
+    calls = [
+        _call(
+            "combat_start",
+            arguments={
+                "campaign_id": "campaign-1",
+                "participant_ids": ["pc-1", "npc-1"],
+                "participant_manifest": {"groups": [{"actor_ids": ["npc-1"]}]},
+                "expected_revision": 8,
+                "idempotency_key": "start-1",
+            },
+            ok=False,
+        ),
+        _call(
+            "combat_start",
+            arguments={
+                "campaign_id": "campaign-1",
+                "participant_ids": ["pc-1", "npc-1"],
+                "participant_manifest": {"groups": [{"actor_ids": ["npc-1"]}]},
+                "expected_revision": 9,
+                "idempotency_key": "start-2",
+            },
+        ),
+    ]
+
+    assert _latest_combat_start_business_template(calls) == {
+        "campaign_id": "campaign-1",
+        "participant_ids": ["pc-1", "npc-1"],
+        "participant_manifest": {"groups": [{"actor_ids": ["npc-1"]}]},
+    }
 
 
 def test_preparation_requires_finalize_import_activate_order() -> None:
@@ -1510,6 +1543,8 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "participant excerpt is" in prompt
     assert "mechanical statblock" in prompt
     assert "identical statblock review cannot fix" in prompt
+    assert "latest_successful_combat_start_business_template=" in prompt
+    assert "Do not retype identifiers" in prompt
     assert "same parallel tool batch as an `exposure(set)`" in prompt
     assert "`tools/list_changed`, refresh the native list" in prompt
     assert "context-barrier rebuild may replay" in prompt

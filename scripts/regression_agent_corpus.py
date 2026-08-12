@@ -505,6 +505,21 @@ def _combat_start_probe_payload(arguments: dict[str, Any]) -> str:
     return json.dumps(payload, sort_keys=True, ensure_ascii=False)
 
 
+def _latest_combat_start_business_template(
+    calls: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Return the latest successful public combat-start payload without controls."""
+
+    for call in reversed(calls):
+        if call.get("tool") != "combat_start" or not call.get("ok"):
+            continue
+        payload = deepcopy(call.get("arguments") or {})
+        payload.pop("expected_revision", None)
+        payload.pop("idempotency_key", None)
+        return payload
+    return None
+
+
 def _conversation_to_combat_covered(calls: list[dict[str, Any]]) -> bool:
     """Require the exact rejected open-conversation probe to succeed after closure."""
 
@@ -1388,8 +1403,12 @@ def _dm_prompt(
     cycle: int,
     gaps: list[str],
     source_opposition_audit: list[dict[str, Any]] | None = None,
+    combat_start_business_template: dict[str, Any] | None = None,
 ) -> str:
     opposition_audit_json = json.dumps(source_opposition_audit or [], ensure_ascii=False)
+    combat_template_json = json.dumps(
+        combat_start_business_template or {}, ensure_ascii=False
+    )
     return f"""You are the DM Agent for a real full-campaign regression.
 Run id: {run_id}
 Campaign line label (never a campaign UUID): {line_id}
@@ -1434,6 +1453,7 @@ managed_sources={json.dumps(_managed_source_summary(unit), ensure_ascii=False)}
 evidence={json.dumps(_evidence_summary(route), ensure_ascii=False)}
 scenarios={json.dumps(route.get("scenarios") or [], ensure_ascii=False)}
 prior_source_opposition_evidence_audit={opposition_audit_json}
+latest_successful_combat_start_business_template={combat_template_json}
 When a combat scenario includes `initial_source_groups`, treat each entry as a
 source-backed audit expectation: re-read the cited source, preserve every listed
 group, exact count, source identity, and `required_variant` in preflight, and
@@ -1596,6 +1616,12 @@ combat, audience, and recovery obligations at genuine scene boundaries. Keep
     prior failed request or narration. Construct the combat payload once and reuse
     it verbatim for the rejected and successful calls, changing only
     `expected_revision` and `idempotency_key`.
+    When `latest_successful_combat_start_business_template` is non-empty, it is a
+    public receipt from this campaign's latest successful start. Re-read its
+    actors and current scene to confirm that it remains valid, then use that JSON
+    object as the business payload for both calls. Do not retype identifiers,
+    omit fields, or redesign the manifest. Add only the current
+    `expected_revision` and a distinct `idempotency_key` to each call.
     For a remaining `resource_settlement` gap in Play, first query the current
     party cards and choose one actually available, source-bound noncombat activity
     or spell; commit it through `character_action` with that actor's exact current
@@ -1982,6 +2008,12 @@ def _run_unit(
                             _read_tool_audit(player_audit), principal="player"
                         ),
                     ),
+                ),
+                combat_start_business_template=_latest_combat_start_business_template(
+                    _tool_timeline(_read_tool_audit(dm_audit), principal="dm")
+                    + _tool_timeline(
+                        _read_tool_audit(player_audit), principal="player"
+                    )
                 ),
             ),
             audit_path=dm_audit,
