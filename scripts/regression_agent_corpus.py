@@ -559,6 +559,25 @@ def _conversation_to_combat_covered(calls: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _persistent_npc_conversation_covered(calls: list[dict[str, Any]]) -> bool:
+    """Require one completed public conversation, not a successful read action."""
+
+    required_actions = ("open", "ingest", "publish", "close")
+    cursor = 0
+    for call in calls:
+        if call.get("tool") != "npc_conversation" or not call.get("ok"):
+            continue
+        action = (call.get("arguments") or {}).get("action")
+        if action != required_actions[cursor]:
+            if action == "open":
+                cursor = 1
+            continue
+        cursor += 1
+        if cursor == len(required_actions):
+            return True
+    return False
+
+
 def _chase_terminal_receipt(call: dict[str, Any]) -> bool:
     """Return whether a successful chase mutation authoritatively ended the chase."""
 
@@ -1317,6 +1336,8 @@ def _mechanism_covered(mechanism: str, calls: list[dict[str, Any]]) -> bool:
         return _source_combat_sequence(calls, require_render=True)
     if mechanism == "conversation_to_combat":
         return _conversation_to_combat_covered(calls)
+    if mechanism == "npc_conversation":
+        return _persistent_npc_conversation_covered(calls)
     if mechanism == "agent_semantic_spell_ruling":
         return _has_agent_semantic_spell_ruling(calls)
     if mechanism == "chase_to_combat":
@@ -1326,7 +1347,6 @@ def _mechanism_covered(mechanism: str, calls: list[dict[str, Any]]) -> bool:
     mappings: dict[str, tuple[tuple[str, str | None], ...]] = {
         "play_scene": (("module_query", "scene"),),
         "noncombat_check": (("character_check", None),),
-        "npc_conversation": (("npc_conversation", None),),
         "resource_settlement": (("campaign_change", None), ("character_action", None)),
         "ending": (("playthrough_manifest", "verify_ending"),),
         "save_restore": (("snapshot_restore", None),),

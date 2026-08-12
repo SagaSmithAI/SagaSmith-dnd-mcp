@@ -505,6 +505,8 @@ def test_coverage_requires_real_ordered_boundaries_retries_and_recovery() -> Non
         _call("exposure", arguments={"action": "search"}),
         _call("exposure", arguments={"action": "set"}),
         _call("npc_conversation", arguments={"action": "open"}),
+        _call("npc_conversation", arguments={"action": "ingest"}),
+        _call("npc_conversation", arguments={"action": "publish"}),
         _call("npc_conversation", arguments={"action": "close"}),
         _call("character_check"),
         _call("npc_conversation", arguments={"action": "open"}),
@@ -876,6 +878,29 @@ def test_conversation_combat_probe_requires_same_valid_retry_payload() -> None:
         ),
     ]
     assert _mechanism_covered("conversation_to_combat", valid_probe) is True
+
+
+def test_npc_conversation_requires_complete_publication_sequence() -> None:
+    assert (
+        _mechanism_covered(
+            "npc_conversation",
+            [_call("npc_conversation", arguments={"action": "list"})],
+        )
+        is False
+    )
+    incomplete = [
+        _call("npc_conversation", arguments={"action": "open"}),
+        _call("npc_conversation", arguments={"action": "ingest"}),
+        _call("npc_conversation", arguments={"action": "close"}),
+    ]
+    assert _mechanism_covered("npc_conversation", incomplete) is False
+    complete = [
+        _call("npc_conversation", arguments={"action": "open"}),
+        _call("npc_conversation", arguments={"action": "ingest"}),
+        _call("npc_conversation", arguments={"action": "publish"}),
+        _call("npc_conversation", arguments={"action": "close"}),
+    ]
+    assert _mechanism_covered("npc_conversation", complete) is True
 
 
 def test_latest_combat_start_template_uses_public_success_without_controls() -> None:
