@@ -440,7 +440,41 @@
           "positioning_mode": "agent",
           "audience": "player",
           "path": "normal",
-          "ending_status": "legal_complete"
+          "ending_status": "legal_complete",
+          "ending_prerequisites": [
+            {
+              "id": "sword-of-zariel-acquired",
+              "receipt": "loot_acquire",
+              "item_name": "Sword of Zariel",
+              "source_evidence": {
+                "page_start": 145,
+                "page_end": 146,
+                "heading_path": ["������ �����Ļ�� Sword of Zariel", "����������� Idyllglen Events"]
+              }
+            },
+            {
+              "id": "zariel-persuasion-success",
+              "receipt": "character_check",
+              "skill": "Persuasion",
+              "dc": 25,
+              "success": true,
+              "source_evidence": {
+                "page_start": 147,
+                "page_end": 148,
+                "heading_path": ["������ ���밢����˹ Escape from Avernus", "��������� Redeeming Zariel"]
+              }
+            },
+            {
+              "id": "sword-of-zariel-surrendered",
+              "receipt": "item_spend",
+              "item_name": "Sword of Zariel",
+              "source_evidence": {
+                "page_start": 147,
+                "page_end": 148,
+                "heading_path": ["������ ���밢����˹ Escape from Avernus", "��������� Redeeming Zariel"]
+              }
+            }
+          ]
         },
         {
           "id": "recovery-boundaries",

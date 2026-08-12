@@ -609,7 +609,98 @@ def _chase_sequence_covered(
     return False
 
 
-def _ending_completed(calls: list[dict[str, Any]]) -> bool:
+def _successful_check_receipt(call: dict[str, Any], prerequisite: dict[str, Any]) -> bool:
+    if call.get("tool") != "character_check" or not call.get("ok"):
+        return False
+    arguments = call.get("arguments") or {}
+    payload = arguments.get("payload") or {}
+    expected_skill = str(prerequisite.get("skill") or "")
+    if expected_skill and str(payload.get("skill") or "").casefold() != expected_skill.casefold():
+        return False
+    if "dc" in prerequisite and payload.get("dc") != prerequisite["dc"]:
+        return False
+    expected_success = prerequisite.get("success")
+    committed = any(
+        isinstance(node, dict)
+        and node.get("status") == "committed"
+        and (
+            expected_success is None
+            or any(
+                isinstance(result, dict) and result.get("success") is expected_success
+                for result in _walk(node.get("result"))
+            )
+        )
+        for node in _walk(call.get("result"))
+    )
+    has_random_receipt = any(
+        isinstance(node, dict) and node.get("operation") == "character_check"
+        for node in _walk(call.get("result"))
+    )
+    return committed and has_random_receipt and bool(payload.get("source_scene_id")) and bool(
+        str(payload.get("source_excerpt") or "").strip()
+    )
+
+
+def _valid_managed_source_ref(value: Any) -> bool:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return False
+    return isinstance(value, dict) and all(
+        value.get(field)
+        for field in ("module_id", "scene_id", "chunk_id", "content_sha256")
+    )
+
+
+def _source_item_receipt(call: dict[str, Any], prerequisite: dict[str, Any]) -> bool:
+    if call.get("tool") != "campaign_change" or not call.get("ok"):
+        return False
+    arguments = call.get("arguments") or {}
+    action = arguments.get("action")
+    expected_action = prerequisite.get("receipt")
+    if action != expected_action:
+        return False
+    expected_name = str(prerequisite.get("item_name") or "")
+    payload = arguments.get("payload") or {}
+    if not _valid_managed_source_ref(payload.get("source_ref")):
+        return False
+    result = call.get("result")
+    if not any(
+        isinstance(node, dict) and node.get("status") == "committed"
+        for node in _walk(result)
+    ):
+        return False
+    if expected_action == "loot_acquire":
+        return any(
+            isinstance(node, dict)
+            and str(node.get("name") or "").casefold() == expected_name.casefold()
+            for node in _walk(result)
+        )
+    if expected_action == "item_spend":
+        item_id = str(payload.get("item_id") or "")
+        return bool(item_id) and any(
+            isinstance(node, dict)
+            and str(node.get("id") or "") == item_id
+            and str(node.get("name") or "").casefold() == expected_name.casefold()
+            for node in _walk(result)
+        )
+    return False
+
+
+def _ending_prerequisite_receipt(call: dict[str, Any], prerequisite: dict[str, Any]) -> bool:
+    receipt = prerequisite.get("receipt")
+    if receipt == "character_check":
+        return _successful_check_receipt(call, prerequisite)
+    if receipt in {"loot_acquire", "item_spend"}:
+        return _source_item_receipt(call, prerequisite)
+    return False
+
+
+def _ending_completed(
+    calls: list[dict[str, Any]], *, prerequisites: list[dict[str, Any]] | None = None
+) -> bool:
+    required = list(prerequisites or [])
     for call in calls:
         if call.get("tool") != "playthrough_manifest" or not call.get("ok"):
             continue
@@ -619,9 +710,24 @@ def _ending_completed(calls: list[dict[str, Any]]) -> bool:
         for node in _walk(call.get("result")):
             if not isinstance(node, dict):
                 continue
-            if node.get("status") in {"completed", "achieved"}:
-                return True
-            if node.get("achieved") is True and node.get("completed") is not False:
+            completed = node.get("status") in {"completed", "achieved"} or (
+                node.get("achieved") is True and node.get("completed") is not False
+            )
+            if completed:
+                verify_index = calls.index(call)
+                cursor = 0
+                for prerequisite in required:
+                    matched = next(
+                        (
+                            index
+                            for index in range(cursor, verify_index)
+                            if _ending_prerequisite_receipt(calls[index], prerequisite)
+                        ),
+                        None,
+                    )
+                    if matched is None:
+                        return False
+                    cursor = matched + 1
                 return True
     return False
 
@@ -1245,7 +1351,16 @@ def _coverage_audit(
     scenarios: list[dict[str, Any]] = []
     for scenario in route.get("scenarios") or []:
         mechanisms = list(scenario.get("mechanisms") or [])
-        scenario_gaps = [item for item in mechanisms if not _mechanism_covered(item, calls)]
+        ending_prerequisites = list(scenario.get("ending_prerequisites") or [])
+        scenario_gaps = [
+            item
+            for item in mechanisms
+            if (
+                not _ending_completed(calls, prerequisites=ending_prerequisites)
+                if item == "ending"
+                else not _mechanism_covered(item, calls)
+            )
+        ]
         mode = scenario.get("positioning_mode")
         if (
             "combat" in mechanisms
@@ -1260,7 +1375,9 @@ def _coverage_audit(
         audience = scenario.get("audience")
         if audience == "player" and not any(call.get("principal") == "player" for call in calls):
             scenario_gaps.append("audience:player")
-        if scenario.get("ending_status") == "legal_complete" and not _ending_completed(calls):
+        if scenario.get("ending_status") == "legal_complete" and not _ending_completed(
+            calls, prerequisites=ending_prerequisites
+        ):
             scenario_gaps.append("legal_ending_not_verified")
         for operation in scenario.get("recovery_operations") or []:
             covered = {
@@ -1306,7 +1423,14 @@ def _coverage_audit(
         "complete": not gaps,
         "gaps": sorted(set(gaps)),
         "scenarios": scenarios,
-        "ending_completed": _ending_completed(calls),
+        "ending_completed": any(
+            scenario.get("ending_status") == "legal_complete"
+            and _ending_completed(
+                calls,
+                prerequisites=list(scenario.get("ending_prerequisites") or []),
+            )
+            for scenario in route.get("scenarios") or []
+        ),
         "party_mechanical_gaps": party_mechanical_gaps,
         "campaign_pc_ids": sorted(campaign_pc_ids),
     }
@@ -1516,6 +1640,21 @@ concluding the mechanical card is absent or starting its Pack review.
 Do not reduce or omit a group to make preflight pass, and do not omit a printed
 override.
 
+When an ending scenario lists `ending_prerequisites`, those Pack-local entries
+are mandatory receipt expectations, not story answers. Re-read their managed
+source evidence and satisfy each prerequisite through the named public facade
+before configuring or verifying the ending. `receipt="loot_acquire"` and
+`receipt="item_spend"` require ordered, committed source-bound `campaign_change`
+acquisition/surrender receipts for the named item; `receipt="character_check"`
+requires a committed engine roll with exact scene evidence, skill/DC, required
+success, and an authoritative random receipt.
+Do not manufacture the result with
+`memory_change`, `module_set_progress`, or manifest fields. Those projections
+may record an outcome only after the independent prerequisite receipts exist.
+The active Pack already contains the indexed ending evidence used by this
+fixture: a remaining ending gap is never, by itself, permission to call
+`module_draft`, rebuild, re-import, or reactivate the Pack.
+
 Treat the current evidence-gap list below as authoritative for what remains;
 prior Agent narration is not proof of a blocker. Query current state first and
 do not repeat a prerequisite that is no longer listed. When `Current
@@ -1542,8 +1681,11 @@ with its returned `source_id`, exact `payload.chunk_ids` (never
 repeated instances distinct names and verify returned
 `statblock.source_identity`. Only when the card exists exclusively in the module
 and its active Pack lacks the review is new Pack data mechanically indispensable.
-A missing structured ending likewise belongs in the Pack. For those Pack-only
-gaps, start an explicit new draft/version from the same managed source, add only
+An ending is missing Pack content only when public active-Pack queries cannot
+resolve its indexed source evidence or prove that evidence corrupted; an empty
+runtime manifest condition or unmet receipt is not missing Pack content. For
+genuinely proven Pack-only gaps, start an explicit new draft/version from the
+same managed source and add only
 the evidence-backed missing review/package decisions, finalize it, import the
 new artifact, and activate only the module id returned by that import.
 For an exact managed image-only card with no text candidate, `content_key` is a
@@ -1640,8 +1782,9 @@ Prepare/finalize/import/activate the current Pack through the public lifecycle;
 before any module authoring write, read the current
 `dnd:full/references/skill-groups/lobby/modules-import.md` asset and follow its
 public request shapes exactly;
-when source review, opposition hydration, ending evidence, or another Pack
-authoring obligation remains, stay in or return to Lobby, search and load
+when source review, opposition hydration, a directly proven missing/corrupted
+ending source, or another Pack authoring obligation remains, stay in or return
+to Lobby, search and load
 `module_draft`, and call `module_draft(action="get")` with no payload before
 creating an actor, starting another draft, or entering Play. Resume the newest
 matching unfinished job and preserve its public ids. An empty candidate list is

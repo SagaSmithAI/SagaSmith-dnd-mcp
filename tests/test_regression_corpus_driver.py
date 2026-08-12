@@ -356,6 +356,20 @@ def test_checked_in_routes_cover_every_fixture_declared_runnable_unit() -> None:
         if item["campaign_line_id"] == "descent-into-avernus-zh"
     )
     morgue = next(item for item in avernus["scenarios"] if item["id"] == "bathhouse-morgue")
+    ending = next(item for item in avernus["scenarios"] if item["id"] == "redeeming-zariel")
+    assert [item["receipt"] for item in ending["ending_prerequisites"]] == [
+        "loot_acquire",
+        "character_check",
+        "item_spend",
+    ]
+    assert ending["ending_prerequisites"][1] | {"source_evidence": None} == {
+        "id": "zariel-persuasion-success",
+        "receipt": "character_check",
+        "skill": "Persuasion",
+        "dc": 25,
+        "success": True,
+        "source_evidence": None,
+    }
     assert [
         (
             item["statblock_source_identity"],

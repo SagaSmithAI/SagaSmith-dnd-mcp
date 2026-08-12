@@ -724,6 +724,110 @@ def test_coverage_does_not_accept_narration_or_unordered_successes() -> None:
     assert "host:list_changed_not_observed" in audit["gaps"]
 
 
+def test_ending_requires_independent_source_item_and_check_receipts() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "ending-scene",
+        "chunk_id": "ending-chunk",
+        "content_sha256": "a" * 64,
+    }
+    prerequisites = [
+        {
+            "id": "source-item-acquired",
+            "receipt": "loot_acquire",
+            "item_name": "Source Sword",
+        },
+        {
+            "id": "persuasion-success",
+            "receipt": "character_check",
+            "skill": "Persuasion",
+            "dc": 25,
+            "success": True,
+        },
+        {
+            "id": "source-item-surrendered",
+            "receipt": "item_spend",
+            "item_name": "Source Sword",
+        },
+    ]
+    route = {
+        "scenarios": [
+            {
+                "id": "ending",
+                "mechanisms": ["ending"],
+                "positioning_mode": "agent",
+                "audience": "player",
+                "path": "normal",
+                "ending_status": "legal_complete",
+                "ending_prerequisites": prerequisites,
+            }
+        ]
+    }
+    self_certifying = [
+        _call("memory_change", arguments={"action": "upsert"}),
+        _call("module_set_progress"),
+        _call(
+            "playthrough_manifest",
+            arguments={"action": "verify_ending"},
+            result={"status": "completed", "achieved": True},
+        ),
+    ]
+    audit = _coverage_audit(route, self_certifying, process_count=2, list_changed_count=1)
+    assert "ending:ending" in audit["gaps"]
+    assert "ending:legal_ending_not_verified" in audit["gaps"]
+
+    receipts = [
+        _call(
+            "campaign_change",
+            arguments={
+                "action": "loot_acquire",
+                "payload": {
+                    "items": [{"id": "source-sword", "name": "Source Sword"}],
+                    "source_ref": source_ref,
+                },
+            },
+            result={
+                "status": "committed",
+                "party": {"inventory": {"items": [{"id": "source-sword", "name": "Source Sword"}]}},
+            },
+        ),
+        _call(
+            "character_check",
+            arguments={
+                "action": "check",
+                "payload": {
+                    "skill": "Persuasion",
+                    "dc": 25,
+                    "source_scene_id": "ending-scene",
+                    "source_excerpt": "The source requires a DC 25 Persuasion check.",
+                },
+            },
+            result={
+                "status": "committed",
+                "result": {
+                    "success": True,
+                    "random_stream_receipt": {"operation": "character_check"},
+                },
+            },
+        ),
+        _call(
+            "campaign_change",
+            arguments={
+                "action": "item_spend",
+                "payload": {"item_id": "source-sword", "source_ref": source_ref},
+            },
+            result={
+                "status": "committed",
+                "removed": {"id": "source-sword", "name": "Source Sword"},
+            },
+        ),
+        *self_certifying,
+    ]
+    audit = _coverage_audit(route, receipts, process_count=2, list_changed_count=1)
+    assert "ending:ending" not in audit["gaps"]
+    assert "ending:legal_ending_not_verified" not in audit["gaps"]
+
+
 def test_conversation_combat_probe_requires_same_valid_retry_payload() -> None:
     base = {
         "campaign_id": "campaign-1",

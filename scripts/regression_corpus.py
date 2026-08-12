@@ -247,6 +247,32 @@ def _build_coverage_matrix(
                 raise ValueError(
                     f"{line_id}/{scenario_id}: invalid ending_status {ending_status!r}"
                 )
+            ending_prerequisites = scenario.get("ending_prerequisites") or []
+            if not isinstance(ending_prerequisites, list) or not all(
+                isinstance(value, dict)
+                and str(value.get("id") or "")
+                and str(value.get("receipt") or "")
+                for value in ending_prerequisites
+            ):
+                raise ValueError(
+                    f"{line_id}/{scenario_id}: ending_prerequisites must be objects "
+                    "with non-empty id and receipt"
+                )
+            allowed_ending_receipts = {"loot_acquire", "character_check", "item_spend"}
+            unknown_ending_receipts = {
+                str(value.get("receipt"))
+                for value in ending_prerequisites
+                if value.get("receipt") not in allowed_ending_receipts
+            }
+            if unknown_ending_receipts:
+                raise ValueError(
+                    f"{line_id}/{scenario_id}: unknown ending receipts "
+                    + ", ".join(sorted(unknown_ending_receipts))
+                )
+            if ending_prerequisites and ending_status != "legal_complete":
+                raise ValueError(
+                    f"{line_id}/{scenario_id}: ending_prerequisites require a legal ending"
+                )
             unknown_recovery = set(scenario_recovery) - REQUIRED_RECOVERY_OPERATIONS
             if unknown_recovery:
                 raise ValueError(
