@@ -1151,6 +1151,24 @@ def test_phase_transition_rejects_exposure_reopen_as_refresh() -> None:
     assert "exposure:reopened_after_transition" in audit["gaps"]
 
 
+def test_rejected_exposure_reopen_attempt_after_transition_is_audit_debt() -> None:
+    route = {"scenarios": []}
+    calls = [
+        _call("skill_query"),
+        _call("exposure", arguments={"action": "open"}),
+        _call("branch_change", arguments={"action": "checkout"}),
+        {
+            **_call("exposure", arguments={"action": "open"}),
+            "ok": False,
+            "error": "exposure is already bound; retain it and use search/set",
+        },
+    ]
+
+    audit = _coverage_audit(route, calls, process_count=1, list_changed_count=1)
+
+    assert "exposure:reopened_after_transition" in audit["gaps"]
+
+
 def test_new_agent_process_may_cold_start_exposure_after_prior_transition() -> None:
     route = {"scenarios": []}
     calls = [
@@ -1317,6 +1335,10 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "matching unfinished job and preserve its public ids" in prompt
     assert "same parallel tool batch as an `exposure(set)`" in prompt
     assert "`tools/list_changed`, refresh the native list" in prompt
+    assert "context-barrier rebuild may replay" in prompt
+    assert "that replay is not a new session" in prompt
+    assert "never call `exposure(open)` for that refresh" in prompt
+    assert "do not repeat that operation" in prompt
     assert "controlled negative invariant probe" in prompt
     assert "fail specifically because the conversation is active" in prompt
     assert "an unrelated" in prompt

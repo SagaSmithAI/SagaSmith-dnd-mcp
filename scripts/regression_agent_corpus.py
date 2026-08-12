@@ -365,10 +365,11 @@ def _has_exposure_reopen_after_transition(calls: list[dict[str, Any]]) -> bool:
         arguments = call.get("arguments") or {}
         tool = call.get("tool")
         action = arguments.get("action")
-        if tool == "exposure" and action == "open" and call.get("ok"):
+        if tool == "exposure" and action == "open":
             if opened.get(process_id, False) and transitioned.get(process_id, False):
                 return True
-            opened[process_id] = True
+            if call.get("ok"):
+                opened[process_id] = True
             continue
         if call.get("ok") and (
             tool in {"combat_start", "combat_end", "snapshot_restore"}
@@ -1282,9 +1283,14 @@ Source-reviewed preparation profile (re-resolve its exact current Pack evidence)
 Trusted player principal to grant one actor: cli:{player_principal}
 Cycle: {cycle}
 
-Use dnd.full and CAMPAIGN_REGRESSION. Start this process session from the six
-core tools, open exposure, consume native list changes, and call only exposed
-native tools. Resume authoritative state if the campaign already exists. Never
+Use dnd.full and CAMPAIGN_REGRESSION. At the physical process's first bootstrap,
+start from the six core tools, open exposure once, consume native list changes,
+and call only exposed native tools. A host context-barrier rebuild may replay
+this original prompt inside the same process; that replay is not a new session
+and never authorizes another `exposure(open)`. After the first campaign binding,
+retain it and recover tools only through native `tools/list_changed`, a fresh
+native list, and `exposure(get/search/set)`. Resume authoritative state if the
+campaign already exists. Never
 use shell, direct database access, an internal service, invented tool results,
 or narration as a substitute for a committed result.
 For the regression reference use `skill_query(kind="asset")` with identifier
@@ -1487,7 +1493,11 @@ Never issue `game_phase`, `combat_start`, `combat_end`, restore, checkout,
 undo, or redo in the same parallel tool batch as an `exposure(set)` built from
 the old native list. Wait for the authoritative transition, consume
 `tools/list_changed`, refresh the native list, and only then search/set the next
-phase's tools.
+phase's tools; never call `exposure(open)` for that refresh. A context-barrier
+replay after checkout or restore is still the same process and binding. After a
+successful recovery operation, do not repeat that operation merely because the
+barrier rebuilt context: consume its returned binding/state once, refresh the
+native list, then query and set any tool cropped by the phase change.
 When the current gaps include `preparation`, do not initialize the playthrough
 manifest or enter Play: read the finalized draft artifact, complete a successful
 `content_pack(import, kind="module")`, and activate only the new module id
@@ -1519,8 +1529,9 @@ successful `sync` that still returns an empty member list. Do not stop after
 either result: source-confirmed `selected_size` remains the recommended maximum,
 so create any missing PCs, register every full member record with manifest
 `replace`, and verify the subsequent `sync` response itself is `ready`.
-After every exposure open, seeing only core tools is expected, not a blocker:
-search and set the next required native tool. A cycle that only lists state or
+After the one permitted initial exposure open, seeing only core tools is
+expected, not a blocker: search and set the next required native tool. A cycle
+that only lists state or
 opens exposure has made no progress. Unless a true external boundary is reached,
 complete at least one successful authoritative mutation toward the first unmet
 prerequisite before stopping the cycle.
