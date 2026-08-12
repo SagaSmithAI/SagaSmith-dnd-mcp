@@ -72,7 +72,14 @@ def test_decision_timing_reports_observable_gaps_without_claiming_hidden_reasoni
     assert "not hidden chain-of-thought timing" in timing["attribution"]
 
 
-def test_execution_order_places_prerequisites_before_historical_audit_debt() -> None:
+def test_execution_order_follows_route_before_historical_audit_debt() -> None:
+    route = {
+        "scenarios": [
+            {"id": "opening"},
+            {"id": "fight"},
+            {"id": "ending"},
+        ]
+    }
     assert _execution_order_gaps(
         [
             "exposure:reopened_after_transition",
@@ -80,9 +87,12 @@ def test_execution_order_places_prerequisites_before_historical_audit_debt() -> 
             "fight:combat",
             "fight:source_opposition_missing",
             "preparation:manifest_party_not_ready",
-        ]
+            "opening:npc_conversation",
+        ],
+        route,
     ) == [
         "preparation:manifest_party_not_ready",
+        "opening:npc_conversation",
         "fight:source_opposition_missing",
         "fight:combat",
         "ending:legal_ending_not_verified",
@@ -1691,7 +1701,8 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "source minimum/maximum are advisory only" in prompt
     assert "Never change or block that selection" in prompt
     assert "re-resolve its exact current Pack evidence" in prompt
-    assert "start an explicit new draft/version from the same managed source" in prompt
+    assert "genuinely proven Pack-only gaps" in prompt
+    assert "runtime manifest condition or unmet receipt is not missing Pack content" in prompt
     assert "Do not send `filters` on that first lookup" in prompt
     assert "retry the minimal shape" in prompt
     assert "exact `payload.chunk_ids` (never" in prompt
