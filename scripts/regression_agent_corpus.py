@@ -496,28 +496,6 @@ def _has_agent_semantic_spell_ruling(calls: list[dict[str, Any]]) -> bool:
     return False
 
 
-def _ordered_pattern(
-    calls: list[dict[str, Any]],
-    requirements: list[tuple[str, str | None, bool]],
-) -> bool:
-    cursor = 0
-    for tool, action, expected_ok in requirements:
-        found = False
-        while cursor < len(calls):
-            call = calls[cursor]
-            cursor += 1
-            args = call.get("arguments") or {}
-            if call.get("tool") != tool or bool(call.get("ok")) is not expected_ok:
-                continue
-            if action is not None and args.get("action") != action and args.get("view") != action:
-                continue
-            found = True
-            break
-        if not found:
-            return False
-    return True
-
-
 def _combat_start_probe_payload(arguments: dict[str, Any]) -> str:
     """Return the mechanically stable portion of a combat-start retry."""
 
