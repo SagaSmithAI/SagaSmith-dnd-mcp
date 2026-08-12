@@ -157,6 +157,67 @@ def _read_tool_audit(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _decision_timing(records: list[dict[str, Any]], *, principal: str) -> dict[str, Any]:
+    """Summarize observable turn boundaries without inventing hidden-thought timing."""
+
+    by_process: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        recorded_at = record.get("recorded_at_unix")
+        assistant = record.get("assistant_message")
+        if (
+            not isinstance(recorded_at, (int, float))
+            or isinstance(recorded_at, bool)
+            or not isinstance(assistant, dict)
+        ):
+            continue
+        process_id = str(record.get("process_id") or "legacy")
+        tool_names = [
+            _normalize_tool_name(dict(call.get("function") or {}).get("name"))
+            for call in assistant.get("tool_calls") or []
+            if isinstance(call, dict)
+        ]
+        by_process.setdefault(process_id, []).append(
+            {"recorded_at_unix": float(recorded_at), "tools": tool_names}
+        )
+
+    processes: list[dict[str, Any]] = []
+    for process_id, turns in sorted(by_process.items()):
+        turns.sort(key=lambda item: item["recorded_at_unix"])
+        gaps = [
+            round(turns[index]["recorded_at_unix"] - turns[index - 1]["recorded_at_unix"], 3)
+            for index in range(1, len(turns))
+        ]
+        long_gaps = [
+            {
+                "seconds": gap,
+                "after_tools": turns[index - 1]["tools"],
+                "before_tools": turns[index]["tools"],
+            }
+            for index, gap in enumerate(gaps, start=1)
+            if gap >= 30
+        ]
+        processes.append(
+            {
+                "principal": principal,
+                "process_id": process_id,
+                "decision_turns": len(turns),
+                "observable_span_seconds": (
+                    round(turns[-1]["recorded_at_unix"] - turns[0]["recorded_at_unix"], 3)
+                    if len(turns) > 1
+                    else 0.0
+                ),
+                "maximum_inter_turn_gap_seconds": max(gaps, default=0.0),
+                "inter_turn_gaps_at_least_30_seconds": long_gaps,
+                "attribution": (
+                    "Inter-turn gaps combine model generation, provider queueing, host "
+                    "work, and any tool execution not separately timestamped; they are "
+                    "not hidden chain-of-thought timing."
+                ),
+            }
+        )
+    return {"processes": processes}
+
+
 def _tool_timeline(rows: list[dict[str, Any]], *, principal: str) -> list[dict[str, Any]]:
     pending: dict[str, dict[str, Any]] = {}
     timeline: list[dict[str, Any]] = []
@@ -1889,6 +1950,8 @@ def _run_unit(
         if player.returncode and args.fail_fast:
             break
 
+    dm_records = _read_session(dm_audit)
+    player_records = _read_session(player_audit)
     dm_rows = _read_tool_audit(dm_audit)
     player_rows = _read_tool_audit(player_audit)
     calls = _tool_timeline(dm_rows, principal="dm") + _tool_timeline(
@@ -1930,6 +1993,10 @@ def _run_unit(
         "discovered_unit": unit,
         "route": route,
         "agent_processes": process_artifacts,
+        "observable_turn_timing": {
+            "dm": _decision_timing(dm_records, principal="dm"),
+            "player": _decision_timing(player_records, principal="player"),
+        },
         "tool_timeline": calls,
         "phase_exposure_timeline": _phase_exposure_timeline(calls),
         "tools_list_changed_observed": list_changed_count,

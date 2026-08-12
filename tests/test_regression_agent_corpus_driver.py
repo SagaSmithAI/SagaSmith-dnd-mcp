@@ -15,6 +15,7 @@ from scripts.regression_agent_corpus import (
     _aggregate_transcripts,
     _configure_agent,
     _coverage_audit,
+    _decision_timing,
     _decode_tool_content,
     _dm_prompt,
     _execution_order_gaps,
@@ -27,6 +28,45 @@ from scripts.regression_agent_corpus import (
     _source_opposition_evidence_audit,
     _tool_timeline,
 )
+
+
+def test_decision_timing_reports_observable_gaps_without_claiming_hidden_reasoning() -> None:
+    records = [
+        {
+            "process_id": "run:dm:cycle-1",
+            "recorded_at_unix": 100.0,
+            "assistant_message": {
+                "role": "assistant",
+                "tool_calls": [
+                    {"function": {"name": "mcp_sagasmith_dnd_module_draft"}}
+                ],
+            },
+        },
+        {
+            "process_id": "run:dm:cycle-1",
+            "recorded_at_unix": 187.0,
+            "assistant_message": {
+                "role": "assistant",
+                "tool_calls": [
+                    {"function": {"name": "mcp_sagasmith_dnd_module_query"}}
+                ],
+            },
+        },
+    ]
+
+    timing = _decision_timing(records, principal="dm")["processes"][0]
+
+    assert timing["decision_turns"] == 2
+    assert timing["observable_span_seconds"] == 87.0
+    assert timing["maximum_inter_turn_gap_seconds"] == 87.0
+    assert timing["inter_turn_gaps_at_least_30_seconds"] == [
+        {
+            "seconds": 87.0,
+            "after_tools": ["module_draft"],
+            "before_tools": ["module_query"],
+        }
+    ]
+    assert "not hidden chain-of-thought timing" in timing["attribution"]
 
 
 def test_execution_order_places_prerequisites_before_historical_audit_debt() -> None:
