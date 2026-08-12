@@ -29,6 +29,7 @@ from scripts.regression_agent_corpus import (
     _process_artifacts,
     _read_tool_audit,
     _refresh_completed_report,
+    _run_agent,
     _runnable_units,
     _source_opposition_evidence_audit,
     _tool_timeline,
@@ -476,6 +477,43 @@ def test_terminal_provider_error_in_stderr_remains_machine_readable() -> None:
         _agent_failure_kind("", "Error calling Codex: server_is_overloaded")
         == "provider_overloaded"
     )
+
+
+def test_agent_runner_uses_prompt_file_for_windows_safe_long_messages(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    command: list[str] = []
+
+    def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        command.extend(args)
+        return subprocess.CompletedProcess(args, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    prompt = "source-backed prompt\n" * 5000
+    args = argparse.Namespace(
+        nanobot=tmp_path / "nanobot.exe",
+        timeout_seconds=30,
+        run_id="run",
+    )
+    unit_dir = tmp_path / "unit"
+
+    result = _run_agent(
+        args,
+        config=tmp_path / "config.json",
+        agent_workspace=tmp_path / "workspace",
+        unit_dir=unit_dir,
+        principal="regression-dm-module",
+        session_id="run:module:dm:cycle-001",
+        cycle=1,
+        prompt=prompt,
+        audit_path=tmp_path / "audit.jsonl",
+    )
+
+    prompt_path = unit_dir / "process" / "cycle-001-regression-dm-module.prompt.txt"
+    assert result.returncode == 0
+    assert "--message" not in command
+    assert command[command.index("--message-file") + 1] == str(prompt_path.resolve())
+    assert prompt_path.read_text(encoding="utf-8") == prompt
 
 
 def test_player_starts_only_after_successful_actor_grant() -> None:

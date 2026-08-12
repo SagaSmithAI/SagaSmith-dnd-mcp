@@ -2320,7 +2320,9 @@ def _run_agent(
     stem = f"cycle-{cycle:03d}-{principal}"
     stdout_path = unit_dir / "process" / f"{stem}.stdout.txt"
     stderr_path = unit_dir / "process" / f"{stem}.stderr.txt"
+    prompt_path = unit_dir / "process" / f"{stem}.prompt.txt"
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    prompt_path.write_text(prompt, encoding="utf-8")
     command = [
         str(args.nanobot.resolve()),
         "agent",
@@ -2334,8 +2336,8 @@ def _run_agent(
         principal,
         "--no-markdown",
         "--logs",
-        "--message",
-        prompt,
+        "--message-file",
+        str(prompt_path.resolve()),
     ]
     try:
         process_env = dict(os.environ)
