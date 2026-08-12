@@ -1467,6 +1467,9 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "Never guess or cache" in prompt
     assert '`module_draft(action="get")` with no payload' in prompt
     assert "matching unfinished job and preserve its public ids" in prompt
+    assert "participant excerpt is" in prompt
+    assert "mechanical statblock" in prompt
+    assert "identical statblock review cannot fix" in prompt
     assert "same parallel tool batch as an `exposure(set)`" in prompt
     assert "`tools/list_changed`, refresh the native list" in prompt
     assert "context-barrier rebuild may replay" in prompt

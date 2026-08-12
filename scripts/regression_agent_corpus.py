@@ -1447,10 +1447,15 @@ source identity matches the required card. A coverage gap named
 complete expected group evidence; it does not mean the actors are absent or
 that another combat action is needed. Compare the latest successful start's
 role, count, actor source identity, variant evidence, and exact normalized
-`source_excerpt` with `initial_source_groups`. If the only available Pack scene
-contains extraction-corrupted text that differs from the managed-source route,
-follow OPPOSITION_HYDRATION and repair that bounded page in a new Pack version
-before retrying. Only create the exact actor shortfall, and use
+`source_excerpt` with `initial_source_groups`. The participant excerpt is
+encounter evidence, while the actor's content review is mechanical statblock
+evidence; these separate passages need not match. A rejected or stale manifest
+is not proof of Pack corruption, and an identical statblock review cannot fix
+encounter prose. Re-read the exact managed encounter excerpt and the Pack copy
+of that same passage before authoring anything. Only if that same Pack passage
+is demonstrably extraction-corrupted relative to managed source should you
+follow OPPOSITION_HYDRATION and repair the bounded scene in a new Pack version.
+Only create the exact actor shortfall, and use
 `character_query(view="get")` with a returned actor id rather than unsupported
 name filters or an empty batch.
 
