@@ -258,7 +258,12 @@ def _build_coverage_matrix(
                     f"{line_id}/{scenario_id}: ending_prerequisites must be objects "
                     "with non-empty id and receipt"
                 )
-            allowed_ending_receipts = {"loot_acquire", "character_check", "item_spend"}
+            allowed_ending_receipts = {
+                "loot_acquire",
+                "semantic_event",
+                "character_check",
+                "item_spend",
+            }
             unknown_ending_receipts = {
                 str(value.get("receipt"))
                 for value in ending_prerequisites
@@ -273,6 +278,65 @@ def _build_coverage_matrix(
                 raise ValueError(
                     f"{line_id}/{scenario_id}: ending_prerequisites require a legal ending"
                 )
+            ending_prerequisites_by_id = {
+                str(value["id"]): value for value in ending_prerequisites
+            }
+            if len(ending_prerequisites_by_id) != len(ending_prerequisites):
+                raise ValueError(
+                    f"{line_id}/{scenario_id}: ending prerequisite ids must be unique"
+                )
+            for index, prerequisite in enumerate(ending_prerequisites):
+                receipt = prerequisite["receipt"]
+                if receipt == "semantic_event":
+                    if not str(prerequisite.get("fact_key") or ""):
+                        raise ValueError(
+                            f"{line_id}/{scenario_id}: semantic_event requires fact_key"
+                        )
+                    reduction = prerequisite.get("dc_reduction")
+                    if reduction is not None and (
+                        not isinstance(reduction, int)
+                        or isinstance(reduction, bool)
+                        or reduction <= 0
+                    ):
+                        raise ValueError(
+                            f"{line_id}/{scenario_id}: semantic_event requires positive "
+                            "integer dc_reduction"
+                        )
+                if receipt == "character_check" and "base_dc" in prerequisite:
+                    base_dc = prerequisite["base_dc"]
+                    reducer_ids = prerequisite.get("applied_reducer_ids")
+                    if (
+                        not isinstance(base_dc, int)
+                        or isinstance(base_dc, bool)
+                        or not isinstance(reducer_ids, list)
+                        or not reducer_ids
+                        or not all(isinstance(value, str) and value for value in reducer_ids)
+                    ):
+                        raise ValueError(
+                            f"{line_id}/{scenario_id}: reduced character_check requires "
+                            "integer base_dc and non-empty applied_reducer_ids"
+                        )
+                    preceding = ending_prerequisites[:index]
+                    reducers = {
+                        str(value["id"]): value
+                        for value in preceding
+                        if value["receipt"] == "semantic_event"
+                        and value.get("dc_reduction") is not None
+                    }
+                    if set(reducer_ids) != set(reducers):
+                        raise ValueError(
+                            f"{line_id}/{scenario_id}: applied_reducer_ids must name all "
+                            "preceding semantic_event prerequisites"
+                        )
+                    expected_dc = base_dc - sum(
+                        int(reducers[reducer_id]["dc_reduction"])
+                        for reducer_id in reducer_ids
+                    )
+                    if prerequisite.get("dc") != expected_dc:
+                        raise ValueError(
+                            f"{line_id}/{scenario_id}: reduced character_check dc must equal "
+                            "base_dc minus declared reducers"
+                        )
             unknown_recovery = set(scenario_recovery) - REQUIRED_RECOVERY_OPERATIONS
             if unknown_recovery:
                 raise ValueError(

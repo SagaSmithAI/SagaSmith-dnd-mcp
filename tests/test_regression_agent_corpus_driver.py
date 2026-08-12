@@ -750,10 +750,24 @@ def test_ending_requires_independent_source_item_and_check_receipts() -> None:
             "item_name": "Source Sword",
         },
         {
+            "id": "ally-present",
+            "receipt": "semantic_event",
+            "fact_key": "ending.ally-present",
+            "dc_reduction": 5,
+        },
+        {
+            "id": "mentor-present",
+            "receipt": "semantic_event",
+            "fact_key": "ending.mentor-present",
+            "dc_reduction": 5,
+        },
+        {
             "id": "persuasion-success",
             "receipt": "character_check",
             "skill": "Persuasion",
-            "dc": 25,
+            "base_dc": 25,
+            "applied_reducer_ids": ["ally-present", "mentor-present"],
+            "dc": 15,
             "success": True,
         },
         {
@@ -804,12 +818,76 @@ def test_ending_requires_independent_source_item_and_check_receipts() -> None:
             },
         ),
         _call(
+            "memory_change",
+            arguments={
+                "action": "commit",
+                "payload": {
+                    "event": {
+                        "event_type": "source_semantic_event",
+                        "summary": "The ally is present for the appeal.",
+                        "audience_scope": "party",
+                        "payload": {
+                            "reducer_id": "ally-present",
+                            "source_ref": source_ref,
+                        },
+                    },
+                    "facts": [
+                        {
+                            "fact_key": "ending.ally-present",
+                            "content": "The ally is present for the appeal.",
+                        }
+                    ],
+                },
+            },
+            result={
+                "event": {"id": "event-ally", "event_type": "source_semantic_event"},
+                "facts": [
+                    {
+                        "fact_key": "ending.ally-present",
+                        "source_event_ids": ["event-ally"],
+                    }
+                ],
+            },
+        ),
+        _call(
+            "memory_change",
+            arguments={
+                "action": "commit",
+                "payload": {
+                    "event": {
+                        "event_type": "source_semantic_event",
+                        "summary": "The mentor is present for the appeal.",
+                        "audience_scope": "party",
+                        "payload": {
+                            "reducer_id": "mentor-present",
+                            "source_ref": source_ref,
+                        },
+                    },
+                    "facts": [
+                        {
+                            "fact_key": "ending.mentor-present",
+                            "content": "The mentor is present for the appeal.",
+                        }
+                    ],
+                },
+            },
+            result={
+                "event": {"id": "event-mentor", "event_type": "source_semantic_event"},
+                "facts": [
+                    {
+                        "fact_key": "ending.mentor-present",
+                        "source_event_ids": ["event-mentor"],
+                    }
+                ],
+            },
+        ),
+        _call(
             "character_check",
             arguments={
                 "action": "check",
                 "payload": {
                     "skill": "Persuasion",
-                    "dc": 25,
+                    "dc": 15,
                     "source_scene_id": "ending-scene",
                     "source_excerpt": "The source requires a DC 25 Persuasion check.",
                 },
@@ -838,6 +916,22 @@ def test_ending_requires_independent_source_item_and_check_receipts() -> None:
     audit = _coverage_audit(route, receipts, process_count=2, list_changed_count=1)
     assert "ending:ending" not in audit["gaps"]
     assert "ending:legal_ending_not_verified" not in audit["gaps"]
+
+    missing_reducer = [call for call in receipts if "event-mentor" not in str(call)]
+    audit = _coverage_audit(route, missing_reducer, process_count=2, list_changed_count=1)
+    assert "ending:ending" in audit["gaps"]
+
+    naked_fact = [
+        receipts[0],
+        receipts[1],
+        _call(
+            "memory_change",
+            arguments={"action": "upsert", "payload": {"fact_key": "ending.mentor-present"}},
+        ),
+        *receipts[3:],
+    ]
+    audit = _coverage_audit(route, naked_fact, process_count=2, list_changed_count=1)
+    assert "ending:ending" in audit["gaps"]
 
 
 def test_conversation_combat_probe_requires_same_valid_retry_payload() -> None:

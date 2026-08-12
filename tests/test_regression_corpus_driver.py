@@ -5,6 +5,8 @@ import json
 import zipfile
 from pathlib import Path
 
+import pytest
+
 from scripts.regression_corpus import (
     CORE_TOOLS,
     _build_coverage_matrix,
@@ -359,14 +361,22 @@ def test_checked_in_routes_cover_every_fixture_declared_runnable_unit() -> None:
     ending = next(item for item in avernus["scenarios"] if item["id"] == "redeeming-zariel")
     assert [item["receipt"] for item in ending["ending_prerequisites"]] == [
         "loot_acquire",
+        "semantic_event",
+        "semantic_event",
+        "semantic_event",
         "character_check",
         "item_spend",
     ]
-    assert ending["ending_prerequisites"][1] | {"source_evidence": None} == {
+    assert ending["ending_prerequisites"][4] | {"source_evidence": None} == {
         "id": "zariel-persuasion-success",
         "receipt": "character_check",
         "skill": "Persuasion",
-        "dc": 25,
+        "base_dc": 25,
+        "applied_reducer_ids": [
+            "lulu-present-reducer",
+            "olanthius-allied-present-reducer",
+        ],
+        "dc": 15,
         "success": True,
         "source_evidence": None,
     }
@@ -387,3 +397,33 @@ def test_checked_in_routes_cover_every_fixture_declared_runnable_unit() -> None:
         "page_end": 181,
         "heading_path": ["Appendix", "驭魂者 Master of Souls"],
     }
+
+
+def test_reduced_ending_check_requires_ordered_declared_reducers() -> None:
+    checksum = "9" * 64
+    units = [{"id": "reduced-ending", "status": "runnable", "module_sha256": [checksum]}]
+    route = _complete_route("reduced-ending", checksum)
+    normal = route["scenarios"][0]
+    normal["ending_prerequisites"] = [
+        {
+            "id": "ally",
+            "receipt": "semantic_event",
+            "fact_key": "ending.ally",
+            "dc_reduction": 5,
+        },
+        {
+            "id": "check",
+            "receipt": "character_check",
+            "skill": "Persuasion",
+            "base_dc": 25,
+            "applied_reducer_ids": ["ally"],
+            "dc": 15,
+            "success": True,
+        },
+    ]
+
+    with pytest.raises(ValueError, match="base_dc minus declared reducers"):
+        _build_coverage_matrix(units, {"reduced-ending": route})
+
+    normal["ending_prerequisites"][1]["dc"] = 20
+    _build_coverage_matrix(units, {"reduced-ending": route})

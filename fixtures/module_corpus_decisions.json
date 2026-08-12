@@ -453,10 +453,47 @@
               }
             },
             {
+              "id": "sword-of-zariel-presented",
+              "receipt": "semantic_event",
+              "fact_key": "ending.redeeming-zariel.sword-presented",
+              "source_evidence": {
+                "page_start": 147,
+                "page_end": 148,
+                "heading_path": ["锟斤拷锟斤拷锟斤拷 锟斤拷锟诫阿锟斤拷锟斤拷斯 Escape from Avernus", "锟斤拷锟斤拷锟斤拷锟斤拷锟?Redeeming Zariel"]
+              }
+            },
+            {
+              "id": "lulu-present-reducer",
+              "receipt": "semantic_event",
+              "fact_key": "ending.redeeming-zariel.lulu-present",
+              "dc_reduction": 5,
+              "source_evidence": {
+                "page_start": 147,
+                "page_end": 148,
+                "heading_path": ["锟斤拷锟斤拷锟斤拷 锟斤拷锟诫阿锟斤拷锟斤拷斯 Escape from Avernus", "锟斤拷锟斤拷锟斤拷锟斤拷锟?Redeeming Zariel"]
+              }
+            },
+            {
+              "id": "olanthius-allied-present-reducer",
+              "receipt": "semantic_event",
+              "fact_key": "ending.redeeming-zariel.olanthius-allied-present",
+              "dc_reduction": 5,
+              "source_evidence": {
+                "page_start": 147,
+                "page_end": 148,
+                "heading_path": ["锟斤拷锟斤拷锟斤拷 锟斤拷锟诫阿锟斤拷锟斤拷斯 Escape from Avernus", "锟斤拷锟斤拷锟斤拷锟斤拷锟?Redeeming Zariel"]
+              }
+            },
+            {
               "id": "zariel-persuasion-success",
               "receipt": "character_check",
               "skill": "Persuasion",
-              "dc": 25,
+              "base_dc": 25,
+              "applied_reducer_ids": [
+                "lulu-present-reducer",
+                "olanthius-allied-present-reducer"
+              ],
+              "dc": 15,
               "success": true,
               "source_evidence": {
                 "page_start": 147,

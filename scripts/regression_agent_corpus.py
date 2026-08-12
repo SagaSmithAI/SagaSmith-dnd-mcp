@@ -628,7 +628,11 @@ def _chase_sequence_covered(
     return False
 
 
-def _successful_check_receipt(call: dict[str, Any], prerequisite: dict[str, Any]) -> bool:
+def _successful_check_receipt(
+    call: dict[str, Any],
+    prerequisite: dict[str, Any],
+    matched_receipts: list[tuple[dict[str, Any], dict[str, Any]]],
+) -> bool:
     if call.get("tool") != "character_check" or not call.get("ok"):
         return False
     arguments = call.get("arguments") or {}
@@ -636,7 +640,40 @@ def _successful_check_receipt(call: dict[str, Any], prerequisite: dict[str, Any]
     expected_skill = str(prerequisite.get("skill") or "")
     if expected_skill and str(payload.get("skill") or "").casefold() != expected_skill.casefold():
         return False
-    if "dc" in prerequisite and payload.get("dc") != prerequisite["dc"]:
+    expected_dc = prerequisite.get("dc")
+    if "base_dc" in prerequisite:
+        reducer_ids = [
+            str(value) for value in prerequisite.get("applied_reducer_ids") or []
+        ]
+        reducers = {
+            str(item.get("id")): (item, receipt_call)
+            for item, receipt_call in matched_receipts
+            if item.get("receipt") == "semantic_event" and item.get("dc_reduction") is not None
+        }
+        if set(reducer_ids) != set(reducers) or len(reducer_ids) != len(reducers):
+            return False
+        expected_dc = int(prerequisite["base_dc"]) - sum(
+            int(reducers[reducer_id][0]["dc_reduction"]) for reducer_id in reducer_ids
+        )
+        if "dc" in prerequisite and prerequisite["dc"] != expected_dc:
+            return False
+        source_scene_id = str(payload.get("source_scene_id") or "")
+        for reducer_id in reducer_ids:
+            reducer_call = reducers[reducer_id][1]
+            reducer_source_ref = (
+                ((reducer_call.get("arguments") or {}).get("payload") or {})
+                .get("event", {})
+                .get("payload", {})
+                .get("source_ref")
+            )
+            if isinstance(reducer_source_ref, str):
+                try:
+                    reducer_source_ref = json.loads(reducer_source_ref)
+                except json.JSONDecodeError:
+                    return False
+            if str((reducer_source_ref or {}).get("scene_id") or "") != source_scene_id:
+                return False
+    if expected_dc is not None and payload.get("dc") != expected_dc:
         return False
     expected_success = prerequisite.get("success")
     committed = any(
@@ -657,6 +694,56 @@ def _successful_check_receipt(call: dict[str, Any], prerequisite: dict[str, Any]
     )
     return committed and has_random_receipt and bool(payload.get("source_scene_id")) and bool(
         str(payload.get("source_excerpt") or "").strip()
+    )
+
+
+def _semantic_event_receipt(call: dict[str, Any], prerequisite: dict[str, Any]) -> bool:
+    if call.get("tool") != "memory_change" or not call.get("ok"):
+        return False
+    arguments = call.get("arguments") or {}
+    if arguments.get("action") != "commit":
+        return False
+    payload = arguments.get("payload") or {}
+    event = payload.get("event") or {}
+    event_payload = event.get("payload") or {}
+    fact_key = str(prerequisite.get("fact_key") or "")
+    reducer_id = str(prerequisite.get("id") or "")
+    if (
+        str(event.get("event_type") or "") != "source_semantic_event"
+        or not str(event.get("summary") or "").strip()
+        or event.get("audience_scope") not in {"actor", "party", "public"}
+        or str(event_payload.get("reducer_id") or "") != reducer_id
+        or not _valid_managed_source_ref(event_payload.get("source_ref"))
+    ):
+        return False
+    requested_fact = next(
+        (
+            fact
+            for fact in payload.get("facts") or []
+            if isinstance(fact, dict) and str(fact.get("fact_key") or "") == fact_key
+        ),
+        None,
+    )
+    if requested_fact is None or not str(requested_fact.get("content") or "").strip():
+        return False
+    result_event = next(
+        (
+            node
+            for node in _walk(call.get("result"))
+            if isinstance(node, dict)
+            and node.get("id")
+            and node.get("event_type") == "source_semantic_event"
+        ),
+        None,
+    )
+    if result_event is None:
+        return False
+    event_id = str(result_event["id"])
+    return any(
+        isinstance(node, dict)
+        and str(node.get("fact_key") or "") == fact_key
+        and event_id in [str(value) for value in node.get("source_event_ids") or []]
+        for node in _walk(call.get("result"))
     )
 
 
@@ -707,10 +794,16 @@ def _source_item_receipt(call: dict[str, Any], prerequisite: dict[str, Any]) -> 
     return False
 
 
-def _ending_prerequisite_receipt(call: dict[str, Any], prerequisite: dict[str, Any]) -> bool:
+def _ending_prerequisite_receipt(
+    call: dict[str, Any],
+    prerequisite: dict[str, Any],
+    matched_receipts: list[tuple[dict[str, Any], dict[str, Any]]],
+) -> bool:
     receipt = prerequisite.get("receipt")
     if receipt == "character_check":
-        return _successful_check_receipt(call, prerequisite)
+        return _successful_check_receipt(call, prerequisite, matched_receipts)
+    if receipt == "semantic_event":
+        return _semantic_event_receipt(call, prerequisite)
     if receipt in {"loot_acquire", "item_spend"}:
         return _source_item_receipt(call, prerequisite)
     return False
@@ -735,17 +828,21 @@ def _ending_completed(
             if completed:
                 verify_index = calls.index(call)
                 cursor = 0
+                matched_receipts: list[tuple[dict[str, Any], dict[str, Any]]] = []
                 for prerequisite in required:
                     matched = next(
                         (
                             index
                             for index in range(cursor, verify_index)
-                            if _ending_prerequisite_receipt(calls[index], prerequisite)
+                            if _ending_prerequisite_receipt(
+                                calls[index], prerequisite, matched_receipts
+                            )
                         ),
                         None,
                     )
                     if matched is None:
                         return False
+                    matched_receipts.append((prerequisite, calls[matched]))
                     cursor = matched + 1
                 return True
     return False
@@ -1674,7 +1771,13 @@ before configuring or verifying the ending. `receipt="loot_acquire"` and
 `receipt="item_spend"` require ordered, committed source-bound `campaign_change`
 acquisition/surrender receipts for the named item; `receipt="character_check"`
 requires a committed engine roll with exact scene evidence, skill/DC, required
-success, and an authoritative random receipt.
+success, and an authoritative random receipt. A preceding
+`receipt="semantic_event"` requires `memory_change(action="commit")`, an event
+with `event_type="source_semantic_event"`, the exact fixture `id` in
+`event.payload.reducer_id`, a managed `event.payload.source_ref`, and the exact
+fixture `fact_key`; the returned fact must cite the returned event id. A reduced
+check must use `base_dc - sum(dc_reduction)` for exactly its declared
+`applied_reducer_ids`. Bare add/upsert facts never qualify.
 Do not manufacture the result with
 `memory_change`, `module_set_progress`, or manifest fields. Those projections
 may record an outcome only after the independent prerequisite receipts exist.
