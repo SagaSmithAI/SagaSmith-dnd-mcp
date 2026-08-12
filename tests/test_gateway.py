@@ -15,6 +15,7 @@ from sagasmith_dnd.content_packages import build_preset_content_package
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.gateway import GATEWAY_KEY, GatewayConfig, create_app
+from sagasmith_dnd_mcp.server import create_server
 from tests.authoring_helpers import finalize_and_activate_module
 
 
@@ -30,12 +31,35 @@ def config(tmp_path: Path) -> McpConfig:
     )
 
 
+class InProcessTestClient:
+    """Unit-test client; real streamable HTTP is covered separately."""
+
+    def __init__(self, value: McpConfig):
+        self.server = create_server(value)
+
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+    async def call_tool(self, tool_id: str, arguments: dict) -> CallToolResult:
+        content, structured = await self.server.call_tool(tool_id, arguments)
+        return CallToolResult(content=content, structuredContent=structured)
+
+
+def app_for(tmp_path: Path, gateway_config: GatewayConfig | None = None):
+    value = config(tmp_path)
+    return create_app(
+        gateway_config or GatewayConfig(),
+        InProcessTestClient(value),
+        value,
+    )
+
+
 def test_gateway_projects_mcp_data_and_enforces_origin(tmp_path: Path) -> None:
     async def exercise() -> None:
-        app = create_app(
-            config(tmp_path),
-            GatewayConfig(allowed_origins=("http://ui.test",)),
-        )
+        app = app_for(tmp_path, GatewayConfig(allowed_origins=("http://ui.test",)))
         gateway = app[GATEWAY_KEY]
         campaign = await gateway.call(
             "campaign_create",
@@ -132,7 +156,7 @@ def test_gateway_projects_mcp_data_and_enforces_origin(tmp_path: Path) -> None:
 
 def test_gateway_requires_configured_bearer_token(tmp_path: Path) -> None:
     async def exercise() -> None:
-        app = create_app(config(tmp_path), GatewayConfig(bearer_token="secret"))
+        app = app_for(tmp_path, GatewayConfig(bearer_token="secret"))
         client = TestClient(TestServer(app))
         await client.start_server()
         try:
@@ -149,9 +173,38 @@ def test_gateway_requires_configured_bearer_token(tmp_path: Path) -> None:
     asyncio.run(exercise())
 
 
+def test_gateway_serves_built_workbench_and_redirects_to_agent(tmp_path: Path) -> None:
+    ui_dist = tmp_path / "ui-dist"
+    ui_dist.mkdir()
+    (ui_dist / "index.html").write_text("<h1>D&D Workbench</h1>", encoding="utf-8")
+
+    async def exercise() -> None:
+        app = app_for(
+            tmp_path,
+            GatewayConfig(
+                ui_dist=ui_dist,
+                agent_webui_url="http://127.0.0.1:18765/",
+            ),
+        )
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            workbench = await client.get("/")
+            assert workbench.status == 200
+            assert "D&D Workbench" in await workbench.text()
+
+            agent = await client.get("/agent", allow_redirects=False)
+            assert agent.status == 302
+            assert agent.headers["Location"] == "http://127.0.0.1:18765/"
+        finally:
+            await client.close()
+
+    asyncio.run(exercise())
+
+
 def test_gateway_streams_native_combat_render_content(tmp_path: Path) -> None:
     async def exercise() -> None:
-        app = create_app(config(tmp_path), GatewayConfig())
+        app = app_for(tmp_path)
         gateway = app[GATEWAY_KEY]
         image = b"\x89PNG\r\n\x1a\nrender"
         metadata = {
@@ -174,7 +227,7 @@ def test_gateway_streams_native_combat_render_content(tmp_path: Path) -> None:
                 structuredContent=metadata,
             )
 
-        gateway.server.call_tool = render
+        gateway.client.call_tool = render
         client = TestClient(TestServer(app))
         await client.start_server()
         try:
@@ -211,7 +264,7 @@ def test_gateway_exposes_known_errors_and_hides_unknown_failures(tmp_path: Path)
             (RuntimeError("database secret"), 500, "internal gateway error"),
         ]
         for error, expected_status, expected_message in cases:
-            app = create_app(config(tmp_path), GatewayConfig())
+            app = app_for(tmp_path)
             gateway = app[GATEWAY_KEY]
 
             async def fail(_tool_id, _arguments, *, raised=error):
@@ -259,7 +312,7 @@ def test_gateway_imports_and_projects_finalized_preset_inventory(tmp_path: Path)
     archive = dumps_content_archive(package, blobs)
 
     async def exercise() -> None:
-        app = create_app(config(tmp_path), GatewayConfig())
+        app = app_for(tmp_path)
         gateway = app[GATEWAY_KEY]
         campaign = await gateway.call(
             "campaign_create",

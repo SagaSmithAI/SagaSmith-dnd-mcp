@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 REQUIRED_DND_SKILLS = ("dnd-dm", "dnd-campaign-manager")
 
@@ -67,12 +68,18 @@ def validate_runtime(config_path: Path, agent_root: Path) -> list[str]:
     if not dnd:
         return [*errors, "tools.mcpServers.sagasmith_dnd is not configured."]
 
-    command = dnd.get("command")
-    if not isinstance(command, str) or not _resolve_config_path(agent_root, command).is_file():
-        errors.append("The configured sagasmith_dnd MCP executable does not exist.")
-    cwd = dnd.get("cwd")
-    if not isinstance(cwd, str) or not _resolve_config_path(agent_root, cwd).is_dir():
-        errors.append("The configured sagasmith_dnd MCP working directory does not exist.")
+    if dnd.get("type") != "streamableHttp":
+        errors.append("sagasmith_dnd.type must be 'streamableHttp' for the single local MCP host.")
+    url = dnd.get("url")
+    parsed_url = urlparse(url) if isinstance(url, str) else None
+    if (
+        parsed_url is None
+        or parsed_url.scheme != "http"
+        or parsed_url.hostname not in {"127.0.0.1", "localhost"}
+        or parsed_url.port != 8767
+        or parsed_url.path.rstrip("/") != "/mcp"
+    ):
+        errors.append("sagasmith_dnd.url must be http://127.0.0.1:8767/mcp.")
 
     if dnd.get("enabledTools") != ["*"]:
         errors.append(
@@ -85,37 +92,31 @@ def validate_runtime(config_path: Path, agent_root: Path) -> list[str]:
     if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout < 900:
         errors.append("sagasmith_dnd.toolTimeout must be at least 900 seconds for PDF imports.")
 
-    env = _mapping(dnd.get("env"))
-    raw_dnd_skills = env.get("SAGASMITH_DND_SKILLS_DIR")
-    if not isinstance(raw_dnd_skills, str):
-        errors.append("SAGASMITH_DND_SKILLS_DIR is missing from the D&D MCP environment.")
-    else:
-        mcp_skill_root = _resolve_config_path(agent_root, raw_dnd_skills)
-        expected = (mcp_skill_root / "full" / "skills").resolve()
-        if not expected.is_dir():
-            errors.append("SAGASMITH_DND_SKILLS_DIR does not contain full/skills.")
-        elif dnd_skill_roots and expected not in dnd_skill_roots:
-            errors.append(
-                "Agent externalSkillsDirs and SAGASMITH_DND_SKILLS_DIR do not point "
-                "to the same Full D&D skill pack."
-            )
+    tools = _mapping(config.get("tools"))
+    whitelist = tools.get("ssrfWhitelist")
+    if not isinstance(whitelist, list) or "127.0.0.1/32" not in whitelist:
+        errors.append(
+            "tools.ssrfWhitelist must include 127.0.0.1/32 for the local HTTP MCP."
+        )
 
-    raw_rule_root = env.get("SAGASMITH_DND_MCP_RULE_IMPORT_ROOTS")
-    rule_roots = (
-        _resolve_config_roots(agent_root, raw_rule_root)
-        if isinstance(raw_rule_root, str)
-        else []
-    )
-    if not rule_roots or not all(root.is_dir() for root in rule_roots):
-        errors.append("SAGASMITH_DND_MCP_RULE_IMPORT_ROOTS does not exist.")
-    raw_module_root = env.get("SAGASMITH_DND_MCP_MODULE_IMPORT_ROOTS")
-    module_roots = (
-        _resolve_config_roots(agent_root, raw_module_root)
-        if isinstance(raw_module_root, str)
-        else []
-    )
-    if not module_roots or not all(root.is_dir() for root in module_roots):
-        errors.append("SAGASMITH_DND_MCP_MODULE_IMPORT_ROOTS does not exist.")
+    expected_skills = (agent_root.parent / "SagaSmith-dnd-skills" / "full" / "skills").resolve()
+    if dnd_skill_roots and expected_skills not in dnd_skill_roots:
+        errors.append(
+            "Agent externalSkillsDirs must expose the sibling Full D&D skill pack."
+        )
+
+    for label, root in (
+        (
+            "D&D rulebook import root",
+            agent_root.parent / "reference" / "DnD-Books" / "5e" / "Books",
+        ),
+        (
+            "D&D module import root",
+            agent_root.parent / "reference" / "DnD-Books" / "5e" / "Campaign",
+        ),
+    ):
+        if not root.is_dir():
+            errors.append(f"{label} does not exist: {root}")
     return errors
 
 

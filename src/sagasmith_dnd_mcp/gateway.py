@@ -11,21 +11,27 @@ import logging
 import os
 import tempfile
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from aiohttp import web
-from mcp.server.fastmcp.exceptions import ToolError
-from mcp.types import ImageContent
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
+from mcp.types import CallToolResult, ImageContent
 from sagasmith_core.access import LOCAL_SYSTEM_PRINCIPAL_ID
 from sagasmith_core.idempotency import IdempotencyConflictError
 
 from sagasmith_dnd_mcp.config import McpConfig
-from sagasmith_dnd_mcp.server import create_server
+from sagasmith_dnd_mcp.tool_profiles import CORE_TOOLS
 
 JsonHandler = Callable[[web.Request], Awaitable[web.StreamResponse]]
 LOGGER = logging.getLogger(__name__)
 CONTENT_PACK_KINDS = ("core_rules", "addon", "module", "preset")
+
+
+class McpToolRejectedError(ValueError):
+    """A connected MCP server rejected a well-formed tool request."""
 
 
 @dataclass(frozen=True)
@@ -34,6 +40,9 @@ class GatewayConfig:
     port: int = 8766
     bearer_token: str | None = None
     upload_limit_bytes: int = 64 * 1024 * 1024
+    mcp_url: str = "http://127.0.0.1:8767/mcp"
+    agent_webui_url: str = "http://127.0.0.1:8765/"
+    ui_dist: Path | None = None
     allowed_origins: tuple[str, ...] = (
         "http://127.0.0.1:4321",
         "http://localhost:4321",
@@ -56,18 +65,217 @@ class GatewayConfig:
             upload_limit_bytes=int(
                 os.environ.get("SAGASMITH_DND_GATEWAY_UPLOAD_LIMIT", str(64 * 1024 * 1024))
             ),
+            mcp_url=os.environ.get(
+                "SAGASMITH_DND_MCP_URL", "http://127.0.0.1:8767/mcp"
+            ),
+            agent_webui_url=os.environ.get(
+                "SAGASMITH_AGENT_WEBUI_URL", "http://127.0.0.1:8765/"
+            ),
+            ui_dist=(
+                Path(value).expanduser().resolve()
+                if (value := os.environ.get("SAGASMITH_DND_UI_DIST", "")).strip()
+                else None
+            ),
             allowed_origins=origins,
         )
+
+
+@dataclass
+class _McpRequest:
+    tool_id: str
+    arguments: dict[str, Any]
+    future: asyncio.Future[CallToolResult]
+    attempts: int = 0
+
+
+@dataclass
+class DndMcpClient:
+    """Own one real MCP session from one long-lived asyncio task."""
+
+    url: str
+    startup_timeout: float = 15.0
+    _queue: asyncio.Queue[_McpRequest | None] = dataclass_field(
+        init=False, default_factory=asyncio.Queue
+    )
+    _ready: asyncio.Event = dataclass_field(init=False, default_factory=asyncio.Event)
+    _runner_task: asyncio.Task[None] | None = dataclass_field(init=False, default=None)
+    _startup_error: BaseException | None = dataclass_field(init=False, default=None)
+
+    async def start(self) -> None:
+        if self._runner_task is not None:
+            return
+        self._runner_task = asyncio.create_task(self._run(), name="sagasmith-dnd-gateway-mcp")
+        try:
+            await asyncio.wait_for(self._ready.wait(), timeout=self.startup_timeout)
+        except TimeoutError:
+            await self.stop()
+            raise RuntimeError(f"D&D MCP did not become ready at {self.url}") from None
+        if self._startup_error is not None:
+            error = self._startup_error
+            await self.stop()
+            raise RuntimeError(f"D&D MCP connection failed at {self.url}") from error
+
+    async def stop(self) -> None:
+        task = self._runner_task
+        if task is None:
+            return
+        await self._queue.put(None)
+        try:
+            await asyncio.wait_for(task, timeout=5)
+        except TimeoutError:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        finally:
+            self._runner_task = None
+
+    async def call_tool(self, tool_id: str, arguments: dict[str, Any]) -> CallToolResult:
+        if self._runner_task is None:
+            raise RuntimeError("D&D MCP client is not started")
+        future = asyncio.get_running_loop().create_future()
+        await self._queue.put(_McpRequest(tool_id, dict(arguments), future))
+        return await future
+
+    async def _run(self) -> None:
+        pending: _McpRequest | None = None
+        first_attempt = True
+        while True:
+            try:
+                async with streamable_http_client(self.url) as streams:
+                    read_stream, write_stream, _ = streams
+                    async with ClientSession(read_stream, write_stream) as session:
+                        await session.initialize()
+                        if first_attempt:
+                            self._ready.set()
+                            first_attempt = False
+                        while True:
+                            request = pending or await self._queue.get()
+                            pending = None
+                            if request is None:
+                                return
+                            try:
+                                result = await self._call_in_session(
+                                    session, request.tool_id, request.arguments
+                                )
+                            except McpToolRejectedError as exc:
+                                if not request.future.done():
+                                    request.future.set_exception(exc)
+                            except Exception as exc:
+                                if request.attempts == 0:
+                                    request.attempts += 1
+                                    pending = request
+                                    break
+                                if not request.future.done():
+                                    request.future.set_exception(exc)
+                            else:
+                                if not request.future.done():
+                                    request.future.set_result(result)
+            except asyncio.CancelledError:
+                if pending is not None and not pending.future.done():
+                    pending.future.cancel()
+                raise
+            except Exception as exc:
+                if first_attempt:
+                    self._startup_error = exc
+                    self._ready.set()
+                    return
+                if pending is not None and pending.attempts >= 1:
+                    if not pending.future.done():
+                        pending.future.set_exception(exc)
+                    pending = None
+                await asyncio.sleep(0.25)
+
+    @staticmethod
+    def _principal(arguments: dict[str, Any]) -> str:
+        return str(
+            arguments.get("by_principal_id")
+            or arguments.get("principal_id")
+            or LOCAL_SYSTEM_PRINCIPAL_ID
+        )
+
+    async def _call_in_session(
+        self,
+        session: ClientSession,
+        tool_id: str,
+        arguments: dict[str, Any],
+    ) -> CallToolResult:
+        if tool_id not in CORE_TOOLS:
+            campaign_id = str(arguments.get("campaign_id") or "").strip() or None
+            principal_id = self._principal(arguments)
+            try:
+                status = await session.call_tool(
+                    "exposure",
+                    {"action": "get", "principal_id": principal_id},
+                )
+                current = dict(status.structuredContent or {})
+                current = dict(current.get("result") or current)
+            except Exception:
+                current = {}
+            if (
+                current.get("campaign_id") != campaign_id
+                or current.get("principal_id") != principal_id
+            ):
+                opened = await session.call_tool(
+                    "exposure",
+                    {
+                        "action": "open",
+                        "campaign_id": campaign_id,
+                        "principal_id": principal_id,
+                    },
+                )
+                self._raise_tool_error(opened)
+                current = dict(opened.structuredContent or {})
+                current = dict(current.get("result") or current)
+            if tool_id not in set(current.get("loaded_tools") or []):
+                loaded = await session.call_tool(
+                    "exposure",
+                    {
+                        "action": "set",
+                        "campaign_id": campaign_id,
+                        "add_tool_ids": [tool_id],
+                        "principal_id": principal_id,
+                    },
+                )
+                self._raise_tool_error(loaded)
+                listed = {tool.name for tool in (await session.list_tools()).tools}
+                if tool_id not in listed:
+                    raise RuntimeError(
+                        f"D&D MCP did not expose {tool_id!r} after tools/list_changed"
+                    )
+        result = await session.call_tool(tool_id, arguments)
+        self._raise_tool_error(result)
+        return result
+
+    @staticmethod
+    def _raise_tool_error(result: CallToolResult) -> None:
+        if not result.isError:
+            return
+        message = next(
+            (
+                str(getattr(item, "text", "")).strip()
+                for item in result.content
+                if str(getattr(item, "text", "")).strip()
+            ),
+            "D&D MCP rejected the request",
+        )
+        raise McpToolRejectedError(message[:2000])
 
 
 class DndGateway:
     """Expose stable UI DTOs while routing every write through an MCP tool."""
 
-    def __init__(self, mcp_config: McpConfig, config: GatewayConfig):
+    def __init__(
+        self,
+        config: GatewayConfig,
+        client: DndMcpClient,
+        mcp_config: McpConfig,
+    ):
         self.config = config
+        self.client = client
         self.mcp_config = mcp_config
         self.mcp_config.prepare()
-        self.server = create_server(mcp_config)
 
     @staticmethod
     def pack_summary(kind: str, value: dict[str, Any]) -> dict[str, Any]:
@@ -146,25 +354,11 @@ class DndGateway:
         )
 
     async def call(self, tool_id: str, arguments: dict[str, Any]) -> Any:
-        try:
-            value = await self.server.call_tool(tool_id, arguments)
-        except ToolError as error:
-            cause = error.__cause__
-            if isinstance(
-                cause,
-                (
-                    IdempotencyConflictError,
-                    KeyError,
-                    LookupError,
-                    PermissionError,
-                    TypeError,
-                    ValueError,
-                ),
-            ):
-                raise cause
-            raise
-        structured = value[1] if isinstance(value, tuple) and len(value) > 1 else value
+        value = await self.client.call_tool(tool_id, arguments)
+        structured = value.structuredContent
         if isinstance(structured, dict) and set(structured) >= {"action", "result"}:
+            return structured["result"]
+        if isinstance(structured, dict) and set(structured) >= {"result"}:
             return structured["result"]
         return structured
 
@@ -796,7 +990,7 @@ class DndGateway:
             raise web.HTTPBadRequest(
                 text="audience_projection must be caller or party_public"
             )
-        rendered = await self.server.call_tool(
+        rendered = await self.client.call_tool(
             "combat_query",
             {
                 "campaign_id": campaign_id,
@@ -882,11 +1076,13 @@ GATEWAY_KEY = web.AppKey("gateway", DndGateway)
 
 
 def create_app(
-    mcp_config: McpConfig | None = None,
     gateway_config: GatewayConfig | None = None,
+    mcp_client: DndMcpClient | None = None,
+    mcp_config: McpConfig | None = None,
 ) -> web.Application:
     config = gateway_config or GatewayConfig.from_environment()
-    gateway = DndGateway(mcp_config or McpConfig.from_environment(), config)
+    client = mcp_client or DndMcpClient(config.mcp_url)
+    gateway = DndGateway(config, client, mcp_config or McpConfig.from_environment())
 
     @web.middleware
     async def boundary(request: web.Request, handler: JsonHandler) -> web.StreamResponse:
@@ -953,6 +1149,15 @@ def create_app(
         client_max_size=config.upload_limit_bytes,
     )
     app[GATEWAY_KEY] = gateway
+
+    async def mcp_lifecycle(_: web.Application):
+        await client.start()
+        try:
+            yield
+        finally:
+            await client.stop()
+
+    app.cleanup_ctx.append(mcp_lifecycle)
     app.router.add_route("OPTIONS", "/{tail:.*}", options)
     app.router.add_get("/api/health", gateway.health)
     app.router.add_get("/api/campaigns", gateway.campaigns)
@@ -1026,6 +1231,36 @@ def create_app(
     app.router.add_get("/api/campaigns/{campaign_id}/stream", gateway.stream)
     app.router.add_get("/api/rules", gateway.rule_sources)
     app.router.add_get("/api/rules/search", gateway.rule_search)
+
+    async def agent_webui(_: web.Request) -> web.Response:
+        raise web.HTTPFound(config.agent_webui_url)
+
+    app.router.add_get("/agent", agent_webui)
+
+    if config.ui_dist is not None:
+        ui_root = config.ui_dist.resolve()
+        if not (ui_root / "index.html").is_file():
+            raise ValueError(f"D&D UI dist is missing index.html: {ui_root}")
+
+        async def ui_file(request: web.Request) -> web.FileResponse:
+            relative = request.match_info.get("path", "").strip("/")
+            candidates = [
+                ui_root / relative,
+                ui_root / relative / "index.html",
+            ] if relative else [ui_root / "index.html"]
+            target = next(
+                (
+                    candidate.resolve()
+                    for candidate in candidates
+                    if candidate.is_file() and candidate.resolve().is_relative_to(ui_root)
+                ),
+                None,
+            )
+            if target is None:
+                raise web.HTTPNotFound(text="D&D UI route not found")
+            return web.FileResponse(target)
+
+        app.router.add_get("/{path:.*}", ui_file)
     return app
 
 

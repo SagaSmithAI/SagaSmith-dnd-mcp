@@ -33,6 +33,9 @@ class McpConfig:
     bound_principal_id: str | None = None
     document_cache_dir: Path | None = None
     npc_host_token: str | None = None
+    http_host: str = "127.0.0.1"
+    http_port: int = 8767
+    http_path: str = "/mcp"
 
     @classmethod
     def from_environment(cls) -> "McpConfig":
@@ -127,6 +130,9 @@ class McpConfig:
                 if (value := os.environ.get("SAGASMITH_NPC_HOST_TOKEN", "")).strip()
                 else None
             ),
+            http_host=os.environ.get("SAGASMITH_DND_MCP_HTTP_HOST", "127.0.0.1"),
+            http_port=int(os.environ.get("SAGASMITH_DND_MCP_HTTP_PORT", "8767")),
+            http_path=os.environ.get("SAGASMITH_DND_MCP_HTTP_PATH", "/mcp"),
         )
 
     @property

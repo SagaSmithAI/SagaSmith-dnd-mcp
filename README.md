@@ -2,7 +2,8 @@
 
 ## Content Pack gateway
 
-The optional HTTP gateway projects the authoritative `content_pack` facade for the D&D UI.
+The HTTP gateway connects to the one authoritative streamable-HTTP MCP process and projects its
+facades for the D&D UI. It never creates a second in-process MCP owner.
 It exposes campaign-aware inventory and detail reads for `core_rules`, `addon`, `module`, and
 `preset`, streams `.sagasmith-pack` uploads into managed storage, and supports explicit
 activate/deactivate/export/remove operations. Safe inventory/detail reads remain available in
@@ -14,9 +15,25 @@ Uploads default to 64 MiB and can be capped with
 checksum, then MCP independently validates the schema-v2 descriptor, blobs, dependencies, and
 D&D semantics. Export downloads are served only after an MCP-authorized managed-artifact check.
 
+Local D&D process layout:
+
+```powershell
+$env:SAGASMITH_DND_MCP_TRANSPORT = "streamable-http"
+$env:SAGASMITH_DND_MCP_HTTP_PORT = "8767"
+sagasmith-dnd-mcp
+
+$env:SAGASMITH_DND_MCP_URL = "http://127.0.0.1:8767/mcp"
+$env:SAGASMITH_DND_UI_DIST = "C:\path\to\SagaSmith-dnd-ui\dist"
+sagasmith-dnd-gateway
+```
+
+The gateway listens on `127.0.0.1:8766` by default and serves the built Workbench when
+`SAGASMITH_DND_UI_DIST` is set. Both the gateway and Agent remain real MCP clients; each observes
+server-emitted `tools/list_changed` rather than using a fixed tool superset.
+
 [平台总览](https://github.com/SagaSmithAI/.github/blob/main/profile/README.md) · [D&D runtime](https://github.com/SagaSmithAI/Sagasmith-dnd) · [D&D Skills](https://github.com/SagaSmithAI/SagaSmith-dnd-skills)
 
-**SagaSmithAI 的 D&D 5e Agent 能力服务。** 它通过标准 stdio MCP 将 SagaSmith Core、D&D 规则运行时、D&D Skills 和模组生成 Skill 组合成一个可被不同 Agent Host 复用的服务端边界。
+**SagaSmithAI 的 D&D 5e Agent 能力服务。** 它通过标准 MCP transport 将 SagaSmith Core、D&D 规则运行时、D&D Skills 和模组生成 Skill 组合成一个可被不同 Agent Host 复用的服务端边界；本地系统使用唯一的 streamable-HTTP 权威进程。
 
 与“把 70+ 个工具一次性塞给模型”不同，本服务在 MCP 侧维护会话级 exposure：先发现能力组，再按当前 `lobby` / `play` / `combat` 阶段加载少量工具，并在阶段、权限或 TTL 改变时收回。
 
@@ -36,7 +53,7 @@ D&D semantics. Export downloads are served only after an MCP-authorized managed-
 
 ```mermaid
 flowchart TB
-    H[MCP Host / Agent] --> C[13 core tools]
+    H[MCP Host / Agent] --> C[6 core tools]
     C --> O[exposure]
     O --> S[search → inspect → load]
     S --> L[lobby tools]
@@ -90,35 +107,21 @@ sagasmith-dnd-mcp
 
 ## Agent 配置
 
-NanoBot 示例；其他 stdio MCP Host 使用相同的 `command`、`cwd` 与 `env`：
+NanoBot 本地 HTTP 示例：
 
 ```json
 {
   "tools": {
     "mcpServers": {
       "sagasmith_dnd": {
-        "command": "C:\\path\\to\\SagaSmith-dnd-mcp\\.venv\\Scripts\\sagasmith-dnd-mcp.exe",
-        "args": [],
-        "cwd": "C:\\path\\to\\SagaSmith-dnd-mcp",
-        "env": {
-          "SAGASMITH_DND_MCP_HOME": "C:\\path\\to\\workspace\\.sagasmith-dnd-mcp",
-          "SAGASMITH_DND_SKILLS_DIR": "C:\\path\\to\\SagaSmith-dnd-skills",
-          "SAGASMITH_DND_MCP_RULE_IMPORT_ROOTS": "C:\\path\\to\\DnD-Books",
-          "SAGASMITH_DND_MCP_RULE_OCR": "1",
-          "SAGASMITH_DND_MCP_RULE_OCR_SCALE": "2.0"
-        },
+        "type": "streamableHttp",
+        "url": "http://127.0.0.1:8767/mcp",
         "toolTimeout": 900,
         "injectPrincipal": true,
-        "enabledTools": [
-          "exposure",
-          "server_capabilities",
-          "storage_status",
-          "campaign_query",
-          "game_phase",
-          "skill_query"
-        ]
+        "enabledTools": ["*"]
       }
-    }
+    },
+    "ssrfWhitelist": ["127.0.0.1/32"]
   }
 }
 ```
@@ -268,6 +271,10 @@ Skill 深度通过 `skill_query(read|outline|section|search)` 按需读取；工
 | `SAGASMITH_DND_MCP_RULE_OCR_SCALE` | OCR 页渲染倍率；默认 `2.0` |
 | `SAGASMITH_DND_MCP_MODULE_IMPORT_ROOTS` | `os.pathsep` 分隔的模组 PDF/Markdown/text 导入白名单 |
 | `SAGASMITH_DND_MCP_AUTO_SEED=0` | 禁用 bundled core reference 自动 seed |
+| `SAGASMITH_DND_MCP_TRANSPORT` | `stdio` 或本地系统使用的 `streamable-http` |
+| `SAGASMITH_DND_MCP_HTTP_HOST` / `PORT` / `PATH` | MCP HTTP 监听地址，默认 `127.0.0.1:8767/mcp` |
+| `SAGASMITH_DND_MCP_URL` | Gateway 连接的权威 MCP URL |
+| `SAGASMITH_DND_UI_DIST` | Gateway 静态服务的 D&D Workbench `dist` 目录 |
 | `SAGASMITH_DND_GATEWAY_HOST` / `PORT` | UI adapter 监听地址，默认 `127.0.0.1:8766` |
 | `SAGASMITH_DND_GATEWAY_TOKEN` | 非 loopback 访问所需 Bearer token |
 | `SAGASMITH_DND_GATEWAY_ORIGINS` | 逗号分隔的精确 CORS origin allowlist |

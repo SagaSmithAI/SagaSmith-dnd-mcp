@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import math
+import os
 import re
 import secrets
 import time
@@ -2845,7 +2846,7 @@ class SessionExposureFastMCP(FastMCP):
 
 
 def create_server(config: McpConfig | None = None) -> FastMCP:
-    """Create a stdio-capable server with one MCP-owned local data directory."""
+    """Create one session-aware MCP server over either supported local transport."""
     config = config or McpConfig.from_environment()
     storage = SagaSmithStorage(config)
     storage.migrate()
@@ -4811,6 +4812,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             authoritative_host_context_binding(campaign_id, principal_id, arguments)
         ),
         bound_principal_id=config.bound_principal_id,
+        host=config.http_host,
+        port=config.http_port,
+        streamable_http_path=config.http_path,
     )
 
     def public_tool() -> Callable[[Callable[..., Any]], Callable[..., Any]]:
@@ -46610,7 +46614,13 @@ def main() -> None:
     # asyncio loop, so initialize it on the main thread before the loop starts.
     import pypdfium2  # noqa: F401
 
-    create_server().run(transport="stdio")
+    config = McpConfig.from_environment()
+    transport = os.environ.get("SAGASMITH_DND_MCP_TRANSPORT", "stdio").strip().casefold()
+    if transport not in {"stdio", "streamable-http"}:
+        raise ValueError(
+            "SAGASMITH_DND_MCP_TRANSPORT must be 'stdio' or 'streamable-http'"
+        )
+    create_server(config).run(transport=transport)
 
 
 if __name__ == "__main__":
