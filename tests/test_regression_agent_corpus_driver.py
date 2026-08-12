@@ -930,6 +930,15 @@ def test_ending_requires_independent_source_item_and_check_receipts() -> None:
     assert "ending:ending" not in audit["gaps"]
     assert "ending:legal_ending_not_verified" not in audit["gaps"]
 
+    audit = _coverage_audit(
+        route,
+        [*self_certifying, *receipts],
+        process_count=2,
+        list_changed_count=1,
+    )
+    assert "ending:ending" not in audit["gaps"]
+    assert "ending:legal_ending_not_verified" not in audit["gaps"]
+
     missing_reducer = [call for call in receipts if "event-mentor" not in str(call)]
     audit = _coverage_audit(route, missing_reducer, process_count=2, list_changed_count=1)
     assert "ending:ending" in audit["gaps"]

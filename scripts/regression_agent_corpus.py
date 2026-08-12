@@ -847,7 +847,7 @@ def _ending_completed(
     calls: list[dict[str, Any]], *, prerequisites: list[dict[str, Any]] | None = None
 ) -> bool:
     required = list(prerequisites or [])
-    for call in calls:
+    for verify_index, call in enumerate(calls):
         if call.get("tool") != "playthrough_manifest" or not call.get("ok"):
             continue
         args = call.get("arguments") or {}
@@ -860,7 +860,6 @@ def _ending_completed(
                 node.get("achieved") is True and node.get("completed") is not False
             )
             if completed:
-                verify_index = calls.index(call)
                 cursor = 0
                 matched_receipts: list[tuple[dict[str, Any], dict[str, Any]]] = []
                 for prerequisite in required:
@@ -875,10 +874,11 @@ def _ending_completed(
                         None,
                     )
                     if matched is None:
-                        return False
+                        break
                     matched_receipts.append((prerequisite, calls[matched]))
                     cursor = matched + 1
-                return True
+                else:
+                    return True
     return False
 
 

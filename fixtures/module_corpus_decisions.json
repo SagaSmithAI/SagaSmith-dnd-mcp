@@ -7,7 +7,10 @@
         {
           "id": "opening",
           "source_sha256": "c3095b66e2f690d8a16b43a6b73c0aa6209c2e913714df5a65b3d2d0481aec07",
-          "heading_path": ["Part 1: Goblin Arrows", "Part 1: Goblin Arrows"],
+          "heading_path": [
+            "Part 1: Goblin Arrows",
+            "Part 1: Goblin Arrows"
+          ],
           "content_sha256": "f8317e197d0bf9b2156463e11a098df8ba367e36aca0d9676bdf1556d3ad73cd",
           "page_start": 6,
           "page_end": 6
@@ -15,7 +18,10 @@
         {
           "id": "encounter",
           "source_sha256": "c3095b66e2f690d8a16b43a6b73c0aa6209c2e913714df5a65b3d2d0481aec07",
-          "heading_path": ["Part 4: Wave Echo Cave", "KEYED ENCOUNTERS"],
+          "heading_path": [
+            "Part 4: Wave Echo Cave",
+            "KEYED ENCOUNTERS"
+          ],
           "content_sha256": "50b0b2138cdee1674652eb832e07c764a120bf6e34dcff48c32ff8fcaaf2ad39",
           "page_start": 42,
           "page_end": 44
@@ -23,7 +29,10 @@
         {
           "id": "ending",
           "source_sha256": "c3095b66e2f690d8a16b43a6b73c0aa6209c2e913714df5a65b3d2d0481aec07",
-          "heading_path": ["Part 4: Wave Echo Cave", "CONCLUSION"],
+          "heading_path": [
+            "Part 4: Wave Echo Cave",
+            "CONCLUSION"
+          ],
           "content_sha256": "f080de6bc20d3330febd99cf8b7799d1a6c4daf2a1bfb66b9966451c774f7294",
           "page_start": 51,
           "page_end": 51
@@ -34,7 +43,13 @@
           "id": "goblin-arrows-opening",
           "chapter_or_scene": "Part 1: Goblin Arrows",
           "evidence_id": "opening",
-          "mechanisms": ["preparation", "play_scene", "noncombat_check", "npc_conversation", "conversation_to_mechanic"],
+          "mechanisms": [
+            "preparation",
+            "play_scene",
+            "noncombat_check",
+            "npc_conversation",
+            "conversation_to_mechanic"
+          ],
           "positioning_mode": "agent",
           "audience": "dm",
           "path": "normal"
@@ -43,7 +58,13 @@
           "id": "wave-echo-encounter",
           "chapter_or_scene": "Part 4: Wave Echo Cave / Keyed Encounters",
           "evidence_id": "encounter",
-          "mechanisms": ["resource_settlement", "conversation_to_combat", "agent_semantic_spell_ruling", "combat", "combat_render"],
+          "mechanisms": [
+            "resource_settlement",
+            "conversation_to_combat",
+            "agent_semantic_spell_ruling",
+            "combat",
+            "combat_render"
+          ],
           "positioning_mode": "grid",
           "audience": "player",
           "path": "normal",
@@ -68,7 +89,9 @@
           "id": "wave-echo-conclusion",
           "chapter_or_scene": "Part 4: Wave Echo Cave / Conclusion",
           "evidence_id": "ending",
-          "mechanisms": ["ending"],
+          "mechanisms": [
+            "ending"
+          ],
           "positioning_mode": "agent",
           "audience": "player",
           "path": "normal",
@@ -78,11 +101,21 @@
           "id": "recovery-boundaries",
           "chapter_or_scene": "Part 1: Goblin Arrows",
           "evidence_id": "opening",
-          "mechanisms": ["save_restore", "idempotent_retry", "revision_conflict_refresh", "phase_exposure_refresh"],
+          "mechanisms": [
+            "save_restore",
+            "idempotent_retry",
+            "revision_conflict_refresh",
+            "phase_exposure_refresh"
+          ],
           "positioning_mode": "grid",
           "audience": "dm",
           "path": "recovery",
-          "recovery_operations": ["process_restart", "snapshot_restore", "branch_checkout", "undo_redo"]
+          "recovery_operations": [
+            "process_restart",
+            "snapshot_restore",
+            "branch_checkout",
+            "undo_redo"
+          ]
         }
       ]
     },
@@ -92,7 +125,11 @@
         {
           "id": "opening",
           "source_sha256": "8f582d64c01c84fca6a2e6106aa616ca8daa929fd7cc6243de56525d1f35f455",
-          "heading_path": ["Ch. 1: A Friend In Need", "Ch. 1: A Friend In Need", "BAR BRAWL IN THE YAWNING PORTAL PROVES"],
+          "heading_path": [
+            "Ch. 1: A Friend In Need",
+            "Ch. 1: A Friend In Need",
+            "BAR BRAWL IN THE YAWNING PORTAL PROVES"
+          ],
           "content_sha256": "b656f10441ccdf5aad04e4de9c92f9deca6816809b89a77f119bc7c289690f04",
           "page_start": 22,
           "page_end": 22
@@ -100,7 +137,11 @@
         {
           "id": "encounter",
           "source_sha256": "8f582d64c01c84fca6a2e6106aa616ca8daa929fd7cc6243de56525d1f35f455",
-          "heading_path": ["Ch. 4: Dragon Season", "Ch. 4: Dragon Season", "OLD MAKES PEOPLE DO STRANGE THINGS, AND"],
+          "heading_path": [
+            "Ch. 4: Dragon Season",
+            "Ch. 4: Dragon Season",
+            "OLD MAKES PEOPLE DO STRANGE THINGS, AND"
+          ],
           "content_sha256": "56b37637fcd0b23c410cb2603722592c089257c40c60ff3ecb49d2c14f48c77c",
           "page_start": 58,
           "page_end": 58
@@ -108,7 +149,11 @@
         {
           "id": "ending",
           "source_sha256": "8f582d64c01c84fca6a2e6106aa616ca8daa929fd7cc6243de56525d1f35f455",
-          "heading_path": ["Ch. 4: Dragon Season", "1 l ENCOUNTER 3,", "ADVENTURE C ONCLUSION"],
+          "heading_path": [
+            "Ch. 4: Dragon Season",
+            "1 l ENCOUNTER 3,",
+            "ADVENTURE C ONCLUSION"
+          ],
           "content_sha256": "10ed09cce12d525f6b3ac669b3d188c7909defcee1eb10b09938197525666db2",
           "page_start": 99,
           "page_end": 99
@@ -119,7 +164,13 @@
           "id": "yawning-portal-opening",
           "chapter_or_scene": "Chapter 1: A Friend in Need",
           "evidence_id": "opening",
-          "mechanisms": ["preparation", "play_scene", "noncombat_check", "npc_conversation", "conversation_to_mechanic"],
+          "mechanisms": [
+            "preparation",
+            "play_scene",
+            "noncombat_check",
+            "npc_conversation",
+            "conversation_to_mechanic"
+          ],
           "positioning_mode": "agent",
           "audience": "dm",
           "path": "normal"
@@ -128,7 +179,14 @@
           "id": "dragon-season-chase-and-encounter",
           "chapter_or_scene": "Chapter 4: Dragon Season",
           "evidence_id": "encounter",
-          "mechanisms": ["resource_settlement", "chase", "chase_to_combat", "conversation_to_combat", "combat", "combat_render"],
+          "mechanisms": [
+            "resource_settlement",
+            "chase",
+            "chase_to_combat",
+            "conversation_to_combat",
+            "combat",
+            "combat_render"
+          ],
           "positioning_mode": "grid",
           "audience": "player",
           "path": "normal"
@@ -137,7 +195,9 @@
           "id": "dragon-season-conclusion",
           "chapter_or_scene": "Chapter 4: Adventure Conclusion",
           "evidence_id": "ending",
-          "mechanisms": ["ending"],
+          "mechanisms": [
+            "ending"
+          ],
           "positioning_mode": "agent",
           "audience": "player",
           "path": "normal",
@@ -147,11 +207,21 @@
           "id": "recovery-boundaries",
           "chapter_or_scene": "Chapter 1: A Friend in Need",
           "evidence_id": "opening",
-          "mechanisms": ["save_restore", "idempotent_retry", "revision_conflict_refresh", "phase_exposure_refresh"],
+          "mechanisms": [
+            "save_restore",
+            "idempotent_retry",
+            "revision_conflict_refresh",
+            "phase_exposure_refresh"
+          ],
           "positioning_mode": "grid",
           "audience": "dm",
           "path": "recovery",
-          "recovery_operations": ["process_restart", "snapshot_restore", "branch_checkout", "undo_redo"]
+          "recovery_operations": [
+            "process_restart",
+            "snapshot_restore",
+            "branch_checkout",
+            "undo_redo"
+          ]
         }
       ]
     },
@@ -161,7 +231,10 @@
         {
           "id": "opening",
           "source_sha256": "1191bd8c8b43967cae144d60e3c9e85afe76480885759cd7211f3c58e5aa4fd4",
-          "heading_path": ["Episode 1: Greenest in Flames", "Episode 1: Greenest in Flames"],
+          "heading_path": [
+            "Episode 1: Greenest in Flames",
+            "Episode 1: Greenest in Flames"
+          ],
           "content_sha256": "2aa3e9dc65c73eeb032a4faba811e06cc4fb3ff3ff6ccd19b4b2205bca69e6c4",
           "page_start": 7,
           "page_end": 7
@@ -169,7 +242,10 @@
         {
           "id": "encounter",
           "source_sha256": "1191bd8c8b43967cae144d60e3c9e85afe76480885759cd7211f3c58e5aa4fd4",
-          "heading_path": ["Episode 8: Castle in the Clouds", "Skyreach Castle"],
+          "heading_path": [
+            "Episode 8: Castle in the Clouds",
+            "Skyreach Castle"
+          ],
           "content_sha256": "92e701274aac8b36f9da27d0f8a5f3448d48adf7be692c7064d13df1bce28931",
           "page_start": 76,
           "page_end": 76
@@ -177,7 +253,10 @@
         {
           "id": "ending",
           "source_sha256": "5bf2aa264299b52ecd6181ff6d192379045acf728555ade89a0b08d275d2a3e0",
-          "heading_path": ["Episode 9: Tiamat's Return", "Victory or Defeat"],
+          "heading_path": [
+            "Episode 9: Tiamat's Return",
+            "Victory or Defeat"
+          ],
           "content_sha256": "8bcb638d169fae0f3b2eb60923ee2a840b22a047a4f04ffb24fbbfb9b4070126",
           "page_start": 89,
           "page_end": 89
@@ -188,7 +267,13 @@
           "id": "greenest-in-flames",
           "chapter_or_scene": "Hoard Episode 1: Greenest in Flames",
           "evidence_id": "opening",
-          "mechanisms": ["preparation", "play_scene", "noncombat_check", "npc_conversation", "conversation_to_mechanic"],
+          "mechanisms": [
+            "preparation",
+            "play_scene",
+            "noncombat_check",
+            "npc_conversation",
+            "conversation_to_mechanic"
+          ],
           "positioning_mode": "agent",
           "audience": "dm",
           "path": "normal"
@@ -197,7 +282,12 @@
           "id": "skyreach-castle",
           "chapter_or_scene": "Hoard Episode 8: Skyreach Castle",
           "evidence_id": "encounter",
-          "mechanisms": ["resource_settlement", "conversation_to_combat", "combat", "combat_render"],
+          "mechanisms": [
+            "resource_settlement",
+            "conversation_to_combat",
+            "combat",
+            "combat_render"
+          ],
           "positioning_mode": "grid",
           "audience": "player",
           "path": "normal"
@@ -206,7 +296,9 @@
           "id": "tiamat-victory-or-defeat",
           "chapter_or_scene": "Rise Episode 9: Victory or Defeat",
           "evidence_id": "ending",
-          "mechanisms": ["ending"],
+          "mechanisms": [
+            "ending"
+          ],
           "positioning_mode": "agent",
           "audience": "player",
           "path": "normal",
@@ -216,11 +308,21 @@
           "id": "recovery-boundaries",
           "chapter_or_scene": "Hoard Episode 1: Greenest in Flames",
           "evidence_id": "opening",
-          "mechanisms": ["save_restore", "idempotent_retry", "revision_conflict_refresh", "phase_exposure_refresh"],
+          "mechanisms": [
+            "save_restore",
+            "idempotent_retry",
+            "revision_conflict_refresh",
+            "phase_exposure_refresh"
+          ],
           "positioning_mode": "grid",
           "audience": "dm",
           "path": "recovery",
-          "recovery_operations": ["process_restart", "snapshot_restore", "branch_checkout", "undo_redo"]
+          "recovery_operations": [
+            "process_restart",
+            "snapshot_restore",
+            "branch_checkout",
+            "undo_redo"
+          ]
         }
       ]
     },
@@ -230,7 +332,10 @@
         {
           "id": "opening",
           "source_sha256": "cd0f080a660cdccbf303efe48798cb17bf5545a2ce667a208e6e51c8aece02da",
-          "heading_path": ["Chapter 1: A Great Upheaval", "NIGHTSTONE"],
+          "heading_path": [
+            "Chapter 1: A Great Upheaval",
+            "NIGHTSTONE"
+          ],
           "content_sha256": "0d9fe7d83c4e6fea3ee99f1d1807eb283e69743336ef79264ed5b3d1e967472c",
           "page_start": 21,
           "page_end": 21
@@ -238,7 +343,10 @@
         {
           "id": "encounter",
           "source_sha256": "cd0f080a660cdccbf303efe48798cb17bf5545a2ce667a208e6e51c8aece02da",
-          "heading_path": ["Chapter 12: Doom of the Desert", "· I yniri th's Lair"],
+          "heading_path": [
+            "Chapter 12: Doom of the Desert",
+            "· I yniri th's Lair"
+          ],
           "content_sha256": "b2ec2bd4bb04361909d569a77a1047a1cba0281d815f0ff8f2af30870787e716",
           "page_start": 229,
           "page_end": 230
@@ -246,7 +354,10 @@
         {
           "id": "ending",
           "source_sha256": "cd0f080a660cdccbf303efe48798cb17bf5545a2ce667a208e6e51c8aece02da",
-          "heading_path": ["Chapter 12: Doom of the Desert", "ADVENTURE CONCLUSION"],
+          "heading_path": [
+            "Chapter 12: Doom of the Desert",
+            "ADVENTURE CONCLUSION"
+          ],
           "content_sha256": "5b5e0364900bed60c168ab61d4a5a0a534d8a07e64771fef48d0f5f31b7ebc7c",
           "page_start": 231,
           "page_end": 231
@@ -257,7 +368,13 @@
           "id": "nightstone-opening",
           "chapter_or_scene": "Chapter 1: Nightstone",
           "evidence_id": "opening",
-          "mechanisms": ["preparation", "play_scene", "noncombat_check", "npc_conversation", "conversation_to_mechanic"],
+          "mechanisms": [
+            "preparation",
+            "play_scene",
+            "noncombat_check",
+            "npc_conversation",
+            "conversation_to_mechanic"
+          ],
           "positioning_mode": "agent",
           "audience": "dm",
           "path": "normal"
@@ -266,7 +383,12 @@
           "id": "iymriths-lair",
           "chapter_or_scene": "Chapter 12: Iymrith's Lair",
           "evidence_id": "encounter",
-          "mechanisms": ["resource_settlement", "conversation_to_combat", "combat", "combat_render"],
+          "mechanisms": [
+            "resource_settlement",
+            "conversation_to_combat",
+            "combat",
+            "combat_render"
+          ],
           "positioning_mode": "grid",
           "audience": "player",
           "path": "normal"
@@ -275,7 +397,9 @@
           "id": "adventure-conclusion",
           "chapter_or_scene": "Chapter 12: Adventure Conclusion",
           "evidence_id": "ending",
-          "mechanisms": ["ending"],
+          "mechanisms": [
+            "ending"
+          ],
           "positioning_mode": "agent",
           "audience": "player",
           "path": "normal",
@@ -285,11 +409,21 @@
           "id": "recovery-boundaries",
           "chapter_or_scene": "Chapter 1: Nightstone",
           "evidence_id": "opening",
-          "mechanisms": ["save_restore", "idempotent_retry", "revision_conflict_refresh", "phase_exposure_refresh"],
+          "mechanisms": [
+            "save_restore",
+            "idempotent_retry",
+            "revision_conflict_refresh",
+            "phase_exposure_refresh"
+          ],
           "positioning_mode": "grid",
           "audience": "dm",
           "path": "recovery",
-          "recovery_operations": ["process_restart", "snapshot_restore", "branch_checkout", "undo_redo"]
+          "recovery_operations": [
+            "process_restart",
+            "snapshot_restore",
+            "branch_checkout",
+            "undo_redo"
+          ]
         }
       ]
     },
@@ -299,7 +433,11 @@
         {
           "id": "opening",
           "source_sha256": "ffa5bd1234e50650aa190420b51ca7c972a5c282c219e22e4a2f5698756a98a8",
-          "heading_path": ["Ch. 1: Port Nyanzaru", "Ch. 1: Port Nyanzaru", "ORT NYANZARU HUGS THE COASTLINE AT THE"],
+          "heading_path": [
+            "Ch. 1: Port Nyanzaru",
+            "Ch. 1: Port Nyanzaru",
+            "ORT NYANZARU HUGS THE COASTLINE AT THE"
+          ],
           "content_sha256": "009741cefe9f923a30195f2c9b735c31fc4c4df942a0c5885580e99b5a6c88e9",
           "page_start": 16,
           "page_end": 16
@@ -307,7 +445,10 @@
         {
           "id": "encounter",
           "source_sha256": "ffa5bd1234e50650aa190420b51ca7c972a5c282c219e22e4a2f5698756a98a8",
-          "heading_path": ["Ch 5: Tomb of the Nine Gods", "Level 6: Cradle of the Death"],
+          "heading_path": [
+            "Ch 5: Tomb of the Nine Gods",
+            "Level 6: Cradle of the Death"
+          ],
           "content_sha256": "057020851d33ca316a6ff695b515b1f51e2dc7346d61e012c02f8775973ce9e1",
           "page_start": 179,
           "page_end": 179
@@ -315,7 +456,10 @@
         {
           "id": "ending",
           "source_sha256": "ffa5bd1234e50650aa190420b51ca7c972a5c282c219e22e4a2f5698756a98a8",
-          "heading_path": ["Ch 5: Tomb of the Nine Gods", "CONCLUSION"],
+          "heading_path": [
+            "Ch 5: Tomb of the Nine Gods",
+            "CONCLUSION"
+          ],
           "content_sha256": "35e6ddcfa02a0cf58c7966341d1e04f402027ca67cedfe080beb5526c8ad7806",
           "page_start": 190,
           "page_end": 190
@@ -326,7 +470,13 @@
           "id": "port-nyanzaru-opening",
           "chapter_or_scene": "Chapter 1: Port Nyanzaru",
           "evidence_id": "opening",
-          "mechanisms": ["preparation", "play_scene", "noncombat_check", "npc_conversation", "conversation_to_mechanic"],
+          "mechanisms": [
+            "preparation",
+            "play_scene",
+            "noncombat_check",
+            "npc_conversation",
+            "conversation_to_mechanic"
+          ],
           "positioning_mode": "agent",
           "audience": "dm",
           "path": "normal"
@@ -335,7 +485,12 @@
           "id": "cradle-of-the-death-god",
           "chapter_or_scene": "Chapter 5: Cradle of the Death God",
           "evidence_id": "encounter",
-          "mechanisms": ["resource_settlement", "conversation_to_combat", "combat", "combat_render"],
+          "mechanisms": [
+            "resource_settlement",
+            "conversation_to_combat",
+            "combat",
+            "combat_render"
+          ],
           "positioning_mode": "agent",
           "audience": "player",
           "path": "normal"
@@ -344,7 +499,9 @@
           "id": "tomb-conclusion",
           "chapter_or_scene": "Chapter 5: Conclusion",
           "evidence_id": "ending",
-          "mechanisms": ["ending"],
+          "mechanisms": [
+            "ending"
+          ],
           "positioning_mode": "agent",
           "audience": "player",
           "path": "normal",
@@ -354,11 +511,21 @@
           "id": "recovery-boundaries",
           "chapter_or_scene": "Chapter 1: Port Nyanzaru",
           "evidence_id": "opening",
-          "mechanisms": ["save_restore", "idempotent_retry", "revision_conflict_refresh", "phase_exposure_refresh"],
+          "mechanisms": [
+            "save_restore",
+            "idempotent_retry",
+            "revision_conflict_refresh",
+            "phase_exposure_refresh"
+          ],
           "positioning_mode": "grid",
           "audience": "dm",
           "path": "recovery",
-          "recovery_operations": ["process_restart", "snapshot_restore", "branch_checkout", "undo_redo"]
+          "recovery_operations": [
+            "process_restart",
+            "snapshot_restore",
+            "branch_checkout",
+            "undo_redo"
+          ]
         }
       ]
     },
@@ -368,7 +535,10 @@
         {
           "id": "opening",
           "source_sha256": "7068355b6f9b07926557ce7dc8c8fb6e598458a5d025156907b9ac70d789640b",
-          "heading_path": ["Front Matter", "博德之门的麻烦 Trouble in Baldur's Gate"],
+          "heading_path": [
+            "Front Matter",
+            "博德之门的麻烦 Trouble in Baldur's Gate"
+          ],
           "content_sha256": "423af7b8964073c65ea74fffeb65b7143576c858b7080b50d40e4a805899cd20",
           "page_start": 6,
           "page_end": 6
@@ -376,7 +546,11 @@
         {
           "id": "encounter",
           "source_sha256": "7068355b6f9b07926557ce7dc8c8fb6e598458a5d025156907b9ac70d789640b",
-          "heading_path": ["第一章 双城记", "澡堂区域 Bathhouse Locations", "D13.停尸房 Morgue"],
+          "heading_path": [
+            "第一章 双城记",
+            "澡堂区域 Bathhouse Locations",
+            "D13.停尸房 Morgue"
+          ],
           "content_sha256": "89c0fc832073fb96a00d7d1bb52e600dfc21e9d7cf66b0d9da252ccb76d2b068",
           "page_start": 24,
           "page_end": 24
@@ -384,7 +558,10 @@
         {
           "id": "ending",
           "source_sha256": "7068355b6f9b07926557ce7dc8c8fb6e598458a5d025156907b9ac70d789640b",
-          "heading_path": ["第五章 逃离阿弗纳斯 Escape from Avernus", "救赎扎瑞尔 Redeeming Zariel"],
+          "heading_path": [
+            "第五章 逃离阿弗纳斯 Escape from Avernus",
+            "救赎扎瑞尔 Redeeming Zariel"
+          ],
           "content_sha256": "67823f12d259abd74d67f7bba7a28810b53d97d349899bd4d291509c05caf1b6",
           "page_start": 147,
           "page_end": 148
@@ -395,7 +572,13 @@
           "id": "baldurs-gate-opening",
           "chapter_or_scene": "Baldur's Gate / Trouble in Baldur's Gate",
           "evidence_id": "opening",
-          "mechanisms": ["preparation", "play_scene", "noncombat_check", "npc_conversation", "conversation_to_mechanic"],
+          "mechanisms": [
+            "preparation",
+            "play_scene",
+            "noncombat_check",
+            "npc_conversation",
+            "conversation_to_mechanic"
+          ],
           "positioning_mode": "agent",
           "audience": "dm",
           "path": "normal"
@@ -404,7 +587,12 @@
           "id": "bathhouse-morgue",
           "chapter_or_scene": "Chapter 1 / Bathhouse / D13 Morgue",
           "evidence_id": "encounter",
-          "mechanisms": ["resource_settlement", "conversation_to_combat", "combat", "combat_render"],
+          "mechanisms": [
+            "resource_settlement",
+            "conversation_to_combat",
+            "combat",
+            "combat_render"
+          ],
           "positioning_mode": "grid",
           "audience": "player",
           "path": "normal",
@@ -417,7 +605,10 @@
               "statblock_evidence": {
                 "page_start": 181,
                 "page_end": 181,
-                "heading_path": ["Appendix", "驭魂者 Master of Souls"]
+                "heading_path": [
+                  "Appendix",
+                  "驭魂者 Master of Souls"
+                ]
               },
               "source_excerpt": "这个一直在研究尸体的死灵法师叫福尼斯 Flennis，她是一个人类女性驭魂者 master of souls，她同时是这个地城里米尔寇信徒的最高阶级。"
             },
@@ -426,7 +617,9 @@
               "statblock_source_identity": "Swarm of Rats",
               "role": "combatant",
               "required_count": 1,
-              "required_variant": {"creature_type": "undead"},
+              "required_variant": {
+                "creature_type": "undead"
+              },
               "variant_source_kind": "module-chunk",
               "source_excerpt": "对于福尼斯的骷髅鼠采用怪物图鉴中的鼠群 swarm of rats 数据，将他们的野兽标签替换成不死生物。"
             }
@@ -436,7 +629,9 @@
           "id": "redeeming-zariel",
           "chapter_or_scene": "Chapter 5 / Redeeming Zariel",
           "evidence_id": "ending",
-          "mechanisms": ["ending"],
+          "mechanisms": [
+            "ending"
+          ],
           "positioning_mode": "agent",
           "audience": "player",
           "path": "normal",
@@ -449,7 +644,10 @@
               "source_evidence": {
                 "page_start": 145,
                 "page_end": 146,
-                "heading_path": ["������ �����Ļ�� Sword of Zariel", "����������� Idyllglen Events"]
+                "heading_path": [
+                  "第四章 扎瑞尔之剑 Sword of Zariel",
+                  "艾德尔格兰事件 Idyllglen Events"
+                ]
               }
             },
             {
@@ -459,7 +657,10 @@
               "source_evidence": {
                 "page_start": 147,
                 "page_end": 148,
-                "heading_path": ["锟斤拷锟斤拷锟斤拷 锟斤拷锟诫阿锟斤拷锟斤拷斯 Escape from Avernus", "锟斤拷锟斤拷锟斤拷锟斤拷锟?Redeeming Zariel"]
+                "heading_path": [
+                  "第五章 逃离阿弗纳斯 Escape from Avernus",
+                  "救赎扎瑞尔 Redeeming Zariel"
+                ]
               }
             },
             {
@@ -470,7 +671,10 @@
               "source_evidence": {
                 "page_start": 147,
                 "page_end": 148,
-                "heading_path": ["锟斤拷锟斤拷锟斤拷 锟斤拷锟诫阿锟斤拷锟斤拷斯 Escape from Avernus", "锟斤拷锟斤拷锟斤拷锟斤拷锟?Redeeming Zariel"]
+                "heading_path": [
+                  "第五章 逃离阿弗纳斯 Escape from Avernus",
+                  "救赎扎瑞尔 Redeeming Zariel"
+                ]
               }
             },
             {
@@ -481,7 +685,10 @@
               "source_evidence": {
                 "page_start": 147,
                 "page_end": 148,
-                "heading_path": ["锟斤拷锟斤拷锟斤拷 锟斤拷锟诫阿锟斤拷锟斤拷斯 Escape from Avernus", "锟斤拷锟斤拷锟斤拷锟斤拷锟?Redeeming Zariel"]
+                "heading_path": [
+                  "第五章 逃离阿弗纳斯 Escape from Avernus",
+                  "救赎扎瑞尔 Redeeming Zariel"
+                ]
               }
             },
             {
@@ -498,7 +705,10 @@
               "source_evidence": {
                 "page_start": 147,
                 "page_end": 148,
-                "heading_path": ["������ ���밢����˹ Escape from Avernus", "��������� Redeeming Zariel"]
+                "heading_path": [
+                  "第五章 逃离阿弗纳斯 Escape from Avernus",
+                  "救赎扎瑞尔 Redeeming Zariel"
+                ]
               }
             },
             {
@@ -508,7 +718,10 @@
               "source_evidence": {
                 "page_start": 147,
                 "page_end": 148,
-                "heading_path": ["������ ���밢����˹ Escape from Avernus", "��������� Redeeming Zariel"]
+                "heading_path": [
+                  "第五章 逃离阿弗纳斯 Escape from Avernus",
+                  "救赎扎瑞尔 Redeeming Zariel"
+                ]
               }
             }
           ]
@@ -517,11 +730,21 @@
           "id": "recovery-boundaries",
           "chapter_or_scene": "Baldur's Gate / Trouble in Baldur's Gate",
           "evidence_id": "opening",
-          "mechanisms": ["save_restore", "idempotent_retry", "revision_conflict_refresh", "phase_exposure_refresh"],
+          "mechanisms": [
+            "save_restore",
+            "idempotent_retry",
+            "revision_conflict_refresh",
+            "phase_exposure_refresh"
+          ],
           "positioning_mode": "grid",
           "audience": "dm",
           "path": "recovery",
-          "recovery_operations": ["process_restart", "snapshot_restore", "branch_checkout", "undo_redo"]
+          "recovery_operations": [
+            "process_restart",
+            "snapshot_restore",
+            "branch_checkout",
+            "undo_redo"
+          ]
         }
       ]
     }
@@ -569,7 +792,10 @@
             "asset_sha256": "7068355b6f9b07926557ce7dc8c8fb6e598458a5d025156907b9ac70d789640b",
             "page_start": 6,
             "page_end": 6,
-            "heading_path": ["Front Matter", "关于冒险 About the Adventure"],
+            "heading_path": [
+              "Front Matter",
+              "关于冒险 About the Adventure"
+            ],
             "content_sha256": "3b801112f7cfbcd60fcda60fb66c5f638d9005c0c50b6f276ccb4278225a2ab4"
           },
           {
@@ -578,7 +804,10 @@
             "asset_sha256": "7068355b6f9b07926557ce7dc8c8fb6e598458a5d025156907b9ac70d789640b",
             "page_start": 140,
             "page_end": 140,
-            "heading_path": ["第四章 宝剑的获得 Sword of Zariel", "角色升级 Character Advancement"],
+            "heading_path": [
+              "第四章 宝剑的获得 Sword of Zariel",
+              "角色升级 Character Advancement"
+            ],
             "content_sha256": "64ef8af81260b7fbf145ead01e69a47bb8b651165645ca8f04daaa594478a896"
           },
           {
@@ -587,7 +816,10 @@
             "asset_sha256": "7068355b6f9b07926557ce7dc8c8fb6e598458a5d025156907b9ac70d789640b",
             "page_start": 146,
             "page_end": 146,
-            "heading_path": ["第五章 逃离阿弗纳斯 Escape from Avernus", "角色升级 Character Advancement"],
+            "heading_path": [
+              "第五章 逃离阿弗纳斯 Escape from Avernus",
+              "角色升级 Character Advancement"
+            ],
             "content_sha256": "f711c3b4421bfcec172186829bddba1642c423a888d019df1f23693704973af4"
           }
         ]
