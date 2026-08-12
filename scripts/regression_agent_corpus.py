@@ -566,6 +566,56 @@ def _conversation_to_combat_covered(calls: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _chase_terminal_receipt(call: dict[str, Any]) -> bool:
+    """Return whether a successful chase mutation authoritatively ended the chase."""
+
+    if call.get("tool") != "chase" or not call.get("ok"):
+        return False
+    action = (call.get("arguments") or {}).get("action")
+    if action == "end":
+        return True
+    if action != "take_turn":
+        return False
+    for node in _walk(call.get("result")):
+        if not isinstance(node, dict) or node.get("active") is not False:
+            continue
+        is_chase = str(node.get("id") or "").startswith("chase-") or {
+            "quarry_ids",
+            "pursuer_ids",
+        }.issubset(node)
+        outcome = node.get("outcome")
+        if is_chase and isinstance(outcome, dict) and str(outcome.get("status") or ""):
+            return True
+    return False
+
+
+def _chase_sequence_covered(
+    calls: list[dict[str, Any]], *, require_combat_start: bool = False
+) -> bool:
+    """Require start -> authoritative terminal receipt [-> Combat] in one sequence."""
+
+    started = False
+    terminated = False
+    for call in calls:
+        arguments = call.get("arguments") or {}
+        if (
+            call.get("tool") == "chase"
+            and call.get("ok")
+            and arguments.get("action") == "start"
+        ):
+            started = True
+            terminated = False
+            continue
+        if started and _chase_terminal_receipt(call):
+            terminated = True
+            if not require_combat_start:
+                return True
+            continue
+        if terminated and call.get("tool") == "combat_start" and call.get("ok"):
+            return True
+    return False
+
+
 def _ending_completed(calls: list[dict[str, Any]]) -> bool:
     for call in calls:
         if call.get("tool") != "playthrough_manifest" or not call.get("ok"):
@@ -1066,23 +1116,9 @@ def _mechanism_covered(mechanism: str, calls: list[dict[str, Any]]) -> bool:
     if mechanism == "agent_semantic_spell_ruling":
         return _has_agent_semantic_spell_ruling(calls)
     if mechanism == "chase_to_combat":
-        return _ordered_pattern(
-            calls,
-            [
-                ("chase", "start", True),
-                ("combat_start", None, False),
-                ("chase", "end", True),
-                ("combat_start", None, True),
-            ],
-        )
+        return _chase_sequence_covered(calls, require_combat_start=True)
     if mechanism == "chase":
-        return _ordered_success(
-            calls,
-            [
-                ("chase", "start"),
-                ("chase", "end"),
-            ],
-        )
+        return _chase_sequence_covered(calls)
     mappings: dict[str, tuple[tuple[str, str | None], ...]] = {
         "play_scene": (("module_query", "scene"),),
         "noncombat_check": (("character_check", None),),

@@ -598,6 +598,75 @@ def test_chase_coverage_requires_successful_start_and_end_receipts() -> None:
     )
 
 
+def test_chase_coverage_accepts_authoritative_automatic_terminal_receipt() -> None:
+    caught = _call(
+        "chase",
+        arguments={"action": "take_turn"},
+        result={
+            "result": {
+                "chase": {
+                    "id": "chase-1",
+                    "active": False,
+                    "quarry_ids": ["quarry-1"],
+                    "pursuer_ids": ["pc-1"],
+                    "outcome": {"status": "caught"},
+                }
+            }
+        },
+    )
+    calls = [
+        _call("chase", arguments={"action": "start"}),
+        caught,
+    ]
+    assert _mechanism_covered("chase", calls) is True
+    assert _mechanism_covered("chase_to_combat", calls) is False
+    assert (
+        _mechanism_covered(
+            "chase_to_combat",
+            [*calls, _call("combat_start")],
+        )
+        is True
+    )
+
+
+def test_chase_coverage_rejects_read_only_or_unrelated_inactive_state() -> None:
+    inactive = {
+        "result": {
+            "chase": {
+                "id": "chase-1",
+                "active": False,
+                "quarry_ids": ["quarry-1"],
+                "pursuer_ids": ["pc-1"],
+                "outcome": {"status": "caught"},
+            }
+        }
+    }
+    assert (
+        _mechanism_covered(
+            "chase",
+            [
+                _call("chase", arguments={"action": "start"}),
+                _call("chase", arguments={"action": "query"}, result=inactive),
+            ],
+        )
+        is False
+    )
+    assert (
+        _mechanism_covered(
+            "chase",
+            [
+                _call("chase", arguments={"action": "start"}),
+                _call(
+                    "chase",
+                    arguments={"action": "take_turn"},
+                    result={"combat": {"id": "combat-1", "active": False}},
+                ),
+            ],
+        )
+        is False
+    )
+
+
 def test_coverage_accepts_paid_standard_agent_spell_clause() -> None:
     calls = [
         _call(
