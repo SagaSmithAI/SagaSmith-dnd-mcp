@@ -2057,6 +2057,9 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "Campaign memory fact `content` is always a string" in prompt
     assert "`fact.content` exactly" in prompt
     assert '"expected_revision_id": <fact.revision_id>' in prompt
+    assert "that is\nthe first executable action" in prompt
+    assert "use `module_search` and `module_expand`" in prompt
+    assert "manifest's current conclusion source" in prompt
     assert "Do not retype identifiers" in prompt
     assert "class_feature_missing:fighter-second-wind" in prompt
     assert "load `character_content_apply`" in prompt

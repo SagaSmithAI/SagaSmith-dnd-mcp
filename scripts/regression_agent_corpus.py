@@ -2245,6 +2245,15 @@ procedure; it supplies no creature identity or module answer.
 
 Current evidence gaps from prior cycles, ordered by execution dependency rather
 than alphabetically: {json.dumps(_execution_order_gaps(gaps, route), ensure_ascii=False)}
+If `current_ending_prerequisite_receipt_audit` has a `first_missing_id`, that is
+the first executable action. Before any ending manifest, progress, or memory
+write, use `module_search` and `module_expand` to resolve the missing entry's
+exact `expected.source_evidence`, then copy the returned managed `module_id`,
+`scene_id`, `chunk_id`, `content_sha256`, pages, heading, and excerpt. The
+manifest's current conclusion source, an asset checksum, or a hand-written
+source object never substitutes for that prerequisite source. Do not load or
+call `module_set_progress` until the missing receipt has been accepted by the
+machine audit.
 `exposure:reopened_after_transition` is immutable historical audit debt in a
 resumed artifact. Do not repeat it, but finish the remaining mechanical route;
 the runner will require a clean fresh campaign after the route is complete.
