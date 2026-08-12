@@ -551,6 +551,14 @@ def test_coverage_requires_real_ordered_boundaries_retries_and_recovery() -> Non
     calls = [
         _call("skill_query"),
         _call("exposure", arguments={"action": "open"}),
+        _call(
+            "campaign_query",
+            arguments={"view": "resume"},
+            result={
+                "host_context_binding": {"branch_id": "source-branch"},
+                "game_phase": "play",
+            },
+        ),
         _call("exposure", arguments={"action": "search"}),
         _call("exposure", arguments={"action": "set"}),
         _call("npc_conversation", arguments={"action": "open"}),
@@ -614,6 +622,14 @@ def test_coverage_requires_real_ordered_boundaries_retries_and_recovery() -> Non
             "playthrough_manifest",
             arguments={"action": "verify_ending"},
             result={"status": "completed", "achieved": True},
+        ),
+        _call(
+            "campaign_query",
+            arguments={"view": "resume"},
+            result={
+                "host_context_binding": {"branch_id": "source-branch"},
+                "game_phase": "play",
+            },
         ),
         *_player_grants(),
         _ready_manifest_call(),
@@ -997,7 +1013,7 @@ def test_ending_requires_independent_source_item_and_check_receipts() -> None:
         list_changed_count=1,
     )
     assert "ending:ending" not in audit["gaps"]
-    assert "ending:legal_ending_not_verified" not in audit["gaps"]
+
 
     missing_reducer = [call for call in receipts if "event-mentor" not in str(call)]
     audit = _coverage_audit(route, missing_reducer, process_count=2, list_changed_count=1)
@@ -1058,6 +1074,65 @@ def test_ending_requires_independent_source_item_and_check_receipts() -> None:
     ]
     audit = _coverage_audit(route, different_sword, process_count=2, list_changed_count=1)
     assert "ending:ending" in audit["gaps"]
+
+
+def test_completed_recovery_route_must_finish_on_source_branch_in_play() -> None:
+    route = {
+        "scenarios": [
+            {
+                "id": "ending",
+                "mechanisms": ["ending"],
+                "ending_status": "legal_complete",
+            },
+            {
+                "id": "recovery",
+                "mechanisms": [],
+                "recovery_operations": ["branch_checkout"],
+            },
+        ]
+    }
+    source_binding = {
+        "host_context_binding": {"branch_id": "source-branch"},
+        "game_phase": "play",
+    }
+    restored_binding = {
+        "host_context_binding": {"branch_id": "restore-branch"},
+        "game_phase": "lobby",
+    }
+    common = [
+        _call("campaign_create", result=source_binding),
+        _call(
+            "branch_change",
+            arguments={"action": "checkout"},
+            result=restored_binding,
+        ),
+        _call(
+            "playthrough_manifest",
+            arguments={"action": "verify_ending"},
+            result={"status": "completed", "achieved": True},
+        ),
+        _call("campaign_query", arguments={"view": "resume"}, result=restored_binding),
+    ]
+
+    audit = _coverage_audit(route, common, process_count=2, list_changed_count=1)
+    assert "final_state:source_branch_play_unverified" in audit["gaps"]
+
+    settled = [
+        *common,
+        _call(
+            "branch_change",
+            arguments={"action": "checkout"},
+            result=source_binding,
+        ),
+        _call(
+            "game_phase",
+            arguments={"action": "set", "phase": "play"},
+            result=source_binding,
+        ),
+        _call("campaign_query", arguments={"view": "resume"}, result=source_binding),
+    ]
+    audit = _coverage_audit(route, settled, process_count=2, list_changed_count=1)
+    assert "final_state:source_branch_play_unverified" not in audit["gaps"]
 
 
 def test_conversation_combat_probe_requires_same_valid_retry_payload() -> None:

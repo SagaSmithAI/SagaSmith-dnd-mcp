@@ -992,6 +992,47 @@ def _campaign_profile_matches(
     )
 
 
+def _final_campaign_state(calls: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Return the last authoritative DM campaign state projection in the audit."""
+
+    for call in reversed(calls):
+        if call.get("principal") != "dm" or not call.get("ok"):
+            continue
+        for node in _walk(call.get("result")):
+            if not isinstance(node, dict):
+                continue
+            binding = node.get("host_context_binding")
+            if not isinstance(binding, dict) or not binding.get("branch_id"):
+                continue
+            phase = node.get("effective_game_phase") or node.get("game_phase")
+            if phase is None and node.get("phase") in {"lobby", "play", "combat"}:
+                phase = node.get("phase")
+            if phase is None:
+                for child in _walk(node):
+                    if isinstance(child, dict) and child.get("game_phase") in {
+                        "lobby",
+                        "play",
+                        "combat",
+                    }:
+                        phase = child["game_phase"]
+                        break
+            return {"branch_id": str(binding["branch_id"]), "phase": phase}
+    return None
+
+
+def _initial_campaign_branch(calls: list[dict[str, Any]]) -> str | None:
+    for call in calls:
+        if call.get("principal") != "dm" or not call.get("ok"):
+            continue
+        if call.get("tool") not in {"campaign_create", "campaign_query"}:
+            continue
+        for node in _walk(call.get("result")):
+            binding = node.get("host_context_binding") if isinstance(node, dict) else None
+            if isinstance(binding, dict) and binding.get("branch_id"):
+                return str(binding["branch_id"])
+    return None
+
+
 def _manifest_party_ids(calls: list[dict[str, Any]]) -> set[str]:
     for call in reversed(calls):
         if call.get("tool") != "playthrough_manifest" or not call.get("ok"):
@@ -1641,6 +1682,25 @@ def _coverage_audit(
         gaps.append("host:list_changed_not_observed")
     if _has_exposure_reopen_after_transition(calls):
         gaps.append("exposure:reopened_after_transition")
+    if any(
+        scenario.get("ending_status") == "legal_complete"
+        and _ending_completed(
+            calls,
+            prerequisites=list(scenario.get("ending_prerequisites") or []),
+        )
+        for scenario in route.get("scenarios") or []
+    ) and any(
+        scenario.get("recovery_operations") for scenario in route.get("scenarios") or []
+    ):
+        initial_branch = _initial_campaign_branch(calls)
+        final_state = _final_campaign_state(calls)
+        if (
+            initial_branch is None
+            or final_state is None
+            or final_state.get("branch_id") != initial_branch
+            or final_state.get("phase") != "play"
+        ):
+            gaps.append("final_state:source_branch_play_unverified")
     return {
         "complete": not gaps,
         "gaps": sorted(set(gaps)),
@@ -1893,6 +1953,10 @@ receipt. For that entry, follow its full `expected` object, including exact
 `source_evidence`, `fact_key`, item, check, and reducer fields. A semantic event
 must use party/public/actor audience and request the fact in the same atomic
 commit; `facts=[]` or a returned fact without the event id never matches. When
+that exact stable fact already exists, use public `memory_query` to fresh-read
+its `revision_id`, then supply it as the fact's `expected_revision_id` in the
+same source-bound atomic commit. Do not change keys or fall back to an unlinked
+upsert merely because the authoritative fact already exists. When
 all entries are matched, configure and verify the exact ending without replaying
 the receipt chain.
 Do not manufacture the result with
@@ -2152,6 +2216,13 @@ that only lists state or
 opens exposure has made no progress. Unless a true external boundary is reached,
 complete at least one successful authoritative mutation toward the first unmet
 prerequisite before stopping the cycle.
+For `final_state:source_branch_play_unverified`, do not replay any completed
+route or ending. In Lobby, query branches and checkout the campaign's original
+source branch (the branch used before recovery), consume the binding barrier,
+then enter Play through `game_phase`. After every transition use only native
+list refresh plus `exposure(get/search/set)`, never open. Finish with a fresh DM
+`campaign_query(view="resume")` and player-safe read proving that exact branch
+and Play phase.
 Stop only for a real external boundary or when the current cycle has exhausted
 its tool budget; in that case report the exact authoritative blocker and leave
 state resumable.
