@@ -759,7 +759,30 @@ def _valid_managed_source_ref(value: Any) -> bool:
     )
 
 
-def _source_item_receipt(call: dict[str, Any], prerequisite: dict[str, Any]) -> bool:
+def _source_ref_matches_evidence(value: Any, prerequisite: dict[str, Any]) -> bool:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return False
+    if not _valid_managed_source_ref(value):
+        return False
+    evidence = prerequisite.get("source_evidence") or {}
+    for field in ("page_start", "page_end"):
+        if field in evidence and value.get(field) != evidence[field]:
+            return False
+    if "heading_path" in evidence and list(value.get("heading_path") or []) != list(
+        evidence["heading_path"]
+    ):
+        return False
+    return True
+
+
+def _source_item_receipt(
+    call: dict[str, Any],
+    prerequisite: dict[str, Any],
+    matched_receipts: list[tuple[dict[str, Any], dict[str, Any]]],
+) -> bool:
     if call.get("tool") != "campaign_change" or not call.get("ok"):
         return False
     arguments = call.get("arguments") or {}
@@ -769,7 +792,7 @@ def _source_item_receipt(call: dict[str, Any], prerequisite: dict[str, Any]) -> 
         return False
     expected_name = str(prerequisite.get("item_name") or "")
     payload = arguments.get("payload") or {}
-    if not _valid_managed_source_ref(payload.get("source_ref")):
+    if not _source_ref_matches_evidence(payload.get("source_ref"), prerequisite):
         return False
     result = call.get("result")
     if not any(
@@ -785,7 +808,16 @@ def _source_item_receipt(call: dict[str, Any], prerequisite: dict[str, Any]) -> 
         )
     if expected_action == "item_spend":
         item_id = str(payload.get("item_id") or "")
-        return bool(item_id) and any(
+        acquired_item_ids = {
+            str(node.get("id"))
+            for prior_prerequisite, prior_call in matched_receipts
+            if prior_prerequisite.get("receipt") == "loot_acquire"
+            for node in _walk(prior_call.get("result"))
+            if isinstance(node, dict)
+            and str(node.get("name") or "").casefold() == expected_name.casefold()
+            and node.get("id")
+        }
+        return item_id in acquired_item_ids and any(
             isinstance(node, dict)
             and str(node.get("id") or "") == item_id
             and str(node.get("name") or "").casefold() == expected_name.casefold()
@@ -805,7 +837,7 @@ def _ending_prerequisite_receipt(
     if receipt == "semantic_event":
         return _semantic_event_receipt(call, prerequisite)
     if receipt in {"loot_acquire", "item_spend"}:
-        return _source_item_receipt(call, prerequisite)
+        return _source_item_receipt(call, prerequisite, matched_receipts)
     return False
 
 

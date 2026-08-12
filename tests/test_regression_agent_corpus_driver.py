@@ -742,12 +742,20 @@ def test_ending_requires_independent_source_item_and_check_receipts() -> None:
         "scene_id": "ending-scene",
         "chunk_id": "ending-chunk",
         "content_sha256": "a" * 64,
+        "page_start": 10,
+        "page_end": 11,
+        "heading_path": ["Chapter", "Ending"],
     }
     prerequisites = [
         {
             "id": "source-item-acquired",
             "receipt": "loot_acquire",
             "item_name": "Source Sword",
+            "source_evidence": {
+                "page_start": 10,
+                "page_end": 11,
+                "heading_path": ["Chapter", "Ending"],
+            },
         },
         {
             "id": "ally-present",
@@ -774,6 +782,11 @@ def test_ending_requires_independent_source_item_and_check_receipts() -> None:
             "id": "source-item-surrendered",
             "receipt": "item_spend",
             "item_name": "Source Sword",
+            "source_evidence": {
+                "page_start": 10,
+                "page_end": 11,
+                "heading_path": ["Chapter", "Ending"],
+            },
         },
     ]
     route = {
@@ -931,6 +944,50 @@ def test_ending_requires_independent_source_item_and_check_receipts() -> None:
         *receipts[3:],
     ]
     audit = _coverage_audit(route, naked_fact, process_count=2, list_changed_count=1)
+    assert "ending:ending" in audit["gaps"]
+
+    wrong_source = {**source_ref, "page_start": 12, "page_end": 12}
+    wrong_source_receipts = [
+        {
+            **receipts[0],
+            "arguments": {
+                **receipts[0]["arguments"],
+                "payload": {**receipts[0]["arguments"]["payload"], "source_ref": wrong_source},
+            },
+        },
+        *receipts[1:],
+    ]
+    audit = _coverage_audit(
+        route, wrong_source_receipts, process_count=2, list_changed_count=1
+    )
+    assert "ending:ending" in audit["gaps"]
+
+    item_spend_index = next(
+        index
+        for index, call in enumerate(receipts)
+        if call["tool"] == "campaign_change"
+        and call["arguments"].get("action") == "item_spend"
+    )
+    different_item_spend = {
+        **receipts[item_spend_index],
+        "arguments": {
+            **receipts[item_spend_index]["arguments"],
+            "payload": {
+                **receipts[item_spend_index]["arguments"]["payload"],
+                "item_id": "replacement-sword",
+            },
+        },
+        "result": {
+            "status": "committed",
+            "removed": {"id": "replacement-sword", "name": "Source Sword"},
+        },
+    }
+    different_sword = [
+        *receipts[:item_spend_index],
+        different_item_spend,
+        *receipts[item_spend_index + 1 :],
+    ]
+    audit = _coverage_audit(route, different_sword, process_count=2, list_changed_count=1)
     assert "ending:ending" in audit["gaps"]
 
 
