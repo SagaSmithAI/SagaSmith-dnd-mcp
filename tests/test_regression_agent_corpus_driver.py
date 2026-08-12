@@ -1313,6 +1313,8 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert 'explicit `edition="2014"`' in prompt
     assert '`advancement_mode="xp"`' in prompt
     assert '"selected": 5' in prompt
+    assert "source minimum/maximum are advisory only" in prompt
+    assert "Never change or block that selection" in prompt
     assert "re-resolve its exact current Pack evidence" in prompt
     assert "start an explicit new draft/version from the same managed source" in prompt
     assert "Do not send `filters` on that first lookup" in prompt

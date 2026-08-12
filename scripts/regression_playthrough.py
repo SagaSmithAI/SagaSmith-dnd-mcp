@@ -2305,7 +2305,7 @@ async def _register_party(
         )
     if len(selections) != selected_size:
         raise ValueError(
-            f"register-party requires exactly the selected maximum of {selected_size} actors"
+            f"register-party requires exactly the selected party size of {selected_size} actors"
         )
     members = []
     for selection in selections:
