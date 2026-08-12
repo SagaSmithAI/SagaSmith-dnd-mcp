@@ -1209,6 +1209,277 @@ def test_stdio_undo_phase_change_immediately_notifies_and_refreshes_tools(
     asyncio.run(exercise())
 
 
+def test_stdio_redo_to_lobby_requires_reloading_snapshot_restore(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        notifications: list[str] = []
+
+        async def on_message(message) -> None:
+            notifications.append(type(getattr(message, "root", message)).__name__)
+
+        async def settle_notifications() -> None:
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+        env = dict(os.environ)
+        env.update(
+            {
+                "SAGASMITH_DND_MCP_HOME": str(tmp_path / "home"),
+                "SAGASMITH_DND_MCP_AUTO_SEED": "0",
+            }
+        )
+        params = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "sagasmith_dnd_mcp.server"],
+            cwd=Path(__file__).parents[1],
+            env=env,
+        )
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write, message_handler=on_message) as session:
+                initialized = await session.initialize()
+                assert initialized.capabilities.tools.listChanged is True
+                principal_id = "discord:redo-snapshot-recovery"
+                await session.call_tool(
+                    "exposure", {"action": "open", "principal_id": principal_id}
+                )
+                await session.call_tool(
+                    "exposure",
+                    {
+                        "action": "set",
+                        "add_tool_ids": ["campaign_create"],
+                        "principal_id": principal_id,
+                    },
+                )
+                created = await session.call_tool(
+                    "campaign_create",
+                    {"name": "Redo snapshot recovery", "idempotency_key": "create"},
+                )
+                assert not created.isError
+                campaign_id = json.loads(created.content[0].text)["id"]
+                await session.call_tool(
+                    "exposure",
+                    {
+                        "action": "open",
+                        "campaign_id": campaign_id,
+                        "principal_id": principal_id,
+                    },
+                )
+                loaded = await session.call_tool(
+                    "exposure",
+                    {
+                        "action": "set",
+                        "add_tool_ids": ["snapshot_create", "state_revision"],
+                        "principal_id": principal_id,
+                    },
+                )
+                assert not loaded.isError
+                current = await session.call_tool(
+                    "campaign_query",
+                    {
+                        "view": "get",
+                        "payload": {"campaign_id": campaign_id},
+                        "principal_id": principal_id,
+                    },
+                )
+                revision = json.loads(current.content[0].text)["result"]["revision"]
+                checkpoint_result = await session.call_tool(
+                    "snapshot_create",
+                    {
+                        "campaign_id": campaign_id,
+                        "label": "Initial lobby",
+                        "expected_revision": revision,
+                        "expected_head_snapshot_id": "",
+                        "idempotency_key": "initial-lobby-snapshot",
+                    },
+                )
+                assert not checkpoint_result.isError
+                checkpoint = json.loads(checkpoint_result.content[0].text)
+
+                entered = await session.call_tool(
+                    "game_phase",
+                    {
+                        "campaign_id": campaign_id,
+                        "action": "set",
+                        "tool_profile": "play",
+                        "expected_revision": revision,
+                        "idempotency_key": "enter-play",
+                    },
+                )
+                assert not entered.isError
+                in_play = await session.call_tool(
+                    "campaign_query",
+                    {
+                        "view": "get",
+                        "payload": {"campaign_id": campaign_id},
+                        "principal_id": principal_id,
+                    },
+                )
+                play_revision = json.loads(in_play.content[0].text)["result"]["revision"]
+                returned = await session.call_tool(
+                    "game_phase",
+                    {
+                        "campaign_id": campaign_id,
+                        "action": "set",
+                        "tool_profile": "lobby",
+                        "expected_revision": play_revision,
+                        "idempotency_key": "return-lobby",
+                    },
+                )
+                assert not returned.isError
+                loaded_restore = await session.call_tool(
+                    "exposure",
+                    {
+                        "action": "set",
+                        "add_tool_ids": ["snapshot_restore"],
+                        "principal_id": principal_id,
+                    },
+                )
+                assert not loaded_restore.isError
+                assert "snapshot_restore" in {
+                    tool.name for tool in (await session.list_tools()).tools
+                }
+                history = await session.call_tool(
+                    "state_revision",
+                    {
+                        "campaign_id": campaign_id,
+                        "action": "history",
+                        "payload": {},
+                    },
+                )
+                return_lobby_sequence = json.loads(history.content[0].text)["result"][0][
+                    "sequence"
+                ]
+                await settle_notifications()
+                notifications.clear()
+
+                undone = await session.call_tool(
+                    "state_revision",
+                    {
+                        "campaign_id": campaign_id,
+                        "action": "undo",
+                        "payload": {
+                            "expected_history_sequence": return_lobby_sequence,
+                        },
+                        "idempotency_key": "undo-return-lobby",
+                    },
+                )
+                assert not undone.isError
+                await settle_notifications()
+                assert "ToolListChangedNotification" in notifications
+                play_tools = {tool.name for tool in (await session.list_tools()).tools}
+                assert "snapshot_restore" not in play_tools
+                assert "state_revision" in play_tools
+                undone_campaign = await session.call_tool(
+                    "campaign_query",
+                    {
+                        "view": "get",
+                        "payload": {"campaign_id": campaign_id},
+                        "principal_id": principal_id,
+                    },
+                )
+                assert json.loads(undone_campaign.content[0].text)["result"]["state"][
+                    "game_phase"
+                ] == "play"
+                undone_history = await session.call_tool(
+                    "state_revision",
+                    {
+                        "campaign_id": campaign_id,
+                        "action": "history",
+                        "payload": {},
+                    },
+                )
+                redo_cursor = next(
+                    item["sequence"]
+                    for item in json.loads(undone_history.content[0].text)["result"]
+                    if item["applied"]
+                )
+                await settle_notifications()
+                notifications.clear()
+
+                redone = await session.call_tool(
+                    "state_revision",
+                    {
+                        "campaign_id": campaign_id,
+                        "action": "redo",
+                        "payload": {"expected_history_sequence": redo_cursor},
+                        "idempotency_key": "redo-return-lobby",
+                    },
+                )
+                assert not redone.isError
+                await settle_notifications()
+                assert "ToolListChangedNotification" in notifications
+                lobby_tools = {tool.name for tool in (await session.list_tools()).tools}
+                assert "snapshot_restore" not in lobby_tools
+                assert "state_revision" in lobby_tools
+                redone_campaign = await session.call_tool(
+                    "campaign_query",
+                    {
+                        "view": "get",
+                        "payload": {"campaign_id": campaign_id},
+                        "principal_id": principal_id,
+                    },
+                )
+                redone_payload = json.loads(redone_campaign.content[0].text)["result"]
+                assert redone_payload["state"]["game_phase"] == "lobby"
+
+                searched = await session.call_tool(
+                    "exposure",
+                    {
+                        "action": "search",
+                        "query": "snapshot_restore",
+                        "principal_id": principal_id,
+                    },
+                )
+                assert not searched.isError
+                search_payload = json.loads(searched.content[0].text)
+                assert [item["tool_id"] for item in search_payload["matches"]] == [
+                    "snapshot_restore"
+                ]
+                assert search_payload["matches"][0]["loaded"] is False
+                await settle_notifications()
+                notifications.clear()
+                reloaded = await session.call_tool(
+                    "exposure",
+                    {
+                        "action": "set",
+                        "add_tool_ids": ["snapshot_restore"],
+                        "principal_id": principal_id,
+                    },
+                )
+                assert not reloaded.isError
+                await settle_notifications()
+                assert "ToolListChangedNotification" in notifications
+                assert "snapshot_restore" in {
+                    tool.name for tool in (await session.list_tools()).tools
+                }
+
+                restored = await session.call_tool(
+                    "snapshot_restore",
+                    {
+                        "campaign_id": campaign_id,
+                        "slot": checkpoint["slot"],
+                        "expected_revision": redone_payload["revision"],
+                        "expected_branch_id": checkpoint["branch_id"],
+                        "idempotency_key": "restore-initial-lobby",
+                    },
+                )
+                assert not restored.isError
+                resumed = await session.call_tool(
+                    "campaign_query",
+                    {
+                        "view": "get",
+                        "payload": {"campaign_id": campaign_id},
+                        "principal_id": principal_id,
+                    },
+                )
+                assert not resumed.isError
+                resumed_payload = json.loads(resumed.content[0].text)["result"]
+                assert resumed_payload["state"]["game_phase"] == "lobby"
+
+    asyncio.run(exercise())
+
+
 def test_stdio_process_binding_overwrites_model_authored_principal(tmp_path: Path) -> None:
     async def exercise() -> None:
         env = dict(os.environ)
