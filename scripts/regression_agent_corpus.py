@@ -1959,6 +1959,14 @@ same source-bound atomic commit. Do not change keys or fall back to an unlinked
 upsert merely because the authoritative fact already exists. When
 all entries are matched, configure and verify the exact ending without replaying
 the receipt chain.
+Campaign memory fact `content` is always a string. A later ending
+`kind="memory_fact"` equality check must copy the successful commit's returned
+`fact.content` exactly; do not substitute boolean `true` for string `"True"` or
+add implicit coercion. Standalone `memory_change(action="revise")` uses
+`payload={{"memory_id": <fact.id>, "content": <string>,
+"expected_revision_id": <fact.revision_id>}}`; the campaign CAS
+`expected_revision` remains top-level. Never confuse stable `id` with the
+concurrency token `revision_id` or put `expected_revision_id` at tool top-level.
 Do not manufacture the result with
 `memory_change`, `module_set_progress`, or manifest fields. Those projections
 may record an outcome only after the independent prerequisite receipts exist.
