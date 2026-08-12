@@ -33,6 +33,7 @@ from sagasmith_dnd_mcp.server import (
     create_server,
 )
 from sagasmith_dnd_mcp.tool_profiles import CORE_TOOLS, policy_for_tool
+from tests.authoring_helpers import finalize_and_activate_module
 
 
 def test_role_refresh_crops_loaded_tools_without_changing_phase() -> None:
@@ -955,6 +956,262 @@ def test_stdio_session_mutates_native_tool_list_and_calls_tools_directly(
                 assert json.loads(retained.content[0].text)["exposure_id"] == rebound_payload[
                     "exposure_id"
                 ]
+
+    asyncio.run(exercise())
+
+
+def test_stdio_player_loads_only_player_safe_module_and_continuity_projections(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        source = tmp_path / "private-module.md"
+        source.write_text(
+            "# Secret Keep\n## Hidden Vault\n#### A1. Reliquary\nThe crown is cursed.",
+            encoding="utf-8",
+        )
+        config = McpConfig(
+            home=tmp_path / "home",
+            database_url=None,
+            chroma_url=None,
+            chroma_path_override=None,
+            dnd_skills_dir=tmp_path / "dnd",
+            modulegen_skills_dir=tmp_path / "modulegen",
+            module_import_roots=(tmp_path,),
+            auto_seed_rules=False,
+        )
+        server = create_server(config)
+
+        async def call(name: str, arguments: dict):
+            _, result = await server.call_tool(name, arguments)
+            return result.get("result", result) if isinstance(result, dict) else result
+
+        campaign = await call(
+            "campaign_create",
+            {"name": "Player-safe projections", "idempotency_key": "campaign"},
+        )
+        actors = []
+        for index in range(2):
+            actors.append(
+                await call(
+                    "character_create_from",
+                    {
+                        "mode": "direct",
+                        "payload": {
+                            "campaign_id": campaign["id"],
+                            "name": f"Combatant {index + 1}",
+                        },
+                        "idempotency_key": f"actor-{index + 1}",
+                    },
+                )
+            )
+        staged = await call(
+            "module_draft",
+            {
+                "campaign_id": campaign["id"],
+                "action": "start",
+                "payload": {
+                    "source_path": str(source),
+                    "source_key": "private-module",
+                    "title": "Private Module",
+                },
+                "idempotency_key": "module:start",
+            },
+        )
+        installed = await finalize_and_activate_module(
+            lambda _server, name, arguments: call(name, arguments),
+            server,
+            campaign["id"],
+            staged,
+            source_key="private-module",
+            title="Private Module",
+            portable_id="dnd5e.module.player-safe-projection",
+        )
+        module_id = installed["imported"]["module_id"]
+        player_id = "player:projection"
+        await call(
+            "access_grant",
+            {
+                "scope": "campaign",
+                "campaign_id": campaign["id"],
+                "principal_id": player_id,
+                "payload": {"role": "player"},
+            },
+        )
+        current = await call(
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        await call(
+            "game_phase",
+            {
+                "campaign_id": campaign["id"],
+                "action": "set",
+                "tool_profile": "play",
+                "expected_revision": current["revision"],
+                "idempotency_key": "enter-play",
+            },
+        )
+
+        env = dict(os.environ)
+        env.update(
+            {
+                "SAGASMITH_DND_MCP_HOME": str(config.home),
+                "SAGASMITH_DND_MCP_AUTO_SEED": "0",
+                "SAGASMITH_DND_MCP_MODULE_IMPORT_ROOTS": str(tmp_path),
+                "SAGASMITH_DND_MCP_BOUND_PRINCIPAL_ID": player_id,
+            }
+        )
+        params = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "sagasmith_dnd_mcp.server"],
+            cwd=Path(__file__).parents[1],
+            env=env,
+        )
+        player_tools = {"module_query", "module_search", "continuity_context"}
+
+        def response_payload(response):
+            structured = getattr(response, "structuredContent", None)
+            if structured is not None:
+                return structured
+            return json.loads(response.content[0].text)
+
+        def response_result(response):
+            payload = response_payload(response)
+            return payload.get("result", payload) if isinstance(payload, dict) else payload
+
+        async def assert_player_projection(expected_phase: str) -> None:
+            notifications: list[str] = []
+
+            async def on_message(message) -> None:
+                notifications.append(type(getattr(message, "root", message)).__name__)
+
+            async with stdio_client(params) as (read, write):
+                async with ClientSession(read, write, message_handler=on_message) as session:
+                    initialized = await session.initialize()
+                    assert initialized.capabilities.tools.listChanged is True
+                    opened = await session.call_tool(
+                        "exposure",
+                        {"action": "open", "campaign_id": campaign["id"]},
+                    )
+                    assert not opened.isError
+                    assert response_payload(opened)["phase"] == expected_phase
+                    for tool_id in sorted(player_tools):
+                        searched = await session.call_tool(
+                            "exposure",
+                            {
+                                "action": "search",
+                                "campaign_id": campaign["id"],
+                                "query": tool_id,
+                            },
+                        )
+                        assert not searched.isError
+                        matches = response_payload(searched)["matches"]
+                        assert [(item["tool_id"], item["roles"]) for item in matches] == [
+                            (tool_id, [])
+                        ]
+
+                    notifications.clear()
+                    loaded = await session.call_tool(
+                        "exposure",
+                        {
+                            "action": "set",
+                            "campaign_id": campaign["id"],
+                            "add_tool_ids": sorted(player_tools),
+                        },
+                    )
+                    assert not loaded.isError
+                    await asyncio.sleep(0)
+                    await asyncio.sleep(0)
+                    assert "ToolListChangedNotification" in notifications
+                    assert player_tools <= {
+                        tool.name for tool in (await session.list_tools()).tools
+                    }
+
+                    listed = await session.call_tool(
+                        "module_query",
+                        {"campaign_id": campaign["id"], "view": "list", "payload": {}},
+                    )
+                    assert not listed.isError
+                    modules = response_result(listed)
+                    assert len(modules) == 1
+                    assert "source_path" not in modules[0]
+                    assert "metadata" not in modules[0]
+
+                    indexed = await session.call_tool(
+                        "module_query",
+                        {
+                            "campaign_id": campaign["id"],
+                            "view": "index",
+                            "payload": {"module_id": module_id},
+                        },
+                    )
+                    assert not indexed.isError
+                    assert response_result(indexed) == []
+                    searched = await session.call_tool(
+                        "module_search",
+                        {
+                            "campaign_id": campaign["id"],
+                            "query": "cursed crown",
+                            "module_ids": [module_id],
+                        },
+                    )
+                    assert not searched.isError
+                    assert response_result(searched) == []
+                    context = await session.call_tool(
+                        "continuity_context",
+                        {
+                            "campaign_id": campaign["id"],
+                            "audience": "player",
+                            "purpose": "general",
+                            "scope_id": "party",
+                        },
+                    )
+                    assert not context.isError
+                    assert response_result(context)["module_evidence"] == []
+
+                    for view in ("content", "assets", "candidates"):
+                        private_view = await session.call_tool(
+                            "module_query",
+                            {
+                                "campaign_id": campaign["id"],
+                                "view": view,
+                                "payload": {"module_id": module_id},
+                            },
+                        )
+                        assert private_view.isError
+                        assert "cannot access campaign" in private_view.content[0].text
+                    dm_context = await session.call_tool(
+                        "continuity_context",
+                        {
+                            "campaign_id": campaign["id"],
+                            "audience": "dm",
+                            "purpose": "source_interpretation",
+                            "scope_id": "party",
+                        },
+                    )
+                    assert dm_context.isError
+                    assert "only to Owner/DM" in dm_context.content[0].text
+
+        await assert_player_projection("play")
+        current = await call(
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        await call(
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "positioning_mode": "agent",
+                "participant_ids": [actor["id"] for actor in actors],
+                "participant_config": [
+                    {"actor_id": actors[0]["id"], "initiative": 20},
+                    {"actor_id": actors[1]["id"], "initiative": 10},
+                ],
+                "expected_revision": current["revision"],
+                "idempotency_key": "combat:start",
+            },
+        )
+        await assert_player_projection("combat")
 
     asyncio.run(exercise())
 
