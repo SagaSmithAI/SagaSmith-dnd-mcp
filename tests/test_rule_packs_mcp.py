@@ -1749,7 +1749,7 @@ def test_checkpointed_core_relock_preserves_profile_and_adopts_current_runtime(
     asyncio.run(exercise())
 
 
-def test_checkpointed_core_relock_is_allowed_during_active_combat(
+def test_combat_lifecycle_declares_and_releases_core_mutation_locks(
     tmp_path: Path,
 ) -> None:
     config = McpConfig(
@@ -1840,22 +1840,15 @@ def test_checkpointed_core_relock_is_allowed_during_active_combat(
             profiles = RuleProfileService(database)
             profile = profiles.get(campaign["id"])
             assert profile is not None
-            profiles.set(
-                campaign["id"],
-                edition=profile.edition,
-                locale=profile.locale,
-                publications=list(profile.publications),
-                options={
-                    **profile.options,
-                    "_core_rule_pack_lock": {
-                        "id": "dnd5e.core.2014",
-                        "version": "0.9.0",
-                        "fingerprint": "old-combat-core-fingerprint",
-                    },
-                },
-                expected_campaign_revision=started["campaign_revision"],
-                active_combat_option_keys={"_core_rule_pack_lock"},
-            )
+            with pytest.raises(ValueError, match="rule profile cannot change while locked"):
+                profiles.set(
+                    campaign["id"],
+                    edition=profile.edition,
+                    locale=profile.locale,
+                    publications=list(profile.publications),
+                    options=dict(profile.options),
+                    expected_campaign_revision=started["campaign_revision"],
+                )
         finally:
             database.dispose()
         changed = await call(
@@ -1867,56 +1860,58 @@ def test_checkpointed_core_relock_is_allowed_during_active_combat(
                 "principal_id": "system:local",
             },
         )
-        branch = next(
-            item
-            for item in await call(
-                server,
-                "branch_query",
-                {
-                    "campaign_id": campaign["id"],
-                    "view": "list",
-                    "payload": {},
-                    "principal_id": "system:local",
-                },
-            )
-            if item["is_current"]
-        )
-        snapshot = await call(
-            server,
-            "snapshot_create",
+        assert changed["state"]["mutation_locks"] == [
             {
-                "campaign_id": campaign["id"],
-                "label": "Mid-combat Core maintenance",
-                "expected_revision": changed["revision"],
-                "expected_head_snapshot_id": branch.get("head_snapshot_id") or "",
-                "idempotency_key": "combat-relock-snapshot",
-            },
-        )
-        relocked = await call(
-            server,
-            "campaign_rules",
-            {
-                "campaign_id": campaign["id"],
-                "action": "core_relock",
-                "payload": {
-                    "expected_core_fingerprint": "old-combat-core-fingerprint",
-                    "reason": "Adopt a tested Core fix at a verified combat checkpoint.",
-                    "expected_head_snapshot_id": snapshot["id"],
-                },
-                "branch_id": branch["id"],
-                "expected_revision": changed["revision"],
-                "idempotency_key": "combat-relock-adopt",
-            },
-        )
-
-        assert relocked["status"] == "relocked"
-        assert relocked["checkpoint_snapshot_id"] == snapshot["id"]
+                "id": "dnd5e:combat",
+                "domains": [
+                    "rule_profile",
+                    "rule_pack_activation",
+                    "addon_activation",
+                ],
+                "reason": "active D&D combat",
+            }
+        ]
         status = await call(
             server,
             "combat_query",
             {"campaign_id": campaign["id"], "view": "status"},
         )
         assert status["active"] is True
+        ended = await call(
+            server,
+            "combat_end",
+            {
+                "campaign_id": campaign["id"],
+                "expected_revision": changed["revision"],
+                "idempotency_key": "combat-relock-end",
+            },
+        )
+        after_end = await call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
+        )
+        assert "mutation_locks" not in after_end["state"]
+        database = Database(sqlite_database_url(config.database_path))
+        try:
+            profiles = RuleProfileService(database)
+            profile = profiles.get(campaign["id"])
+            assert profile is not None
+            updated = profiles.set(
+                campaign["id"],
+                edition=profile.edition,
+                locale=profile.locale,
+                publications=list(profile.publications),
+                options=dict(profile.options),
+                expected_campaign_revision=ended["campaign_revision"],
+            )
+            assert updated.options == profile.options
+        finally:
+            database.dispose()
 
     asyncio.run(exercise())
 
@@ -2150,19 +2145,18 @@ def test_snapshot_and_branch_checkout_reject_unavailable_core_lock(
             )
             == 1
         )
-        legacy_branch = await call(
-            server,
-            "branch_change",
-            {
-                "campaign_id": campaign["id"],
-                "action": "create",
-                "payload": {"name": "legacy-core", "from_snapshot_id": legacy_snapshot["id"]},
-                "principal_id": "system:local",
-                "expected_revision": repaired["campaign_revision"],
-                "expected_branch_id": branch["id"],
-                "idempotency_key": "legacy-core-branch",
-            },
-        )
+        legacy_branch_args = {
+            "campaign_id": campaign["id"],
+            "action": "create",
+            "payload": {"name": "legacy-core", "from_snapshot_id": legacy_snapshot["id"]},
+            "principal_id": "system:local",
+            "expected_revision": repaired["campaign_revision"],
+            "expected_branch_id": branch["id"],
+            "idempotency_key": "legacy-core-branch",
+        }
+        legacy_branch = await call(server, "branch_change", legacy_branch_args)
+        assert await call(server, "branch_change", legacy_branch_args) == legacy_branch
+        assert legacy_branch["campaign_revision"] == repaired["campaign_revision"] + 1
 
         with pytest.raises(Exception, match="cannot be restored without explicit conversion"):
             await call(
@@ -2171,7 +2165,7 @@ def test_snapshot_and_branch_checkout_reject_unavailable_core_lock(
                 {
                     "campaign_id": campaign["id"],
                     "slot": legacy_snapshot["slot"],
-                    "expected_revision": repaired["campaign_revision"],
+                    "expected_revision": legacy_branch["campaign_revision"],
                     "expected_branch_id": branch["id"],
                     "idempotency_key": "reject-legacy-restore",
                 },
@@ -2185,7 +2179,7 @@ def test_snapshot_and_branch_checkout_reject_unavailable_core_lock(
                     "action": "checkout",
                     "payload": {"branch_id": legacy_branch["id"]},
                     "principal_id": "system:local",
-                    "expected_revision": repaired["campaign_revision"],
+                    "expected_revision": legacy_branch["campaign_revision"],
                     "expected_branch_id": branch["id"],
                     "idempotency_key": "reject-legacy-checkout",
                 },
@@ -2209,7 +2203,7 @@ def test_snapshot_and_branch_checkout_reject_unavailable_core_lock(
                 "principal_id": "system:local",
             },
         )
-        assert after["revision"] == repaired["campaign_revision"]
+        assert after["revision"] == legacy_branch["campaign_revision"]
         assert (
             next(item for item in current_branch if item["id"] == branch["id"])["is_current"]
             is True

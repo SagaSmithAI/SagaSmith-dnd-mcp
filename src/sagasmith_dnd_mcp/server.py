@@ -339,6 +339,7 @@ from sagasmith_dnd.resolution_plan import (
     resolution_plan_template,
 )
 from sagasmith_dnd.resources import mutate_bounded_resource
+from sagasmith_dnd.retrieval import DND5E_QUERY_HINTS
 from sagasmith_dnd.rule_engine import (
     AGENT_RULING_KIND_ORDER,
     EXTERNAL_RULING_KIND_ORDER,
@@ -568,6 +569,42 @@ ENGINE_OWNED_STANDARD_ACTIVITY_IDS = frozenset(
         "dnd5e.content.srd2024.feature.rogue-cunning-action",
     }
 )
+
+COMBAT_MUTATION_LOCK_ID = "dnd5e:combat"
+COMBAT_MUTATION_LOCK = {
+    "id": COMBAT_MUTATION_LOCK_ID,
+    "domains": ["rule_profile", "rule_pack_activation", "addon_activation"],
+    "reason": "active D&D combat",
+}
+
+
+def _with_combat_mutation_lock(
+    state: dict[str, Any],
+    *,
+    active: bool,
+) -> dict[str, Any]:
+    """Add or remove the authoritative ruleset lock for the combat lifecycle."""
+
+    value = deepcopy(state)
+    raw_locks = value.get("mutation_locks", [])
+    if not isinstance(raw_locks, list) or any(
+        not isinstance(item, dict) for item in raw_locks
+    ):
+        raise ValueError("campaign state mutation_locks must be an array of objects")
+    locks = [
+        deepcopy(item)
+        for item in raw_locks
+        if str(item.get("id") or "") != COMBAT_MUTATION_LOCK_ID
+    ]
+    if active:
+        locks.append(deepcopy(COMBAT_MUTATION_LOCK))
+    if locks:
+        value["mutation_locks"] = locks
+    else:
+        value.pop("mutation_locks", None)
+    return value
+
+
 ENGINE_SETTLED_CARD_MECHANIC_IDS = frozenset(
     {
         "dnd5e.core.action.multiattack_choice",
@@ -7135,7 +7172,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
         if scene is None:
             return None
-        if scene.get("visibility", "keeper") not in PLAYER_MODULE_VISIBILITY_SCOPES:
+        if scene.get("visibility", "restricted") not in PLAYER_MODULE_VISIBILITY_SCOPES:
             return {
                 "campaign_id": campaign_id,
                 "scene_id": scene.get("scene_id"),
@@ -13917,6 +13954,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         # The active encounter is the sole Combat authority.  ``game_phase``
         # records only the non-combat Lobby/Play lifecycle.
         updated_state["game_phase"] = PROFILE_PLAY
+        updated_state = _with_combat_mutation_lock(updated_state, active=True)
         updated_state = validate_party_state(updated_state)
         source_start_updates = [
             CharacterStateUpdate(
@@ -23434,12 +23472,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             name=name,
             from_snapshot_id=from_snapshot_id,
             checkout=checkout,
+            expected_revision=expected_revision,
+            expected_branch_id=expected_branch_id,
             idempotency_key=idempotency_key,
             idempotency_write=IdempotencyWrite(
                 scope=scope,
                 payload=request_payload,
                 response=lambda value: {
                     **asdict(value["branch"]),
+                    "campaign_revision": expected_revision + 1,
                     **(
                         {"snapshot": asdict(value["snapshot"])}
                         if value["snapshot"] is not None
@@ -23448,7 +23489,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 },
             ),
         )
-        response = asdict(created)
+        response = {
+            **asdict(created),
+            "campaign_revision": campaigns.get(campaign_id).revision,
+        }
         if checkout and created.head_snapshot_id:
             snapshot = next(
                 item for item in snapshots.list(campaign_id) if item.id == created.head_snapshot_id
@@ -23495,12 +23539,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         checked_out = branches.checkout(
             campaign_id,
             branch_id,
+            expected_revision=expected_revision,
+            expected_branch_id=expected_branch_id,
             idempotency_key=idempotency_key,
             idempotency_write=IdempotencyWrite(
                 scope=scope,
                 payload=request_payload,
                 response=lambda value: {
                     "branch": asdict(value["branch"]),
+                    "campaign_revision": expected_revision
+                    + int(branch_id != expected_branch_id),
                     "snapshot": (
                         asdict(value["snapshot"]) if value["snapshot"] is not None else None
                     ),
@@ -23518,6 +23566,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         response = {
             "branch": asdict(checked_out),
+            "campaign_revision": campaigns.get(campaign_id).revision,
             "snapshot": asdict(snapshot) if snapshot else None,
         }
         return response
@@ -28358,6 +28407,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         updated_state = dict(campaign.state or {})
         updated_state["combat"] = combat
         updated_state["game_phase"] = PROFILE_PLAY
+        updated_state = _with_combat_mutation_lock(updated_state, active=False)
         character_updates: list[CharacterStateUpdate] = []
         expired_effects: set[str] = set()
         for actor_id_value in ending_actor_ids:
@@ -30419,7 +30469,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return [
             item
             for item in index
-            if item.get("visibility", "keeper") in PLAYER_MODULE_VISIBILITY_SCOPES
+            if item.get("visibility", "restricted") in PLAYER_MODULE_VISIBILITY_SCOPES
         ]
 
     @public_tool()
@@ -30429,7 +30479,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Read a complete module chunk after it was selected by search."""
         result = modules.expand(chunk_id)
         membership = access.require_campaign(result["campaign_id"], principal_id)
-        visibility = result.get("scene", {}).get("visibility", "keeper")
+        visibility = result.get("scene", {}).get("visibility", "restricted")
         if membership.role in CAMPAIGN_DM_ROLES or visibility in PLAYER_MODULE_VISIBILITY_SCOPES:
             return result
         return {
@@ -31265,6 +31315,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         hits = modules.search(
             campaign_id=campaign_id,
             query=query,
+            query_hints=DND5E_QUERY_HINTS,
             top_k=top_k,
             module_ids=module_ids,
             embedder=embedder,
@@ -31275,7 +31326,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return [
             asdict(hit)
             for hit in hits
-            if hit.metadata.get("visibility", "keeper") in PLAYER_MODULE_VISIBILITY_SCOPES
+            if hit.metadata.get("visibility", "restricted")
+            in PLAYER_MODULE_VISIBILITY_SCOPES
         ]
 
     def campaign_rule_source_ids(campaign_id: str) -> set[str]:
@@ -31454,6 +31506,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         hits = rules.search(
             system_id=DND5E.id,
             query=query,
+            query_hints=DND5E_QUERY_HINTS,
             edition=edition,
             locale=locale,
             publications=publications,
@@ -34411,7 +34464,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 payload=payload,
                 response=relock_response,
             ),
-            active_combat_option_keys={"_core_rule_pack_lock"},
         )
         committed = idempotency.lookup(scope, str(idempotency_key), payload)
         assert committed is not None and committed.response is not None
