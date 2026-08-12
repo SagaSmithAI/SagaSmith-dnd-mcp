@@ -734,9 +734,40 @@ def _party_character_views(calls: list[dict[str, Any]]) -> dict[str, dict[str, A
     return latest
 
 
+def _class_feature_catalog(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collect current-level feature requirements from public catalog receipts."""
+
+    features: dict[str, dict[str, Any]] = {}
+    for call in calls:
+        arguments = call.get("arguments") or {}
+        if (
+            call.get("tool") != "character_query"
+            or not call.get("ok")
+            or arguments.get("view") != "catalog"
+        ):
+            continue
+        for node in _walk(call.get("result")):
+            if not isinstance(node, dict) or node.get("kind") != "feature":
+                continue
+            artifact_id = str(node.get("id") or "")
+            requirements = dict(node.get("selection_requirements") or {})
+            class_name = str(requirements.get("class_name") or "")
+            if not artifact_id or not class_name:
+                continue
+            features[artifact_id] = {
+                "artifact_id": artifact_id,
+                "name": str(node.get("name") or artifact_id),
+                "class_name": class_name,
+                "minimum_level": int(requirements.get("minimum_level", 1) or 1),
+                "application_state": str(node.get("application_state") or ""),
+            }
+    return list(features.values())
+
+
 def _party_mechanical_readiness(calls: list[dict[str, Any]]) -> dict[str, list[str]]:
     party_ids = _manifest_party_ids(calls)
     views = _party_character_views(calls)
+    class_features = _class_feature_catalog(calls)
     gaps: dict[str, list[str]] = {}
     for actor_id in sorted(party_ids):
         character = views.get(actor_id)
@@ -755,6 +786,11 @@ def _party_mechanical_readiness(calls: list[dict[str, Any]]) -> dict[str, list[s
             if isinstance(item, dict)
         ]
         selection_kinds = {str(item.get("kind") or "") for item in selections}
+        applied_feature_ids = {
+            str(item.get("id") or "")
+            for item in dict(sheet.get("content") or {}).get("features") or []
+            if isinstance(item, dict)
+        }
         hit_dice = dict(combat.get("hit_dice") or {})
         profile = dict(notes.get("profile") or {})
         actor_gaps: list[str] = []
@@ -785,6 +821,17 @@ def _party_mechanical_readiness(calls: list[dict[str, Any]]) -> dict[str, list[s
         for kind in ("class", "species", "background"):
             if kind not in selection_kinds:
                 actor_gaps.append(f"{kind}_catalog_provenance_missing")
+        for class_entry in classes:
+            class_name = str(class_entry.get("name") or "")
+            class_level = int(class_entry.get("level", 0) or 0)
+            for feature in class_features:
+                if (
+                    feature["application_state"] == "selection_ready"
+                    and feature["class_name"].casefold() == class_name.casefold()
+                    and feature["minimum_level"] <= class_level
+                    and feature["artifact_id"] not in applied_feature_ids
+                ):
+                    actor_gaps.append(f"class_feature_missing:{feature['artifact_id']}")
         hp = dict(combat.get("hp") or {})
         if int(hp.get("max", 0) or 0) < 1 or int(hp.get("value", 0) or 0) < 1:
             actor_gaps.append("hit_points_incomplete")

@@ -884,6 +884,69 @@ def test_preparation_uses_highest_character_revision_across_principals() -> None
     assert audit["party_mechanical_gaps"] == {}
 
 
+def test_preparation_reports_current_level_catalog_feature_shortfall() -> None:
+    catalog = _call(
+        "character_query",
+        arguments={
+            "view": "catalog",
+            "payload": {"campaign_id": "campaign-1", "query": "Fighter"},
+        },
+        result=[
+            {
+                "id": "fighter-fighting-style",
+                "kind": "feature",
+                "name": "Fighting Style",
+                "application_state": "selection_ready",
+                "selection_requirements": {
+                    "class_name": "Fighter",
+                    "minimum_level": 1,
+                    "fields": ["option"],
+                },
+            },
+            {
+                "id": "fighter-second-wind",
+                "kind": "feature",
+                "name": "Second Wind",
+                "application_state": "selection_ready",
+                "selection_requirements": {
+                    "class_name": "Fighter",
+                    "minimum_level": 1,
+                    "fields": [],
+                },
+            },
+            {
+                "id": "fighter-action-surge",
+                "kind": "feature",
+                "name": "Action Surge",
+                "application_state": "selection_ready",
+                "selection_requirements": {
+                    "class_name": "Fighter",
+                    "minimum_level": 2,
+                    "fields": [],
+                },
+            },
+        ],
+    )
+    pc = _ready_pc_call()
+    pc["result"]["sheet"]["content"]["features"] = [
+        {"id": "fighter-fighting-style"}
+    ]
+    calls = [
+        _call("skill_query"),
+        _call("exposure", arguments={"action": "open"}),
+        *_player_grants(),
+        _ready_manifest_call(),
+        catalog,
+        pc,
+    ]
+
+    audit = _coverage_audit({"scenarios": []}, calls, process_count=1, list_changed_count=1)
+
+    assert audit["party_mechanical_gaps"] == {
+        "pc-1": ["class_feature_missing:fighter-second-wind"]
+    }
+
+
 def test_preparation_allows_campaign_party_to_grow_beyond_initial_selection() -> None:
     route = {"scenarios": []}
     extra_pc = _call(
