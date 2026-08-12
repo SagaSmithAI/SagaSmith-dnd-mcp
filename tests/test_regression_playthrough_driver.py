@@ -229,7 +229,7 @@ def _stub_exact_chunk_expansion(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def test_register_party_returns_unresolved_dm_review_to_agent() -> None:
+def test_register_party_does_not_block_on_unresolved_party_recommendation() -> None:
     manifest = new_playthrough_manifest(
         run_id="run-1",
         campaign_line_id="unknown-size",
@@ -242,26 +242,44 @@ def test_register_party_returns_unresolved_dm_review_to_agent() -> None:
     )
 
     class Client:
+        def __init__(self) -> None:
+            self.manifest = manifest
+            self.revision = 1
+
         async def domain(self, tool_id: str, arguments: dict):
-            assert tool_id == "playthrough_manifest"
-            assert arguments == {"campaign_id": "campaign-1", "action": "get"}
-            return {"manifest": manifest}
+            if tool_id == "playthrough_manifest" and arguments["action"] == "get":
+                return {"manifest": deepcopy(self.manifest)}
+            if tool_id == "character_query":
+                return {
+                    "id": "pc-1",
+                    "name": "First PC",
+                    "campaign_id": "campaign-1",
+                    "character_type": "pc",
+                    "sheet": default_character_sheet(),
+                    "derived": {},
+                }
+            if tool_id == "playthrough_manifest" and arguments["action"] == "replace":
+                self.manifest = deepcopy(arguments["payload"]["manifest"])
+                self.revision += 1
+                return {"manifest": deepcopy(self.manifest), "campaign_revision": self.revision}
+            if tool_id == "playthrough_manifest" and arguments["action"] == "sync":
+                return {"manifest": deepcopy(self.manifest), "campaign_revision": self.revision}
+            raise AssertionError((tool_id, arguments))
 
-    with pytest.raises(RegressionRulingRequiredError) as raised:
-        asyncio.run(
-            regression_playthrough._register_party(
-                Client(),
-                campaign_id="campaign-1",
-                run_id="run-1",
-                selections=[{"actor_id": "pc-1", "source": "generated"}],
-            )
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {"result": {"id": "campaign-1", "revision": self.revision}}
+
+    result = asyncio.run(
+        regression_playthrough._register_party(
+            Client(),
+            campaign_id="campaign-1",
+            run_id="run-1",
+            selections=[{"actor_id": "pc-1", "source": "generated"}],
         )
+    )
 
-    requirement = raised.value.requirement
-    assert requirement["operation"] == "playthrough_manifest.register_party"
-    assert requirement["ruling"]["default_resolver"] == "agent"
-    assert requirement["ruling"]["ruling_kind"] == "source_or_scene_fact"
-    assert requirement["ruling"]["committed"] is False
+    assert result["manifest"]["party"]["members"][0]["actor_id"] == "pc-1"
 
 
 def test_playthrough_parser_accepts_deferred_scene_checkpoint(

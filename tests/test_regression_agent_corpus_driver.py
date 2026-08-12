@@ -718,7 +718,7 @@ def test_preparation_rejects_manifest_ready_skeletal_party() -> None:
     assert "starting_equipment_missing" in audit["party_mechanical_gaps"]["pc-1"]
 
 
-def test_preparation_rejects_extra_campaign_pc_builds() -> None:
+def test_preparation_allows_campaign_party_to_grow_beyond_initial_selection() -> None:
     route = {"scenarios": []}
     extra_pc = _call(
         "character_create_from",
@@ -743,7 +743,7 @@ def test_preparation_rejects_extra_campaign_pc_builds() -> None:
 
     audit = _coverage_audit(route, calls, process_count=1, list_changed_count=1)
 
-    assert "preparation:extra_campaign_pcs_created" in audit["gaps"]
+    assert "preparation:extra_campaign_pcs_created" not in audit["gaps"]
     assert audit["campaign_pc_ids"] == ["pc-1", "pc-2"]
 
 

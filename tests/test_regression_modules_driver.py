@@ -295,7 +295,7 @@ def test_full_campaign_manifest_verifies_checksums_and_selection(tmp_path: Path)
         _selected_lines(manifest, ["missing"])
 
 
-def test_full_campaign_review_blocks_missing_party_count_and_incomplete_preset() -> None:
+def test_full_campaign_party_recommendation_is_advisory_but_incomplete_preset_blocks() -> None:
     line = {
         "id": "line-1",
         "play_requirements": {
@@ -317,11 +317,6 @@ def test_full_campaign_review_blocks_missing_party_count_and_incomplete_preset()
     ]
 
     assert _line_review_blocks(line, player_documents) == [
-        {
-            "kind": "recommended_party_size",
-            "campaign_line_id": "line-1",
-            "reason": "No range in source",
-        },
         {
             "kind": "incomplete_character_template",
             "campaign_line_id": "line-1",
@@ -360,7 +355,7 @@ def test_reviewed_non_module_character_material_does_not_block_fallback_party() 
     assert _line_review_blocks(line, player_documents) == []
 
 
-def test_completed_party_size_dm_review_unblocks_only_with_evidence() -> None:
+def test_completed_party_size_dm_review_is_advisory_even_without_evidence() -> None:
     line = {
         "id": "waterdeep-dragon-heist",
         "play_requirements": {
@@ -379,8 +374,7 @@ def test_completed_party_size_dm_review_unblocks_only_with_evidence() -> None:
 
     assert _line_review_blocks(line, []) == []
     del line["play_requirements"]["recommended_party_size"]["review"]
-    with pytest.raises(ValueError, match="completed party-size Agent-as-DM review"):
-        _line_review_blocks(line, [])
+    assert _line_review_blocks(line, []) == []
 
 
 def test_playthrough_manifest_builder_preserves_unknown_party_size_review() -> None:

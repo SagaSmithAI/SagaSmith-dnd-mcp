@@ -45127,11 +45127,15 @@ boundary.
         active_members = [
             item for item in updated["party"]["members"] if item["status"] == "active"
         ]
+        blocking_reviews = [
+            item
+            for item in updated["review_blocks"]
+            if item.get("kind") != "recommended_party_size"
+        ]
         if (
             updated["status"] == "lobby"
-            and not updated["review_blocks"]
-            and updated["party"]["selected_size"] is not None
-            and len(active_members) == updated["party"]["selected_size"]
+            and not blocking_reviews
+            and active_members
         ):
             updated["status"] = "ready"
         return validate_playthrough_manifest(updated)

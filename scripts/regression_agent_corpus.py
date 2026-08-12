@@ -531,7 +531,6 @@ def _manifest_party_ready(calls: list[dict[str, Any]]) -> bool:
                 continue
             manifest = node["manifest"]
             party = manifest.get("party") or {}
-            selected_size = party.get("selected_size")
             members = party.get("members") or []
             active_count = sum(
                 1
@@ -540,8 +539,7 @@ def _manifest_party_ready(calls: list[dict[str, Any]]) -> bool:
             )
             return (
                 manifest.get("status") in {"ready", "in_progress", "completed"}
-                and isinstance(selected_size, int)
-                and active_count == selected_size
+                and active_count > 0
             )
     return False
 
@@ -574,22 +572,11 @@ def _manifest_party_ids(calls: list[dict[str, Any]]) -> set[str]:
             return {
                 str(member.get("actor_id"))
                 for member in members
-                if isinstance(member, dict) and member.get("actor_id")
+                if isinstance(member, dict)
+                and member.get("actor_id")
+                and member.get("status") == "active"
             }
     return set()
-
-
-def _manifest_selected_size(calls: list[dict[str, Any]]) -> int | None:
-    for call in reversed(calls):
-        if call.get("tool") != "playthrough_manifest" or not call.get("ok"):
-            continue
-        for node in _walk(call.get("result")):
-            if not isinstance(node, dict) or not isinstance(node.get("manifest"), dict):
-                continue
-            selected_size = dict(node["manifest"].get("party") or {}).get("selected_size")
-            if isinstance(selected_size, int) and not isinstance(selected_size, bool):
-                return selected_size
-    return None
 
 
 def _campaign_pc_ids(calls: list[dict[str, Any]]) -> set[str]:
@@ -1112,10 +1099,7 @@ def _coverage_audit(
         gaps.append("preparation:player_membership_or_actor_grant_missing")
     if not _manifest_party_ready(calls):
         gaps.append("preparation:manifest_party_not_ready")
-    selected_size = _manifest_selected_size(calls)
     campaign_pc_ids = _campaign_pc_ids(calls)
-    if selected_size is not None and len(campaign_pc_ids) > selected_size:
-        gaps.append("preparation:extra_campaign_pcs_created")
     party_mechanical_gaps = _party_mechanical_readiness(calls)
     if party_mechanical_gaps:
         gaps.append("preparation:party_mechanics_not_ready")
@@ -1450,7 +1434,7 @@ cycles already left duplicate matching unfinished jobs, resume only the first
 newest matching handle returned by the public list and create no more. Start a
 new draft only if that public list proves no matching resumable job exists or a
 finalized Pack requires an explicit new version.
-create or resume one reproducibly seeded campaign; create the source-sized legal
+create or resume one reproducibly seeded campaign; create a positive-sized legal
 party; grant the named player principal both campaign membership with role
 `player` and explicit control of one PC through separate public `access_grant`
 calls; then progress the source-backed
@@ -1506,14 +1490,15 @@ does not satisfy preparation. Here `preparation` means a scenario gap ending in
 `:preparation`; the separate
 `preparation:player_membership_or_actor_grant_missing` gap requires only the
 missing campaign/actor grants and never authorizes rebuilding the Pack or party.
-`preparation:manifest_party_not_ready` requires only creating any source-sized
-missing PCs, replacing the complete manifest with full member records, and
+`preparation:manifest_party_not_ready` requires only creating at least one
+campaign PC when none exists, replacing the complete manifest with the current
+active members' full records, and
 syncing it to `ready`; it also never authorizes rebuilding the Pack.
 An empty manifest does not mean the campaign has no PCs. Before any build, call
 `character_query(view="list")`, count the distinct campaign-bound PC instances,
-and calculate the exact shortfall from source-confirmed `selected_size`. If that
-shortfall is zero, make no build call and register the existing actors. Never
-create a reserve/bench PC in this fresh regression campaign.
+and reuse the current active party. If at least one suitable PC exists, make no
+build call and register the existing actors. Never create a reserve/bench PC in
+this fresh regression campaign merely to match a recommendation or old plan.
 `preparation:party_mechanics_not_ready` requires completing the existing party,
 not creating replacements. Read the exact
 `dnd:full/skills/dnd-dm/references/CHAR_CREATION.md` asset, follow its bootstrap,
@@ -1528,8 +1513,9 @@ satisfied by `module_set_progress` state or by a
 successful `sync` that still returns an empty member list. Do not stop after
 either result: `selected_size` is an explicit positive Agent selection and the
 source minimum/maximum are advisory only. Never change or block that selection
-merely to match a recommendation. Create any missing PCs up to the selected
-count, register every full member record with manifest
+merely to match a recommendation. The initial selection is planning metadata,
+not an invariant: the registered active party may gain or lose members during
+the campaign, but must never be empty. Register every current active member with manifest
 `replace`, and verify the subsequent `sync` response itself is `ready`.
 After the one permitted initial exposure open, seeing only core tools is
 expected, not a blocker: search and set the next required native tool. A cycle

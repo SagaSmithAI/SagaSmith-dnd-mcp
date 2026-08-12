@@ -254,29 +254,6 @@ def _line_review_blocks(
     player_documents: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     blocks: list[dict[str, Any]] = []
-    party_size = line["play_requirements"]["recommended_party_size"]
-    party_size_status = str(party_size["status"])
-    if party_size_status == "dm_review_required":
-        blocks.append(
-            {
-                "kind": "recommended_party_size",
-                "campaign_line_id": line["id"],
-                "reason": party_size["reason"],
-            }
-        )
-    elif party_size_status == "dm_review_completed":
-        if (
-            party_size.get("minimum") is None
-            or party_size.get("maximum") is None
-            or party_size.get("selected") is None
-            or not isinstance(party_size.get("review"), dict)
-        ):
-            raise ValueError(
-                "completed party-size Agent-as-DM review requires minimum, maximum, "
-                "selected, and review evidence"
-            )
-    elif party_size_status != "source_confirmed":
-        raise ValueError(f"unsupported party-size status: {party_size_status}")
     for document in player_documents:
         inspection = dict(document.get("character_document") or {})
         declared = dict(document.get("declared_player_material") or {})

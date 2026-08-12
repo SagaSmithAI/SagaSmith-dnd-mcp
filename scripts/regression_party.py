@@ -1110,7 +1110,6 @@ def audit_profiles(
     campaign_line_id: str = "lost-mine-of-phandelver",
 ) -> dict[str, Any]:
     if campaign_line_id == "lost-mine-of-phandelver":
-        expected_size = 5
         size_basis = {
             "kind": "module_source_maximum",
             "source_minimum": 4,
@@ -1126,7 +1125,6 @@ def audit_profiles(
             ),
         }
     elif campaign_line_id == "waterdeep-dragon-heist":
-        expected_size = 4
         size_basis = {
             "kind": "explicit_dm_review",
             "module_party_size_status": "not_stated_after_text_and_visual_review",
@@ -1141,7 +1139,6 @@ def audit_profiles(
             "disposition": "legally generate all four Agent-reviewed seats",
         }
     elif campaign_line_id == "tyranny-of-dragons":
-        expected_size = 4
         size_basis = {
             "kind": "module_source_maximum",
             "source_minimum": 4,
@@ -1160,7 +1157,6 @@ def audit_profiles(
             ),
         }
     elif campaign_line_id == "storm-kings-thunder":
-        expected_size = 6
         size_basis = {
             "kind": "module_source_maximum",
             "source_minimum": 4,
@@ -1185,7 +1181,6 @@ def audit_profiles(
             ),
         }
     elif campaign_line_id == "tomb-of-annihilation":
-        expected_size = 6
         size_basis = {
             "kind": "module_source_maximum",
             "source_minimum": 4,
@@ -1203,10 +1198,6 @@ def audit_profiles(
         }
     else:
         raise ValueError(f"unsupported campaign party profile: {campaign_line_id}")
-    if len(profiles) != expected_size:
-        raise ValueError(
-            f"{campaign_line_id} must use its reviewed party size of {expected_size} PCs"
-        )
     for profile in profiles:
         if set(profile["abilities"]) != set(ABILITY_NAMES):
             raise ValueError(f"{profile['name']} does not assign all six abilities")

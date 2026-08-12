@@ -2281,32 +2281,6 @@ async def _register_party(
             raise ValueError("party member source must be pregen, generated, or replacement")
     current = await _manifest_get(client, campaign_id)
     manifest = deepcopy(current["manifest"])
-    selected_size = manifest["party"]["selected_size"]
-    if selected_size is None:
-        review = dict(manifest["party"].get("party_size_review") or {})
-        raise RegressionRulingRequiredError(
-            {
-                "status": "pending_ruling",
-                "default_resolver": str(review.get("default_resolver") or "agent"),
-                "ruling_kind": str(review.get("ruling_kind") or "source_or_scene_fact"),
-                "reason": "party size still requires explicit Agent-as-DM review",
-                "committed": False,
-            },
-            operation="playthrough_manifest.register_party",
-            context={
-                "campaign_id": campaign_id,
-                "run_id": run_id,
-                "party_size_status": manifest["party"]["party_size_status"],
-            },
-            retry_hint=(
-                "Complete the Agent-owned party-size review with source/rules evidence, "
-                "then retry register-party."
-            ),
-        )
-    if len(selections) != selected_size:
-        raise ValueError(
-            f"register-party requires exactly the selected party size of {selected_size} actors"
-        )
     members = []
     for selection in selections:
         actor = await client.domain(
