@@ -903,6 +903,7 @@ def _ending_prerequisite_audit(
                         "id": prerequisite.get("id"),
                         "receipt": prerequisite.get("receipt"),
                         "status": "blocked_by_prior",
+                        "expected": prerequisite,
                     }
                 )
                 continue
@@ -923,6 +924,7 @@ def _ending_prerequisite_audit(
                         "id": prerequisite.get("id"),
                         "receipt": prerequisite.get("receipt"),
                         "status": "missing",
+                        "expected": prerequisite,
                     }
                 )
                 continue
@@ -937,6 +939,7 @@ def _ending_prerequisite_audit(
                     "call_index": matched,
                     "tool": matched_call.get("tool"),
                     "action": (matched_call.get("arguments") or {}).get("action"),
+                    "expected": prerequisite,
                 }
             )
         audits.append(
@@ -1886,8 +1889,12 @@ check must use `base_dc - sum(dc_reduction)` for exactly its declared
 Treat `current_ending_prerequisite_receipt_audit` as the machine authority for
 the ordered receipt chain. Resume at its `first_missing_id`; historical completed
 manifest status or successful verification never substitutes for a missing
-receipt. When all entries are matched, configure and verify the exact ending
-without replaying the receipt chain.
+receipt. For that entry, follow its full `expected` object, including exact
+`source_evidence`, `fact_key`, item, check, and reducer fields. A semantic event
+must use party/public/actor audience and request the fact in the same atomic
+commit; `facts=[]` or a returned fact without the event id never matches. When
+all entries are matched, configure and verify the exact ending without replaying
+the receipt chain.
 Do not manufacture the result with
 `memory_change`, `module_set_progress`, or manifest fields. Those projections
 may record an outcome only after the independent prerequisite receipts exist.

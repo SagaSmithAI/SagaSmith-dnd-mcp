@@ -866,6 +866,7 @@ def test_ending_requires_independent_source_item_and_check_receipts() -> None:
     receipt_audit = _ending_prerequisite_audit(route, self_certifying)
     assert receipt_audit[0]["first_missing_id"] == "source-item-acquired"
     assert receipt_audit[0]["receipts"][0]["status"] == "missing"
+    assert receipt_audit[0]["receipts"][0]["expected"] == prerequisites[0]
     assert receipt_audit[0]["receipts"][1]["status"] == "blocked_by_prior"
 
     receipts = [
@@ -1976,6 +1977,8 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "latest_successful_combat_start_business_template=" in prompt
     assert "current_ending_prerequisite_receipt_audit=" in prompt
     assert "historical completed\nmanifest status" in prompt
+    assert "follow its full `expected` object" in prompt
+    assert "`facts=[]`" in prompt
     assert "Do not retype identifiers" in prompt
     assert "class_feature_missing:fighter-second-wind" in prompt
     assert "load `character_content_apply`" in prompt
