@@ -713,7 +713,9 @@ def _semantic_event_receipt(call: dict[str, Any], prerequisite: dict[str, Any]) 
         or not str(event.get("summary") or "").strip()
         or event.get("audience_scope") not in {"actor", "party", "public"}
         or str(event_payload.get("reducer_id") or "") != reducer_id
-        or not _valid_managed_source_ref(event_payload.get("source_ref"))
+        or not _source_ref_matches_evidence(
+            event_payload.get("source_ref"), prerequisite
+        )
     ):
         return False
     requested_fact = next(
