@@ -352,6 +352,30 @@ def test_checked_in_routes_cover_every_fixture_declared_runnable_unit() -> None:
     }
     assert all(item["status"] == "complete" for item in coverage)
 
+    tomb = next(
+        item
+        for item in decisions["coverage_routes"]
+        if item["campaign_line_id"] == "tomb-of-annihilation"
+    )
+    tomb_ending = next(
+        item for item in tomb["scenarios"] if item["id"] == "tomb-conclusion"
+    )
+    assert tomb_ending["ending_prerequisites"] == [
+        {
+            "id": "soulmonger-destroyed",
+            "receipt": "semantic_event",
+            "fact_key": "ending.tomb-of-annihilation.soulmonger-destroyed",
+            "source_evidence": {
+                "page_start": 179,
+                "page_end": 179,
+                "heading_path": [
+                    "Ch 5: Tomb of the Nine Gods",
+                    "Level 6: Cradle of the Death",
+                ],
+            },
+        }
+    ]
+
     avernus = next(
         item
         for item in decisions["coverage_routes"]

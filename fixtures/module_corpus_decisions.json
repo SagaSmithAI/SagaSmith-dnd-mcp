@@ -505,7 +505,22 @@
           "positioning_mode": "agent",
           "audience": "player",
           "path": "normal",
-          "ending_status": "legal_complete"
+          "ending_status": "legal_complete",
+          "ending_prerequisites": [
+            {
+              "id": "soulmonger-destroyed",
+              "receipt": "semantic_event",
+              "fact_key": "ending.tomb-of-annihilation.soulmonger-destroyed",
+              "source_evidence": {
+                "page_start": 179,
+                "page_end": 179,
+                "heading_path": [
+                  "Ch 5: Tomb of the Nine Gods",
+                  "Level 6: Cradle of the Death"
+                ]
+              }
+            }
+          ]
         },
         {
           "id": "recovery-boundaries",
