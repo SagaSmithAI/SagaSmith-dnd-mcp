@@ -1884,8 +1884,8 @@ fixture `fact_key`; the returned fact must cite the returned event id. A reduced
 check must use `base_dc - sum(dc_reduction)` for exactly its declared
 `applied_reducer_ids`. Bare add/upsert facts never qualify.
 Treat `current_ending_prerequisite_receipt_audit` as the machine authority for
-the ordered receipt chain. Resume at its `first_missing_id`; a historical
-completed manifest or successful verification never substitutes for a missing
+the ordered receipt chain. Resume at its `first_missing_id`; historical completed
+manifest status or successful verification never substitutes for a missing
 receipt. When all entries are matched, configure and verify the exact ending
 without replaying the receipt chain.
 Do not manufacture the result with
@@ -2017,6 +2017,15 @@ Search and load the exact `combat_end` tool, then close immediately with a
     you query status and use `combat_end` with truthful
     `outcome.status="interrupted"`; do not replay a completed encounter before
     returning to the first remaining Play/ending gap.
+    In `positioning_mode="agent"`, a pending attack's Agent spatial ruling belongs
+    at `action.context.spatial_facts`, not at `action.spatial_facts`,
+    `action.attack`, `agent_ruling`, or `declaration`. Copy the preflight contract
+    exactly. Its attack facts require `decision_id`, a source-grounded `reason`,
+    `targetable`, `in_range`, `cover_degree`, `attacker_can_see_target`, and
+    `target_can_see_attacker`. Re-run preflight with that context until it is
+    `ready`, then submit the same action context to the engine-owned resolver and
+    require a committed result. Do not pass turns to avoid an unresolved spatial
+    ruling or end the encounter while every action remains pending.
 
 Prepare/finalize/import/activate the current Pack through the public lifecycle;
 before any module authoring write, read the current

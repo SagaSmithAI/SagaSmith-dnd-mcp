@@ -1913,6 +1913,9 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "every remaining Combat-specific mechanism are already" in prompt
     assert "at least one successful" in prompt
     assert "`combat_start` alone never" in prompt
+    assert "`action.context.spatial_facts`" in prompt
+    assert "`action.spatial_facts`" in prompt
+    assert "`target_can_see_attacker`" in prompt
     assert "A `pending_ruling` response" in prompt
     assert "Never guess or cache" in prompt
     assert '`module_draft(action="get")` with no payload' in prompt
@@ -1922,7 +1925,7 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "identical statblock review cannot fix" in prompt
     assert "latest_successful_combat_start_business_template=" in prompt
     assert "current_ending_prerequisite_receipt_audit=" in prompt
-    assert "historical completed manifest" in prompt
+    assert "historical completed\nmanifest status" in prompt
     assert "Do not retype identifiers" in prompt
     assert "class_feature_missing:fighter-second-wind" in prompt
     assert "load `character_content_apply`" in prompt
