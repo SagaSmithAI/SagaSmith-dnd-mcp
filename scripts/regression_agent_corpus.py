@@ -1451,11 +1451,13 @@ def _dm_prompt(
     gaps: list[str],
     source_opposition_audit: list[dict[str, Any]] | None = None,
     combat_start_business_template: dict[str, Any] | None = None,
+    party_mechanical_gaps: dict[str, list[str]] | None = None,
 ) -> str:
     opposition_audit_json = json.dumps(source_opposition_audit or [], ensure_ascii=False)
     combat_template_json = json.dumps(
         combat_start_business_template or {}, ensure_ascii=False
     )
+    party_gaps_json = json.dumps(party_mechanical_gaps or {}, ensure_ascii=False)
     return f"""You are the DM Agent for a real full-campaign regression.
 Run id: {run_id}
 Campaign line label (never a campaign UUID): {line_id}
@@ -1465,6 +1467,7 @@ Source-reviewed preparation profile (re-resolve its exact current Pack evidence)
 {json.dumps(unit.get("play_requirements") or {}, ensure_ascii=False)}
 Trusted player principal to grant one actor: cli:{player_principal}
 Cycle: {cycle}
+Current authoritative party mechanical gaps: {party_gaps_json}
 
 Use dnd.full and CAMPAIGN_REGRESSION. At the physical process's first bootstrap,
 start from the six core tools, open exposure once, consume native list changes,
@@ -1515,11 +1518,20 @@ override.
 
 Treat the current evidence-gap list below as authoritative for what remains;
 prior Agent narration is not proof of a blocker. Query current state first and
-do not repeat a prerequisite that is no longer listed. In particular, when no
-`preparation` gap remains, do not rebuild the existing party or re-import an
-unchanged Pack. A `source_opposition_missing` gap does not by itself prove that
-the active Pack needs a new review. In Lobby, first use exact `rule_search` with
-only `campaign_id`, the exact printed identity as `query`, and optional `top_k`.
+do not repeat a prerequisite that is no longer listed. When `Current
+authoritative party mechanical gaps` names
+`class_feature_missing:<artifact_id>`, the catalog receipt proves that exact
+feature is selection-ready and available at the actor's current class level.
+Fresh-read that actor, load `character_content_apply`, apply the exact artifact
+id with only its catalog-required selection fields, and re-read the resulting
+features, activities, and resources. Do not call `character_action` with a
+feature or core mechanic id before the feature has materialized its returned
+activity card, and never synthesize the missing resource through a state patch.
+In particular, when no `preparation` gap remains, do not rebuild the existing
+party or re-import an unchanged Pack. A `source_opposition_missing` gap does not
+by itself prove that the active Pack needs a new review. In Lobby, first use
+exact `rule_search` with only `campaign_id`, the exact printed identity as
+`query`, and optional `top_k`.
 Do not send `filters` on that first lookup: the campaign binding already scopes
 enabled rule sources. Later exact filters belong only inside the optional
 `filters` object. If a filtered lookup returns no hits, retry the minimal shape
@@ -2062,6 +2074,7 @@ def _run_unit(
                         _read_tool_audit(player_audit), principal="player"
                     )
                 ),
+                party_mechanical_gaps=dict(audit.get("party_mechanical_gaps") or {}),
             ),
             audit_path=dm_audit,
         )

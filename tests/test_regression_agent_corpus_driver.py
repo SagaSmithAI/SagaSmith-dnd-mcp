@@ -1556,6 +1556,9 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
         player_principal="player",
         cycle=1,
         gaps=[],
+        party_mechanical_gaps={
+            "pc-1": ["class_feature_missing:fighter-second-wind"]
+        },
     )
     assert "Retrieve and expand the exact managed source before deciding" in prompt
     assert "dnd:full/references/skill-groups/lobby/modules-import.md" in prompt
@@ -1608,6 +1611,8 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "identical statblock review cannot fix" in prompt
     assert "latest_successful_combat_start_business_template=" in prompt
     assert "Do not retype identifiers" in prompt
+    assert "class_feature_missing:fighter-second-wind" in prompt
+    assert "load `character_content_apply`" in prompt
     assert "same parallel tool batch as an `exposure(set)`" in prompt
     assert "`tools/list_changed`, refresh the native list" in prompt
     assert "context-barrier rebuild may replay" in prompt
