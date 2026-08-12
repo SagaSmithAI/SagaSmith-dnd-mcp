@@ -2585,6 +2585,33 @@ def _run_unit(
     return report
 
 
+def _refresh_completed_report(
+    report: dict[str, Any], unit: dict[str, Any], route: dict[str, Any]
+) -> dict[str, Any]:
+    """Re-evaluate a saved run against the current source-backed route contract."""
+
+    refreshed = dict(report)
+    calls = list(report.get("tool_timeline") or [])
+    coverage = _coverage_audit(
+        route,
+        calls,
+        process_count=len(report.get("agent_processes") or []),
+        list_changed_count=int(report.get("tools_list_changed_observed") or 0),
+        expected_edition=str(unit.get("edition") or "").strip() or None,
+        expected_advancement_mode=(
+            str(unit.get("advancement_mode") or "").strip() or None
+        ),
+    )
+    refreshed.update(
+        {
+            "discovered_unit": unit,
+            "route": route,
+            "coverage": coverage,
+        }
+    )
+    return refreshed
+
+
 def _run(args: argparse.Namespace) -> int:
     if args.max_cycles < 1:
         raise ValueError("--max-cycles must be positive")
@@ -2613,8 +2640,11 @@ def _run(args: argparse.Namespace) -> int:
             continue
         report_path = args.output_dir / "campaigns" / _safe_id(line_id) / "campaign-report.json"
         if args.resume and report_path.is_file():
-            existing = _read_json(report_path)
-            if dict(existing.get("coverage") or {}).get("complete") is True:
+            existing = _refresh_completed_report(
+                _read_json(report_path), unit, routes[line_id]
+            )
+            _write_json(report_path, existing)
+            if dict(existing["coverage"]).get("complete") is True:
                 reports.append(existing)
                 continue
         report = _run_unit(args, unit, routes[line_id])

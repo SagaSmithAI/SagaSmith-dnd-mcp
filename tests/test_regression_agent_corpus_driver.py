@@ -28,6 +28,7 @@ from scripts.regression_agent_corpus import (
     _player_ready,
     _process_artifacts,
     _read_tool_audit,
+    _refresh_completed_report,
     _runnable_units,
     _source_opposition_evidence_audit,
     _tool_timeline,
@@ -376,6 +377,53 @@ def test_resume_cycles_preserve_existing_process_artifacts(tmp_path: Path) -> No
         encoding="utf-8",
     )
     assert _next_cycle(tmp_path) == 8
+
+
+def test_resume_reopens_completed_report_when_current_route_adds_receipt() -> None:
+    old_route = {
+        "scenarios": [
+            {
+                "id": "ending",
+                "mechanisms": ["ending"],
+                "ending_status": "legal_complete",
+            }
+        ]
+    }
+    calls = [
+        _call("skill_query"),
+        _call("exposure", arguments={"action": "open"}),
+        _call(
+            "playthrough_manifest",
+            arguments={"action": "verify_ending"},
+            result={"status": "completed", "achieved": True},
+        ),
+    ]
+    report = {
+        "route": old_route,
+        "tool_timeline": calls,
+        "agent_processes": [{"cycle": 1}],
+        "tools_list_changed_observed": 1,
+        "coverage": {"complete": True, "gaps": []},
+    }
+    new_route = copy.deepcopy(old_route)
+    new_route["scenarios"][0]["ending_prerequisites"] = [
+        {
+            "id": "source-outcome",
+            "receipt": "semantic_event",
+            "fact_key": "ending.source-outcome",
+        }
+    ]
+
+    refreshed = _refresh_completed_report(
+        report,
+        {"edition": "2014", "advancement_mode": "milestone"},
+        new_route,
+    )
+
+    assert refreshed["route"] == new_route
+    assert refreshed["coverage"]["complete"] is False
+    assert "ending:ending" in refreshed["coverage"]["gaps"]
+    assert "ending:legal_ending_not_verified" in refreshed["coverage"]["gaps"]
 
 
 def test_agent_provider_overload_is_machine_readable(tmp_path: Path) -> None:
