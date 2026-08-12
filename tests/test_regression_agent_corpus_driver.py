@@ -1899,6 +1899,8 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "re-resolve its exact current Pack evidence" in prompt
     assert "genuinely proven Pack-only gaps" in prompt
     assert "runtime manifest condition or unmet receipt is not missing Pack content" in prompt
+    assert "multi-volume campaign's managed next volume" in prompt
+    assert "Never\nretry the already-active earlier volume" in prompt
     assert "Do not send `filters` on that first lookup" in prompt
     assert "retry the minimal shape" in prompt
     assert "exact `payload.chunk_ids` (never" in prompt

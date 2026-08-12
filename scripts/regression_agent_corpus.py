@@ -1891,9 +1891,16 @@ without replaying the receipt chain.
 Do not manufacture the result with
 `memory_change`, `module_set_progress`, or manifest fields. Those projections
 may record an outcome only after the independent prerequisite receipts exist.
-The active Pack already contains the indexed ending evidence used by this
-fixture: a remaining ending gap is never, by itself, permission to call
-`module_draft`, rebuild, re-import, or reactivate the Pack.
+A remaining ending gap is never, by itself, permission to rebuild or re-import
+an already-active source volume. First compare `managed_sources` with the
+campaign's active module sources and query the exact indexed ending evidence.
+When the matching source volume is active and resolves that evidence, do not
+call `module_draft`. When a multi-volume campaign's managed next volume is not
+active and public queries prove that its ending evidence is consequently absent,
+that absent volume is a real Pack lifecycle obligation: in Lobby, use its exact
+managed path/checksum to resume or start one draft, finalize/import it, require
+`skipped=false`, and activate only the module id returned by that import. Never
+retry the already-active earlier volume as a substitute.
 
 Treat the current evidence-gap list below as authoritative for what remains;
 prior Agent narration is not proof of a blocker. Query current state first and
