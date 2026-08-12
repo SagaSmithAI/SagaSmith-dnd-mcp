@@ -428,7 +428,7 @@
               "required_count": 1,
               "required_variant": {"creature_type": "undead"},
               "variant_source_kind": "module-chunk",
-              "source_excerpt": "对于福尼斯的骷髅鼠采用怪物图鉴中的鼠群 swarm of rats 数据，将它们的野兽标签替换成不死生物。"
+              "source_excerpt": "对于福尼斯的骷髅鼠采用怪物图鉴中的鼠群 swarm of rats 数据，将他们的野兽标签替换成不死生物。"
             }
           ]
         },
