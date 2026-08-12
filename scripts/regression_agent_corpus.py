@@ -897,6 +897,14 @@ def _ending_prerequisite_audit(
         receipts: list[dict[str, Any]] = []
         first_missing_id: str | None = None
         for prerequisite in prerequisites:
+            evidence = prerequisite.get("source_evidence") or {}
+            headings = [
+                str(value).strip()
+                for value in evidence.get("heading_path") or []
+                if str(value).strip()
+            ]
+            safe_query = re.sub(r"[^\w\s-]", " ", headings[-1] if headings else "")
+            safe_query = " ".join(safe_query.split())
             if first_missing_id is not None:
                 receipts.append(
                     {
@@ -904,6 +912,7 @@ def _ending_prerequisite_audit(
                         "receipt": prerequisite.get("receipt"),
                         "status": "blocked_by_prior",
                         "expected": prerequisite,
+                        "safe_source_query": safe_query,
                     }
                 )
                 continue
@@ -925,6 +934,7 @@ def _ending_prerequisite_audit(
                         "receipt": prerequisite.get("receipt"),
                         "status": "missing",
                         "expected": prerequisite,
+                        "safe_source_query": safe_query,
                     }
                 )
                 continue
@@ -940,6 +950,7 @@ def _ending_prerequisite_audit(
                     "tool": matched_call.get("tool"),
                     "action": (matched_call.get("arguments") or {}).get("action"),
                     "expected": prerequisite,
+                    "safe_source_query": safe_query,
                 }
             )
         audits.append(
@@ -2254,6 +2265,12 @@ manifest's current conclusion source, an asset checksum, or a hand-written
 source object never substitutes for that prerequisite source. Do not load or
 call `module_set_progress` until the missing receipt has been accepted by the
 machine audit.
+Use that entry's machine-generated `safe_source_query` verbatim for the first
+search; it is derived from the expected heading with FTS punctuation removed.
+If it returns no exact page/heading match, simplify words from the same expected
+heading only. Never switch to a conclusion/current-scene query or select a hit
+whose page/heading differs from `expected.source_evidence`; previously expanded
+mismatched sources remain negative evidence, not fallbacks.
 `exposure:reopened_after_transition` is immutable historical audit debt in a
 resumed artifact. Do not repeat it, but finish the remaining mechanical route;
 the runner will require a clean fresh campaign after the route is complete.

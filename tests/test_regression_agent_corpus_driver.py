@@ -921,6 +921,7 @@ def test_ending_requires_independent_source_item_and_check_receipts() -> None:
     assert receipt_audit[0]["first_missing_id"] == "source-item-acquired"
     assert receipt_audit[0]["receipts"][0]["status"] == "missing"
     assert receipt_audit[0]["receipts"][0]["expected"] == prerequisites[0]
+    assert receipt_audit[0]["receipts"][0]["safe_source_query"] == "Ending"
     assert receipt_audit[0]["receipts"][1]["status"] == "blocked_by_prior"
 
     receipts = [
@@ -2098,6 +2099,8 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "that is\nthe first executable action" in prompt
     assert "use `module_search` and `module_expand`" in prompt
     assert "manifest's current conclusion source" in prompt
+    assert "machine-generated `safe_source_query` verbatim" in prompt
+    assert "mismatched sources remain negative evidence" in prompt
     assert "Do not retype identifiers" in prompt
     assert "class_feature_missing:fighter-second-wind" in prompt
     assert "load `character_content_apply`" in prompt
