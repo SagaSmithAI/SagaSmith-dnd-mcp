@@ -882,6 +882,74 @@ def _ending_completed(
     return False
 
 
+def _ending_prerequisite_audit(
+    route: dict[str, Any], calls: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Report the ordered authoritative receipts already present for each ending."""
+
+    audits: list[dict[str, Any]] = []
+    for scenario in route.get("scenarios") or []:
+        prerequisites = list(scenario.get("ending_prerequisites") or [])
+        if not prerequisites:
+            continue
+        cursor = 0
+        matched_receipts: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        receipts: list[dict[str, Any]] = []
+        first_missing_id: str | None = None
+        for prerequisite in prerequisites:
+            if first_missing_id is not None:
+                receipts.append(
+                    {
+                        "id": prerequisite.get("id"),
+                        "receipt": prerequisite.get("receipt"),
+                        "status": "blocked_by_prior",
+                    }
+                )
+                continue
+            matched = next(
+                (
+                    index
+                    for index in range(cursor, len(calls))
+                    if _ending_prerequisite_receipt(
+                        calls[index], prerequisite, matched_receipts
+                    )
+                ),
+                None,
+            )
+            if matched is None:
+                first_missing_id = str(prerequisite.get("id") or "")
+                receipts.append(
+                    {
+                        "id": prerequisite.get("id"),
+                        "receipt": prerequisite.get("receipt"),
+                        "status": "missing",
+                    }
+                )
+                continue
+            matched_call = calls[matched]
+            matched_receipts.append((prerequisite, matched_call))
+            cursor = matched + 1
+            receipts.append(
+                {
+                    "id": prerequisite.get("id"),
+                    "receipt": prerequisite.get("receipt"),
+                    "status": "matched",
+                    "call_index": matched,
+                    "tool": matched_call.get("tool"),
+                    "action": (matched_call.get("arguments") or {}).get("action"),
+                }
+            )
+        audits.append(
+            {
+                "scenario_id": scenario.get("id"),
+                "receipts": receipts,
+                "first_missing_id": first_missing_id,
+                "ready_for_verification": first_missing_id is None,
+            }
+        )
+    return audits
+
+
 def _manifest_party_ready(calls: list[dict[str, Any]]) -> bool:
     for call in reversed(calls):
         if call.get("tool") != "playthrough_manifest" or not call.get("ok"):
@@ -1732,10 +1800,12 @@ def _dm_prompt(
     cycle: int,
     gaps: list[str],
     source_opposition_audit: list[dict[str, Any]] | None = None,
+    ending_prerequisite_audit: list[dict[str, Any]] | None = None,
     combat_start_business_template: dict[str, Any] | None = None,
     party_mechanical_gaps: dict[str, list[str]] | None = None,
 ) -> str:
     opposition_audit_json = json.dumps(source_opposition_audit or [], ensure_ascii=False)
+    ending_audit_json = json.dumps(ending_prerequisite_audit or [], ensure_ascii=False)
     combat_template_json = json.dumps(
         combat_start_business_template or {}, ensure_ascii=False
     )
@@ -1785,6 +1855,7 @@ managed_sources={json.dumps(_managed_source_summary(unit), ensure_ascii=False)}
 evidence={json.dumps(_evidence_summary(route), ensure_ascii=False)}
 scenarios={json.dumps(route.get("scenarios") or [], ensure_ascii=False)}
 prior_source_opposition_evidence_audit={opposition_audit_json}
+current_ending_prerequisite_receipt_audit={ending_audit_json}
 latest_successful_combat_start_business_template={combat_template_json}
 When a combat scenario includes `initial_source_groups`, treat each entry as a
 source-backed audit expectation: re-read the cited source, preserve every listed
@@ -1812,6 +1883,11 @@ with `event_type="source_semantic_event"`, the exact fixture `id` in
 fixture `fact_key`; the returned fact must cite the returned event id. A reduced
 check must use `base_dc - sum(dc_reduction)` for exactly its declared
 `applied_reducer_ids`. Bare add/upsert facts never qualify.
+Treat `current_ending_prerequisite_receipt_audit` as the machine authority for
+the ordered receipt chain. Resume at its `first_missing_id`; a historical
+completed manifest or successful verification never substitutes for a missing
+receipt. When all entries are matched, configure and verify the exact ending
+without replaying the receipt chain.
 Do not manufacture the result with
 `memory_change`, `module_set_progress`, or manifest fields. Those projections
 may record an outcome only after the independent prerequisite receipts exist.
@@ -2348,6 +2424,9 @@ def _run_unit(
     start_cycle = _next_cycle(unit_dir)
 
     for cycle in range(start_cycle, start_cycle + args.max_cycles):
+        current_calls = _tool_timeline(
+            _read_tool_audit(dm_audit), principal="dm"
+        ) + _tool_timeline(_read_tool_audit(player_audit), principal="player")
         dm_session = f"{dm_session_prefix}:cycle-{cycle:03d}"
         dm = _run_agent(
             args,
@@ -2367,19 +2446,13 @@ def _run_unit(
                 gaps=list(audit.get("gaps") or []),
                 source_opposition_audit=_current_opposition_audit(
                     route,
-                    _source_opposition_evidence_audit(
-                        route,
-                        _tool_timeline(_read_tool_audit(dm_audit), principal="dm")
-                        + _tool_timeline(
-                            _read_tool_audit(player_audit), principal="player"
-                        ),
-                    ),
+                    _source_opposition_evidence_audit(route, current_calls),
+                ),
+                ending_prerequisite_audit=_ending_prerequisite_audit(
+                    route, current_calls
                 ),
                 combat_start_business_template=_latest_combat_start_business_template(
-                    _tool_timeline(_read_tool_audit(dm_audit), principal="dm")
-                    + _tool_timeline(
-                        _read_tool_audit(player_audit), principal="player"
-                    )
+                    current_calls
                 ),
                 party_mechanical_gaps=dict(audit.get("party_mechanical_gaps") or {}),
             ),

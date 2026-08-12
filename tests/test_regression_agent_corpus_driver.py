@@ -20,6 +20,7 @@ from scripts.regression_agent_corpus import (
     _decision_timing,
     _decode_tool_content,
     _dm_prompt,
+    _ending_prerequisite_audit,
     _execution_order_gaps,
     _latest_combat_start_business_template,
     _mechanism_covered,
@@ -814,6 +815,10 @@ def test_ending_requires_independent_source_item_and_check_receipts() -> None:
     audit = _coverage_audit(route, self_certifying, process_count=2, list_changed_count=1)
     assert "ending:ending" in audit["gaps"]
     assert "ending:legal_ending_not_verified" in audit["gaps"]
+    receipt_audit = _ending_prerequisite_audit(route, self_certifying)
+    assert receipt_audit[0]["first_missing_id"] == "source-item-acquired"
+    assert receipt_audit[0]["receipts"][0]["status"] == "missing"
+    assert receipt_audit[0]["receipts"][1]["status"] == "blocked_by_prior"
 
     receipts = [
         _call(
@@ -929,6 +934,12 @@ def test_ending_requires_independent_source_item_and_check_receipts() -> None:
     audit = _coverage_audit(route, receipts, process_count=2, list_changed_count=1)
     assert "ending:ending" not in audit["gaps"]
     assert "ending:legal_ending_not_verified" not in audit["gaps"]
+    receipt_audit = _ending_prerequisite_audit(route, receipts)
+    assert receipt_audit[0]["first_missing_id"] is None
+    assert receipt_audit[0]["ready_for_verification"] is True
+    assert [item["status"] for item in receipt_audit[0]["receipts"]] == [
+        "matched"
+    ] * len(prerequisites)
 
     audit = _coverage_audit(
         route,
@@ -1910,6 +1921,8 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "mechanical statblock" in prompt
     assert "identical statblock review cannot fix" in prompt
     assert "latest_successful_combat_start_business_template=" in prompt
+    assert "current_ending_prerequisite_receipt_audit=" in prompt
+    assert "historical completed manifest" in prompt
     assert "Do not retype identifiers" in prompt
     assert "class_feature_missing:fighter-second-wind" in prompt
     assert "load `character_content_apply`" in prompt
