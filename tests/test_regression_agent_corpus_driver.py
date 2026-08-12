@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 import json
 import os
 import subprocess
@@ -825,6 +826,28 @@ def test_preparation_rejects_manifest_ready_skeletal_party() -> None:
     assert "ability_generation_incomplete" in audit["party_mechanical_gaps"]["pc-1"]
     assert "class_catalog_provenance_missing" in audit["party_mechanical_gaps"]["pc-1"]
     assert "starting_equipment_missing" in audit["party_mechanical_gaps"]["pc-1"]
+
+
+def test_preparation_uses_highest_character_revision_across_principals() -> None:
+    newest = _ready_pc_call()
+    newest["result"]["revision"] = 11
+    older_player_view = copy.deepcopy(newest)
+    older_player_view["principal"] = "player"
+    older_player_view["result"]["revision"] = 7
+    older_player_view["result"]["sheet"]["inventory"]["items"] = []
+    calls = [
+        _call("skill_query"),
+        _call("exposure", arguments={"action": "open"}),
+        *_player_grants(),
+        _ready_manifest_call(),
+        newest,
+        older_player_view,
+    ]
+
+    audit = _coverage_audit({"scenarios": []}, calls, process_count=2, list_changed_count=1)
+
+    assert "preparation:party_mechanics_not_ready" not in audit["gaps"]
+    assert audit["party_mechanical_gaps"] == {}
 
 
 def test_preparation_allows_campaign_party_to_grow_beyond_initial_selection() -> None:

@@ -699,7 +699,23 @@ def _party_character_views(calls: list[dict[str, Any]]) -> dict[str, dict[str, A
                 and node.get("character_type") == "pc"
                 and isinstance(node.get("sheet"), dict)
             ):
-                latest[actor_id] = node
+                current = latest.get(actor_id)
+                current_revision = (
+                    current.get("revision", -1) if current is not None else -1
+                )
+                candidate_revision = node.get("revision", -1)
+                if (
+                    not isinstance(current_revision, int)
+                    or isinstance(current_revision, bool)
+                ):
+                    current_revision = -1
+                if (
+                    not isinstance(candidate_revision, int)
+                    or isinstance(candidate_revision, bool)
+                ):
+                    candidate_revision = -1
+                if candidate_revision >= current_revision:
+                    latest[actor_id] = node
     return latest
 
 
