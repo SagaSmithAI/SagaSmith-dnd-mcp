@@ -111,7 +111,7 @@ def test_campaign_baseline_reuses_existing_public_snapshot() -> None:
             self.created = False
 
         async def open(self, campaign_id: str) -> None:
-            assert campaign_id == "campaign-1"
+            raise AssertionError(f"baseline must reuse the bound exposure: {campaign_id}")
 
         async def load(self, *group_ids: str) -> None:
             assert group_ids == ()

@@ -477,7 +477,9 @@ async def _create_baseline_snapshot(
     run_id: str,
 ) -> dict[str, Any]:
     baseline_identity = _token(f"{run_id}\0{campaign_key}\0playthrough-manifest-v1")
-    await client.open(campaign_id)
+    # The import workflow already owns a campaign-bound exposure in this stdio
+    # session. Reopening it would discard the current exposure and violates the
+    # one-open-per-binding host contract; refresh/load the existing list instead.
     await client.load()
     campaign = await client.core(
         "campaign_query",
