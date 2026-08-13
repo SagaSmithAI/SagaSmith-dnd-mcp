@@ -1141,6 +1141,12 @@ def test_ending_requires_independent_source_item_and_check_receipts() -> None:
     assert receipt_audit[0]["receipts"][0]["call_index"] == 2
     assert receipt_audit[0]["first_missing_id"] == "ally-present"
 
+    longer_older_prefix = [valid_receipts[0], valid_receipts[1], restarted_receipts[0]]
+    receipt_audit = _ending_prerequisite_audit(route, longer_older_prefix)
+    assert receipt_audit[0]["receipts"][0]["call_index"] == 0
+    assert receipt_audit[0]["receipts"][1]["call_index"] == 1
+    assert receipt_audit[0]["first_missing_id"] == "mentor-present"
+
 
 def test_completed_recovery_route_must_finish_on_source_branch_in_play() -> None:
     route = {

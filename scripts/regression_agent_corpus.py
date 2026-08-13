@@ -879,6 +879,43 @@ def _complete_ending_receipt_sequence(
     return _search(0, 0, [])
 
 
+def _best_partial_ending_receipt_sequence(
+    calls: list[dict[str, Any]], prerequisites: list[dict[str, Any]]
+) -> list[tuple[dict[str, Any], dict[str, Any], int]]:
+    """Choose the longest valid prefix, preferring the newer prefix on ties."""
+
+    best: list[tuple[dict[str, Any], dict[str, Any], int]] = []
+
+    def _search(
+        prerequisite_index: int,
+        cursor: int,
+        matched: list[tuple[dict[str, Any], dict[str, Any], int]],
+    ) -> None:
+        nonlocal best
+        if len(matched) > len(best) or (
+            len(matched) == len(best)
+            and matched
+            and (not best or matched[0][2] > best[0][2])
+        ):
+            best = matched
+        if prerequisite_index >= len(prerequisites):
+            return
+        prerequisite = prerequisites[prerequisite_index]
+        prior_receipts = [(expected, call) for expected, call, _index in matched]
+        for call_index in range(cursor, len(calls)):
+            if _ending_prerequisite_receipt(
+                calls[call_index], prerequisite, prior_receipts
+            ):
+                _search(
+                    prerequisite_index + 1,
+                    call_index + 1,
+                    [*matched, (prerequisite, calls[call_index], call_index)],
+                )
+
+    _search(0, 0, [])
+    return best
+
+
 def _ending_completed(
     calls: list[dict[str, Any]], *, prerequisites: list[dict[str, Any]] | None = None
 ) -> bool:
@@ -913,19 +950,14 @@ def _ending_prerequisite_audit(
         if not prerequisites:
             continue
         complete_sequence = _complete_ending_receipt_sequence(calls, prerequisites)
+        partial_sequence = (
+            []
+            if complete_sequence is not None
+            else _best_partial_ending_receipt_sequence(calls, prerequisites)
+        )
         matched_receipts: list[tuple[dict[str, Any], dict[str, Any]]] = []
         receipts: list[dict[str, Any]] = []
         first_missing_id: str | None = None
-        cursor = 0
-        if complete_sequence is None:
-            first_prerequisite = prerequisites[0]
-            first_matches = [
-                index
-                for index, call in enumerate(calls)
-                if _ending_prerequisite_receipt(call, first_prerequisite, [])
-            ]
-            if first_matches:
-                cursor = first_matches[-1]
         for prerequisite_index, prerequisite in enumerate(prerequisites):
             evidence = prerequisite.get("source_evidence") or {}
             headings = [
@@ -948,17 +980,10 @@ def _ending_prerequisite_audit(
                 continue
             if complete_sequence is not None:
                 matched = complete_sequence[prerequisite_index][2]
+            elif prerequisite_index < len(partial_sequence):
+                matched = partial_sequence[prerequisite_index][2]
             else:
-                matched = next(
-                    (
-                        index
-                        for index in range(cursor, len(calls))
-                        if _ending_prerequisite_receipt(
-                            calls[index], prerequisite, matched_receipts
-                        )
-                    ),
-                    None,
-                )
+                matched = None
             if matched is None:
                 first_missing_id = str(prerequisite.get("id") or "")
                 receipts.append(
@@ -973,7 +998,6 @@ def _ending_prerequisite_audit(
                 continue
             matched_call = calls[matched]
             matched_receipts.append((prerequisite, matched_call))
-            cursor = matched + 1
             receipts.append(
                 {
                     "id": prerequisite.get("id"),
