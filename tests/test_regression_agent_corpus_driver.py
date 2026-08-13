@@ -2162,6 +2162,10 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "identical statblock review cannot fix" in prompt
     assert "latest_successful_combat_start_business_template=" in prompt
     assert "current_ending_prerequisite_receipt_audit=" in prompt
+    assert '`payload={"spend_id": <new stable id>' in prompt
+    assert '"item_id": <the exact matched acquisition item id>' in prompt
+    assert "do not\nput `excerpt`" in prompt
+    assert "never\nreuse a spend id from a rejected attempt" in prompt
     assert "MANDATORY_FIRST_ENDING_MUTATION=" in prompt
     assert '"tool": "memory_change"' in prompt
     assert '"action": "commit"' in prompt

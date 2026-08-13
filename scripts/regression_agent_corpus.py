@@ -2085,7 +2085,12 @@ are mandatory receipt expectations, not story answers. Re-read their managed
 source evidence and satisfy each prerequisite through the named public facade
 before configuring or verifying the ending. `receipt="loot_acquire"` and
 `receipt="item_spend"` require ordered, committed source-bound `campaign_change`
-acquisition/surrender receipts for the named item; `receipt="character_check"`
+acquisition/surrender receipts for the named item. For `item_spend`, send a new
+top-level idempotency key and `payload={{"spend_id": <new stable id>,
+"item_id": <the exact matched acquisition item id>, "quantity": 1,
+"reason": <source-defined surrender>, "source_ref": <managed ref>}}`; do not
+put `excerpt` or other unsupported fields inside that source_ref, and never
+reuse a spend id from a rejected attempt. `receipt="character_check"`
 requires a committed engine roll with exact scene evidence, skill/DC, required
 success, and an authoritative random receipt. Put the check evidence in the
 public receipt fields `payload.source_scene_id` and `payload.source_excerpt`;
