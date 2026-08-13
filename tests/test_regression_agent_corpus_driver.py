@@ -2125,6 +2125,8 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "current_ending_prerequisite_receipt_audit=" in prompt
     assert "historical completed\nmanifest status" in prompt
     assert "follow its full `expected` object" in prompt
+    assert '`payload.facts=[{"kind":"memory_fact","fact_key":"...", ...}]`' in prompt
+    assert "singular\n`payload.fact`" in prompt
     assert "`facts=[]`" in prompt
     assert "Campaign memory fact `content` is always a string" in prompt
     assert "`fact.content` exactly" in prompt

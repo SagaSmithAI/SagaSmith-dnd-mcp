@@ -2020,7 +2020,10 @@ manifest status or successful verification never substitutes for a missing
 receipt. For that entry, follow its full `expected` object, including exact
 `source_evidence`, `fact_key`, item, check, and reducer fields. A semantic event
 must use party/public/actor audience and request the fact in the same atomic
-commit; `facts=[]` or a returned fact without the event id never matches. When
+commit through the plural array
+`payload.facts=[{{"kind":"memory_fact","fact_key":"...", ...}}]`; singular
+`payload.fact`, `facts=[]`, or a returned fact without the event id never
+matches. When
 that exact stable fact already exists, use public `memory_query` to fresh-read
 its `revision_id`, then supply it as the fact's `expected_revision_id` in the
 same source-bound atomic commit. Do not change keys or fall back to an unlinked
