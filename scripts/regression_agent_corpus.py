@@ -891,7 +891,7 @@ def _source_item_chain_is_live(
             acquired[item_id] = call_index
     for item_id, acquired_at in acquired.items():
         for call in calls[acquired_at + 1 : stop]:
-            if branch_id and _call_branch_id(call) not in {None, branch_id}:
+            if branch_id and _call_branch_id(call) != branch_id:
                 continue
             arguments = call.get("arguments") or {}
             payload = arguments.get("payload") or {}
@@ -930,7 +930,7 @@ def _complete_ending_receipt_sequence(
         prerequisite = prerequisites[prerequisite_index]
         prior_receipts = [(expected, call) for expected, call, _index in matched]
         for call_index in range(cursor, limit):
-            if branch_id and _call_branch_id(calls[call_index]) not in {None, branch_id}:
+            if branch_id and _call_branch_id(calls[call_index]) != branch_id:
                 continue
             if not _source_item_chain_is_live(
                 calls, matched, call_index, branch_id=branch_id
@@ -983,7 +983,7 @@ def _best_partial_ending_receipt_sequence(
         prerequisite = prerequisites[prerequisite_index]
         prior_receipts = [(expected, call) for expected, call, _index in matched]
         for call_index in range(cursor, len(calls)):
-            if branch_id and _call_branch_id(calls[call_index]) not in {None, branch_id}:
+            if branch_id and _call_branch_id(calls[call_index]) != branch_id:
                 continue
             if not _source_item_chain_is_live(
                 calls, matched, call_index, branch_id=branch_id
@@ -1090,7 +1090,7 @@ def _ending_prerequisite_audit(
             and _ending_verify_contradicts_surrender(call, prerequisites)
             and (
                 current_branch_id is None
-                or _call_branch_id(call) in {None, current_branch_id}
+                or _call_branch_id(call) == current_branch_id
             )
             and any(
                 isinstance(node, dict)
@@ -1113,7 +1113,7 @@ def _ending_prerequisite_audit(
             in str(call.get("error") or "")
             and (
                 current_branch_id is None
-                or _call_branch_id(call) in {None, current_branch_id}
+                or _call_branch_id(call) == current_branch_id
             )
             for call in calls
         )
@@ -1269,6 +1269,33 @@ def _initial_campaign_branch(calls: list[dict[str, Any]]) -> str | None:
             if isinstance(binding, dict) and binding.get("branch_id"):
                 return str(binding["branch_id"])
     return None
+
+
+def _latest_snapshot_on_branch(
+    calls: list[dict[str, Any]], branch_id: str | None
+) -> dict[str, Any] | None:
+    if not branch_id:
+        return None
+    snapshots: dict[str, dict[str, Any]] = {}
+    for call in calls:
+        if not call.get("ok"):
+            continue
+        for node in _walk(call.get("result")):
+            if (
+                not isinstance(node, dict)
+                or str(node.get("branch_id") or "") != branch_id
+                or not node.get("id")
+                or not isinstance(node.get("slot"), int)
+                or isinstance(node.get("slot"), bool)
+            ):
+                continue
+            snapshots[str(node["id"])] = {
+                "id": str(node["id"]),
+                "slot": int(node["slot"]),
+                "label": str(node.get("label") or ""),
+                "branch_id": branch_id,
+            }
+    return max(snapshots.values(), key=lambda item: item["slot"], default=None)
 
 
 def _manifest_party_ids(calls: list[dict[str, Any]]) -> set[str]:
@@ -2105,6 +2132,7 @@ def _dm_prompt(
     combat_start_business_template: dict[str, Any] | None = None,
     party_mechanical_gaps: dict[str, list[str]] | None = None,
     initial_source_branch_id: str | None = None,
+    latest_source_snapshot: dict[str, Any] | None = None,
 ) -> str:
     opposition_audit_json = json.dumps(source_opposition_audit or [], ensure_ascii=False)
     ending_audit_json = json.dumps(ending_prerequisite_audit or [], ensure_ascii=False)
@@ -2116,78 +2144,81 @@ def _dm_prompt(
         "character_check": ("character_check", "check"),
     }
     for audit in ending_prerequisite_audit or []:
-        first_missing = str(audit.get("first_missing_id") or "")
-        if not first_missing:
-            continue
-        receipt = next(
-            (
-                item
-                for item in audit.get("receipts") or []
-                if str(item.get("id") or "") == first_missing
-            ),
-            {},
-        )
-        tool, action = receipt_tools.get(str(receipt.get("receipt") or ""), ("", ""))
-        mandatory_ending_mutation = {
-            "scenario_id": audit.get("scenario_id"),
-            "first_missing_id": first_missing,
-            "tool": tool,
-            "action": action,
-            "expected": receipt.get("expected") or {},
-            "safe_source_query": receipt.get("safe_source_query") or "",
-            "ready_for_verification": False,
+        scenario_id = str(audit.get("scenario_id") or "")
+        ending_gaps = {
+            f"{scenario_id}:ending",
+            f"{scenario_id}:legal_ending_not_verified",
         }
-        if action == "item_spend":
-            write_key = f"{run_id}-{line_id}-cycle-{cycle:03d}-{first_missing}"
-            acquired_item_ids = [
-                str(item_id)
-                for prior in audit.get("receipts") or []
-                if prior.get("receipt") == "loot_acquire"
-                and prior.get("status") == "matched"
-                for item_id in prior.get("acquired_item_ids") or []
-            ]
-            mandatory_ending_mutation["write_ids"] = {
-                "idempotency_key": write_key,
-                "spend_id": f"{write_key}-spend",
+        if (
+            audit.get("replacement_blocked_by_completed_manifest") is True
+            and ending_gaps.intersection(gaps)
+        ):
+            mandatory_ending_mutation = {
+                "scenario_id": scenario_id,
+                "tool": "branch_change",
+                "action": "create",
+                "required_phase": "lobby",
+                "source_branch_id": initial_source_branch_id or "",
+                "from_snapshot_id": str((latest_source_snapshot or {}).get("id") or ""),
+                "from_snapshot_slot": (latest_source_snapshot or {}).get("slot"),
+                "from_snapshot_label": str(
+                    (latest_source_snapshot or {}).get("label") or ""
+                ),
+                "checkout": True,
+                "ready_for_verification": False,
+                "forbidden_actions_until_checked_out": [
+                    "configure_ending",
+                    "verify_ending",
+                    "loot_acquire",
+                ],
+                "reason": (
+                    "the current branch has an immutable completed ending whose "
+                    "condition contradicts the ordered receipt chain"
+                ),
             }
-            mandatory_ending_mutation["matched_acquisition_item_ids"] = (
-                acquired_item_ids
-            )
-        break
+            break
     if not mandatory_ending_mutation:
         for audit in ending_prerequisite_audit or []:
-            scenario_id = str(audit.get("scenario_id") or "")
-            ending_gaps = {
-                f"{scenario_id}:ending",
-                f"{scenario_id}:legal_ending_not_verified",
+            first_missing = str(audit.get("first_missing_id") or "")
+            if not first_missing:
+                continue
+            receipt = next(
+                (
+                    item
+                    for item in audit.get("receipts") or []
+                    if str(item.get("id") or "") == first_missing
+                ),
+                {},
+            )
+            tool, action = receipt_tools.get(
+                str(receipt.get("receipt") or ""), ("", "")
+            )
+            mandatory_ending_mutation = {
+                "scenario_id": audit.get("scenario_id"),
+                "first_missing_id": first_missing,
+                "tool": tool,
+                "action": action,
+                "expected": receipt.get("expected") or {},
+                "safe_source_query": receipt.get("safe_source_query") or "",
+                "ready_for_verification": False,
             }
-            if (
-                audit.get("replacement_blocked_by_completed_manifest") is True
-                and ending_gaps.intersection(gaps)
-            ):
-                mandatory_ending_mutation = {
-                    "scenario_id": scenario_id,
-                    "tool": "branch_change",
-                    "action": "create",
-                    "required_phase": "lobby",
-                    "source_branch_id": initial_source_branch_id or "",
-                    "from_snapshot_selection": (
-                        "latest verified snapshot on the source branch before the "
-                        "first invalid completed ending"
-                    ),
-                    "checkout": True,
-                    "ready_for_verification": False,
-                    "forbidden_actions_until_checked_out": [
-                        "configure_ending",
-                        "verify_ending",
-                        "loot_acquire",
-                    ],
-                    "reason": (
-                        "the current branch has an immutable completed ending whose "
-                        "condition contradicts the ordered receipt chain"
-                    ),
+            if action == "item_spend":
+                write_key = f"{run_id}-{line_id}-cycle-{cycle:03d}-{first_missing}"
+                acquired_item_ids = [
+                    str(item_id)
+                    for prior in audit.get("receipts") or []
+                    if prior.get("receipt") == "loot_acquire"
+                    and prior.get("status") == "matched"
+                    for item_id in prior.get("acquired_item_ids") or []
+                ]
+                mandatory_ending_mutation["write_ids"] = {
+                    "idempotency_key": write_key,
+                    "spend_id": f"{write_key}-spend",
                 }
-                break
+                mandatory_ending_mutation["matched_acquisition_item_ids"] = (
+                    acquired_item_ids
+                )
+            break
     if not mandatory_ending_mutation:
         for audit in ending_prerequisite_audit or []:
             scenario_id = str(audit.get("scenario_id") or "")
@@ -2232,7 +2263,10 @@ When this object is non-empty, execute its named tool/action as the first
 authoritative write after the required source lookup. Until it succeeds, do not
 call `playthrough_manifest` except when it is the named tool/action, and do not
 report the ending complete.
-When it names `branch_change(create)`, first use `game_phase(set)` only if needed
+When it names `branch_change(create)`, copy its exact non-empty
+`from_snapshot_id` into `payload.from_snapshot_id`; the facade does not accept
+`source_branch_id` or `from_snapshot_selection` as substitutes. First use
+`game_phase(set)` only if needed
 to enter Lobby, query and verify the selected source-branch snapshot, then create
 and checkout one recovery branch from that snapshot. Those phase/preflight calls
 are the only allowed writes before the named branch mutation. After checkout,
@@ -2968,6 +3002,9 @@ def _run_unit(
                 ),
                 party_mechanical_gaps=dict(audit.get("party_mechanical_gaps") or {}),
                 initial_source_branch_id=_initial_campaign_branch(current_calls),
+                latest_source_snapshot=_latest_snapshot_on_branch(
+                    current_calls, _initial_campaign_branch(current_calls)
+                ),
             ),
             audit_path=dm_audit,
         )

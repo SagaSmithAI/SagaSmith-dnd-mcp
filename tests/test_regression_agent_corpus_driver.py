@@ -2374,12 +2374,22 @@ def test_dm_prompt_recovers_immutable_invalid_ending_on_a_new_branch() -> None:
             }
         ],
         initial_source_branch_id="source-branch",
+        latest_source_snapshot={
+            "id": "source-snapshot",
+            "slot": 7,
+            "label": "source-before-invalid-ending",
+            "branch_id": "source-branch",
+        },
     )
     mandatory = prompt.split("MANDATORY_FIRST_ENDING_MUTATION=", 1)[1].splitlines()[0]
     assert '"tool": "branch_change"' in mandatory
     assert '"action": "create"' in mandatory
     assert '"source_branch_id": "source-branch"' in mandatory
+    assert '"from_snapshot_id": "source-snapshot"' in mandatory
+    assert '"from_snapshot_slot": 7' in mandatory
     assert '"checkout": true' in mandatory
+    assert "copy its exact non-empty\n`from_snapshot_id`" in prompt
+    assert "does not accept\n`source_branch_id`" in prompt
     assert "verify the selected source-branch snapshot" in prompt
     assert "Never mutate or delete the immutable" in prompt
 
