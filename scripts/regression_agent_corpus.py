@@ -2009,6 +2009,12 @@ def _dm_prompt(
             "safe_source_query": receipt.get("safe_source_query") or "",
             "ready_for_verification": False,
         }
+        if action == "item_spend":
+            write_key = f"{run_id}-{line_id}-cycle-{cycle:03d}-{first_missing}"
+            mandatory_ending_mutation["write_ids"] = {
+                "idempotency_key": write_key,
+                "spend_id": f"{write_key}-spend",
+            }
         break
     mandatory_ending_mutation_json = json.dumps(
         mandatory_ending_mutation, ensure_ascii=False
@@ -2025,6 +2031,9 @@ MANDATORY_FIRST_ENDING_MUTATION={mandatory_ending_mutation_json}
 When this object is non-empty, execute its named tool/action as the first
 authoritative write after the required source lookup. Until it succeeds, do not
 call any `playthrough_manifest` action and do not report the ending complete.
+When it includes `write_ids`, copy those exact fresh values into the tool's
+top-level `idempotency_key` and `payload.spend_id`; do not derive either from the
+fixture receipt id or any historical attempt.
 Source-selected advancement mode: {unit.get("advancement_mode")}
 Source-reviewed preparation profile (re-resolve its exact current Pack evidence):
 {json.dumps(unit.get("play_requirements") or {}, ensure_ascii=False)}

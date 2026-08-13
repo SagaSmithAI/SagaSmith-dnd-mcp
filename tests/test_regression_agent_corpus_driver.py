@@ -2214,6 +2214,41 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert '"outcome"' not in prompt
 
 
+def test_dm_prompt_generates_fresh_item_spend_write_ids() -> None:
+    prompt = _dm_prompt(
+        run_id="run",
+        line_id="module",
+        unit={"edition": "2014", "advancement_mode": "xp"},
+        route={"scenarios": []},
+        player_principal="player",
+        cycle=42,
+        gaps=["ending:ending"],
+        ending_prerequisite_audit=[
+            {
+                "scenario_id": "ending",
+                "first_missing_id": "source-item-surrendered",
+                "ready_for_verification": False,
+                "receipts": [
+                    {
+                        "id": "source-item-surrendered",
+                        "receipt": "item_spend",
+                        "status": "missing",
+                        "expected": {
+                            "id": "source-item-surrendered",
+                            "receipt": "item_spend",
+                            "item_name": "Source Sword",
+                        },
+                    }
+                ],
+            }
+        ],
+    )
+    assert '"idempotency_key": "run-module-cycle-042-source-item-surrendered"' in prompt
+    assert '"spend_id": "run-module-cycle-042-source-item-surrendered-spend"' in prompt
+    assert "copy those exact fresh values" in prompt
+    assert "do not derive either from the\nfixture receipt id" in prompt
+
+
 @pytest.mark.full_agent
 @pytest.mark.skipif(
     os.environ.get("SAGASMITH_RUN_FULL_AGENT_CORPUS") != "1",
