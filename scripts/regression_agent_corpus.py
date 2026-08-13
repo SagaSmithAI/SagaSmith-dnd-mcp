@@ -1254,6 +1254,8 @@ def _final_campaign_state(calls: list[dict[str, Any]]) -> dict[str, Any] | None:
                     }:
                         phase = child["game_phase"]
                         break
+            if phase is None:
+                continue
             return {"branch_id": str(binding["branch_id"]), "phase": phase}
     return None
 

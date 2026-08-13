@@ -22,6 +22,7 @@ from scripts.regression_agent_corpus import (
     _dm_prompt,
     _ending_prerequisite_audit,
     _execution_order_gaps,
+    _final_campaign_state,
     _latest_combat_start_business_template,
     _mechanism_covered,
     _next_cycle,
@@ -1286,6 +1287,29 @@ def test_completed_recovery_route_must_finish_on_source_branch_in_play() -> None
     ]
     audit = _coverage_audit(route, settled, process_count=2, list_changed_count=1)
     assert "final_state:source_branch_play_unverified" not in audit["gaps"]
+
+
+def test_final_campaign_state_skips_newer_binding_without_phase() -> None:
+    source_binding = {
+        "host_context_binding": {"branch_id": "source-branch"},
+        "game_phase": "play",
+    }
+    calls = [
+        _call("campaign_query", arguments={"view": "resume"}, result=source_binding),
+        _call(
+            "playthrough_manifest",
+            arguments={"action": "get"},
+            result={
+                "manifest": {"status": "completed"},
+                "host_context_binding": {"branch_id": "source-branch"},
+            },
+        ),
+    ]
+
+    assert _final_campaign_state(calls) == {
+        "branch_id": "source-branch",
+        "phase": "play",
+    }
 
 
 def test_conversation_combat_probe_requires_same_valid_retry_payload() -> None:
