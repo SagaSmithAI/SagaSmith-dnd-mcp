@@ -843,6 +843,43 @@ def _ending_prerequisite_receipt(
     return False
 
 
+def _source_item_chain_is_live(
+    calls: list[dict[str, Any]],
+    matched: list[tuple[dict[str, Any], dict[str, Any], int]],
+    stop: int,
+) -> bool:
+    """Reject a receipt prefix after its selected source item was already spent."""
+
+    acquired: dict[str, int] = {}
+    for prerequisite, call, call_index in matched:
+        if prerequisite.get("receipt") != "loot_acquire":
+            continue
+        expected_name = str(prerequisite.get("item_name") or "").casefold()
+        for node in _walk(call.get("result")):
+            if (
+                isinstance(node, dict)
+                and node.get("id")
+                and str(node.get("name") or "").casefold() == expected_name
+            ):
+                acquired[str(node["id"])] = call_index
+    for item_id, acquired_at in acquired.items():
+        for call in calls[acquired_at + 1 : stop]:
+            arguments = call.get("arguments") or {}
+            payload = arguments.get("payload") or {}
+            if (
+                call.get("tool") == "campaign_change"
+                and call.get("ok")
+                and arguments.get("action") == "item_spend"
+                and str(payload.get("item_id") or "") == item_id
+                and any(
+                    isinstance(node, dict) and node.get("status") == "committed"
+                    for node in _walk(call.get("result"))
+                )
+            ):
+                return False
+    return True
+
+
 def _complete_ending_receipt_sequence(
     calls: list[dict[str, Any]],
     prerequisites: list[dict[str, Any]],
@@ -863,6 +900,8 @@ def _complete_ending_receipt_sequence(
         prerequisite = prerequisites[prerequisite_index]
         prior_receipts = [(expected, call) for expected, call, _index in matched]
         for call_index in range(cursor, limit):
+            if not _source_item_chain_is_live(calls, matched, call_index):
+                continue
             if not _ending_prerequisite_receipt(
                 calls[call_index], prerequisite, prior_receipts
             ):
@@ -892,17 +931,21 @@ def _best_partial_ending_receipt_sequence(
         matched: list[tuple[dict[str, Any], dict[str, Any], int]],
     ) -> None:
         nonlocal best
-        if len(matched) > len(best) or (
-            len(matched) == len(best)
-            and matched
-            and (not best or matched[0][2] > best[0][2])
-        ):
-            best = matched
+        complete = len(matched) >= len(prerequisites)
+        if complete or _source_item_chain_is_live(calls, matched, len(calls)):
+            if len(matched) > len(best) or (
+                len(matched) == len(best)
+                and matched
+                and (not best or matched[0][2] > best[0][2])
+            ):
+                best = matched
         if prerequisite_index >= len(prerequisites):
             return
         prerequisite = prerequisites[prerequisite_index]
         prior_receipts = [(expected, call) for expected, call, _index in matched]
         for call_index in range(cursor, len(calls)):
+            if not _source_item_chain_is_live(calls, matched, call_index):
+                continue
             if _ending_prerequisite_receipt(
                 calls[call_index], prerequisite, prior_receipts
             ):

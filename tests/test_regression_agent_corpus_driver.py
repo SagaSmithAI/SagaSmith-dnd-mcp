@@ -1141,6 +1141,25 @@ def test_ending_requires_independent_source_item_and_check_receipts() -> None:
     assert receipt_audit[0]["receipts"][0]["call_index"] == 2
     assert receipt_audit[0]["first_missing_id"] == "ally-present"
 
+    prematurely_spent = [
+        valid_receipts[0],
+        valid_receipts[-1],
+        *valid_receipts[1:4],
+    ]
+    receipt_audit = _ending_prerequisite_audit(route, prematurely_spent)
+    assert receipt_audit[0]["receipts"][0]["status"] == "missing"
+    assert receipt_audit[0]["first_missing_id"] == "source-item-acquired"
+
+    reacquired_after_premature_spend = [
+        *prematurely_spent,
+        restarted_receipts[0],
+    ]
+    receipt_audit = _ending_prerequisite_audit(route, reacquired_after_premature_spend)
+    assert receipt_audit[0]["receipts"][0]["call_index"] == len(
+        reacquired_after_premature_spend
+    ) - 1
+    assert receipt_audit[0]["first_missing_id"] == "ally-present"
+
     longer_older_prefix = [valid_receipts[0], valid_receipts[1], restarted_receipts[0]]
     receipt_audit = _ending_prerequisite_audit(route, longer_older_prefix)
     assert receipt_audit[0]["receipts"][0]["call_index"] == 0
