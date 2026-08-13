@@ -1114,6 +1114,33 @@ def test_ending_requires_independent_source_item_and_check_receipts() -> None:
     audit = _coverage_audit(route, different_sword, process_count=2, list_changed_count=1)
     assert "ending:ending" in audit["gaps"]
 
+    valid_receipts = receipts[:5]
+    restarted_receipts = copy.deepcopy(valid_receipts)
+    for call in (restarted_receipts[0], restarted_receipts[-1]):
+        call["arguments"]["payload"]["item_id"] = "replacement-sword"
+        for node in call["result"].values():
+            if isinstance(node, dict) and node.get("id") == "source-sword":
+                node["id"] = "replacement-sword"
+    restarted_receipts[0]["result"]["party"]["inventory"]["items"][0]["id"] = (
+        "replacement-sword"
+    )
+    stale_then_restarted = [
+        valid_receipts[0],
+        valid_receipts[-1],
+        *restarted_receipts,
+        self_certifying[-1],
+    ]
+    audit = _coverage_audit(
+        route, stale_then_restarted, process_count=2, list_changed_count=1
+    )
+    assert "ending:ending" not in audit["gaps"]
+    assert "ending:legal_ending_not_verified" not in audit["gaps"]
+
+    partial_restart = [valid_receipts[0], valid_receipts[-1], restarted_receipts[0]]
+    receipt_audit = _ending_prerequisite_audit(route, partial_restart)
+    assert receipt_audit[0]["receipts"][0]["call_index"] == 2
+    assert receipt_audit[0]["first_missing_id"] == "ally-present"
+
 
 def test_completed_recovery_route_must_finish_on_source_branch_in_play() -> None:
     route = {
