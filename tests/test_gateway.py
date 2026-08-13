@@ -13,8 +13,14 @@ from sagasmith_dnd.character_schema import default_character_notes, default_char
 from sagasmith_dnd.content_actors import build_dnd_content_actor
 from sagasmith_dnd.content_packages import build_preset_content_package
 
+from sagasmith_dnd_mcp import gateway as gateway_module
 from sagasmith_dnd_mcp.config import McpConfig
-from sagasmith_dnd_mcp.gateway import GATEWAY_KEY, GatewayConfig, create_app
+from sagasmith_dnd_mcp.gateway import (
+    GATEWAY_KEY,
+    DndClientPool,
+    GatewayConfig,
+    create_app,
+)
 from sagasmith_dnd_mcp.server import create_server
 from tests.authoring_helpers import finalize_and_activate_module
 
@@ -57,6 +63,91 @@ def app_for(tmp_path: Path, gateway_config: GatewayConfig | None = None):
     )
 
 
+def test_gateway_pool_is_sticky_and_rotates_only_switching_browser(monkeypatch) -> None:
+    class FakeClient:
+        instances = []
+
+        def __init__(self, url: str):
+            self.url = url
+            self.started = False
+            self.stopped = False
+            self.instances.append(self)
+
+        async def start(self) -> None:
+            self.started = True
+
+        async def stop(self) -> None:
+            self.stopped = True
+
+    monkeypatch.setattr(gateway_module, "DndMcpClient", FakeClient)
+
+    async def exercise() -> None:
+        pool = DndClientPool(GatewayConfig())
+        first_token, first, created = await pool.session(None, "campaign-a")
+        assert created is True
+        same_token, same, created = await pool.session(first_token, "campaign-a")
+        assert same_token == first_token
+        assert same is first
+        assert created is False
+
+        second_token, second, second_created = await pool.session(None, "campaign-a")
+        assert second_created is True
+        assert second_token != first_token
+        assert second is not first
+
+        rotated_token, rotated, rotated_created = await pool.session(
+            first_token, "campaign-b"
+        )
+        assert rotated_token == first_token
+        assert rotated_created is False
+        assert rotated is not first
+        assert first.stopped is True
+        assert second.stopped is False
+
+        await pool.close()
+        assert second.stopped is True
+        assert rotated.stopped is True
+
+    asyncio.run(exercise())
+
+
+def test_character_route_carries_campaign_into_the_mcp_exposure(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        app = app_for(tmp_path)
+        gateway = app[GATEWAY_KEY]
+        calls: list[tuple[str, dict]] = []
+
+        async def call(tool_id: str, arguments: dict):
+            calls.append((tool_id, arguments))
+            if tool_id == "character_query":
+                return {"id": "actor-1", "campaign_id": "campaign-1"}
+            if tool_id == "campaign_query":
+                return {"id": "campaign-1", "revision": 3}
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            raise AssertionError(tool_id)
+
+        gateway.call = call
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            response = await client.get(
+                "/api/campaigns/campaign-1/characters/actor-1"
+            )
+            assert response.status == 200
+            assert (await response.json())["data"]["id"] == "actor-1"
+            character_call = next(item for item in calls if item[0] == "character_query")
+            assert character_call[1]["payload"] == {
+                "campaign_id": "campaign-1",
+                "character_id": "actor-1",
+            }
+            assert (await client.get("/api/characters/actor-1")).status in {404, 405}
+        finally:
+            await client.close()
+
+    asyncio.run(exercise())
+
+
 def test_gateway_projects_mcp_data_and_enforces_origin(tmp_path: Path) -> None:
     async def exercise() -> None:
         app = app_for(tmp_path, GatewayConfig(allowed_origins=("http://ui.test",)))
@@ -79,6 +170,7 @@ def test_gateway_projects_mcp_data_and_enforces_origin(tmp_path: Path) -> None:
             )
             assert response.status == 200
             assert response.headers["Access-Control-Allow-Origin"] == "http://ui.test"
+            assert response.headers["Access-Control-Allow-Credentials"] == "true"
             payload = await response.json()
             assert payload["data"][0]["id"] == campaign["id"]
             assert payload["meta"]["audience"] == "system:local"
@@ -88,14 +180,12 @@ def test_gateway_projects_mcp_data_and_enforces_origin(tmp_path: Path) -> None:
                 headers={
                     "Origin": "http://ui.test",
                     "Access-Control-Request-Method": "POST",
-                    "Access-Control-Request-Headers": (
-                        "content-type,x-sagasmith-principal"
-                    ),
+                    "Access-Control-Request-Headers": "content-type",
                 },
             )
             assert preflight.status == 204
             assert preflight.headers["Access-Control-Allow-Origin"] == "http://ui.test"
-            assert "X-SagaSmith-Principal" in preflight.headers[
+            assert "X-SagaSmith-Principal" not in preflight.headers[
                 "Access-Control-Allow-Headers"
             ]
 
@@ -233,7 +323,7 @@ def test_gateway_streams_native_combat_render_content(tmp_path: Path) -> None:
         try:
             response = await client.get(
                 "/api/campaigns/campaign-1/combat/render",
-                headers={"X-SagaSmith-Principal": "user:player"},
+                headers={"X-SagaSmith-Principal": "user:forged"},
             )
             assert response.status == 200
             assert response.content_type == "image/png"
@@ -246,7 +336,7 @@ def test_gateway_streams_native_combat_render_content(tmp_path: Path) -> None:
                         "campaign_id": "campaign-1",
                         "view": "render",
                         "payload": {"audience_projection": "party_public"},
-                        "principal_id": "user:player",
+                        "principal_id": "system:local",
                     },
                 )
             ]

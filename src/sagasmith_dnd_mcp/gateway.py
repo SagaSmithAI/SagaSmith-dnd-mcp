@@ -9,7 +9,10 @@ import hmac
 import json
 import logging
 import os
+import secrets
 import tempfile
+import time
+from contextvars import ContextVar
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from pathlib import Path
@@ -18,7 +21,7 @@ from typing import Any, Awaitable, Callable
 from aiohttp import web
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
-from mcp.types import CallToolResult, ImageContent
+from mcp.types import CallToolResult, ImageContent, ToolListChangedNotification
 from sagasmith_core.access import LOCAL_SYSTEM_PRINCIPAL_ID
 from sagasmith_core.idempotency import IdempotencyConflictError
 
@@ -28,6 +31,8 @@ from sagasmith_dnd_mcp.tool_profiles import CORE_TOOLS
 JsonHandler = Callable[[web.Request], Awaitable[web.StreamResponse]]
 LOGGER = logging.getLogger(__name__)
 CONTENT_PACK_KINDS = ("core_rules", "addon", "module", "preset")
+COOKIE_NAME = "sagasmith_dnd_session"
+_REQUEST_CLIENT: ContextVar[DndMcpClient | None]
 
 
 class McpToolRejectedError(ValueError):
@@ -39,10 +44,12 @@ class GatewayConfig:
     host: str = "127.0.0.1"
     port: int = 8766
     bearer_token: str | None = None
+    principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID
     upload_limit_bytes: int = 64 * 1024 * 1024
     mcp_url: str = "http://127.0.0.1:8767/mcp"
     agent_webui_url: str = "http://127.0.0.1:8765/"
     ui_dist: Path | None = None
+    session_ttl_seconds: int = 12 * 60 * 60
     allowed_origins: tuple[str, ...] = (
         "http://127.0.0.1:4321",
         "http://localhost:4321",
@@ -62,6 +69,9 @@ class GatewayConfig:
             host=os.environ.get("SAGASMITH_DND_GATEWAY_HOST", "127.0.0.1"),
             port=int(os.environ.get("SAGASMITH_DND_GATEWAY_PORT", "8766")),
             bearer_token=os.environ.get("SAGASMITH_DND_GATEWAY_TOKEN") or None,
+            principal_id=os.environ.get(
+                "SAGASMITH_DND_GATEWAY_PRINCIPAL_ID", LOCAL_SYSTEM_PRINCIPAL_ID
+            ),
             upload_limit_bytes=int(
                 os.environ.get("SAGASMITH_DND_GATEWAY_UPLOAD_LIMIT", str(64 * 1024 * 1024))
             ),
@@ -75,6 +85,9 @@ class GatewayConfig:
                 Path(value).expanduser().resolve()
                 if (value := os.environ.get("SAGASMITH_DND_UI_DIST", "")).strip()
                 else None
+            ),
+            session_ttl_seconds=int(
+                os.environ.get("SAGASMITH_DND_GATEWAY_SESSION_TTL", str(12 * 60 * 60))
             ),
             allowed_origins=origins,
         )
@@ -145,8 +158,57 @@ class DndMcpClient:
             try:
                 async with streamable_http_client(self.url) as streams:
                     read_stream, write_stream, _ = streams
-                    async with ClientSession(read_stream, write_stream) as session:
+                    refresh_generation = 0
+                    synced_generation = 0
+                    call_lock = asyncio.Lock()
+
+                    async def handle_server_message(message: Any) -> None:
+                        nonlocal refresh_generation
+                        if isinstance(
+                            getattr(message, "root", None),
+                            ToolListChangedNotification,
+                        ):
+                            refresh_generation += 1
+                        await asyncio.sleep(0)
+
+                    async def refresh_changed_tools(session: ClientSession) -> None:
+                        nonlocal synced_generation
+                        while synced_generation < refresh_generation:
+                            target = refresh_generation
+
+                            async def refresh() -> None:
+                                await session.list_tools()
+
+                            await asyncio.shield(
+                                asyncio.create_task(
+                                    refresh(),
+                                    name="sagasmith-dnd-gateway-tools-refresh",
+                                )
+                            )
+                            synced_generation = target
+
+                    async def force_refresh_tools(session: ClientSession) -> None:
+                        nonlocal synced_generation
+
+                        async def refresh() -> None:
+                            await asyncio.sleep(0)
+                            await session.list_tools()
+
+                        await asyncio.shield(
+                            asyncio.create_task(
+                                refresh(),
+                                name="sagasmith-dnd-gateway-tools-force-refresh",
+                            )
+                        )
+                        synced_generation = refresh_generation
+
+                    async with ClientSession(
+                        read_stream,
+                        write_stream,
+                        message_handler=handle_server_message,
+                    ) as session:
                         await session.initialize()
+                        await session.list_tools()
                         if first_attempt:
                             self._ready.set()
                             first_attempt = False
@@ -156,9 +218,14 @@ class DndMcpClient:
                             if request is None:
                                 return
                             try:
-                                result = await self._call_in_session(
-                                    session, request.tool_id, request.arguments
-                                )
+                                async with call_lock:
+                                    result = await self._call_in_session(
+                                        session,
+                                        request.tool_id,
+                                        request.arguments,
+                                        force_refresh_tools,
+                                    )
+                                    await refresh_changed_tools(session)
                             except McpToolRejectedError as exc:
                                 if not request.future.done():
                                     request.future.set_exception(exc)
@@ -200,9 +267,17 @@ class DndMcpClient:
         session: ClientSession,
         tool_id: str,
         arguments: dict[str, Any],
+        refresh_changed_tools: Callable[[ClientSession], Awaitable[None]],
     ) -> CallToolResult:
-        if tool_id not in CORE_TOOLS:
-            campaign_id = str(arguments.get("campaign_id") or "").strip() or None
+        dynamic_tool = tool_id not in CORE_TOOLS
+        if dynamic_tool:
+            payload = arguments.get("payload")
+            payload_campaign = (
+                payload.get("campaign_id") if isinstance(payload, dict) else None
+            )
+            campaign_id = str(
+                arguments.get("campaign_id") or payload_campaign or ""
+            ).strip() or None
             principal_id = self._principal(arguments)
             try:
                 status = await session.call_tool(
@@ -239,10 +314,12 @@ class DndMcpClient:
                     },
                 )
                 self._raise_tool_error(loaded)
-                listed = {tool.name for tool in (await session.list_tools()).tools}
-                if tool_id not in listed:
+                await refresh_changed_tools(session)
+                loaded_value = dict(loaded.structuredContent or {})
+                loaded_value = dict(loaded_value.get("result") or loaded_value)
+                if tool_id not in set(loaded_value.get("loaded_tools") or []):
                     raise RuntimeError(
-                        f"D&D MCP did not expose {tool_id!r} after tools/list_changed"
+                        f"D&D MCP did not load {tool_id!r} into the active exposure"
                     )
         result = await session.call_tool(tool_id, arguments)
         self._raise_tool_error(result)
@@ -263,19 +340,92 @@ class DndMcpClient:
         raise McpToolRejectedError(message[:2000])
 
 
+_REQUEST_CLIENT = ContextVar("sagasmith_dnd_gateway_client", default=None)
+
+
+@dataclass
+class _BrowserSession:
+    client: DndMcpClient
+    touched_at: float
+    campaign_id: str | None = None
+
+
+class DndClientPool:
+    """Keep dynamic MCP exposure isolated to one browser and campaign."""
+
+    def __init__(self, config: GatewayConfig):
+        self.config = config
+        self.sessions: dict[str, _BrowserSession] = {}
+        self._lock = asyncio.Lock()
+
+    async def session(
+        self,
+        token: str | None,
+        campaign_id: str | None,
+    ) -> tuple[str, DndMcpClient, bool]:
+        async with self._lock:
+            now = time.monotonic()
+            expired = [
+                key
+                for key, value in self.sessions.items()
+                if now - value.touched_at > self.config.session_ttl_seconds
+            ]
+            for key in expired:
+                stale = self.sessions.pop(key)
+                await stale.client.stop()
+            if token and token in self.sessions:
+                current = self.sessions[token]
+                if (
+                    current.campaign_id is None
+                    or campaign_id is None
+                    or current.campaign_id == campaign_id
+                ):
+                    current.touched_at = now
+                    current.campaign_id = current.campaign_id or campaign_id
+                    return token, current.client, False
+                await current.client.stop()
+                client = DndMcpClient(self.config.mcp_url)
+                await client.start()
+                self.sessions[token] = _BrowserSession(client, now, campaign_id)
+                return token, client, False
+            token = secrets.token_urlsafe(32)
+            client = DndMcpClient(self.config.mcp_url)
+            await client.start()
+            self.sessions[token] = _BrowserSession(client, now, campaign_id)
+            return token, client, True
+
+    async def close(self) -> None:
+        for current in list(self.sessions.values()):
+            await current.client.stop()
+        self.sessions.clear()
+
+
 class DndGateway:
     """Expose stable UI DTOs while routing every write through an MCP tool."""
 
     def __init__(
         self,
         config: GatewayConfig,
-        client: DndMcpClient,
+        client: DndMcpClient | None,
         mcp_config: McpConfig,
     ):
         self.config = config
-        self.client = client
+        self._default_client = client
         self.mcp_config = mcp_config
         self.mcp_config.prepare()
+
+    @property
+    def client(self) -> DndMcpClient:
+        client = _REQUEST_CLIENT.get() or self._default_client
+        if client is None:
+            raise RuntimeError("D&D MCP request session is not bound")
+        return client
+
+    @client.setter
+    def client(self, value: DndMcpClient) -> None:
+        """Allow focused tests to replace the injected client explicitly."""
+
+        self._default_client = value
 
     @staticmethod
     def pack_summary(kind: str, value: dict[str, Any]) -> dict[str, Any]:
@@ -363,9 +513,8 @@ class DndGateway:
         return structured
 
     def principal(self, request: web.Request) -> str:
-        return request.headers.get("X-SagaSmith-Principal") or request.query.get(
-            "principal_id", LOCAL_SYSTEM_PRINCIPAL_ID
-        )
+        del request
+        return self.config.principal_id
 
     async def campaign_meta(self, campaign_id: str, principal_id: str) -> dict[str, Any]:
         campaign = await self.call(
@@ -452,15 +601,18 @@ class DndGateway:
         return await self.envelope(request, result, campaign_id)
 
     async def character(self, request: web.Request) -> web.Response:
+        campaign_id = request.match_info["campaign_id"]
         result = await self.call(
             "character_query",
             {
                 "view": "get",
-                "payload": {"character_id": request.match_info["character_id"]},
+                "payload": {
+                    "campaign_id": campaign_id,
+                    "character_id": request.match_info["character_id"],
+                },
                 "principal_id": self.principal(request),
             },
         )
-        campaign_id = result.get("campaign_id") if isinstance(result, dict) else None
         return await self.envelope(request, result, campaign_id)
 
     async def module_view(self, request: web.Request, view: str) -> web.Response:
@@ -1081,8 +1233,8 @@ def create_app(
     mcp_config: McpConfig | None = None,
 ) -> web.Application:
     config = gateway_config or GatewayConfig.from_environment()
-    client = mcp_client or DndMcpClient(config.mcp_url)
-    gateway = DndGateway(config, client, mcp_config or McpConfig.from_environment())
+    pool = None if mcp_client is not None else DndClientPool(config)
+    gateway = DndGateway(config, mcp_client, mcp_config or McpConfig.from_environment())
 
     @web.middleware
     async def boundary(request: web.Request, handler: JsonHandler) -> web.StreamResponse:
@@ -1099,7 +1251,16 @@ def create_app(
         if request.method == "OPTIONS":
             response: web.StreamResponse = web.Response(status=204)
         else:
+            context_token = None
+            browser_token = None
+            created = False
             try:
+                if pool is not None and request.path.startswith("/api/"):
+                    browser_token, client, created = await pool.session(
+                        request.cookies.get(COOKIE_NAME),
+                        request.match_info.get("campaign_id") or None,
+                    )
+                    context_token = _REQUEST_CLIENT.set(client)
                 response = await handler(request)
             except web.HTTPException:
                 raise
@@ -1114,12 +1275,23 @@ def create_app(
             except Exception:
                 LOGGER.exception("unhandled D&D gateway request failure")
                 response = web.json_response({"error": "internal gateway error"}, status=500)
+            finally:
+                if context_token is not None:
+                    _REQUEST_CLIENT.reset(context_token)
+            if created and browser_token and not response.prepared:
+                response.set_cookie(
+                    COOKIE_NAME,
+                    browser_token,
+                    httponly=True,
+                    samesite="Strict",
+                    secure=False,
+                    max_age=config.session_ttl_seconds,
+                )
         if origin and origin in config.allowed_origins:
             response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
             response.headers["Vary"] = "Origin"
-            response.headers["Access-Control-Allow-Headers"] = (
-                "Authorization, Content-Type, X-SagaSmith-Principal"
-            )
+            response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
             response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
         return response
 
@@ -1151,11 +1323,15 @@ def create_app(
     app[GATEWAY_KEY] = gateway
 
     async def mcp_lifecycle(_: web.Application):
-        await client.start()
+        if mcp_client is not None:
+            await mcp_client.start()
         try:
             yield
         finally:
-            await client.stop()
+            if mcp_client is not None:
+                await mcp_client.stop()
+            elif pool is not None:
+                await pool.close()
 
     app.cleanup_ctx.append(mcp_lifecycle)
     app.router.add_route("OPTIONS", "/{tail:.*}", options)
@@ -1163,7 +1339,9 @@ def create_app(
     app.router.add_get("/api/campaigns", gateway.campaigns)
     app.router.add_get("/api/campaigns/{campaign_id}", gateway.campaign)
     app.router.add_get("/api/campaigns/{campaign_id}/characters", gateway.characters)
-    app.router.add_get("/api/characters/{character_id}", gateway.character)
+    app.router.add_get(
+        "/api/campaigns/{campaign_id}/characters/{character_id}", gateway.character
+    )
     app.router.add_get(
         "/api/campaigns/{campaign_id}/modules",
         modules,

@@ -95,7 +95,7 @@ pip install -e ".[gateway,dev]"
 sagasmith-dnd-gateway
 ```
 
-Gateway 默认只监听 `127.0.0.1:8766`。读请求按 `X-SagaSmith-Principal` 投影；战斗移动写请求不会直写数据库，而是调用同一服务实现中的 `combat_movement` MCP 工具，因此仍经过 actor 权限、campaign/branch revision、幂等、五尺格、阻挡与反应窗口校验。SSE 只发布 revision 变化通知，客户端随后重新读取 audience-filtered DTO。
+Gateway 默认只监听 `127.0.0.1:8766`，身份由服务端配置或上游认证会话绑定，浏览器不能选择 authoritative principal。战斗移动写请求不会直写数据库，而是调用同一服务实现中的 MCP 工具，因此仍经过 actor 权限、campaign/branch revision、幂等、五尺格、阻挡与反应窗口校验。SSE 只发布 revision 变化通知，客户端随后重新读取 audience-filtered DTO。
 
 启用向量嵌入：
 

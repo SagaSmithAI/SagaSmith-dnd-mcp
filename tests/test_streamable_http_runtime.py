@@ -78,6 +78,17 @@ def test_real_streamable_http_client_tracks_dynamic_tools(tmp_path: Path) -> Non
                     {"action": "get", "campaign_id": campaign["id"]},
                 )
                 assert queried.isError is not True
+                characters_direct = await asyncio.wait_for(
+                    client.call_tool(
+                        "character_query",
+                        {
+                            "view": "list",
+                            "payload": {"campaign_id": campaign["id"]},
+                        },
+                    ),
+                    15,
+                )
+                assert characters_direct.isError is not True
             finally:
                 await client.stop()
 
@@ -102,12 +113,12 @@ def test_real_streamable_http_client_tracks_dynamic_tools(tmp_path: Path) -> Non
             gateway = TestClient(TestServer(app))
             await gateway.start_server()
             try:
-                health = await gateway.get("/api/health")
+                health = await asyncio.wait_for(gateway.get("/api/health"), 15)
                 assert health.status == 200
-                campaigns = await gateway.get("/api/campaigns")
+                campaigns = await asyncio.wait_for(gateway.get("/api/campaigns"), 15)
                 assert campaigns.status == 200
                 assert (await campaigns.json())["data"][0]["id"] == campaign["id"]
-                workbench = await gateway.get("/")
+                workbench = await asyncio.wait_for(gateway.get("/"), 15)
                 assert "Remote Workbench" in await workbench.text()
             finally:
                 await gateway.close()
