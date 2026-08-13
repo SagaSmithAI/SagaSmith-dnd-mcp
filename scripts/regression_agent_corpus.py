@@ -2020,7 +2020,8 @@ manifest status or successful verification never substitutes for a missing
 receipt. For that entry, follow its full `expected` object, including exact
 `source_evidence`, `fact_key`, item, check, and reducer fields. A semantic event
 must use party/public/actor audience and request the fact in the same atomic
-commit through the plural array
+commit with `payload.event.audience_scope="party"` (the audience does not belong
+on a fact) and through the plural array
 `payload.facts=[{{"kind":"memory_fact","fact_key":"...", ...}}]`; singular
 `payload.fact`, `facts=[]`, or a returned fact without the event id never
 matches. When
