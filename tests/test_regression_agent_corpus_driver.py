@@ -2125,6 +2125,10 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "current_ending_prerequisite_receipt_audit=" in prompt
     assert "historical completed\nmanifest status" in prompt
     assert "follow its full `expected` object" in prompt
+    assert "`payload.source_scene_id` and `payload.source_excerpt`" in prompt
+    assert "nested `payload.source_evidence` object does not satisfy" in prompt
+    assert "`payload.base_dc`" in prompt
+    assert "`payload.applied_reducer_ids`" in prompt
     assert '`payload.event.audience_scope="party"`' in prompt
     assert "audience does not belong\non a fact" in prompt
     assert '`payload.facts=[{"kind":"memory_fact","fact_key":"...", ...}]`' in prompt

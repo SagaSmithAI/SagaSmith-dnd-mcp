@@ -2007,7 +2007,11 @@ before configuring or verifying the ending. `receipt="loot_acquire"` and
 `receipt="item_spend"` require ordered, committed source-bound `campaign_change`
 acquisition/surrender receipts for the named item; `receipt="character_check"`
 requires a committed engine roll with exact scene evidence, skill/DC, required
-success, and an authoritative random receipt. A preceding
+success, and an authoritative random receipt. Put the check evidence in the
+public receipt fields `payload.source_scene_id` and `payload.source_excerpt`;
+an otherwise identical nested `payload.source_evidence` object does not satisfy
+that receipt. For a reduced check, also send `payload.base_dc` and the exact
+`payload.applied_reducer_ids` declared by the fixture. A preceding
 `receipt="semantic_event"` requires `memory_change(action="commit")`, an event
 with `event_type="source_semantic_event"`, the exact fixture `id` in
 `event.payload.reducer_id`, a managed `event.payload.source_ref`, and the exact
