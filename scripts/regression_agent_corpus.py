@@ -1980,6 +1980,39 @@ def _dm_prompt(
 ) -> str:
     opposition_audit_json = json.dumps(source_opposition_audit or [], ensure_ascii=False)
     ending_audit_json = json.dumps(ending_prerequisite_audit or [], ensure_ascii=False)
+    mandatory_ending_mutation: dict[str, Any] = {}
+    receipt_tools = {
+        "loot_acquire": ("campaign_change", "loot_acquire"),
+        "item_spend": ("campaign_change", "item_spend"),
+        "semantic_event": ("memory_change", "commit"),
+        "character_check": ("character_check", "check"),
+    }
+    for audit in ending_prerequisite_audit or []:
+        first_missing = str(audit.get("first_missing_id") or "")
+        if not first_missing:
+            continue
+        receipt = next(
+            (
+                item
+                for item in audit.get("receipts") or []
+                if str(item.get("id") or "") == first_missing
+            ),
+            {},
+        )
+        tool, action = receipt_tools.get(str(receipt.get("receipt") or ""), ("", ""))
+        mandatory_ending_mutation = {
+            "scenario_id": audit.get("scenario_id"),
+            "first_missing_id": first_missing,
+            "tool": tool,
+            "action": action,
+            "expected": receipt.get("expected") or {},
+            "safe_source_query": receipt.get("safe_source_query") or "",
+            "ready_for_verification": False,
+        }
+        break
+    mandatory_ending_mutation_json = json.dumps(
+        mandatory_ending_mutation, ensure_ascii=False
+    )
     combat_template_json = json.dumps(
         combat_start_business_template or {}, ensure_ascii=False
     )
@@ -1988,6 +2021,10 @@ def _dm_prompt(
 Run id: {run_id}
 Campaign line label (never a campaign UUID): {line_id}
 Source-declared D&D edition: {unit.get("edition")}
+MANDATORY_FIRST_ENDING_MUTATION={mandatory_ending_mutation_json}
+When this object is non-empty, execute its named tool/action as the first
+authoritative write after the required source lookup. Until it succeeds, do not
+call any `playthrough_manifest` action and do not report the ending complete.
 Source-selected advancement mode: {unit.get("advancement_mode")}
 Source-reviewed preparation profile (re-resolve its exact current Pack evidence):
 {json.dumps(unit.get("play_requirements") or {}, ensure_ascii=False)}

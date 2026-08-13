@@ -2081,6 +2081,26 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
         player_principal="player",
         cycle=1,
         gaps=[],
+        ending_prerequisite_audit=[
+            {
+                "scenario_id": "ending",
+                "first_missing_id": "source-item-presented",
+                "ready_for_verification": False,
+                "receipts": [
+                    {
+                        "id": "source-item-presented",
+                        "receipt": "semantic_event",
+                        "status": "missing",
+                        "expected": {
+                            "id": "source-item-presented",
+                            "receipt": "semantic_event",
+                            "fact_key": "ending.source-item-presented",
+                        },
+                        "safe_source_query": "Conclusion",
+                    }
+                ],
+            }
+        ],
         party_mechanical_gaps={
             "pc-1": ["class_feature_missing:fighter-second-wind"]
         },
@@ -2142,6 +2162,10 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "identical statblock review cannot fix" in prompt
     assert "latest_successful_combat_start_business_template=" in prompt
     assert "current_ending_prerequisite_receipt_audit=" in prompt
+    assert "MANDATORY_FIRST_ENDING_MUTATION=" in prompt
+    assert '"tool": "memory_change"' in prompt
+    assert '"action": "commit"' in prompt
+    assert "do not\ncall any `playthrough_manifest` action" in prompt
     assert "historical completed\nmanifest status" in prompt
     assert "follow its full `expected` object" in prompt
     assert "`ready_for_verification=false`" in prompt
