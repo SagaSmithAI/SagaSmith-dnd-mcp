@@ -1076,6 +1076,27 @@ def test_ending_requires_independent_source_item_and_check_receipts() -> None:
     assert receipt_audit[0]["ready_for_verification"] is True
     assert receipt_audit[0]["contradictory_completed_verification"] is True
 
+    cross_branch_receipts = copy.deepcopy(receipts)
+    for call in cross_branch_receipts[:-1]:
+        call["result"] = {
+            "host_context_binding": {"branch_id": "branch-a"},
+            "wrapped": call["result"],
+        }
+    cross_branch_receipts[-1]["result"] = {
+        "host_context_binding": {"branch_id": "branch-b"},
+        "wrapped": cross_branch_receipts[-1]["result"],
+    }
+    audit = _coverage_audit(
+        route,
+        cross_branch_receipts,
+        process_count=2,
+        list_changed_count=1,
+    )
+    assert "ending:ending" in audit["gaps"]
+    receipt_audit = _ending_prerequisite_audit(route, cross_branch_receipts)
+    assert receipt_audit[0]["current_branch_id"] == "branch-b"
+    assert receipt_audit[0]["first_missing_id"] == prerequisites[0]["id"]
+
     audit = _coverage_audit(
         route,
         [*self_certifying, *receipts],
@@ -2331,6 +2352,36 @@ def test_dm_prompt_makes_replacement_ending_condition_the_first_write() -> None:
     assert '"require_new_condition_id": true' in mandatory
     assert '"verify_ending", "loot_acquire"' in mandatory
     assert "execute its named tool/action as the first" in prompt
+
+
+def test_dm_prompt_recovers_immutable_invalid_ending_on_a_new_branch() -> None:
+    prompt = _dm_prompt(
+        run_id="run",
+        line_id="module",
+        unit={"edition": "2014", "advancement_mode": "xp"},
+        route={"scenarios": []},
+        player_principal="player",
+        cycle=48,
+        gaps=["ending:ending", "ending:legal_ending_not_verified"],
+        ending_prerequisite_audit=[
+            {
+                "scenario_id": "ending",
+                "first_missing_id": None,
+                "ready_for_verification": True,
+                "contradictory_completed_verification": True,
+                "replacement_blocked_by_completed_manifest": True,
+                "receipts": [],
+            }
+        ],
+        initial_source_branch_id="source-branch",
+    )
+    mandatory = prompt.split("MANDATORY_FIRST_ENDING_MUTATION=", 1)[1].splitlines()[0]
+    assert '"tool": "branch_change"' in mandatory
+    assert '"action": "create"' in mandatory
+    assert '"source_branch_id": "source-branch"' in mandatory
+    assert '"checkout": true' in mandatory
+    assert "verify the selected source-branch snapshot" in prompt
+    assert "Never mutate or delete the immutable" in prompt
 
 
 @pytest.mark.full_agent

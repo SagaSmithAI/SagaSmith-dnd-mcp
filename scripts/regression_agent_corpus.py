@@ -861,10 +861,24 @@ def _ending_prerequisite_receipt(
     return False
 
 
+def _call_branch_id(call: dict[str, Any]) -> str | None:
+    for node in _walk(call.get("result")):
+        if not isinstance(node, dict):
+            continue
+        binding = node.get("host_context_binding")
+        if isinstance(binding, dict) and binding.get("branch_id"):
+            return str(binding["branch_id"])
+    arguments = call.get("arguments") or {}
+    branch_id = arguments.get("branch_id") or arguments.get("expected_branch_id")
+    return str(branch_id) if branch_id else None
+
+
 def _source_item_chain_is_live(
     calls: list[dict[str, Any]],
     matched: list[tuple[dict[str, Any], dict[str, Any], int]],
     stop: int,
+    *,
+    branch_id: str | None = None,
 ) -> bool:
     """Reject a receipt prefix after its selected source item was already spent."""
 
@@ -877,6 +891,8 @@ def _source_item_chain_is_live(
             acquired[item_id] = call_index
     for item_id, acquired_at in acquired.items():
         for call in calls[acquired_at + 1 : stop]:
+            if branch_id and _call_branch_id(call) not in {None, branch_id}:
+                continue
             arguments = call.get("arguments") or {}
             payload = arguments.get("payload") or {}
             if (
@@ -898,6 +914,7 @@ def _complete_ending_receipt_sequence(
     prerequisites: list[dict[str, Any]],
     *,
     stop: int | None = None,
+    branch_id: str | None = None,
 ) -> list[tuple[dict[str, Any], dict[str, Any], int]] | None:
     """Find an ordered complete chain without committing to an earlier dead end."""
 
@@ -913,7 +930,11 @@ def _complete_ending_receipt_sequence(
         prerequisite = prerequisites[prerequisite_index]
         prior_receipts = [(expected, call) for expected, call, _index in matched]
         for call_index in range(cursor, limit):
-            if not _source_item_chain_is_live(calls, matched, call_index):
+            if branch_id and _call_branch_id(calls[call_index]) not in {None, branch_id}:
+                continue
+            if not _source_item_chain_is_live(
+                calls, matched, call_index, branch_id=branch_id
+            ):
                 continue
             if not _ending_prerequisite_receipt(
                 calls[call_index], prerequisite, prior_receipts
@@ -932,7 +953,10 @@ def _complete_ending_receipt_sequence(
 
 
 def _best_partial_ending_receipt_sequence(
-    calls: list[dict[str, Any]], prerequisites: list[dict[str, Any]]
+    calls: list[dict[str, Any]],
+    prerequisites: list[dict[str, Any]],
+    *,
+    branch_id: str | None = None,
 ) -> list[tuple[dict[str, Any], dict[str, Any], int]]:
     """Choose the longest valid prefix, preferring the newer prefix on ties."""
 
@@ -945,7 +969,9 @@ def _best_partial_ending_receipt_sequence(
     ) -> None:
         nonlocal best
         complete = len(matched) >= len(prerequisites)
-        if complete or _source_item_chain_is_live(calls, matched, len(calls)):
+        if complete or _source_item_chain_is_live(
+            calls, matched, len(calls), branch_id=branch_id
+        ):
             if len(matched) > len(best) or (
                 len(matched) == len(best)
                 and matched
@@ -957,7 +983,11 @@ def _best_partial_ending_receipt_sequence(
         prerequisite = prerequisites[prerequisite_index]
         prior_receipts = [(expected, call) for expected, call, _index in matched]
         for call_index in range(cursor, len(calls)):
-            if not _source_item_chain_is_live(calls, matched, call_index):
+            if branch_id and _call_branch_id(calls[call_index]) not in {None, branch_id}:
+                continue
+            if not _source_item_chain_is_live(
+                calls, matched, call_index, branch_id=branch_id
+            ):
                 continue
             if _ending_prerequisite_receipt(
                 calls[call_index], prerequisite, prior_receipts
@@ -982,6 +1012,7 @@ def _ending_completed(
         args = call.get("arguments") or {}
         if args.get("action") not in {"verify_ending", "verify-ending"}:
             continue
+        verify_branch_id = _call_branch_id(call)
         contradicts_surrender = _ending_verify_contradicts_surrender(call, required)
         for node in _walk(call.get("result")):
             if not isinstance(node, dict):
@@ -993,7 +1024,10 @@ def _ending_completed(
                 completed
                 and not contradicts_surrender
                 and _complete_ending_receipt_sequence(
-                    calls, required, stop=verify_index
+                    calls,
+                    required,
+                    stop=verify_index,
+                    branch_id=verify_branch_id,
                 )
                 is not None
             ):
@@ -1021,15 +1055,29 @@ def _ending_prerequisite_audit(
     """Report the ordered authoritative receipts already present for each ending."""
 
     audits: list[dict[str, Any]] = []
+    current_branch_id = next(
+        (
+            branch_id
+            for call in reversed(calls)
+            if call.get("ok")
+            for branch_id in [_call_branch_id(call)]
+            if branch_id
+        ),
+        None,
+    )
     for scenario in route.get("scenarios") or []:
         prerequisites = list(scenario.get("ending_prerequisites") or [])
         if not prerequisites:
             continue
-        complete_sequence = _complete_ending_receipt_sequence(calls, prerequisites)
+        complete_sequence = _complete_ending_receipt_sequence(
+            calls, prerequisites, branch_id=current_branch_id
+        )
         partial_sequence = (
             []
             if complete_sequence is not None
-            else _best_partial_ending_receipt_sequence(calls, prerequisites)
+            else _best_partial_ending_receipt_sequence(
+                calls, prerequisites, branch_id=current_branch_id
+            )
         )
         matched_receipts: list[tuple[dict[str, Any], dict[str, Any]]] = []
         receipts: list[dict[str, Any]] = []
@@ -1040,6 +1088,10 @@ def _ending_prerequisite_audit(
             and (call.get("arguments") or {}).get("action")
             in {"verify_ending", "verify-ending"}
             and _ending_verify_contradicts_surrender(call, prerequisites)
+            and (
+                current_branch_id is None
+                or _call_branch_id(call) in {None, current_branch_id}
+            )
             and any(
                 isinstance(node, dict)
                 and (
@@ -1050,6 +1102,18 @@ def _ending_prerequisite_audit(
                     )
                 )
                 for node in _walk(call.get("result"))
+            )
+            for call in calls
+        )
+        replacement_blocked_by_completed_manifest = any(
+            call.get("tool") == "playthrough_manifest"
+            and not call.get("ok")
+            and (call.get("arguments") or {}).get("action") == "configure_ending"
+            and "completed playthrough ending conditions cannot be changed"
+            in str(call.get("error") or "")
+            and (
+                current_branch_id is None
+                or _call_branch_id(call) in {None, current_branch_id}
             )
             for call in calls
         )
@@ -1115,8 +1179,12 @@ def _ending_prerequisite_audit(
                 "receipts": receipts,
                 "first_missing_id": first_missing_id,
                 "ready_for_verification": first_missing_id is None,
+                "current_branch_id": current_branch_id,
                 "contradictory_completed_verification": (
                     contradictory_completed_verification
+                ),
+                "replacement_blocked_by_completed_manifest": (
+                    replacement_blocked_by_completed_manifest
                 ),
             }
         )
@@ -2036,6 +2104,7 @@ def _dm_prompt(
     ending_prerequisite_audit: list[dict[str, Any]] | None = None,
     combat_start_business_template: dict[str, Any] | None = None,
     party_mechanical_gaps: dict[str, list[str]] | None = None,
+    initial_source_branch_id: str | None = None,
 ) -> str:
     opposition_audit_json = json.dumps(source_opposition_audit or [], ensure_ascii=False)
     ending_audit_json = json.dumps(ending_prerequisite_audit or [], ensure_ascii=False)
@@ -2093,6 +2162,40 @@ def _dm_prompt(
                 f"{scenario_id}:legal_ending_not_verified",
             }
             if (
+                audit.get("replacement_blocked_by_completed_manifest") is True
+                and ending_gaps.intersection(gaps)
+            ):
+                mandatory_ending_mutation = {
+                    "scenario_id": scenario_id,
+                    "tool": "branch_change",
+                    "action": "create",
+                    "required_phase": "lobby",
+                    "source_branch_id": initial_source_branch_id or "",
+                    "from_snapshot_selection": (
+                        "latest verified snapshot on the source branch before the "
+                        "first invalid completed ending"
+                    ),
+                    "checkout": True,
+                    "ready_for_verification": False,
+                    "forbidden_actions_until_checked_out": [
+                        "configure_ending",
+                        "verify_ending",
+                        "loot_acquire",
+                    ],
+                    "reason": (
+                        "the current branch has an immutable completed ending whose "
+                        "condition contradicts the ordered receipt chain"
+                    ),
+                }
+                break
+    if not mandatory_ending_mutation:
+        for audit in ending_prerequisite_audit or []:
+            scenario_id = str(audit.get("scenario_id") or "")
+            ending_gaps = {
+                f"{scenario_id}:ending",
+                f"{scenario_id}:legal_ending_not_verified",
+            }
+            if (
                 audit.get("ready_for_verification") is True
                 and audit.get("contradictory_completed_verification") is True
                 and ending_gaps.intersection(gaps)
@@ -2129,6 +2232,13 @@ When this object is non-empty, execute its named tool/action as the first
 authoritative write after the required source lookup. Until it succeeds, do not
 call `playthrough_manifest` except when it is the named tool/action, and do not
 report the ending complete.
+When it names `branch_change(create)`, first use `game_phase(set)` only if needed
+to enter Lobby, query and verify the selected source-branch snapshot, then create
+and checkout one recovery branch from that snapshot. Those phase/preflight calls
+are the only allowed writes before the named branch mutation. After checkout,
+consume `tools/list_changed`, retain the binding with `exposure(get/search/set)`,
+and re-read the branch-local manifest. Never mutate or delete the immutable
+historical branch.
 When it includes `write_ids`, copy those exact fresh values into the tool's
 top-level `idempotency_key` and `payload.spend_id`; do not derive either from the
 fixture receipt id or any historical attempt. For an item surrender, copy the
@@ -2857,6 +2967,7 @@ def _run_unit(
                     current_calls
                 ),
                 party_mechanical_gaps=dict(audit.get("party_mechanical_gaps") or {}),
+                initial_source_branch_id=_initial_campaign_branch(current_calls),
             ),
             audit_path=dm_audit,
         )
