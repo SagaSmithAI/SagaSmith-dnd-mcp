@@ -982,17 +982,7 @@ def _ending_completed(
         args = call.get("arguments") or {}
         if args.get("action") not in {"verify_ending", "verify-ending"}:
             continue
-        contradicts_surrender = any(
-            item.get("receipt") == "item_spend" for item in required
-        ) and any(
-            isinstance(check, dict)
-            and check.get("kind") == "campaign_state_value"
-            and check.get("path") == "party.inventory.items"
-            and check.get("operator") == "truthy"
-            for node in _walk(call.get("result"))
-            if isinstance(node, dict)
-            for check in node.get("verification") or []
-        )
+        contradicts_surrender = _ending_verify_contradicts_surrender(call, required)
         for node in _walk(call.get("result")):
             if not isinstance(node, dict):
                 continue
@@ -1009,6 +999,20 @@ def _ending_completed(
             ):
                 return True
     return False
+
+
+def _ending_verify_contradicts_surrender(
+    call: dict[str, Any], prerequisites: list[dict[str, Any]]
+) -> bool:
+    return any(item.get("receipt") == "item_spend" for item in prerequisites) and any(
+        isinstance(check, dict)
+        and check.get("kind") == "campaign_state_value"
+        and check.get("path") == "party.inventory.items"
+        and check.get("operator") == "truthy"
+        for node in _walk(call.get("result"))
+        if isinstance(node, dict)
+        for check in node.get("verification") or []
+    )
 
 
 def _ending_prerequisite_audit(
@@ -1030,6 +1034,25 @@ def _ending_prerequisite_audit(
         matched_receipts: list[tuple[dict[str, Any], dict[str, Any]]] = []
         receipts: list[dict[str, Any]] = []
         first_missing_id: str | None = None
+        contradictory_completed_verification = any(
+            call.get("tool") == "playthrough_manifest"
+            and call.get("ok")
+            and (call.get("arguments") or {}).get("action")
+            in {"verify_ending", "verify-ending"}
+            and _ending_verify_contradicts_surrender(call, prerequisites)
+            and any(
+                isinstance(node, dict)
+                and (
+                    node.get("status") in {"completed", "achieved"}
+                    or (
+                        node.get("achieved") is True
+                        and node.get("completed") is not False
+                    )
+                )
+                for node in _walk(call.get("result"))
+            )
+            for call in calls
+        )
         for prerequisite_index, prerequisite in enumerate(prerequisites):
             evidence = prerequisite.get("source_evidence") or {}
             headings = [
@@ -1092,6 +1115,9 @@ def _ending_prerequisite_audit(
                 "receipts": receipts,
                 "first_missing_id": first_missing_id,
                 "ready_for_verification": first_missing_id is None,
+                "contradictory_completed_verification": (
+                    contradictory_completed_verification
+                ),
             }
         )
     return audits
@@ -2059,6 +2085,34 @@ def _dm_prompt(
                 acquired_item_ids
             )
         break
+    if not mandatory_ending_mutation:
+        for audit in ending_prerequisite_audit or []:
+            scenario_id = str(audit.get("scenario_id") or "")
+            ending_gaps = {
+                f"{scenario_id}:ending",
+                f"{scenario_id}:legal_ending_not_verified",
+            }
+            if (
+                audit.get("ready_for_verification") is True
+                and audit.get("contradictory_completed_verification") is True
+                and ending_gaps.intersection(gaps)
+            ):
+                mandatory_ending_mutation = {
+                    "scenario_id": scenario_id,
+                    "tool": "playthrough_manifest",
+                    "action": "configure_ending",
+                    "ready_for_verification": True,
+                    "require_new_condition_id": True,
+                    "forbidden_actions_until_configured": [
+                        "verify_ending",
+                        "loot_acquire",
+                    ],
+                    "reason": (
+                        "the completed historical condition requires party inventory "
+                        "truthy after the ordered source item surrender"
+                    ),
+                }
+                break
     mandatory_ending_mutation_json = json.dumps(
         mandatory_ending_mutation, ensure_ascii=False
     )
@@ -2073,7 +2127,8 @@ Source-declared D&D edition: {unit.get("edition")}
 MANDATORY_FIRST_ENDING_MUTATION={mandatory_ending_mutation_json}
 When this object is non-empty, execute its named tool/action as the first
 authoritative write after the required source lookup. Until it succeeds, do not
-call any `playthrough_manifest` action and do not report the ending complete.
+call `playthrough_manifest` except when it is the named tool/action, and do not
+report the ending complete.
 When it includes `write_ids`, copy those exact fresh values into the tool's
 top-level `idempotency_key` and `payload.spend_id`; do not derive either from the
 fixture receipt id or any historical attempt. For an item surrender, copy the

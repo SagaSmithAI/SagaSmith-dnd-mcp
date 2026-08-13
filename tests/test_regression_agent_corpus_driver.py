@@ -1070,6 +1070,11 @@ def test_ending_requires_independent_source_item_and_check_receipts() -> None:
     )
     assert "ending:ending" in audit["gaps"]
     assert "ending:legal_ending_not_verified" in audit["gaps"]
+    receipt_audit = _ending_prerequisite_audit(
+        route, contradictory_inventory_verify
+    )
+    assert receipt_audit[0]["ready_for_verification"] is True
+    assert receipt_audit[0]["contradictory_completed_verification"] is True
 
     audit = _coverage_audit(
         route,
@@ -2211,7 +2216,7 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "MANDATORY_FIRST_ENDING_MUTATION=" in prompt
     assert '"tool": "memory_change"' in prompt
     assert '"action": "commit"' in prompt
-    assert "do not\ncall any `playthrough_manifest` action" in prompt
+    assert "do not\ncall `playthrough_manifest` except when it is the named" in prompt
     assert "historical completed\nmanifest status" in prompt
     assert "follow its full `expected` object" in prompt
     assert "`ready_for_verification=false`" in prompt
@@ -2299,6 +2304,33 @@ def test_dm_prompt_generates_fresh_item_spend_write_ids() -> None:
     assert "copy those exact fresh values" in prompt
     assert "do not derive either from the\nfixture receipt id" in prompt
     assert "never choose\nanother same-named item" in prompt
+
+
+def test_dm_prompt_makes_replacement_ending_condition_the_first_write() -> None:
+    prompt = _dm_prompt(
+        run_id="run",
+        line_id="module",
+        unit={"edition": "2014", "advancement_mode": "xp"},
+        route={"scenarios": []},
+        player_principal="player",
+        cycle=46,
+        gaps=["ending:ending", "ending:legal_ending_not_verified"],
+        ending_prerequisite_audit=[
+            {
+                "scenario_id": "ending",
+                "first_missing_id": None,
+                "ready_for_verification": True,
+                "contradictory_completed_verification": True,
+                "receipts": [],
+            }
+        ],
+    )
+    mandatory = prompt.split("MANDATORY_FIRST_ENDING_MUTATION=", 1)[1].splitlines()[0]
+    assert '"tool": "playthrough_manifest"' in mandatory
+    assert '"action": "configure_ending"' in mandatory
+    assert '"require_new_condition_id": true' in mandatory
+    assert '"verify_ending", "loot_acquire"' in mandatory
+    assert "execute its named tool/action as the first" in prompt
 
 
 @pytest.mark.full_agent
