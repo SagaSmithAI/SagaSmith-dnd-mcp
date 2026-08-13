@@ -2144,6 +2144,10 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "current_ending_prerequisite_receipt_audit=" in prompt
     assert "historical completed\nmanifest status" in prompt
     assert "follow its full `expected` object" in prompt
+    assert "`ready_for_verification=false`" in prompt
+    assert "do not call\n`playthrough_manifest(verify_ending)`" in prompt
+    assert "first authoritative write of the cycle must be the exact" in prompt
+    assert "read-only manifest verification is not progress" in prompt
     assert "`payload.source_scene_id` and `payload.source_excerpt`" in prompt
     assert "nested `payload.source_evidence` object does not satisfy" in prompt
     assert "`payload.base_dc`" in prompt

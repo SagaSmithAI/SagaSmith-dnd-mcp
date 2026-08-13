@@ -2081,6 +2081,11 @@ same source-bound atomic commit. Do not change keys or fall back to an unlinked
 upsert merely because the authoritative fact already exists. When
 all entries are matched, configure and verify the exact ending without replaying
 the receipt chain.
+While `ready_for_verification=false`, do not call
+`playthrough_manifest(verify_ending)`, do not describe the ending as complete,
+and do not use a historical completed manifest as evidence. After the required
+source lookup, the first authoritative write of the cycle must be the exact
+`first_missing_id` receipt; a read-only manifest verification is not progress.
 Campaign memory fact `content` is always a string. A later ending
 `kind="memory_fact"` equality check must copy the successful commit's returned
 `fact.content` exactly; do not substitute boolean `true` for string `"True"` or
