@@ -2240,6 +2240,7 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "do not\ncall `playthrough_manifest` except when it is the named" in prompt
     assert "historical completed\nmanifest status" in prompt
     assert "follow its full `expected` object" in prompt
+    assert "Never reuse the\npreceding acquisition's source reference" in prompt
     assert "`ready_for_verification=false`" in prompt
     assert "do not call\n`playthrough_manifest(verify_ending)`" in prompt
     assert "first authoritative write of the cycle must be the exact" in prompt

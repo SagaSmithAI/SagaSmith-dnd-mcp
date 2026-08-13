@@ -2364,6 +2364,9 @@ the ordered receipt chain. Resume at its `first_missing_id`; historical complete
 manifest status or successful verification never substitutes for a missing
 receipt. For that entry, follow its full `expected` object, including exact
 `source_evidence`, `fact_key`, item, check, and reducer fields. A semantic event
+must resolve and use that entry's own page range and heading. Never reuse the
+preceding acquisition's source reference for a presentation or reducer event,
+even when both concern the same named item. A semantic event
 must use party/public/actor audience and request the fact in the same atomic
 commit with `payload.event.audience_scope="party"` (the audience does not belong
 on a fact) and through the plural array
