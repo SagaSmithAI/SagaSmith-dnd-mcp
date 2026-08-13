@@ -2129,6 +2129,9 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "nested `payload.source_evidence` object does not satisfy" in prompt
     assert "`payload.base_dc`" in prompt
     assert "`payload.applied_reducer_ids`" in prompt
+    assert '`payload.ability="Charisma"`' in prompt
+    assert '`payload.skill="Persuasion"`' in prompt
+    assert '`ability="persuasion"` with the skill omitted' in prompt
     assert '`payload.event.audience_scope="party"`' in prompt
     assert "audience does not belong\non a fact" in prompt
     assert '`payload.facts=[{"kind":"memory_fact","fact_key":"...", ...}]`' in prompt

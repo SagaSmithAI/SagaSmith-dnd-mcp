@@ -2011,7 +2011,10 @@ success, and an authoritative random receipt. Put the check evidence in the
 public receipt fields `payload.source_scene_id` and `payload.source_excerpt`;
 an otherwise identical nested `payload.source_evidence` object does not satisfy
 that receipt. For a reduced check, also send `payload.base_dc` and the exact
-`payload.applied_reducer_ids` declared by the fixture. A preceding
+`payload.applied_reducer_ids` declared by the fixture. Preserve the check's
+separate ability and skill fields—for this fixture that means
+`payload.ability="Charisma"` and `payload.skill="Persuasion"`, never
+`ability="persuasion"` with the skill omitted. A preceding
 `receipt="semantic_event"` requires `memory_change(action="commit")`, an event
 with `event_type="source_semantic_event"`, the exact fixture `id` in
 `event.payload.reducer_id`, a managed `event.payload.source_ref`, and the exact
