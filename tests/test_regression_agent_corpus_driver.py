@@ -1049,6 +1049,28 @@ def test_ending_requires_independent_source_item_and_check_receipts() -> None:
         "matched"
     ] * len(prerequisites)
 
+    contradictory_inventory_verify = copy.deepcopy(receipts)
+    contradictory_inventory_verify[-1]["result"] = {
+        "status": "completed",
+        "achieved": True,
+        "verification": [
+            {
+                "kind": "campaign_state_value",
+                "path": "party.inventory.items",
+                "operator": "truthy",
+                "passed": True,
+            }
+        ],
+    }
+    audit = _coverage_audit(
+        route,
+        contradictory_inventory_verify,
+        process_count=2,
+        list_changed_count=1,
+    )
+    assert "ending:ending" in audit["gaps"]
+    assert "ending:legal_ending_not_verified" in audit["gaps"]
+
     audit = _coverage_audit(
         route,
         [*self_certifying, *receipts],
@@ -2196,6 +2218,8 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
     assert "do not call\n`playthrough_manifest(verify_ending)`" in prompt
     assert "first authoritative write of the cycle must be the exact" in prompt
     assert "read-only manifest verification is not progress" in prompt
+    assert "never reacquire the item to satisfy that condition" in prompt
+    assert "Configure a\nnew condition id" in prompt
     assert "`payload.source_scene_id` and `payload.source_excerpt`" in prompt
     assert "nested `payload.source_evidence` object does not satisfy" in prompt
     assert "`payload.base_dc`" in prompt

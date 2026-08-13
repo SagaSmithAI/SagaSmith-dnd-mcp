@@ -982,15 +982,31 @@ def _ending_completed(
         args = call.get("arguments") or {}
         if args.get("action") not in {"verify_ending", "verify-ending"}:
             continue
+        contradicts_surrender = any(
+            item.get("receipt") == "item_spend" for item in required
+        ) and any(
+            isinstance(check, dict)
+            and check.get("kind") == "campaign_state_value"
+            and check.get("path") == "party.inventory.items"
+            and check.get("operator") == "truthy"
+            for node in _walk(call.get("result"))
+            if isinstance(node, dict)
+            for check in node.get("verification") or []
+        )
         for node in _walk(call.get("result")):
             if not isinstance(node, dict):
                 continue
             completed = node.get("status") in {"completed", "achieved"} or (
                 node.get("achieved") is True and node.get("completed") is not False
             )
-            if completed and _complete_ending_receipt_sequence(
-                calls, required, stop=verify_index
-            ) is not None:
+            if (
+                completed
+                and not contradicts_surrender
+                and _complete_ending_receipt_sequence(
+                    calls, required, stop=verify_index
+                )
+                is not None
+            ):
                 return True
     return False
 
@@ -2161,6 +2177,11 @@ same source-bound atomic commit. Do not change keys or fall back to an unlinked
 upsert merely because the authoritative fact already exists. When
 all entries are matched, configure and verify the exact ending without replaying
 the receipt chain.
+If an immutable historical condition contradicts the completed receipt chain
+(for example, it requires `party.inventory.items` truthy after a source item was
+surrendered), never reacquire the item to satisfy that condition. Configure a
+new condition id using an exact source-bound fact/content and current runtime
+checks, then verify that new condition.
 While `ready_for_verification=false`, do not call
 `playthrough_manifest(verify_ending)`, do not describe the ending as complete,
 and do not use a historical completed manifest as evidence. After the required
