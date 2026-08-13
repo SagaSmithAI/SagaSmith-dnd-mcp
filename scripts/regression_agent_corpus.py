@@ -780,6 +780,29 @@ def _source_ref_matches_evidence(value: Any, prerequisite: dict[str, Any]) -> bo
     return True
 
 
+def _source_acquisition_item_ids(call: dict[str, Any], expected_name: str) -> set[str]:
+    """Return only item ids minted by this acquisition, never projected inventory."""
+
+    expected = expected_name.casefold()
+    for node in _walk(call.get("result")):
+        if not isinstance(node, dict) or node.get("status") != "committed":
+            continue
+        declared_ids = {str(value) for value in node.get("item_ids") or []}
+        if not declared_ids:
+            continue
+        minted_ids = {
+            str(item.get("id"))
+            for item in node.get("items") or []
+            if isinstance(item, dict)
+            and item.get("id")
+            and str(item.get("name") or "").casefold() == expected
+        }
+        matched = declared_ids & minted_ids
+        if matched:
+            return matched
+    return set()
+
+
 def _source_item_receipt(
     call: dict[str, Any],
     prerequisite: dict[str, Any],
@@ -803,21 +826,16 @@ def _source_item_receipt(
     ):
         return False
     if expected_action == "loot_acquire":
-        return any(
-            isinstance(node, dict)
-            and str(node.get("name") or "").casefold() == expected_name.casefold()
-            for node in _walk(result)
-        )
+        return bool(_source_acquisition_item_ids(call, expected_name))
     if expected_action == "item_spend":
         item_id = str(payload.get("item_id") or "")
         acquired_item_ids = {
-            str(node.get("id"))
+            acquired_item_id
             for prior_prerequisite, prior_call in matched_receipts
             if prior_prerequisite.get("receipt") == "loot_acquire"
-            for node in _walk(prior_call.get("result"))
-            if isinstance(node, dict)
-            and str(node.get("name") or "").casefold() == expected_name.casefold()
-            and node.get("id")
+            for acquired_item_id in _source_acquisition_item_ids(
+                prior_call, expected_name
+            )
         }
         return item_id in acquired_item_ids and any(
             isinstance(node, dict)
@@ -854,14 +872,9 @@ def _source_item_chain_is_live(
     for prerequisite, call, call_index in matched:
         if prerequisite.get("receipt") != "loot_acquire":
             continue
-        expected_name = str(prerequisite.get("item_name") or "").casefold()
-        for node in _walk(call.get("result")):
-            if (
-                isinstance(node, dict)
-                and node.get("id")
-                and str(node.get("name") or "").casefold() == expected_name
-            ):
-                acquired[str(node["id"])] = call_index
+        expected_name = str(prerequisite.get("item_name") or "")
+        for item_id in _source_acquisition_item_ids(call, expected_name):
+            acquired[item_id] = call_index
     for item_id, acquired_at in acquired.items():
         for call in calls[acquired_at + 1 : stop]:
             arguments = call.get("arguments") or {}
@@ -1041,18 +1054,22 @@ def _ending_prerequisite_audit(
                 continue
             matched_call = calls[matched]
             matched_receipts.append((prerequisite, matched_call))
-            receipts.append(
-                {
-                    "id": prerequisite.get("id"),
-                    "receipt": prerequisite.get("receipt"),
-                    "status": "matched",
-                    "call_index": matched,
-                    "tool": matched_call.get("tool"),
-                    "action": (matched_call.get("arguments") or {}).get("action"),
-                    "expected": prerequisite,
-                    "safe_source_query": safe_query,
-                }
-            )
+            receipt_result = {
+                "id": prerequisite.get("id"),
+                "receipt": prerequisite.get("receipt"),
+                "status": "matched",
+                "call_index": matched,
+                "tool": matched_call.get("tool"),
+                "action": (matched_call.get("arguments") or {}).get("action"),
+                "expected": prerequisite,
+                "safe_source_query": safe_query,
+            }
+            if prerequisite.get("receipt") == "loot_acquire":
+                expected_name = str(prerequisite.get("item_name") or "")
+                receipt_result["acquired_item_ids"] = sorted(
+                    _source_acquisition_item_ids(matched_call, expected_name)
+                )
+            receipts.append(receipt_result)
         audits.append(
             {
                 "scenario_id": scenario.get("id"),
@@ -2011,10 +2028,20 @@ def _dm_prompt(
         }
         if action == "item_spend":
             write_key = f"{run_id}-{line_id}-cycle-{cycle:03d}-{first_missing}"
+            acquired_item_ids = [
+                str(item_id)
+                for prior in audit.get("receipts") or []
+                if prior.get("receipt") == "loot_acquire"
+                and prior.get("status") == "matched"
+                for item_id in prior.get("acquired_item_ids") or []
+            ]
             mandatory_ending_mutation["write_ids"] = {
                 "idempotency_key": write_key,
                 "spend_id": f"{write_key}-spend",
             }
+            mandatory_ending_mutation["matched_acquisition_item_ids"] = (
+                acquired_item_ids
+            )
         break
     mandatory_ending_mutation_json = json.dumps(
         mandatory_ending_mutation, ensure_ascii=False
@@ -2033,7 +2060,9 @@ authoritative write after the required source lookup. Until it succeeds, do not
 call any `playthrough_manifest` action and do not report the ending complete.
 When it includes `write_ids`, copy those exact fresh values into the tool's
 top-level `idempotency_key` and `payload.spend_id`; do not derive either from the
-fixture receipt id or any historical attempt.
+fixture receipt id or any historical attempt. For an item surrender, copy the
+single `matched_acquisition_item_ids` value into `payload.item_id`; never choose
+another same-named item from inventory or history.
 Source-selected advancement mode: {unit.get("advancement_mode")}
 Source-reviewed preparation profile (re-resolve its exact current Pack evidence):
 {json.dumps(unit.get("play_requirements") or {}, ensure_ascii=False)}

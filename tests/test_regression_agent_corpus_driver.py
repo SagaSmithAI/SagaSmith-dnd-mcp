@@ -936,6 +936,9 @@ def test_ending_requires_independent_source_item_and_check_receipts() -> None:
             },
             result={
                 "status": "committed",
+                "acquisition_id": "source-sword-acquisition",
+                "items": [{"id": "source-sword", "name": "Source Sword"}],
+                "item_ids": ["source-sword"],
                 "party": {"inventory": {"items": [{"id": "source-sword", "name": "Source Sword"}]}},
             },
         ),
@@ -1041,6 +1044,7 @@ def test_ending_requires_independent_source_item_and_check_receipts() -> None:
     receipt_audit = _ending_prerequisite_audit(route, receipts)
     assert receipt_audit[0]["first_missing_id"] is None
     assert receipt_audit[0]["ready_for_verification"] is True
+    assert receipt_audit[0]["receipts"][0]["acquired_item_ids"] == ["source-sword"]
     assert [item["status"] for item in receipt_audit[0]["receipts"]] == [
         "matched"
     ] * len(prerequisites)
@@ -1114,6 +1118,14 @@ def test_ending_requires_independent_source_item_and_check_receipts() -> None:
     audit = _coverage_audit(route, different_sword, process_count=2, list_changed_count=1)
     assert "ending:ending" in audit["gaps"]
 
+    projected_same_name_is_not_minted = copy.deepcopy(different_sword)
+    projected_same_name_is_not_minted[0]["result"]["party"]["inventory"][
+        "items"
+    ].append({"id": "replacement-sword", "name": "Source Sword"})
+    receipt_audit = _ending_prerequisite_audit(route, projected_same_name_is_not_minted)
+    assert receipt_audit[0]["receipts"][0]["acquired_item_ids"] == ["source-sword"]
+    assert receipt_audit[0]["first_missing_id"] == "source-item-surrendered"
+
     valid_receipts = receipts[:5]
     restarted_receipts = copy.deepcopy(valid_receipts)
     for call in (restarted_receipts[0], restarted_receipts[-1]):
@@ -1124,6 +1136,8 @@ def test_ending_requires_independent_source_item_and_check_receipts() -> None:
     restarted_receipts[0]["result"]["party"]["inventory"]["items"][0]["id"] = (
         "replacement-sword"
     )
+    restarted_receipts[0]["result"]["items"][0]["id"] = "replacement-sword"
+    restarted_receipts[0]["result"]["item_ids"] = ["replacement-sword"]
     stale_then_restarted = [
         valid_receipts[0],
         valid_receipts[-1],
@@ -2088,6 +2102,12 @@ def test_dm_prompt_contains_coverage_evidence_but_no_authored_story_outcome() ->
                 "ready_for_verification": False,
                 "receipts": [
                     {
+                        "id": "source-item-acquired",
+                        "receipt": "loot_acquire",
+                        "status": "matched",
+                        "acquired_item_ids": ["source-sword"],
+                    },
+                    {
                         "id": "source-item-presented",
                         "receipt": "semantic_event",
                         "status": "missing",
@@ -2230,6 +2250,12 @@ def test_dm_prompt_generates_fresh_item_spend_write_ids() -> None:
                 "ready_for_verification": False,
                 "receipts": [
                     {
+                        "id": "source-item-acquired",
+                        "receipt": "loot_acquire",
+                        "status": "matched",
+                        "acquired_item_ids": ["source-sword"],
+                    },
+                    {
                         "id": "source-item-surrendered",
                         "receipt": "item_spend",
                         "status": "missing",
@@ -2245,8 +2271,10 @@ def test_dm_prompt_generates_fresh_item_spend_write_ids() -> None:
     )
     assert '"idempotency_key": "run-module-cycle-042-source-item-surrendered"' in prompt
     assert '"spend_id": "run-module-cycle-042-source-item-surrendered-spend"' in prompt
+    assert '"matched_acquisition_item_ids": ["source-sword"]' in prompt
     assert "copy those exact fresh values" in prompt
     assert "do not derive either from the\nfixture receipt id" in prompt
+    assert "never choose\nanother same-named item" in prompt
 
 
 @pytest.mark.full_agent
