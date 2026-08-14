@@ -167,7 +167,7 @@ Host 使用原生 `tools/list` + `tools/call`；每次 exposure 变化后刷新�
 
 服务提供 campaign/membership、角色控制、事件、Snapshot DAG、branch checkout、continuity context、修订式记忆以及 PC/NPC 独立的 actor knowledge。玩家只能读取当前分支、允许的场景 scope、自己控制角色的完整 sheet，以及角色真正知道的事实。
 
-Snapshot 是可独立恢复的全量 checkpoint，`recap` 才是父子节点差量。切换 branch 前当前工作区必须已经保存；否则服务拒绝 checkout，避免角色状态与 actor knowledge 落在不同时间点。
+Snapshot 是可独立恢复的全量 checkpoint，`recap` 才是父子节点差量。底层 schema v8 将每个完整状态文档独立保存为受大小限制和双重校验保护的 `zlib-1` 记录；读取、校验、恢复和导出仍物化同一个完整 JSON，不依赖祖先回放。切换 branch 前当前工作区必须已经保存；否则服务拒绝 checkout，避免角色状态与 actor knowledge 落在不同时间点。
 
 ### 规则与扩展书
 
@@ -278,6 +278,12 @@ Skill 深度通过 `skill_query(read|outline|section|search)` 按需读取；工
 | `SAGASMITH_DND_GATEWAY_HOST` / `PORT` | UI adapter 监听地址，默认 `127.0.0.1:8766` |
 | `SAGASMITH_DND_GATEWAY_TOKEN` | 非 loopback 访问所需 Bearer token |
 | `SAGASMITH_DND_GATEWAY_ORIGINS` | 逗号分隔的精确 CORS origin allowlist |
+
+### 数据库升级与回滚
+
+服务启动时会执行 Core Alembic 迁移。首次使用包含 Snapshot schema v8 的版本前，必须在服务停止且 SQLite WAL 已收敛后备份 `data/ttrpgbase.db`；外部数据库则使用其原生一致性备份。迁移只接受完整且 checksum 有效的 schema-v7 Snapshot，并移除旧 JSON `payload` 列。v3–v6 数据必须先由对应的历史运行时物化到 v7，不能通过当前服务的兼容入口读取。
+
+该切换没有数据库 downgrade 或双协议运行模式。若升级失败或需要回滚，停止新服务，恢复升级前数据库备份，并同时恢复匹配的 Core、D&D 与 MCP 版本；不要让旧运行时打开已经迁移到 v8 的数据库。
 
 服务永远不会直接导入模型任意选择的路径。规则书必须位于 allowlisted root；商业内容由用户自行确保使用权。
 Content package 的 `source_path` 同样只允许位于 rule/module import roots；服务端导出

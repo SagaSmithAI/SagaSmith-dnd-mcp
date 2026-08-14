@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
+from sagasmith_core.database import Database, sqlite_database_url
+from sagasmith_core.models import CampaignSnapshot
 from sagasmith_dnd.character_schema import default_character_sheet
 
 from sagasmith_dnd_mcp.config import McpConfig
@@ -65,7 +67,8 @@ def test_public_rolls_replay_after_restore_and_do_not_pollute_the_parent_branch(
     tmp_path: Path,
 ) -> None:
     async def exercise() -> None:
-        server = create_server(_config(tmp_path))
+        config = _config(tmp_path)
+        server = create_server(config)
         campaign = await _call(
             server,
             "campaign_create",
@@ -132,6 +135,27 @@ def test_public_rolls_replay_after_restore_and_do_not_pollute_the_parent_branch(
                 "idempotency_key": "checkpoint-before",
             },
         )
+        verified = await _call(
+            server,
+            "snapshot_query",
+            {
+                "campaign_id": campaign_id,
+                "view": "verify",
+                "payload": {"slot": checkpoint["slot"]},
+            },
+        )
+        assert verified["valid"] is True
+        stored_database = Database(sqlite_database_url(config.database_path))
+        try:
+            with stored_database.transaction() as session:
+                stored = session.get(CampaignSnapshot, checkpoint["id"])
+                assert stored is not None
+                assert stored.schema_version == 8
+                assert stored.payload_codec == "zlib-1"
+                assert stored.uncompressed_size > 0
+                assert stored.compressed_payload
+        finally:
+            stored_database.dispose()
         branch_roll = await _call(
             server,
             "dnd_dice_roll",
