@@ -281,9 +281,9 @@ Skill 深度通过 `skill_query(read|outline|section|search)` 按需读取；工
 
 ### 数据库升级与回滚
 
-服务启动时会执行 Core Alembic 迁移。首次使用包含 Snapshot schema v8 的版本前，必须在服务停止且 SQLite WAL 已收敛后备份 `data/ttrpgbase.db`；外部数据库则使用其原生一致性备份。迁移只接受完整且 checksum 有效的 schema-v7 Snapshot，并移除旧 JSON `payload` 列。v3–v6 数据必须先由对应的历史运行时物化到 v7，不能通过当前服务的兼容入口读取。
+服务启动时会执行 Core Alembic 迁移，并要求数据库符合当前 Snapshot schema v8。部署前必须在服务停止且 SQLite WAL 已收敛后备份 `data/ttrpgbase.db`；外部数据库则使用其原生一致性备份。
 
-该切换没有数据库 downgrade 或双协议运行模式。若升级失败或需要回滚，停止新服务，恢复升级前数据库备份，并同时恢复匹配的 Core、D&D 与 MCP 版本；不要让旧运行时打开已经迁移到 v8 的数据库。
+当前格式没有数据库 downgrade 或双协议运行模式。若启动失败或需要回滚，停止服务，并将数据库、Core、D&D 与 MCP 恢复为一套匹配版本。
 
 服务永远不会直接导入模型任意选择的路径。规则书必须位于 allowlisted root；商业内容由用户自行确保使用权。
 Content package 的 `source_path` 同样只允许位于 rule/module import roots；服务端导出
