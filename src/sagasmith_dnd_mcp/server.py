@@ -365,6 +365,10 @@ from sagasmith_dnd.rule_providers import load_native_rule_providers
 from sagasmith_dnd.spatial import (
     BattleMapError,
     compile_battle_map,
+    compile_battle_map_template,
+    normalize_combat_grid_source_refs,
+    normalize_combat_grid_template,
+    normalize_combat_grid_templates,
     patch_battle_map,
     validate_position,
 )
@@ -13645,6 +13649,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         scene_id: str | None = None,
         scope_id: str = "party",
         battle_map: dict[str, Any] | None = None,
+        battle_map_template_id: str | None = None,
+        battle_map_override_reason: str | None = None,
         ruleset: str | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         branch_id: str | None = None,
@@ -13671,6 +13677,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "scene_id": scene_id,
             "scope_id": scope_id,
             "battle_map": battle_map,
+            "battle_map_template_id": battle_map_template_id,
+            "battle_map_override_reason": battle_map_override_reason,
             "ruleset": authoritative_ruleset,
             "branch_id": resolved_branch_id,
         }
@@ -13713,6 +13721,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "actor_id",
                 "token_id",
                 "position",
+                "deployment_zone_id",
                 "hidden",
                 "visible_to_actor_ids",
                 "disposition",
@@ -13740,6 +13749,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ):
                 raise ValueError("source_conditions must be a list of objects")
             config_by_actor[actor_id_value] = dict(entry)
+        if battle_map_template_id is not None and battle_map is not None:
+            raise CombatEngineError(
+                "battle_map_template_id and battle_map are mutually exclusive map authorities"
+            )
+        if positioning_mode == "agent" and battle_map_template_id is not None:
+            raise CombatEngineError(
+                "agent-positioned combat does not accept a battle_map_template_id"
+            )
         current_scene_context = modules.current_scene(campaign_id, scope_id=scope_id)
         scene_context = None
         resolved_scene_id = scene_id
@@ -13786,8 +13803,76 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     + ", ".join(premature)
                 )
         compiled_map = None
-        if positioning_mode == "grid" and scene_context is not None:
+        if positioning_mode == "grid" and battle_map_template_id is not None:
+            if scene_context is None:
+                raise CombatEngineError(
+                    "battle_map_template_id requires an encounter scene from a "
+                    "finalized module Pack"
+                )
             try:
+                template_matches: list[tuple[dict[str, Any], dict[str, Any]]] = []
+                for candidate_scene in modules.scene_index(
+                    campaign_id, module_id=str(scene_context["module_id"])
+                ):
+                    templates = normalize_combat_grid_templates(
+                        list(
+                            dict(candidate_scene.get("profile_data") or {}).get(
+                                "combat_grid_templates"
+                            )
+                            or []
+                        )
+                    )
+                    template_matches.extend(
+                        (candidate_scene, template)
+                        for template in templates
+                        if template["id"] == str(battle_map_template_id)
+                    )
+                if len(template_matches) != 1:
+                    raise BattleMapError(
+                        "battle_map_template_id must resolve to exactly one template in the "
+                        "encounter module"
+                    )
+                template_scene, template = template_matches[0]
+                archived = _content_pack_module_archive(
+                    campaign_id, str(scene_context["module_id"])
+                )
+                if archived is None:
+                    raise BattleMapError(
+                        "battle-map templates require an installed finalized module Pack archive"
+                    )
+                package, _template_blobs, _template_artifact = archived
+                authority_receipt = {
+                    "schema_version": 1,
+                    "kind": "content_pack_template",
+                    "package_id": str(package["id"]),
+                    "package_version": str(package["version"]),
+                    "package_checksum": str(package["checksum"]),
+                    "template_id": str(template["id"]),
+                    "template_checksum": json_sha256(template),
+                    "scene_stable_key": str(template_scene.get("stable_key") or ""),
+                }
+                map_scene_context = modules.read_scene(
+                    campaign_id, str(template_scene["scene_id"])
+                )
+                map_scene_context = {
+                    **map_scene_context,
+                    "encounter_scene_id": resolved_scene_id,
+                }
+                compiled_map = compile_battle_map_template(
+                    map_scene_context,
+                    template,
+                    authority_receipt=authority_receipt,
+                )
+            except BattleMapError as error:
+                raise NeedsRulingError(str(error), missing=("battle_map_template_id",)) from error
+            for entry in config_by_actor.values():
+                try:
+                    validate_position(compiled_map, entry.get("position"))
+                except BattleMapError as error:
+                    raise CombatEngineError(str(error)) from error
+        elif positioning_mode == "grid" and scene_context is not None:
+            try:
+                explicit_battle_map_request = deepcopy(battle_map or {})
                 battle_map_request = deepcopy(battle_map or {})
                 progress_context = scene_context
                 if current_scene_context is not None and current_scene_context.get(
@@ -13850,18 +13935,81 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "encounter_scene_id": resolved_scene_id,
                     }
                 compiled_map = compile_battle_map(map_scene_context, battle_map_request)
+                mechanical_override_fields = sorted(
+                    set(explicit_battle_map_request) - {"location_key"}
+                )
+                if mechanical_override_fields:
+                    reason = str(
+                        battle_map_override_reason or "Explicit DM battle-map override."
+                    ).strip()
+                    if len(reason) > 2000:
+                        raise BattleMapError(
+                            "battle_map_override_reason must not exceed 2000 characters"
+                        )
+                    compiled_map["authority_receipt"] = {
+                        "schema_version": 1,
+                        "kind": "dm_override",
+                        "principal_id": principal_id,
+                        "reason": reason,
+                        "request_checksum": json_sha256(explicit_battle_map_request),
+                        "fields": mechanical_override_fields,
+                    }
+                else:
+                    if battle_map_override_reason is not None:
+                        raise BattleMapError(
+                            "battle_map_override_reason requires a mechanical battle_map override"
+                        )
+                    compiled_map["authority_receipt"] = {
+                        "schema_version": 1,
+                        "kind": "scene_spatial",
+                        "location_key": compiled_map["source"].get("location_key"),
+                    }
+                compiled_map["checksum"] = json_sha256(
+                    {key: value for key, value in compiled_map.items() if key != "checksum"}
+                )
                 for entry in config_by_actor.values():
                     validate_position(compiled_map, entry.get("position"))
             except BattleMapError as error:
                 raise NeedsRulingError(str(error), missing=("battle_map",)) from error
         elif positioning_mode == "grid" and battle_map is not None:
             try:
+                mechanical_override_fields = sorted(set(battle_map) - {"location_key"})
+                reason = str(
+                    battle_map_override_reason or "Explicit DM battle-map override."
+                ).strip()
+                if mechanical_override_fields and len(reason) > 2000:
+                    raise BattleMapError(
+                        "battle_map_override_reason must not exceed 2000 characters"
+                    )
+                if not mechanical_override_fields and battle_map_override_reason is not None:
+                    raise BattleMapError(
+                        "battle_map_override_reason requires a mechanical battle_map override"
+                    )
                 compiled_map = compile_battle_map(
                     {
                         "scene_id": resolved_scene_id or f"ad-hoc-combat:{campaign_id}",
                         "spatial": {},
                     },
                     deepcopy(battle_map),
+                )
+                compiled_map["authority_receipt"] = (
+                    {
+                        "schema_version": 1,
+                        "kind": "dm_override",
+                        "principal_id": principal_id,
+                        "reason": reason,
+                        "request_checksum": json_sha256(battle_map),
+                        "fields": mechanical_override_fields,
+                    }
+                    if mechanical_override_fields
+                    else {
+                        "schema_version": 1,
+                        "kind": "scene_spatial",
+                        "location_key": compiled_map["source"].get("location_key"),
+                    }
+                )
+                compiled_map["checksum"] = json_sha256(
+                    {key: value for key, value in compiled_map.items() if key != "checksum"}
                 )
                 for entry in config_by_actor.values():
                     validate_position(compiled_map, entry.get("position"))
@@ -13896,6 +14044,41 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "grid combat requires positions for every participant: "
                     + ", ".join(missing_positions)
                 )
+            deployment_zones = {
+                str(zone["id"]): set(zone.get("cells") or [])
+                for zone in compiled_map.get("deployment_zones") or []
+                if isinstance(zone, dict) and zone.get("id")
+            }
+            declared_zone_actor_ids = {
+                actor_id_value
+                for actor_id_value, entry in config_by_actor.items()
+                if entry.get("deployment_zone_id") is not None
+            }
+            if deployment_zones:
+                missing_zones = sorted(set(participant_ids) - declared_zone_actor_ids)
+                if missing_zones:
+                    raise CombatEngineError(
+                        "template-backed grid combat requires a deployment_zone_id for every "
+                        "participant: "
+                        + ", ".join(missing_zones)
+                    )
+                for actor_id_value in participant_ids:
+                    entry = dict(config_by_actor.get(actor_id_value) or {})
+                    zone_id = str(entry.get("deployment_zone_id") or "")
+                    if zone_id not in deployment_zones:
+                        raise CombatEngineError(
+                            f"participant {actor_id_value} has an unknown deployment_zone_id"
+                        )
+                    position = dict(entry["position"])
+                    if f"{position['x']},{position['y']}" not in deployment_zones[zone_id]:
+                        raise CombatEngineError(
+                            f"participant {actor_id_value} position is outside deployment zone "
+                            f"{zone_id}"
+                        )
+            elif declared_zone_actor_ids:
+                raise CombatEngineError(
+                    "deployment_zone_id is accepted only by a template with deployment zones"
+                )
         participants = [characters.get(item) for item in participant_ids]
         if any(char.campaign_id != campaign_id for char in participants):
             raise ValueError("all participants must belong to the campaign")
@@ -13926,6 +14109,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor = combat_actor_snapshot(character_id)
             actor_config = dict(config_by_actor.get(character_id, {}))
             actor_config.pop("source_conditions", None)
+            actor_config.pop("deployment_zone_id", None)
             actor.update(actor_config)
             if character_id in source_condition_sheets:
                 actor["sheet"] = validate_character_sheet(
@@ -13943,6 +14127,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         if preflight is not None:
             encounter["participant_manifest"] = preflight
+        if compiled_map and compiled_map.get("deployment_zones"):
+            encounter["deployment_assignments"] = [
+                {
+                    "actor_id": actor_id_value,
+                    "deployment_zone_id": str(
+                        config_by_actor[actor_id_value]["deployment_zone_id"]
+                    ),
+                    "position": deepcopy(config_by_actor[actor_id_value]["position"]),
+                }
+                for actor_id_value in participant_ids
+            ]
         if source_condition_records:
             encounter["source_conditions"] = source_condition_records
         initial_sheets = {
@@ -42114,6 +42309,181 @@ boundary.
                     scene_id=(str(value["scene_id"]) if value.get("scene_id") else None),
                     metadata=dict(value.get("metadata") or {}),
                 )
+            elif operation == "combat_grid":
+                access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+                require_write_contract(expected_revision, idempotency_key)
+                if job.state != "imported" or not job.module_id:
+                    raise ValueError(
+                        "combat-grid edits require a mechanically imported module draft"
+                    )
+                change = str(required(value, "change"))
+                if change not in {"upsert", "remove"}:
+                    raise ValueError("combat_grid change must be upsert or remove")
+                scene_id_value = str(required(value, "scene_id"))
+                scene = modules.read_scene(campaign_id, scene_id_value)
+                if str(scene["module_id"]) != str(job.module_id):
+                    raise ValueError("combat-grid scene_id must belong to the draft module")
+                source_key = str(dict(job.payload or {}).get("source_key") or job.artifact)
+                chunk_hashes = {
+                    str(item.get("content_hash") or "")
+                    for item in modules.list_chunks(campaign_id, str(job.module_id))
+                    if item.get("content_hash")
+                }
+
+                def validate_draft_refs(refs: list[dict[str, Any]]) -> None:
+                    if any(str(ref["source_key"]) != source_key for ref in refs):
+                        raise ValueError(
+                            "combat-grid source_refs must use the current module draft source_key"
+                        )
+                    missing_hashes = sorted(
+                        str(ref["chunk_hash"])
+                        for ref in refs
+                        if str(ref["chunk_hash"]) not in chunk_hashes
+                    )
+                    if missing_hashes:
+                        raise ValueError(
+                            "combat-grid source_refs do not resolve inside draft evidence: "
+                            + ", ".join(missing_hashes)
+                        )
+
+                if change == "upsert":
+                    template = normalize_combat_grid_template(
+                        required(value, "template"),
+                        source_ref_key="chunk_hash",
+                    )
+                    validate_draft_refs(template["source_refs"])
+                    edit_refs = template["source_refs"]
+                    template_id = template["id"]
+                else:
+                    template = None
+                    template_id = str(required(value, "template_id"))
+                    edit_refs = normalize_combat_grid_source_refs(
+                        required(value, "source_refs"),
+                        source_ref_key="chunk_hash",
+                    )
+                    validate_draft_refs(edit_refs)
+                request_payload = {
+                    "job_id": job_id,
+                    "operation": operation,
+                    "change": change,
+                    "scene_id": scene_id_value,
+                    "template_id": template_id,
+                    **({"template": template} if template is not None else {}),
+                    "source_refs": edit_refs,
+                    "note": str(value.get("note") or "").strip(),
+                }
+                scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
+                replay = replay_idempotent(scope, idempotency_key, request_payload)
+                if replay is not None:
+                    return facade_result(action, replay)
+                if job.revision != expected_revision:
+                    raise ValueError(
+                        "import job revision conflict: "
+                        f"expected {expected_revision}, found {job.revision}"
+                    )
+                existing = normalize_combat_grid_templates(
+                    list(dict(scene.get("profile_data") or {}).get("combat_grid_templates") or []),
+                    source_ref_key="chunk_hash",
+                )
+                if template is not None:
+                    location_keys = {
+                        str(item.get("key"))
+                        for item in dict(scene.get("spatial") or {}).get("locations", [])
+                        if isinstance(item, dict) and item.get("key")
+                    }
+                    if template["location_key"] not in location_keys:
+                        raise ValueError(
+                            "combat-grid template location_key must belong to its draft scene"
+                        )
+                    for other_scene in modules.scene_index(
+                        campaign_id, module_id=str(job.module_id)
+                    ):
+                        if str(other_scene["scene_id"]) == scene_id_value:
+                            continue
+                        other_templates = normalize_combat_grid_templates(
+                            list(
+                                dict(other_scene.get("profile_data") or {}).get(
+                                    "combat_grid_templates"
+                                )
+                                or []
+                            ),
+                            source_ref_key="chunk_hash",
+                        )
+                        if template["id"] in {item["id"] for item in other_templates}:
+                            raise ValueError(
+                                "combat-grid template ids must be unique across the draft module"
+                            )
+                    asset_key = template.get("map_asset_key")
+                    if asset_key:
+                        matches = [
+                            item
+                            for item in modules.list_assets(campaign_id, str(job.module_id))
+                            if str(dict(item.get("metadata") or {}).get("content_asset_key") or "")
+                            == str(asset_key)
+                        ]
+                        if len(matches) != 1 or not str(
+                            matches[0].get("media_type") or ""
+                        ).startswith("image/"):
+                            raise ValueError(
+                                "map_asset_key must identify one draft image asset by "
+                                "metadata.content_asset_key"
+                            )
+                    by_id = {item["id"]: item for item in existing}
+                    by_id[template["id"]] = template
+                    templates = normalize_combat_grid_templates(
+                        list(by_id.values()), source_ref_key="chunk_hash"
+                    )
+                else:
+                    if template_id not in {item["id"] for item in existing}:
+                        raise LookupError(template_id)
+                    templates = [item for item in existing if item["id"] != template_id]
+                prior_result = dict(job.result or {})
+                edit_record = {
+                    "revision": job.revision + 1,
+                    "editor": principal_id,
+                    "operation": "combat_grid",
+                    "change": change,
+                    "scene_id": scene_id_value,
+                    "template_id": template_id,
+                    "source_refs": deepcopy(edit_refs),
+                    "note": request_payload["note"],
+                }
+                with storage.database.transaction():
+                    modules.set_scene_profile_field(
+                        campaign_id=campaign_id,
+                        module_id=str(job.module_id),
+                        scene_id=scene_id_value,
+                        field="combat_grid_templates",
+                        value=templates,
+                    )
+                    updated = import_jobs.record_result(
+                        job_id,
+                        {
+                            **prior_result,
+                            "combat_grid_edit_history": [
+                                *list(prior_result.get("combat_grid_edit_history") or []),
+                                edit_record,
+                            ],
+                        },
+                        state="imported",
+                        module_id=job.module_id,
+                        expected_revision=expected_revision,
+                        idempotency_key=idempotency_key,
+                        idempotency_write=IdempotencyWrite(
+                            scope=scope,
+                            payload=request_payload,
+                            response=lambda saved: {
+                                "job": import_job_view(saved),
+                                "scene_id": scene_id_value,
+                                "combat_grid_templates": templates,
+                            },
+                        ),
+                    )
+                result = {
+                    "job": import_job_view(updated),
+                    "scene_id": scene_id_value,
+                    "combat_grid_templates": templates,
+                }
             elif operation == "package":
                 if job.state != "imported" or not job.module_id:
                     raise ValueError("module Pack decisions require a mechanically imported draft")
@@ -42207,7 +42577,7 @@ boundary.
             else:
                 raise ValueError(
                     "payload.operation must be advance, source_text, content, "
-                    "statblock, asset, actor, or package"
+                    "statblock, asset, actor, combat_grid, or package"
                 )
             return facade_result(action, result)
 
@@ -43375,6 +43745,7 @@ boundary.
                 "tie_breaker",
                 "join_round",
                 "source_conditions",
+                "deployment_zone_id",
             }
             if unknown := sorted(set(config_value) - allowed):
                 raise ValueError(f"unsupported participant config fields: {unknown}")
