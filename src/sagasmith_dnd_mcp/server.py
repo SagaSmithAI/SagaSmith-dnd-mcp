@@ -42343,8 +42343,8 @@ boundary.
                 raise ValueError(
                     f"payload.kind {kind} does not match archive kind {package_kind or '<missing>'}"
                 )
-            if kind == "module":
-                with storage.database.transaction():
+            with storage.database.transaction():
+                if kind == "module":
                     result = import_content_module_package(
                         campaign_id,
                         package,
@@ -42354,14 +42354,14 @@ boundary.
                         activate=False,
                         progress_remaps=data.get("progress_remaps"),
                     )
-            else:
-                result = import_content_rules_package(
-                    campaign_id,
-                    package,
-                    blobs,
-                    principal_id=principal_id,
-                    idempotency_key=idempotency_key,
-                )
+                else:
+                    result = import_content_rules_package(
+                        campaign_id,
+                        package,
+                        blobs,
+                        principal_id=principal_id,
+                        idempotency_key=idempotency_key,
+                    )
             return facade_result(action, result)
 
         if action == "export":
