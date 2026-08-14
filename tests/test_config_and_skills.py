@@ -611,8 +611,8 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
         server = create_server(config)
         _, capabilities = await server.call_tool("server_capabilities", {})
         assert capabilities["npc_conversations"] == {
-            "schema_version": 2,
-            "contract": "npc-conversation.v2",
+            "schema_version": 3,
+            "contract": "npc-conversation.v3",
             "phase": "play",
             "execution_mode": "client_subagents_required",
             "proposal_contract": "npc-conversation-proposal.v4",
@@ -634,9 +634,13 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
             "conversation_revision": True,
             "write_idempotency": True,
             "actor_local_authority_refresh": True,
-            "local_resolution_waits": True,
-            "incremental_actor_context": True,
-            "durable_semantic_journal": True,
+                "local_resolution_waits": True,
+                "incremental_actor_context": True,
+                "stable_memory_candidate_ids": True,
+                "symmetric_heard_statement_candidates": True,
+                "actor_safe_transcript_recall": True,
+                "terminal_journal_compaction": True,
+                "durable_semantic_journal": True,
             "server_managed_inference": False,
             "server_managed_kv": False,
             "minimum_host_capabilities": [

@@ -409,6 +409,15 @@ def test_active_conversation_blocks_combat_and_leaving_play(tmp_path: Path) -> N
             "campaign_query",
             {"view": "get", "payload": {"campaign_id": campaign["id"]}},
         )
+        current_branch = next(
+            item
+            for item in await _call(
+                server,
+                "branch_query",
+                {"campaign_id": campaign["id"], "view": "list", "payload": {}},
+            )
+            if item["is_current"]
+        )
 
         with pytest.raises(Exception, match="before resolving an authoritative character check"):
             await _call(
@@ -469,6 +478,19 @@ def test_active_conversation_blocks_combat_and_leaving_play(tmp_path: Path) -> N
                     },
                     "expected_revision": current["revision"],
                     "idempotency_key": "chase-with-open-conversation",
+                },
+            )
+        with pytest.raises(Exception, match="before creating and checking out a branch"):
+            await _call(
+                server,
+                "branch_change",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "create",
+                    "payload": {"name": "blocked", "checkout": True},
+                    "expected_revision": current["revision"],
+                    "expected_branch_id": current_branch["id"],
+                    "idempotency_key": "branch-with-open-conversation",
                 },
             )
 
@@ -636,6 +658,21 @@ def test_conversation_facade_private_transport_and_commit(tmp_path: Path) -> Non
         )
         assert submitted["status"] == "publication_ready"
         assert "private_intent" not in str(submitted["publication"])
+        with pytest.raises(Exception, match="unpublished NPC output"):
+            await _call(
+                server,
+                "npc_conversation",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "close",
+                    "payload": {
+                        "conversation_id": conversation_id,
+                        "expected_conversation_revision": 3,
+                        "accepted_candidate_ids": [],
+                        "idempotency_key": "close-before-publication",
+                    },
+                },
+            )
         published = await _call(
             server,
             "npc_conversation",
@@ -657,6 +694,21 @@ def test_conversation_facade_private_transport_and_commit(tmp_path: Path) -> Non
             },
         )
         assert published["publication"]["speech"] == "No. I stayed home."
+        with pytest.raises(Exception, match="unresolved mechanic requests"):
+            await _call(
+                server,
+                "npc_conversation",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "close",
+                    "payload": {
+                        "conversation_id": conversation_id,
+                        "expected_conversation_revision": 4,
+                        "accepted_candidate_ids": [],
+                        "idempotency_key": "close-before-resolution",
+                    },
+                },
+            )
         resolution_id = submitted["resolution_requests"][0]["resolution_id"]
         resolved = await _call(
             server,
@@ -683,6 +735,25 @@ def test_conversation_facade_private_transport_and_commit(tmp_path: Path) -> Non
             },
         )
         assert resolved["event"]["resolved_resolution_ids"] == [resolution_id]
+        status = await _call(
+            server,
+            "npc_conversation",
+            {
+                "campaign_id": campaign["id"],
+                "action": "get",
+                "payload": {"conversation_id": conversation_id},
+            },
+        )
+        accepted_candidate_ids = [
+            item["candidate_id"]
+            for item in status["memory_candidates"]
+            if (
+                item["actor_id"] == pc["id"]
+                or item["value"].get("knowledge_key")
+                == f"conversation:{conversation_id}:questioned"
+            )
+        ]
+        assert len(accepted_candidate_ids) == 2
         committed = await _call(
             server,
             "npc_conversation",
@@ -692,29 +763,51 @@ def test_conversation_facade_private_transport_and_commit(tmp_path: Path) -> Non
                 "payload": {
                     "conversation_id": conversation_id,
                     "expected_conversation_revision": 5,
-                    "accepted_working_deltas": {
-                        npc["id"]: {
-                            "fact_indexes": [],
-                            "actor_knowledge_indexes": [0],
-                            "commitment_indexes": [],
-                        },
-                        pc["id"]: {
-                            "fact_indexes": [],
-                            "actor_knowledge_indexes": [],
-                            "commitment_indexes": [],
-                            "listener_knowledge_indexes": [0],
-                        },
-                    },
+                    "accepted_candidate_ids": accepted_candidate_ids,
                     "idempotency_key": "close",
                 },
             },
         )
+        replayed = await _call(
+            server,
+            "npc_conversation",
+            {
+                "campaign_id": campaign["id"],
+                "action": "close",
+                "payload": {
+                    "conversation_id": conversation_id,
+                    "expected_conversation_revision": 5,
+                    "accepted_candidate_ids": accepted_candidate_ids,
+                    "idempotency_key": "close",
+                },
+            },
+        )
+        assert replayed == committed
         assert committed["event"]["event_type"] == "npc_conversation"
         assert committed["conversation_revision"] == 6
         assert committed["event"]["payload"]["unresolved_resolution_requests"] == []
         transcript = committed["event"]["payload"]["transcript"]
         assert all("audience_facts" in event for event in transcript)
         assert transcript[-1]["resolved_resolution_ids"] == [resolution_id]
+        assert committed["event"]["retrieval_text"].endswith(
+            "Scene: Aria notices Mara edging toward the door."
+        )
+        recalled = await _call(
+            server,
+            "continuity_context",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": npc["id"],
+                "purpose": "npc_turn",
+                "query": "stayed home",
+                "interlocutor_actor_ids": [pc["id"]],
+            },
+        )
+        assert "No. I stayed home." in [
+            item["utterance"]
+            for item in recalled["conversation"]["events"]
+            if item["event_type"] == "npc_conversation_turn"
+        ]
         heard = await _call(
             server,
             "actor_knowledge_query",
@@ -771,6 +864,53 @@ def test_unrelated_campaign_event_does_not_stale_conversation(tmp_path: Path) ->
         )
         assert status["status"] == "open"
         assert status["conversation_revision"] == 0
+
+    asyncio.run(exercise())
+
+
+def test_new_actor_knowledge_refreshes_the_open_actor_runtime(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign, npc, pc = await _campaign_with_actors(server)
+        opened = await _call(
+            server,
+            "npc_conversation",
+            {
+                "campaign_id": campaign["id"],
+                "action": "open",
+                "payload": {
+                    "participant_actor_ids": [pc["id"], npc["id"]],
+                    "idempotency_key": "open",
+                },
+            },
+        )
+        await _call(
+            server,
+            "actor_knowledge_change",
+            {
+                "action": "add",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "actor_id": npc["id"],
+                    "knowledge_key": "new-secret",
+                    "proposition": "The duke is compromised.",
+                    "subject_ref": "actor:duke",
+                    "epistemic_status": "known",
+                },
+                "idempotency_key": "knowledge-add",
+            },
+        )
+        status = await _call(
+            server,
+            "npc_conversation",
+            {
+                "campaign_id": campaign["id"],
+                "action": "get",
+                "payload": {"conversation_id": opened["conversation_id"]},
+            },
+        )
+        assert status["conversation_revision"] == 1
+        assert status["refreshed_actor_ids"] == [npc["id"]]
 
     asyncio.run(exercise())
 

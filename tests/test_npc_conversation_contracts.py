@@ -4,6 +4,7 @@ import pytest
 from jsonschema import Draft202012Validator
 
 from sagasmith_dnd_mcp.npc_conversations import (
+    NPC_CONVERSATION_SCHEMA_VERSION,
     ConversationStore,
     derive_publication,
     normalize_audience_facts,
@@ -234,8 +235,9 @@ def test_submit_validation_keeps_lease_and_success_waits_for_publication(tmp_pat
     )
     assert published["status"] == "published"
     assert len(store.get(opened["conversation_id"])["events"]) == 2
-    candidates = store.get(opened["conversation_id"])["listener_knowledge_candidates"]
-    assert candidates["pc"][0]["metadata"]["statement_truth_not_implied"] is True
+    candidates = store.memory_candidates(store.get(opened["conversation_id"]))
+    pc_candidate = next(item for item in candidates if item["actor_id"] == "pc")
+    assert pc_candidate["value"]["metadata"]["statement_truth_not_implied"] is True
 
 
 def test_every_mutation_requires_current_revision_and_replays_identically(tmp_path) -> None:
@@ -324,8 +326,12 @@ def test_publication_redacts_each_segment_and_derives_only_understood_claims(tmp
     assert inbox["utterance_segments"][0]["text"] == "The gate opens at dusk."
     assert inbox["utterance_segments"][1]["comprehension"] == "perceived_only"
     assert "password" not in json.dumps(inbox)
-    claims = session["listener_knowledge_candidates"]["npc-2"]
-    assert [item["proposition"] for item in claims] == ["npc said: The gate opens at dusk."]
+    claims = [
+        item["value"]["proposition"]
+        for item in store.memory_candidates(session)
+        if item["actor_id"] == "npc-2"
+    ]
+    assert claims == ["npc said: The gate opens at dusk."]
 
 
 def test_mechanical_action_waits_locally_without_blocking_public_speech(tmp_path) -> None:
@@ -422,13 +428,71 @@ def test_retired_conversation_journal_is_ignored_by_current_runtime(tmp_path) ->
     store = ConversationStore(root)
     conversation_id = "00000000-0000-0000-0000-000000000001"
     (root / f"{conversation_id}.json").write_text(
-        json.dumps({"schema_version": 1, "contract": "npc-conversation.v1", "status": "open"}),
+        json.dumps(
+            {
+                "schema_version": NPC_CONVERSATION_SCHEMA_VERSION - 1,
+                "contract": (
+                    f"npc-conversation.v{NPC_CONVERSATION_SCHEMA_VERSION - 1}"
+                ),
+                "status": "open",
+            }
+        ),
         encoding="utf-8",
     )
     with pytest.raises(LookupError):
         store.get(conversation_id)
+    assert store.cleanup_terminal_receipts() == 1
+    assert not (root / f"{conversation_id}.json").exists()
     opened = _open(store)
     assert opened["status"] == "open"
     assert store.active_ids(campaign_id="campaign", branch_id="branch") == [
         opened["conversation_id"]
     ]
+
+
+def test_terminal_journal_is_compact_and_replays_the_exact_result(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    opened = _open(store)
+    session, replay = store.begin_mutation(
+        opened["conversation_id"],
+        expected_revision=0,
+        idempotency_key="abort",
+        operation="abort",
+        payload={},
+    )
+    assert replay is None
+    session["status"] = "aborted"
+    result = store.finish_mutation(session, {"status": "aborted", "detail": "done"})
+    stored = store.get(opened["conversation_id"])
+
+    assert stored["events"] == []
+    assert stored["memory_candidates"] == []
+    assert "compressed_result" in stored["idempotency"]["abort"]
+    _, replayed = store.begin_mutation(
+        opened["conversation_id"],
+        expected_revision=0,
+        idempotency_key="abort",
+        operation="abort",
+        payload={},
+    )
+    assert replayed == result
+
+
+def test_conversation_event_limit_is_enforced_before_another_append(tmp_path) -> None:
+    store = ConversationStore(tmp_path / "conversations")
+    opened = _open(store)
+    session = store.get(opened["conversation_id"])
+    session["events"] = [
+        {"event_id": f"event:{index}", "sequence": index + 1, "type": "scene_prompt"}
+        for index in range(200)
+    ]
+    store.save(session)
+
+    with pytest.raises(ValueError, match="200-event limit"):
+        store.append_event(
+            store.get(opened["conversation_id"]),
+            event={"type": "scene_prompt", "content": "Too late."},
+            audience_facts=_audience(),
+            expected_revision=0,
+            idempotency_key="overflow",
+        )

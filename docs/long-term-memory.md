@@ -44,3 +44,29 @@ unsnapshotted events, checkpoint size, recap evidence, and Skill-manifest drift;
 the diagnostic response contains no narrative content. Snapshot recaps always
 retain a deterministic canonical delta. Optional generated presentation text must
 cite player-safe event ids and cannot replace canonical restore evidence.
+
+## NPC conversation settlement
+
+An active NPC conversation is a recoverable runtime journal, not authoritative
+campaign memory. Every understood speech event produces a stable, reviewable
+ActorKnowledge candidate that records only that the speaker said the text; it
+never promotes the statement itself to objective truth. NPC workers may also
+propose actor-owned relationship, goal, commitment, and knowledge candidates.
+
+`npc_conversation(action="get")` exposes the sanitized candidates with stable
+`candidate_id` values and their activation, publication, and event provenance.
+Closing accepts only `accepted_candidate_ids`; array indexes are not a protocol.
+The accepted candidates, one complete DM conversation event, and their source
+links commit atomically. Closing is rejected while an activation, publication,
+or mechanic resolution remains unfinished.
+
+The complete transcript is retained for DM audit and has bounded first-class
+event retrieval text. NPC turn context expands only transcript segments that the
+target NPC perceived, using the recorded audience decision; content the NPC did
+not understand is never recovered through the DM transcript. ActorKnowledge
+remains the durable personalized recall ledger.
+
+Active journals are bounded to 200 public events and 4 MiB. Close and abort
+replace the mutable journal with a compact terminal receipt containing a
+compressed idempotent result. Terminal receipts expire after 30 days; the
+authoritative event and accepted memory remain in the campaign database.
