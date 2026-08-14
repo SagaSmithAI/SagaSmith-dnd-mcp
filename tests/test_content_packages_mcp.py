@@ -13,8 +13,10 @@ from sagasmith_core.content_pack import (
     blob_descriptor,
     build_content_package,
     dumps_content_archive,
+    loads_content_archive,
 )
 from sagasmith_core.indexed_source import rule_chunk_key
+from sagasmith_core.modules import ModuleService
 from sagasmith_dnd.character_schema import default_character_notes, default_character_sheet
 from sagasmith_dnd.content_actors import build_dnd_content_actor
 from sagasmith_dnd.content_packages import (
@@ -215,7 +217,10 @@ def test_character_query_does_not_export_ad_hoc_actor_packages(tmp_path: Path) -
     asyncio.run(exercise())
 
 
-def test_module_package_round_trip_recreates_cast_bindings(tmp_path: Path) -> None:
+def test_module_package_round_trip_recreates_cast_bindings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def import_markdown(server, campaign_id: str) -> dict:
         staged = await _call(
             server,
@@ -257,7 +262,8 @@ def test_module_package_round_trip_recreates_cast_bindings(tmp_path: Path) -> No
         return ingested
 
     async def exercise() -> None:
-        server = create_server(_config(tmp_path))
+        config = _config(tmp_path)
+        server = create_server(config)
         source_campaign = await _call(
             server,
             "campaign_create",
@@ -317,6 +323,46 @@ def test_module_package_round_trip_recreates_cast_bindings(tmp_path: Path) -> No
             activate=False,
         )
         exported = finalized["finalized"]
+        exported_package, exported_blobs = loads_content_archive(
+            (config.content_packages_dir / exported["artifact"]).read_bytes()
+        )
+        portrait_output = BytesIO()
+        Image.new("RGB", (12, 12), "#654321").save(portrait_output, format="PNG")
+        portrait = portrait_output.getvalue()
+        portrait_asset = blob_descriptor(
+            asset_key="actor.gate-guard.image",
+            kind="actor_image",
+            name="gate-guard.png",
+            media_type="image/png",
+            content=portrait,
+            license="user-supplied",
+            attribution="Test source",
+            source_refs=exported_package["actors"][0]["provenance"]["source_refs"],
+        )
+        actor_with_image = deepcopy(exported_package["actors"][0])
+        actor_with_image["image"] = {
+            "asset_key": portrait_asset["asset_key"],
+            "alt": "Gate Guard portrait",
+        }
+        image_package = build_content_package(
+            kind=exported_package["kind"],
+            package_id=exported_package["id"],
+            version=exported_package["version"],
+            system_id=exported_package["system_id"],
+            manifest=exported_package["manifest"],
+            sources=exported_package["sources"],
+            assets=[*exported_package["assets"], portrait_asset],
+            content_reviews=exported_package["content_reviews"],
+            actors=[actor_with_image],
+            content=exported_package["content"],
+            dependencies=exported_package["dependencies"],
+            metadata=exported_package["metadata"],
+        )
+        exported_blobs[portrait_asset["checksum"]] = portrait
+        image_artifact = "image-module.sagasmith-pack"
+        (config.content_packages_dir / image_artifact).write_bytes(
+            dumps_content_archive(image_package, exported_blobs)
+        )
         target_campaign = await _call(
             server,
             "campaign_create",
@@ -327,10 +373,44 @@ def test_module_package_round_trip_recreates_cast_bindings(tmp_path: Path) -> No
             "payload": {
                 "kind": "module",
                 "campaign_id": target_campaign["id"],
-                "artifact": exported["artifact"],
+                "artifact": image_artifact,
             },
             "idempotency_key": "package-import",
         }
+        original_bind = ModuleService.bind_actor
+        interrupted = False
+
+        def interrupt_after_binding(self, *args, **kwargs):
+            nonlocal interrupted
+            result = original_bind(self, *args, **kwargs)
+            if not interrupted:
+                interrupted = True
+                raise RuntimeError("simulated interruption after actor binding")
+            return result
+
+        monkeypatch.setattr(ModuleService, "bind_actor", interrupt_after_binding)
+        with pytest.raises(ToolError, match="simulated interruption"):
+            await _call(server, "content_pack", import_arguments)
+        assert (
+            await _call(
+                server,
+                "content_pack",
+                {
+                    "action": "list",
+                    "payload": {"kind": "module", "campaign_id": target_campaign["id"]},
+                },
+            )
+            == []
+        )
+        assert (
+            await _call(
+                server,
+                "character_query",
+                {"view": "list", "payload": {"campaign_id": target_campaign["id"]}},
+            )
+            == []
+        )
+        monkeypatch.setattr(ModuleService, "bind_actor", original_bind)
         imported = await _call(
             server,
             "content_pack",
@@ -382,6 +462,15 @@ def test_module_package_round_trip_recreates_cast_bindings(tmp_path: Path) -> No
         assert "portable_actor_id" not in bindings[0]
         assert bindings[0]["scene_key"] == scene_index[0]["stable_key"]
         assert bindings[0]["role"] == "gate guard"
+        imported_actor = await _call(
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": imported["actor_map"]["example.keep.guard"]},
+            },
+        )
+        assert imported_actor["notes"]["profile"]["portrait_ref"]["alt"] == ("Gate Guard portrait")
         assert detail["package"]["id"] == "example.keep"
         assert detail["package"]["checksum"] == imported["artifact"]["checksum"]
         assert reexported["artifact"] == imported["artifact"]["artifact"]

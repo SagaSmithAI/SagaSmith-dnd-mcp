@@ -587,14 +587,10 @@ def _with_combat_mutation_lock(
 
     value = deepcopy(state)
     raw_locks = value.get("mutation_locks", [])
-    if not isinstance(raw_locks, list) or any(
-        not isinstance(item, dict) for item in raw_locks
-    ):
+    if not isinstance(raw_locks, list) or any(not isinstance(item, dict) for item in raw_locks):
         raise ValueError("campaign state mutation_locks must be an array of objects")
     locks = [
-        deepcopy(item)
-        for item in raw_locks
-        if str(item.get("id") or "") != COMBAT_MUTATION_LOCK_ID
+        deepcopy(item) for item in raw_locks if str(item.get("id") or "") != COMBAT_MUTATION_LOCK_ID
     ]
     if active:
         locks.append(deepcopy(COMBAT_MUTATION_LOCK))
@@ -3497,8 +3493,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         manifest_value["semantic_validation"] = deepcopy(semantic_validation)
         if not semantic_validation["complete"]:
             compiler_warnings.extend(
-                "Agent runtime resolution required for "
-                f"{item['artifact_id']}: {item['reason']}"
+                f"Agent runtime resolution required for {item['artifact_id']}: {item['reason']}"
                 for item in semantic_validation["unresolved"]
             )
         try:
@@ -3511,10 +3506,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         elif mechanics and not compiler_errors:
             report = run_mechanic_tests(mechanics or [], declared_tests)
             compiler_errors.extend(
-                error
-                for case in report["cases"]
-                if not case["passed"]
-                for error in case["errors"]
+                error for case in report["cases"] if not case["passed"] for error in case["errors"]
             )
             if report["mechanics_uncovered"]:
                 compiler_warnings.append(
@@ -4129,6 +4121,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "module actor cards do not match the campaign edition: " + ", ".join(mismatched)
             )
         managed_archive = storage.write_content_archive(normalized, blobs)
+        assets_by_key = {str(item["asset_key"]): item for item in normalized["assets"]}
         result = modules.import_content_package(
             campaign_id,
             normalized,
@@ -4139,9 +4132,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         modules.register_asset(
             campaign_id=campaign_id,
             module_id=result["module_id"],
-            source_path=str(
-                (config.content_packages_dir / managed_archive["artifact"]).resolve()
-            ),
+            source_path=str((config.content_packages_dir / managed_archive["artifact"]).resolve()),
             media_type="application/vnd.sagasmith.content-package+zip",
             checksum=str(managed_archive["archive_checksum"]),
             metadata={
@@ -4165,6 +4156,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             character = characters.import_content_actor(
                 actor,
                 campaign_id=None if preset_pc else campaign_id,
+                assets_by_key=assets_by_key,
                 principal_id=principal_id,
                 idempotency_key=f"content-module:{idempotency_key}:{actor['id']}",
             )
@@ -7674,9 +7666,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "source_excerpt": recorded_excerpt,
             "source_card_id": str(source_card.get("id") or ""),
             "rule_refs": [
-                str(item)
-                for item in list(source_card.get("rule_refs") or [])
-                if str(item)
+                str(item) for item in list(source_card.get("rule_refs") or []) if str(item)
             ],
         }
 
@@ -8341,9 +8331,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 if not isinstance(raw_spatial_facts.get(field), bool):
                     raise CombatEngineError(f"Agent spatial fact {field} must be boolean")
             for field in {"long_range", "target_within_5_ft"}:
-                if field in raw_spatial_facts and not isinstance(
-                    raw_spatial_facts[field], bool
-                ):
+                if field in raw_spatial_facts and not isinstance(raw_spatial_facts[field], bool):
                     raise CombatEngineError(f"Agent spatial fact {field} must be boolean")
             if "cleave_secondary_eligible" in raw_spatial_facts and not isinstance(
                 raw_spatial_facts["cleave_secondary_eligible"], bool
@@ -8388,9 +8376,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "reason": reason,
                 "cover_degree": cover_degree,
                 "long_range": bool(raw_spatial_facts.get("long_range", False)),
-                "target_within_5_ft": bool(
-                    raw_spatial_facts.get("target_within_5_ft", False)
-                ),
+                "target_within_5_ft": bool(raw_spatial_facts.get("target_within_5_ft", False)),
                 "cleave_secondary_eligible": bool(
                     raw_spatial_facts.get("cleave_secondary_eligible", False)
                 ),
@@ -8499,15 +8485,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             **dict(spatial_facts),
             "decision_id": decision_id,
             "reason": reason,
-            "difficult_terrain_extra_ft": int(
-                spatial_facts.get("difficult_terrain_extra_ft", 0)
-            ),
+            "difficult_terrain_extra_ft": int(spatial_facts.get("difficult_terrain_extra_ft", 0)),
             "moves_farther_from_turn_source": bool(
                 spatial_facts.get("moves_farther_from_turn_source", False)
             ),
-            "enters_turn_source_30_ft": bool(
-                spatial_facts.get("enters_turn_source_30_ft", False)
-            ),
+            "enters_turn_source_30_ft": bool(spatial_facts.get("enters_turn_source_30_ft", False)),
             "moves_closer_to_visible_fear_source": bool(
                 spatial_facts.get("moves_closer_to_visible_fear_source", False)
             ),
@@ -11919,8 +11901,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if job.state not in {"extracted", "review_required"}:
             raise ValueError("only an editable rulebook draft accepts candidate decisions")
         candidates_by_id = {
-            str(candidate.get("id") or ""): deepcopy(candidate)
-            for candidate in job.candidates
+            str(candidate.get("id") or ""): deepcopy(candidate) for candidate in job.candidates
         }
         normalized_decisions: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -12110,17 +12091,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Revoke non-owner membership and its actor grants at one authority boundary."""
 
         caller = by_principal_id or LOCAL_SYSTEM_PRINCIPAL_ID
-        caller_membership = access.require_campaign(
-            campaign_id, caller, roles=CAMPAIGN_DM_ROLES
-        )
+        caller_membership = access.require_campaign(campaign_id, caller, roles=CAMPAIGN_DM_ROLES)
         target = access.membership(campaign_id, principal_id)
         if target is not None and target.role == "owner":
             raise AccessDeniedError("campaign owners cannot be revoked")
-        if (
-            target is not None
-            and target.role == "dm"
-            and caller_membership.role != "owner"
-        ):
+        if target is not None and target.role == "dm" and caller_membership.role != "owner":
             raise AccessDeniedError("only a campaign owner can revoke a DM")
         return asdict(access.revoke_campaign(campaign_id, principal_id))
 
@@ -17540,9 +17515,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 spell_entry,
             )
         ):
-            persisted_requirement = persisted_standard_spell_ruling_requirement(
-                spell_entry
-            )
+            persisted_requirement = persisted_standard_spell_ruling_requirement(spell_entry)
             if persisted_requirement is None:
                 return {
                     **_ruling_status(
@@ -17604,8 +17577,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             "source_card_id": spell_id,
                             "casting_source": {
                                 "grant_method": str(
-                                    dict(spell_entry.get("grant") or {}).get("method")
-                                    or ""
+                                    dict(spell_entry.get("grant") or {}).get("method") or ""
                                 ),
                                 "instruction": (
                                     "for grant_method=innate, omit signature_free_cast so "
@@ -22762,9 +22734,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "affected_target_ids",
                 "line_of_effect_clear",
             }
-            if (
-                set(spatial_facts) - allowed_spatial_fields
-                or required_spatial_fields - set(spatial_facts)
+            if set(spatial_facts) - allowed_spatial_fields or required_spatial_fields - set(
+                spatial_facts
             ):
                 raise CombatEngineError(
                     "Agent area spatial facts require decision_id, reason, affected_target_ids, "
@@ -22812,9 +22783,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "reason": reason,
                 "affected_target_ids": list(affected_ids),
                 "excluded_actor_ids": list(excluded_ids),
-                "friendly_fire_included": bool(
-                    spatial_facts.get("friendly_fire_included", False)
-                ),
+                "friendly_fire_included": bool(spatial_facts.get("friendly_fire_included", False)),
             }
         elif spatial_facts is not None:
             raise CombatEngineError(
@@ -23547,8 +23516,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 payload=request_payload,
                 response=lambda value: {
                     "branch": asdict(value["branch"]),
-                    "campaign_revision": expected_revision
-                    + int(branch_id != expected_branch_id),
+                    "campaign_revision": expected_revision + int(branch_id != expected_branch_id),
                     "snapshot": (
                         asdict(value["snapshot"]) if value["snapshot"] is not None else None
                     ),
@@ -29042,9 +29010,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         branch_id = require_current_branch(campaign_id, branch_id)
         campaign = campaigns.get(campaign_id)
         if dict(campaign.state.get("chase") or {}).get("active", False):
-            raise CombatEngineError(
-                "end the active chase before opening an NPC conversation"
-            )
+            raise CombatEngineError("end the active chase before opening an NPC conversation")
         actor_ids = [str(item).strip() for item in participant_actor_ids]
         if not actor_ids or any(not item for item in actor_ids):
             raise ValueError("participant_actor_ids must contain at least one actor")
@@ -29642,9 +29608,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "there are no npc_actor_ids or npc_ids fields"
                 )
             if not str(data.get("idempotency_key") or "").strip():
-                raise ValueError(
-                    "npc_conversation open requires payload.idempotency_key"
-                )
+                raise ValueError("npc_conversation open requires payload.idempotency_key")
             return npc_conversation_open_impl(
                 campaign_id=campaign_id,
                 participant_actor_ids=list(data["participant_actor_ids"]),
@@ -31326,8 +31290,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return [
             asdict(hit)
             for hit in hits
-            if hit.metadata.get("visibility", "restricted")
-            in PLAYER_MODULE_VISIBILITY_SCOPES
+            if hit.metadata.get("visibility", "restricted") in PLAYER_MODULE_VISIBILITY_SCOPES
         ]
 
     def campaign_rule_source_ids(campaign_id: str) -> set[str]:
@@ -31414,8 +31377,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         }
         if unknown_fields := sorted(set(filter_data) - allowed_filter_fields):
             raise ValueError(
-                "rule_search filters contain unsupported fields: "
-                + ", ".join(unknown_fields)
+                "rule_search filters contain unsupported fields: " + ", ".join(unknown_fields)
             )
 
         def optional_text(field_name: str) -> str | None:
@@ -31423,9 +31385,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if value is None:
                 return None
             if not isinstance(value, str) or not value.strip():
-                raise ValueError(
-                    f"rule_search filters.{field_name} must be a non-empty string"
-                )
+                raise ValueError(f"rule_search filters.{field_name} must be a non-empty string")
             return value.strip()
 
         def optional_text_list(field_name: str) -> list[str] | None:
@@ -31454,9 +31414,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         source_keys = optional_text_list("source_keys")
         page_value = filter_data.get("page")
         if page_value is not None and (
-            not isinstance(page_value, int)
-            or isinstance(page_value, bool)
-            or page_value < 1
+            not isinstance(page_value, int) or isinstance(page_value, bool) or page_value < 1
         ):
             raise ValueError("rule_search filters.page must be a positive integer")
         page = int(page_value) if page_value is not None else None
@@ -31521,7 +31479,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             values = [
                 item
                 for item in values
-                if int(dict(item.get("metadata") or {}).get("page_start") or 0) <= page
+                if int(dict(item.get("metadata") or {}).get("page_start") or 0)
+                <= page
                 <= int(dict(item.get("metadata") or {}).get("page_end") or 0)
             ]
         return values
@@ -40848,13 +40807,9 @@ boundary.
             if len(matches) != 1:
                 raise ValueError("artifact_id is not present in the actor preset pack")
             cards = [validate_dnd_content_actor(matches[0])]
-        package_id = (
-            SRD2014_PRESET_PACK_ID if edition == "2014" else SRD2024_PRESET_PACK_ID
-        )
+        package_id = SRD2014_PRESET_PACK_ID if edition == "2014" else SRD2024_PRESET_PACK_ID
         package_version = (
-            SRD2014_PRESET_PACK_VERSION
-            if edition == "2014"
-            else SRD2024_PRESET_PACK_VERSION
+            SRD2014_PRESET_PACK_VERSION if edition == "2014" else SRD2024_PRESET_PACK_VERSION
         )
         title = (
             "D&D 5e SRD 5.1 Actor Presets"
@@ -40942,9 +40897,7 @@ boundary.
             editions = {
                 str(value)
                 for value in (
-                    manifest.get("editions")
-                    or provenance.get("content_package_editions")
-                    or []
+                    manifest.get("editions") or provenance.get("content_package_editions") or []
                 )
             }
             if not editions and source.startswith("bundled-srd2014"):
@@ -40962,9 +40915,7 @@ boundary.
                     "pack_id": package_id,
                     "local_ref": item.pack_id,
                     "version": str(provenance.get("content_package_version") or item.version),
-                    "checksum": str(
-                        provenance.get("content_package_checksum") or item.checksum
-                    ),
+                    "checksum": str(provenance.get("content_package_checksum") or item.checksum),
                     "status": "stored",
                     "actors": len(item.artifacts),
                     "artifact": provenance.get("content_archive_artifact"),
@@ -40972,9 +40923,7 @@ boundary.
                         **manifest,
                         "id": package_id,
                         "editions": sorted(editions),
-                        "version": str(
-                            provenance.get("content_package_version") or item.version
-                        ),
+                        "version": str(provenance.get("content_package_version") or item.version),
                     },
                     "metadata": {
                         "license": provenance.get("license"),
@@ -41697,23 +41646,19 @@ boundary.
                         "jobs": [
                             module_draft_handle_view(item)
                             for item in import_jobs.list(campaign_id, kind="module")
-                        ]
+                        ],
                     },
                 )
             if view == "package":
                 job = require_import_job(campaign_id, str(data["job_id"]), "module")
                 job_result = dict(job.result or {})
-                finalized_package = deepcopy(
-                    dict(job_result.get("finalized_package") or {})
-                )
+                finalized_package = deepcopy(dict(job_result.get("finalized_package") or {}))
                 finalized_package.pop("package", None)
                 return facade_result(
                     action,
                     {
                         "job": module_draft_handle_view(job),
-                        "pack_draft": deepcopy(
-                            dict(job_result.get("pack_draft") or {})
-                        ),
+                        "pack_draft": deepcopy(dict(job_result.get("pack_draft") or {})),
                         "finalized_package": finalized_package,
                     },
                 )
@@ -41881,9 +41826,7 @@ boundary.
                         and isinstance(page_end, int)
                         and page_start <= rendered.page_number <= page_end
                     ):
-                        page_chunks.append(
-                            chunk_evidence_receipt(item, page=rendered.page_number)
-                        )
+                        page_chunks.append(chunk_evidence_receipt(item, page=rendered.page_number))
             return facade_render_result(
                 [
                     {
@@ -42263,22 +42206,17 @@ boundary.
                 for item in rule_pack_list(data.get("pack_id")):
                     if "actor_card" in {
                         str(value)
-                        for value in dict(item.get("manifest") or {}).get("content_kinds")
-                        or []
+                        for value in dict(item.get("manifest") or {}).get("content_kinds") or []
                     }:
                         continue
-                    provenance = rule_packs.provenance(
-                        str(item["pack_id"]), str(item["version"])
-                    )
+                    provenance = rule_packs.provenance(str(item["pack_id"]), str(item["version"]))
                     package_kind = str(provenance.get("content_package_kind") or "")
                     if package_kind and package_kind != "core_rules":
                         continue
                     result.append(
                         {
                             **item,
-                            "pack_id": str(
-                                provenance.get("content_package_id") or item["pack_id"]
-                            ),
+                            "pack_id": str(provenance.get("content_package_id") or item["pack_id"]),
                             "local_ref": str(item["pack_id"]),
                             "version": str(
                                 provenance.get("content_package_version") or item["version"]
@@ -42336,9 +42274,7 @@ boundary.
                 if data.get("include_package") is True and archive_name:
                     package, blobs = storage.read_content_archive(artifact=archive_name)
                     if package.get("kind") != "core_rules":
-                        raise ValueError(
-                            "installed rule Pack archive is not a core_rules Pack"
-                        )
+                        raise ValueError("installed rule Pack archive is not a core_rules Pack")
                     result = {
                         "rule_pack": {
                             **inspected,
@@ -42408,15 +42344,16 @@ boundary.
                     f"payload.kind {kind} does not match archive kind {package_kind or '<missing>'}"
                 )
             if kind == "module":
-                result = import_content_module_package(
-                    campaign_id,
-                    package,
-                    blobs,
-                    principal_id=principal_id,
-                    idempotency_key=idempotency_key,
-                    activate=False,
-                    progress_remaps=data.get("progress_remaps"),
-                )
+                with storage.database.transaction():
+                    result = import_content_module_package(
+                        campaign_id,
+                        package,
+                        blobs,
+                        principal_id=principal_id,
+                        idempotency_key=idempotency_key,
+                        activate=False,
+                        progress_remaps=data.get("progress_remaps"),
+                    )
             else:
                 result = import_content_rules_package(
                     campaign_id,
@@ -42442,11 +42379,7 @@ boundary.
                             "actors": len(package["actors"]),
                             "assets": len(package["assets"]),
                         },
-                        **(
-                            {"package": package}
-                            if data.get("include_package") is True
-                            else {}
-                        ),
+                        **({"package": package} if data.get("include_package") is True else {}),
                     }
                 else:
                     result = export_module_pack(campaign_id, data, principal_id)
@@ -43254,9 +43187,7 @@ boundary.
                 if missing_narrative_fields:
                     details.append("missing fields: " + ", ".join(missing_narrative_fields))
                 if unsupported_narrative_fields:
-                    details.append(
-                        "unsupported fields: " + ", ".join(unsupported_narrative_fields)
-                    )
+                    details.append("unsupported fields: " + ", ".join(unsupported_narrative_fields))
                 raise ValueError("narrative NPC payload has " + "; ".join(details))
             if not scoped_campaign_id:
                 raise ValueError("narrative NPC campaign_id must be a non-empty string")
@@ -43397,9 +43328,7 @@ boundary.
                     "provenance": deepcopy(card.get("provenance") or {}),
                     "bindings": deepcopy(card.get("bindings") or []),
                     "image_retained_by_runtime": bool(
-                        dict(dict(card.get("notes") or {}).get("profile") or {}).get(
-                            "portrait_ref"
-                        )
+                        dict(dict(card.get("notes") or {}).get("profile") or {}).get("portrait_ref")
                     ),
                 },
                 "actor_knowledge_imported": False,
@@ -43810,9 +43739,11 @@ boundary.
                 rule_refs=[f"module-scene:{review['scene_id']}", f"module-review:{review_id}"],
             )
             source_identity = str(data.get("source_identity") or "").strip()
-            if source_identity and " ".join(source_identity.split()).casefold() != " ".join(
-                source_parsed.name.split()
-            ).casefold():
+            if (
+                source_identity
+                and " ".join(source_identity.split()).casefold()
+                != " ".join(source_parsed.name.split()).casefold()
+            ):
                 raise ValueError(
                     "module statblock source_identity does not match the reviewed card: "
                     f"expected {source_parsed.name!r}"
@@ -44227,11 +44158,7 @@ boundary.
                     "text_layout_recovery": text_layout_recovery,
                 },
                 "statblock": {
-                    **(
-                        {"source_identity": source_statblock_name}
-                        if source_statblock_name
-                        else {}
-                    ),
+                    **({"source_identity": source_statblock_name} if source_statblock_name else {}),
                     "challenge_rating": challenge_rating,
                     "experience_points": experience_points,
                     **statblock_settlement(
@@ -45213,11 +45140,7 @@ boundary.
             for item in updated["review_blocks"]
             if item.get("kind") != "recommended_party_size"
         ]
-        if (
-            updated["status"] == "lobby"
-            and not blocking_reviews
-            and active_members
-        ):
+        if updated["status"] == "lobby" and not blocking_reviews and active_members:
             updated["status"] = "ready"
         return validate_playthrough_manifest(updated)
 
@@ -45391,9 +45314,7 @@ boundary.
             current_manifest = validate_playthrough_manifest(current_manifest)
             if action == "configure_ending":
                 if current_manifest["status"] == "completed":
-                    raise RuntimeError(
-                        "completed playthrough ending conditions cannot be changed"
-                    )
+                    raise RuntimeError("completed playthrough ending conditions cannot be changed")
                 condition = deepcopy(required(data, "condition"))
                 if not isinstance(condition, dict):
                     raise ValueError("payload.condition must be an object")
@@ -45409,9 +45330,7 @@ boundary.
                 )
                 if existing is not None:
                     if existing == condition:
-                        raise ValueError(
-                            f"ending condition {condition_id} is already configured"
-                        )
+                        raise ValueError(f"ending condition {condition_id} is already configured")
                 next_manifest = deepcopy(current_manifest)
                 next_manifest["ending"]["conditions"] = [
                     condition if item["id"] == condition_id else item
@@ -46707,9 +46626,7 @@ def main() -> None:
     config = McpConfig.from_environment()
     transport = os.environ.get("SAGASMITH_DND_MCP_TRANSPORT", "stdio").strip().casefold()
     if transport not in {"stdio", "streamable-http"}:
-        raise ValueError(
-            "SAGASMITH_DND_MCP_TRANSPORT must be 'stdio' or 'streamable-http'"
-        )
+        raise ValueError("SAGASMITH_DND_MCP_TRANSPORT must be 'stdio' or 'streamable-http'")
     create_server(config).run(transport=transport)
 
 
