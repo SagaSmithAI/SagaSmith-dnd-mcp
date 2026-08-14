@@ -165,6 +165,95 @@ def test_role_demotion_refreshes_only_the_affected_native_session(tmp_path: Path
     asyncio.run(exercise())
 
 
+def test_actor_private_downgrade_advances_context_without_tool_delta(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        server = create_server(
+            McpConfig(
+                home=tmp_path / "home",
+                database_url=None,
+                chroma_url=None,
+                chroma_path_override=None,
+                dnd_skills_dir=tmp_path / "dnd",
+                modulegen_skills_dir=tmp_path / "modulegen",
+                auto_seed_rules=False,
+            )
+        )
+
+        async def call(name: str, arguments: dict):
+            _, result = await server.call_tool(name, arguments)
+            return result.get("result", result) if isinstance(result, dict) else result
+
+        campaign = await call(
+            "campaign_create", {"name": "Private barrier", "idempotency_key": "campaign"}
+        )
+        actor = await call(
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Secret actor"},
+                "idempotency_key": "actor",
+            },
+        )
+        target = "discord:private-reader"
+        await call(
+            "access_grant",
+            {
+                "scope": "campaign",
+                "campaign_id": campaign["id"],
+                "principal_id": target,
+                "payload": {"role": "player"},
+                "by_principal_id": "system:local",
+            },
+        )
+        await call(
+            "access_grant",
+            {
+                "scope": "actor",
+                "campaign_id": campaign["id"],
+                "principal_id": target,
+                "payload": {
+                    "actor_id": actor["id"],
+                    "can_control": True,
+                    "can_view_private": True,
+                },
+                "by_principal_id": "system:local",
+            },
+        )
+        exposure = server.exposure_registry.open(
+            session_key="target-session",
+            principal_id=target,
+            campaign_id=campaign["id"],
+            phase="lobby",
+        )
+
+        class Session:
+            notifications = 0
+
+            async def send_tool_list_changed(self) -> None:
+                self.notifications += 1
+
+        session = Session()
+        server._sessions["target-session"] = session
+        await server._refresh("target-session", campaign["id"])
+        before = exposure.authorization_fingerprint
+        await call(
+            "access_grant",
+            {
+                "scope": "actor",
+                "campaign_id": campaign["id"],
+                "principal_id": target,
+                "payload": {"actor_id": actor["id"], "can_view_private": False},
+                "by_principal_id": "system:local",
+            },
+        )
+
+        assert await server._refresh("target-session", campaign["id"]) is True
+        assert exposure.authorization_fingerprint != before
+        assert session.notifications == 1
+
+    asyncio.run(exercise())
+
+
 def test_pending_ruling_envelope_defaults_to_agent_reasoning() -> None:
     assert _ruling_status("committed", "generic_spell_effect") == {"status": "committed"}
     assert _ruling_status("pending_ruling", "generic_spell_effect") == {
@@ -833,6 +922,7 @@ def test_same_server_runs_two_campaign_sessions_without_cross_talk(
         )
         assert binding_a["host_context_binding"]["campaign_id"] == campaign_a["id"]
         assert binding_b["host_context_binding"]["campaign_id"] == campaign_b["id"]
+        assert len(binding_a["host_context_binding"]["authorization_fingerprint"]) == 64
         assert (
             binding_a["host_context_binding"]["context_epoch"]
             != binding_b["host_context_binding"]["context_epoch"]

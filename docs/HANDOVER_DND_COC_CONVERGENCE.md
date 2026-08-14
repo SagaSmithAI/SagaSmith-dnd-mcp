@@ -2,6 +2,25 @@
 
 更新时间：2026-08-15
 
+> 完成状态：本文列出的任务一权限、Host context、actor lifecycle、D&D/CoC
+> mutation、NPC conversation、Agent、Skills 与回测收敛项已经实现。下文缺口描述
+> 保留为审计来源，不再代表当前代码状态。Content Pack 预制 Combat Grid 仍属于
+> 独立任务二，本轮未实施。
+
+当前协议只有一个 actor lifecycle 路径和一个 conversation v3 / proposal v4 Host
+transport 路径。Core authorization fingerprint 包含 campaign membership 与完整 actor
+grants；D&D/CoC session 在授权变化时发出 `tools/list_changed` 并改变 Host context
+epoch。CoC 公开 50 个 native tools，私有 transport 经过 Host token 鉴权且永不列出，
+旧公开 worker 没有 alias 或 fallback。
+
+验收证据包括四个 Python 仓库完整 pytest/Ruff、CoC Skills validator、D&D/CoC
+实际 stdio MCP + Agent conversation、公共 Lobby → Play → Combat → Play、DM/player、
+Grid/Agent、retry、restart、snapshot/branch 与 undo/redo 回归。两个 CoC 私有模块在
+只读 Pack 来源和隔离数据库副本上以当前 runtime 重跑，报告位于
+`.runs/coc-private-current-20260815-run5/reports/parallel-campaign-backtest.json`。
+旧 Pack 归档不满足当前 scene metadata schema 时会被预检拒绝；本轮没有为旧归档
+恢复兼容导入。
+
 ## 目标
 
 把 D&D 自身审计与 CoC 对标 D&D 审计合并为一条实现线：

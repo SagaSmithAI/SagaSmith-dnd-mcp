@@ -85,11 +85,12 @@
   "$defs": {
     "hostContextBinding": {
       "type": "object",
-      "required": ["domain", "campaign_id", "principal_fingerprint", "role", "audience", "branch_id", "memory_policy", "context_epoch"],
+      "required": ["domain", "campaign_id", "principal_fingerprint", "role", "audience", "branch_id", "authorization_fingerprint", "memory_policy", "context_epoch"],
       "properties": {
         "domain": {"const": "sagasmith-dnd"},
         "campaign_id": {"type": "string", "minLength": 1},
         "principal_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "authorization_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "role": {"enum": ["owner", "dm", "player"]},
         "audience": {"enum": ["dm", "player"]},
         "branch_id": {"type": "string", "minLength": 1},

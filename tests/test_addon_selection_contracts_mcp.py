@@ -785,6 +785,143 @@ to hit, reach 5 ft., one target. *Hit:* 1d8 + PB force damage.
             in created["character"]["notes"]["profile"]["dm_notes"]
         )
 
+        current = await _call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "system:local",
+            },
+        )
+        phase = await _call(
+            server,
+            "game_phase",
+            {
+                "campaign_id": campaign["id"],
+                "action": "set",
+                "tool_profile": "play",
+                "expected_revision": current["revision"],
+                "idempotency_key": "addon-actor-play",
+            },
+        )
+        started = await _call(
+            server,
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "positioning_mode": "agent",
+                "participant_ids": [owner["id"]],
+                "expected_revision": phase["campaign_revision"],
+                "idempotency_key": "addon-actor-combat",
+            },
+        )
+        combat_arguments = {
+            "campaign_id": campaign["id"],
+            "artifact_id": artifact["id"],
+            "owner_character_id": owner["id"],
+            "name": "Combat Steel Defender",
+            "participant_config": {
+                "initiative": 12,
+                "tie_breaker": 1,
+                "disposition": "friendly",
+            },
+            "expected_revision": started["campaign_revision"],
+            "idempotency_key": "addon-actor-combat-create",
+        }
+        combat_created = await _call(server, "addon_actor_instantiate", combat_arguments)
+        combat_replay = await _call(server, "addon_actor_instantiate", combat_arguments)
+        for field, value in combat_created["character"].items():
+            assert combat_replay["character"][field] == value, field
+        assert {**combat_replay, "character": {}} == {**combat_created, "character": {}}
+        combat_actor_id = combat_created["character"]["id"]
+        assert combat_actor_id in {
+            item["actor_id"]
+            for item in combat_created["combat"]["combat"]["reinforcements"]
+        }
+
+        history = await _call(
+            server,
+            "state_revision",
+            {
+                "campaign_id": campaign["id"],
+                "action": "history",
+                "payload": {},
+                "principal_id": "system:local",
+            },
+        )
+        await _call(
+            server,
+            "state_revision",
+            {
+                "campaign_id": campaign["id"],
+                "action": "undo",
+                "payload": {"expected_history_sequence": history[0]["sequence"]},
+                "principal_id": "system:local",
+                "idempotency_key": "undo-addon-actor-combat-create",
+            },
+        )
+        with pytest.raises(Exception, match=combat_actor_id):
+            await _call(
+                server,
+                "character_query",
+                {
+                    "view": "get",
+                    "payload": {"character_id": combat_actor_id},
+                    "principal_id": "system:local",
+                },
+            )
+        undone_combat = await _call(
+            server,
+            "combat_query",
+            {"campaign_id": campaign["id"], "view": "status"},
+        )
+        assert combat_actor_id not in {
+            item["actor_id"] for item in undone_combat["reinforcements"]
+        }
+        undone_history = await _call(
+            server,
+            "state_revision",
+            {
+                "campaign_id": campaign["id"],
+                "action": "history",
+                "payload": {},
+                "principal_id": "system:local",
+            },
+        )
+        redo_cursor = next(
+            item["sequence"] for item in undone_history if item["applied"]
+        )
+        await _call(
+            server,
+            "state_revision",
+            {
+                "campaign_id": campaign["id"],
+                "action": "redo",
+                "payload": {"expected_history_sequence": redo_cursor},
+                "principal_id": "system:local",
+                "idempotency_key": "redo-addon-actor-combat-create",
+            },
+        )
+        restored_actor = await _call(
+            server,
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": combat_actor_id},
+                "principal_id": "system:local",
+            },
+        )
+        restored_combat = await _call(
+            server,
+            "combat_query",
+            {"campaign_id": campaign["id"], "view": "status"},
+        )
+        assert restored_actor["id"] == combat_actor_id
+        assert combat_actor_id in {
+            item["actor_id"] for item in restored_combat["reinforcements"]
+        }
+
     import asyncio
 
     asyncio.run(exercise())

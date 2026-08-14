@@ -19,7 +19,7 @@ from datetime import datetime
 from functools import lru_cache, wraps
 from pathlib import Path
 from typing import Annotated, Any, Callable, Literal, TypeVar
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 from weakref import WeakValueDictionary
 
 from mcp.server.fastmcp import FastMCP, Image
@@ -31,6 +31,7 @@ from sagasmith_core import (
     AccessService,
     ActorKnowledgeService,
     ActorKnowledgeTransfer,
+    ActorLifecycleService,
     AddonService,
     BranchService,
     CampaignService,
@@ -42,6 +43,7 @@ from sagasmith_core import (
     IdempotencyService,
     IdempotencyWrite,
     ImportJobService,
+    InitialActorGrant,
     MemoryService,
     ModuleService,
     OcrPageLayout,
@@ -69,6 +71,7 @@ from sagasmith_core.access import (
     LOCAL_SYSTEM_PRINCIPAL_ID,
     AccessDeniedError,
 )
+from sagasmith_core.characters import CharacterInfo
 from sagasmith_core.context_anchors import normalize_context_entity_ref
 from sagasmith_core.idempotency import request_hash
 from sagasmith_core.integrity import canonical_json, json_sha256
@@ -2555,6 +2558,7 @@ class SessionExposureFastMCP(FastMCP):
         scope_validator: Any,
         random_context_factory: Any,
         context_binding_factory: Any,
+        authorization_fingerprint_lookup: Any,
         bound_principal_id: str | None = None,
         **kwargs: Any,
     ) -> None:
@@ -2564,6 +2568,7 @@ class SessionExposureFastMCP(FastMCP):
         self._scope_validator = scope_validator
         self._random_context_factory = random_context_factory
         self._context_binding_factory = context_binding_factory
+        self._authorization_fingerprint_lookup = authorization_fingerprint_lookup
         self._bound_principal_id = bound_principal_id.strip() if bound_principal_id else None
         self._sessions: WeakValueDictionary[str, Any] = WeakValueDictionary()
         self._exposure_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
@@ -2793,6 +2798,11 @@ class SessionExposureFastMCP(FastMCP):
                 allowed_tools=self._allowed_tools_lookup(exposure, phase),
             ):
                 changed_session_keys.add(key)
+            fingerprint = self._authorization_fingerprint_lookup(
+                exposure.campaign_id, exposure.principal_id
+            )
+            if self.exposure_registry.refresh_authorization(exposure, fingerprint):
+                changed_session_keys.add(key)
         for key in changed_session_keys:
             session = self._sessions.get(key)
             if session is not None:
@@ -2890,6 +2900,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     storage.migrate()
     campaigns = CampaignService(storage.database)
     characters = CharacterService(storage.database)
+    actor_lifecycle = ActorLifecycleService(storage.database)
     branches = BranchService(storage.database)
     continuity = ContinuityService(storage.database)
     continuity_commits = ContinuityCommitService(storage.database)
@@ -4859,6 +4870,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         context_binding_factory=lambda campaign_id, principal_id, arguments: (
             authoritative_host_context_binding(campaign_id, principal_id, arguments)
         ),
+        authorization_fingerprint_lookup=access.authorization_fingerprint,
         bound_principal_id=config.bound_principal_id,
         host=config.http_host,
         port=config.http_port,
@@ -4887,6 +4899,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         principal_id: str,
         role: str,
         audience: str,
+        authorization_fingerprint: str | None = None,
     ) -> dict[str, str]:
         """Return the exact host replay boundary without exposing principal identity."""
 
@@ -4898,6 +4911,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "role": role,
             "audience": audience,
             "branch_id": branch_id,
+            "authorization_fingerprint": (
+                authorization_fingerprint
+                or access.authorization_fingerprint(campaign_id, principal_id)
+            ),
             "memory_policy": "domain_authoritative",
         }
         return {
@@ -4913,6 +4930,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             "role",
                             "audience",
                             "branch_id",
+                            "authorization_fingerprint",
                         )
                     }
                 ).encode("utf-8")
@@ -7100,6 +7118,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             principal_id=principal_id,
             role=str(membership.role),
             audience=audience,
+            authorization_fingerprint=access.authorization_fingerprint(
+                campaign_id, principal_id
+            ),
         )
 
     def active_encounter(campaign_id: str) -> tuple[Any, dict[str, Any]]:
@@ -23871,6 +23892,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Create a D&D PC, NPC, or monster; optionally bind it to a campaign."""
         if campaign_id is not None:
             access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        elif principal_id != LOCAL_SYSTEM_PRINCIPAL_ID:
+            raise PermissionError(
+                "only the local service principal may create global library actors"
+            )
         if not idempotency_key:
             raise ValueError("idempotency_key is required for character creation")
         sheet_value = deepcopy(sheet or default_character_sheet())
@@ -23887,13 +23912,30 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             name=name,
             summary=summary,
         )
+        if campaign_id is not None:
+            created = actor_lifecycle.create(
+                campaign_id,
+                system_id=DND5E.id,
+                name=name,
+                principal_id=principal_id,
+                idempotency_key=idempotency_key,
+                character_type=character_type,
+                player_name=player_name,
+                summary=summary,
+                sheet=normalized_sheet,
+                notes=normalized_notes,
+                initial_grants=(InitialActorGrant(principal_id),),
+                operation="character.create",
+                actor=principal_id,
+            )
+            return character_view(created.character)
         return character_view(
             characters.create_idempotent(
                 system_id=DND5E.id,
                 name=name,
                 principal_id=principal_id,
                 idempotency_key=idempotency_key,
-                campaign_id=campaign_id,
+                campaign_id=None,
                 character_type=character_type,
                 player_name=player_name,
                 summary=summary,
@@ -23950,9 +23992,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         name: str | None = None,
         player_name: str | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Copy a public D&D character template into one campaign."""
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for character instantiation")
         template = characters.get(template_id)
         sheet = deepcopy(template.sheet)
         sheet["edition"] = campaign_rules_edition(campaign_id)
@@ -23965,14 +24010,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             summary=template.summary,
         )
         return character_view(
-            characters.instantiate(
-                template_id,
-                campaign_id=campaign_id,
-                name=name,
+            actor_lifecycle.create(
+                campaign_id,
+                system_id=DND5E.id,
+                template_id=template_id,
+                name=instance_name,
+                character_type=template.character_type,
                 player_name=player_name,
+                summary=template.summary,
                 sheet=validate_character_sheet(sheet, rules=effective_rule_context(campaign_id)),
                 notes=notes,
-            )
+                principal_id=principal_id,
+                idempotency_key=idempotency_key,
+                initial_grants=(InitialActorGrant(principal_id),),
+                operation="character.instantiate",
+                actor=principal_id,
+            ).character
         )
 
     @_agent_ruling_boundary
@@ -29230,7 +29283,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         opened["role"] = membership.role
         opened["next_step"] = (
             "Call npc_conversation(action='ingest') with Agent-resolved audience_facts, "
-            "then dispatch only the returned activation_refs to npc_conversation_worker."
+            "then let the authenticated Host dispatch only the returned activation_refs."
         )
         return opened
 
@@ -43142,6 +43195,9 @@ boundary.
         owner_class_name: str | None = None,
         casting_slot_level: int | None = None,
         template_variant: str | None = None,
+        participant_config: dict[str, Any] | None = None,
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -43149,6 +43205,33 @@ boundary.
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for addon actor instantiation")
+        addon_request = {
+            "artifact_id": artifact_id,
+            "owner_character_id": owner_character_id,
+            "name": name,
+            "character_type": character_type,
+            "player_name": player_name,
+            "summary": summary,
+            "notes": deepcopy(notes),
+            "owner_class_name": owner_class_name,
+            "casting_slot_level": casting_slot_level,
+            "template_variant": template_variant,
+            "participant_config": deepcopy(participant_config),
+            "expected_revision": expected_revision,
+            "branch_id": branch_id,
+        }
+        lifecycle_scope = f"actor-lifecycle:{campaign_id}:{principal_id}"
+        replay = idempotency.lookup(lifecycle_scope, idempotency_key, addon_request)
+        if replay is not None and replay.response is not None:
+            response = dict(replay.response)
+            return {
+                "character": character_view(CharacterInfo(**dict(response["character"]))),
+                "content_receipt": deepcopy(response["content_receipt"]),
+                "actor_knowledge_imported": False,
+                "combat": deepcopy(response.get("combat")),
+                "mutation_group_id": str(response["mutation_group_id"]),
+                "next": None,
+            }
         owner = characters.get(owner_character_id)
         if owner.campaign_id != campaign_id:
             raise ValueError("dependent actor owner belongs to another campaign")
@@ -43257,22 +43340,147 @@ boundary.
         provenance = "sagasmith:addon-actor-template:" + canonical_json(receipt)
         existing_dm_notes = str(profile.get("dm_notes") or "").strip()
         profile["dm_notes"] = "\n".join(value for value in (existing_dm_notes, provenance) if value)
-        character = character_create(
-            actor_name,
-            campaign_id,
-            character_type,
-            player_name,
-            str(summary or parsed.summary),
-            sheet,
-            notes_value,
-            principal_id,
-            f"{idempotency_key}:actor",
+        actor_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                f"sagasmith-dnd:addon-actor:{campaign_id}:{principal_id}:{idempotency_key}",
+            )
         )
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        campaign_state: dict[str, Any] | None = None
+        combat_result: dict[str, Any] | None = None
+        actor_sheet = sheet
+        if authoritative_phase(campaign_id) == PROFILE_COMBAT:
+            if expected_revision is None:
+                raise ValueError("expected_revision is required during Combat")
+            campaign, encounter = active_encounter(campaign_id)
+            require_no_blocking_pending(encounter)
+            if campaign.revision != expected_revision:
+                raise ValueError(
+                    "campaign revision conflict: "
+                    f"expected {expected_revision}, found {campaign.revision}"
+                )
+            config_value = dict(participant_config or {})
+            allowed = {
+                "token_id",
+                "position",
+                "hidden",
+                "visible_to_actor_ids",
+                "disposition",
+                "reach_ft",
+                "can_share_space",
+                "surprised",
+                "death_saves",
+                "initiative",
+                "tie_breaker",
+                "join_round",
+                "source_conditions",
+            }
+            if unknown := sorted(set(config_value) - allowed):
+                raise ValueError(f"unsupported participant config fields: {unknown}")
+            visible_to = config_value.get("visible_to_actor_ids")
+            encounter_actor_ids = {
+                str(item.get("actor_id") or "")
+                for item in encounter.get("combatants", [])
+            } | {actor_id}
+            if visible_to is not None and (
+                not isinstance(visible_to, list)
+                or any(str(item) not in encounter_actor_ids for item in visible_to)
+            ):
+                raise ValueError(
+                    "visible_to_actor_ids must contain only current or joining participant IDs"
+                )
+            battle_map = encounter.get("battle_map")
+            if isinstance(battle_map, dict):
+                validate_position(battle_map, config_value.get("position"))
+            join_round = config_value.pop("join_round", None)
+            if join_round is not None and (
+                isinstance(join_round, bool)
+                or not isinstance(join_round, int)
+                or join_round <= int(encounter.get("round", 1) or 1)
+            ):
+                raise ValueError(
+                    "join_round must be an integer after the current combat round"
+                )
+            provisional = CharacterInfo(
+                id=actor_id,
+                system_id=DND5E.id,
+                campaign_id=campaign_id,
+                template_id=None,
+                character_type=character_type,
+                name=actor_name,
+                player_name=player_name,
+                summary=str(summary or parsed.summary),
+                sheet=deepcopy(actor_sheet),
+                notes=deepcopy(notes_value),
+                revision=1,
+            )
+            _, joining_conditions, joining_sheet = source_participant_rules(
+                campaign_id,
+                str(encounter.get("scene_id") or "") or None,
+                provisional,
+                config_value,
+            )
+            config_value.pop("source_conditions", None)
+            if joining_sheet is not None:
+                actor_sheet = validate_character_sheet(
+                    joining_sheet, rules=effective_rule_context(campaign_id)
+                )
+                provisional = replace(provisional, sheet=deepcopy(actor_sheet))
+            actor_snapshot = character_view(provisional)
+            actor_snapshot.update(config_value)
+            next_encounter = queue_combatant(
+                encounter,
+                actor_snapshot,
+                joins_round=join_round,
+            )
+            if joining_conditions:
+                next_encounter["source_conditions"] = [
+                    *list(next_encounter.get("source_conditions") or []),
+                    *joining_conditions,
+                ]
+            campaign_state = validate_party_state(
+                {**dict(campaign.state or {}), "combat": next_encounter}
+            )
+            combat_result = {
+                "status": "committed",
+                "combat": next_encounter,
+                "campaign_revision": campaign.revision + 1,
+            }
+        created = actor_lifecycle.create(
+            campaign_id,
+            system_id=DND5E.id,
+            name=actor_name,
+            character_type=character_type,
+            player_name=player_name,
+            summary=str(summary or parsed.summary),
+            sheet=actor_sheet,
+            notes=notes_value,
+            principal_id=principal_id,
+            idempotency_key=idempotency_key,
+            initial_grants=(InitialActorGrant(principal_id),),
+            campaign_state=campaign_state,
+            expected_campaign_revision=expected_revision,
+            operation="addon.actor.instantiate",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            actor_id=actor_id,
+            idempotency_payload=addon_request,
+            response_extra={
+                "content_receipt": receipt,
+                "actor_knowledge_imported": False,
+                "combat": combat_result,
+                "next": None,
+            },
+        )
+        character = character_view(created.character)
         return {
             "character": character,
             "content_receipt": receipt,
             "actor_knowledge_imported": False,
-            "next": ("combat_join" if authoritative_phase(campaign_id) == PROFILE_COMBAT else None),
+            "combat": combat_result,
+            "mutation_group_id": created.mutation_group_id,
+            "next": None,
         }
 
     @public_tool()
@@ -43673,6 +43881,7 @@ boundary.
                 data.get("name"),
                 data.get("player_name"),
                 principal_id,
+                idempotency_key,
             )
         elif mode == "reviewed_rule_statblock":
             campaign_id = str(required(data, "campaign_id"))
@@ -46645,6 +46854,11 @@ boundary.
                 principal_id=principal_id,
                 campaign_id=campaign_id,
                 phase=phase,
+                authorization_fingerprint=(
+                    access.authorization_fingerprint(campaign_id, principal_id)
+                    if campaign_id
+                    else ""
+                ),
             )
             return {
                 **exposures.status(opened),

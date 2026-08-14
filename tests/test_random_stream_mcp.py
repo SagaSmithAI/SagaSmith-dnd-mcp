@@ -150,7 +150,7 @@ def test_public_rolls_replay_after_restore_and_do_not_pollute_the_parent_branch(
             with stored_database.transaction() as session:
                 stored = session.get(CampaignSnapshot, checkpoint["id"])
                 assert stored is not None
-                assert stored.schema_version == 8
+                assert stored.schema_version == 9
                 assert stored.payload_codec == "zlib-1"
                 assert stored.uncompressed_size > 0
                 assert stored.compressed_payload

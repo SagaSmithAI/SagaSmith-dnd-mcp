@@ -53,6 +53,54 @@ def test_character_build_replays_one_template_and_instance(tmp_path: Path) -> No
     asyncio.run(exercise())
 
 
+def test_template_mode_retries_same_instance_and_remote_cannot_create_library_actor(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(config(tmp_path))
+        campaign = await call(
+            server,
+            "campaign_create",
+            {"name": "Template table", "edition": "2014", "idempotency_key": "campaign"},
+        )
+        template = await call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {"name": "Library template", "character_type": "pc"},
+                "idempotency_key": "library-template",
+            },
+        )
+        arguments = {
+            "mode": "template",
+            "payload": {
+                "campaign_id": campaign["id"],
+                "template_id": template["id"],
+                "name": "Campaign instance",
+            },
+            "idempotency_key": "instantiate-template",
+        }
+        created = await call(server, "character_create_from", arguments)
+        replay = await call(server, "character_create_from", arguments)
+        assert replay["id"] == created["id"]
+        assert created["template_id"] == template["id"]
+
+        with pytest.raises(Exception, match="local service principal"):
+            await call(
+                server,
+                "character_create_from",
+                {
+                    "mode": "direct",
+                    "payload": {"name": "Remote library actor"},
+                    "principal_id": "user:remote",
+                    "idempotency_key": "remote-library",
+                },
+            )
+
+    asyncio.run(exercise())
+
+
 def test_dm_two_players_restart_and_combat_projection(tmp_path: Path) -> None:
     async def exercise() -> None:
         runtime = config(tmp_path)
