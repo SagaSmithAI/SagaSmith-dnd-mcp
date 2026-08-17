@@ -93,6 +93,7 @@ from sagasmith_core.visibility import (
     PLAYER_MODULE_VISIBILITY_SCOPES,
     PLAYER_OWNED_ACTOR_DISCLOSURE_SCOPES,
 )
+from sagasmith_dnd import source_cards
 from sagasmith_dnd.ability_generation import (
     apply_ability_generation,
     apply_pending_rolled_ability_generation,
@@ -282,7 +283,7 @@ from sagasmith_dnd.game_time import (
     game_time_ticks,
     rules_day_from_ticks,
 )
-from sagasmith_dnd.heroic_inspiration import spend_heroic_inspiration_reroll
+from sagasmith_dnd.heroic_inspiration import reroll_recorded_d20_result
 from sagasmith_dnd.lifecycle import (
     LONG_REST_MINIMUM_MINUTES,
     advance_effect_durations,
@@ -7435,37 +7436,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         source_card_kind: str,
     ) -> dict[str, Any]:
         """Resolve exactly one durable source card from a character sheet."""
-
-        collections = {
-            "activity": ("activities",),
-            "feature": ("features", "feats"),
-            "monster_action": ("activities",),
-            "spell": ("spells",),
-            "trait": ("features",),
-        }.get(source_card_kind)
-        if source_card_kind == "item":
-            matches = [
-                item
-                for item in dict(sheet.get("inventory") or {}).get("items", [])
-                if isinstance(item, dict) and str(item.get("id") or "") == source_card_id
-            ]
-        elif collections is None:
-            raise CombatEngineError(
-                "character-bound resolution plans require an activity, feature, "
-                "item, monster action, spell, or trait source card"
-            )
-        else:
-            matches = [
-                item
-                for collection in collections
-                for item in dict(sheet.get("content") or {}).get(collection, [])
-                if isinstance(item, dict) and str(item.get("id") or "") == source_card_id
-            ]
-        if len(matches) != 1:
-            raise CombatEngineError(
-                "source card must resolve to exactly one recorded character card"
-            )
-        return deepcopy(matches[0])
+        try:
+            return source_cards.character_source_card(sheet, source_card_id, source_card_kind)
+        except source_cards.CharacterSourceCardError as error:
+            raise CombatEngineError(str(error)) from error
 
     def character_resolution_plan(
         sheet: dict[str, Any],
@@ -7474,23 +7448,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> tuple[dict[str, Any], Any]:
         """Resolve one executable plan from the exact recorded character card."""
 
-        card = character_source_card(
-            sheet,
-            source_card_id,
-            source_card_kind,
-        )
-        if not isinstance(card.get("resolution_plan"), dict):
-            raise CombatEngineError("source card has no recorded resolution plan")
         try:
-            compiled = compile_resolution_plan(card["resolution_plan"])
-        except ResolutionPlanCompilationError as error:
-            raise CombatEngineError(f"recorded resolution plan is invalid: {error}") from error
-        if (
-            compiled.source_card_id != source_card_id
-            or compiled.source_card_kind != source_card_kind
-        ):
-            raise CombatEngineError("recorded resolution plan does not match its source card")
-        return card, compiled
+            return source_cards.character_resolution_plan(sheet, source_card_id, source_card_kind)
+        except source_cards.CharacterSourceCardError as error:
+            raise CombatEngineError(str(error)) from error
 
     def character_activity_source_card(
         sheet: dict[str, Any],
@@ -7500,64 +7461,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> tuple[dict[str, Any], str]:
         """Resolve an activatable card across every canonical sheet section."""
 
-        matches: list[tuple[dict[str, Any], str]] = []
-        content = dict(sheet.get("content") or {})
-        for item in content.get("activities", []):
-            if isinstance(item, dict) and str(item.get("id") or "") == activity_id:
-                matches.append(
-                    (
-                        item,
-                        (
-                            "monster_action"
-                            if character_type in NON_PLAYER_CHARACTER_TYPES
-                            else "activity"
-                        ),
-                    )
-                )
-        for section in ("features", "feats"):
-            for item in content.get(section, []):
-                if isinstance(item, dict) and str(item.get("id") or "") == activity_id:
-                    matches.append((item, "feature"))
-        if len(matches) != 1:
-            raise CombatEngineError(
-                "activity source card must resolve exactly once across "
-                "activities, features, and feats"
+        try:
+            return source_cards.character_activity_source_card(
+                sheet,
+                activity_id,
+                character_type=character_type,
+                non_player_character_types=NON_PLAYER_CHARACTER_TYPES,
             )
-        card, source_card_kind = matches[0]
-        return deepcopy(card), source_card_kind
+        except source_cards.CharacterSourceCardError as error:
+            raise CombatEngineError(str(error)) from error
 
     def source_card_evidence_texts(source_card: dict[str, Any]) -> tuple[str, ...]:
         """Collect normalized original wording without treating it as executable."""
 
-        values: list[str] = []
-
-        def collect(value: Any, key: str = "") -> None:
-            if isinstance(value, dict):
-                for child_key, child in value.items():
-                    if child_key in {
-                        "resolution_plan",
-                        "resolution_solution",
-                    }:
-                        continue
-                    collect(child, child_key)
-                return
-            if isinstance(value, list):
-                for child in value:
-                    collect(child, key)
-                return
-            if key in {
-                "description",
-                "effect",
-                "on_hit_effect",
-                "source_excerpt",
-                "text",
-            }:
-                normalized = _normalize_source_evidence_text(value)
-                if len(normalized) >= 10:
-                    values.append(normalized)
-
-        collect(source_card)
-        return tuple(dict.fromkeys(values))
+        return source_cards.source_card_evidence_texts(source_card)
 
     def source_card_has_executable_mechanic(
         campaign_id: str,
@@ -7642,23 +7559,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> dict[str, Any] | None:
         """Return the exact persisted Agent clause for one standard spell card."""
 
-        if str(source_card.get("pack_id") or "") not in {
-            CORE_CONTENT_PACK_ID,
-            CORE_2024_CONTENT_PACK_ID,
-            STANDARD_2014_CONTENT_PACK_ID,
-        }:
-            return None
-        matches = [
-            dict(item)
-            for item in list(source_card.get("ruling_requirements") or [])
-            if isinstance(item, dict)
-            and item.get("default_resolver") == "agent"
-            and item.get("ruling_kind") == "generic_spell_effect"
-            and len(str(item.get("source_excerpt") or "").strip()) >= 10
-        ]
-        if len(matches) != 1:
-            return None
-        return matches[0]
+        return source_cards.persisted_standard_spell_ruling_requirement(
+            source_card,
+            standard_pack_ids=frozenset(
+                {
+                    CORE_CONTENT_PACK_ID,
+                    CORE_2024_CONTENT_PACK_ID,
+                    STANDARD_2014_CONTENT_PACK_ID,
+                }
+            ),
+        )
 
     def validate_persisted_standard_spell_ruling(
         raw_ruling: Any,
@@ -7668,48 +7578,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> dict[str, Any]:
         """Validate Agent judgment against the immutable standard-card clause."""
 
-        if not isinstance(raw_ruling, dict):
-            raise CombatEngineError("standard spell agent_ruling must be an object")
-        allowed = {
-            "application_id",
-            "default_resolver",
-            "ruling_kind",
-            "decision",
-            "reason",
-            "source_excerpt",
-        }
-        unknown = set(raw_ruling) - allowed
-        application_id = str(raw_ruling.get("application_id") or "").strip()
-        decision = " ".join(str(raw_ruling.get("decision") or "").split())
-        reason = " ".join(str(raw_ruling.get("reason") or "").split())
-        source_excerpt = str(raw_ruling.get("source_excerpt") or "")
-        recorded_excerpt = str(requirement.get("source_excerpt") or "")
-        if (
-            unknown
-            or not application_id
-            or raw_ruling.get("default_resolver") != "agent"
-            or raw_ruling.get("ruling_kind") != "generic_spell_effect"
-            or not 10 <= len(decision) <= 1000
-            or not 10 <= len(reason) <= 500
-            or _normalize_source_evidence_text(source_excerpt)
-            != _normalize_source_evidence_text(recorded_excerpt)
-        ):
-            raise CombatEngineError(
-                "standard spell agent_ruling requires the exact persisted "
-                "source-card clause, application_id, decision, and reason"
+        try:
+            return source_cards.validate_persisted_standard_spell_ruling(
+                raw_ruling,
+                source_card=source_card,
+                requirement=requirement,
             )
-        return {
-            "application_id": application_id,
-            "default_resolver": "agent",
-            "ruling_kind": "generic_spell_effect",
-            "decision": decision,
-            "reason": reason,
-            "source_excerpt": recorded_excerpt,
-            "source_card_id": str(source_card.get("id") or ""),
-            "rule_refs": [
-                str(item) for item in list(source_card.get("rule_refs") or []) if str(item)
-            ],
-        }
+        except source_cards.CharacterSourceCardError as error:
+            raise CombatEngineError(str(error)) from error
 
     def validate_authored_content_plan(
         campaign_id: str,
@@ -20666,35 +20542,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise CombatEngineError(
                 "roll_index and expected_original_roll must match the recorded die"
             )
-        spent = spend_heroic_inspiration_reroll(
+        rerolled = reroll_recorded_d20_result(
             actor.sheet,
-            die_sides=20,
-            original_roll=expected_original_roll,
+            original,
+            roll_index=roll_index,
+            expected_original_roll=expected_original_roll,
         )
-        rolls[roll_index] = int(spent["new_roll"])
-        roll_mode = str(original.get("roll_mode") or "normal")
-        natural = (
-            max(rolls)
-            if roll_mode == "advantage"
-            else min(rolls)
-            if roll_mode == "disadvantage"
-            else rolls[0]
-        )
-        modifier = int(original.get("total", 0) or 0) - int(original.get("natural", 0) or 0)
-        rerolled_result = {
-            **original,
-            "rolls": rolls,
-            "natural": natural,
-            "critical": natural == 20,
-            "fumble": natural == 1,
-            "total": natural + modifier,
-        }
-        if isinstance(original.get("dc"), int):
-            rerolled_result["success"] = rerolled_result["total"] >= int(original["dc"])
+        rerolled_result = dict(rerolled["result"])
         event["result"] = rerolled_result
-        event["heroic_inspiration_reroll"] = {
-            key: value for key, value in spent.items() if key != "sheet"
-        }
+        event["heroic_inspiration_reroll"] = dict(rerolled["heroic_inspiration_reroll"])
         rules = effective_rule_context(
             campaign_id,
             facts={
@@ -20709,7 +20565,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ["dnd5e.core.heroic_inspiration"],
             "character.check.heroic_inspiration_reroll",
         )
-        normalized_sheet = validate_character_sheet(spent["sheet"])
+        normalized_sheet = validate_character_sheet(rerolled["sheet"])
 
         def reroll_response(revisions: list[Any]) -> dict[str, Any]:
             response = {
