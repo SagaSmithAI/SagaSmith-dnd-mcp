@@ -176,6 +176,7 @@ from sagasmith_dnd.combat_engine import (
     end_hypnotic_pattern_effects,
     end_turn,
     force_move_directly_away,
+    newly_ended_witch_bolt_tethers,
     pay_activity_activation,
     pay_attack_action,
     pay_legendary_action,
@@ -184,6 +185,7 @@ from sagasmith_dnd.combat_engine import (
     preflight_spell_attack,
     queue_combatant,
     reconcile_effect_dependencies,
+    reconcile_readied_spells,
     reconcile_witch_bolt_concentration,
     reconcile_witch_bolt_range,
     resolve_actor_check,
@@ -204,6 +206,7 @@ from sagasmith_dnd.combat_engine import (
     roll_attack_action,
     settle_core_activity_effect,
     source_speed_multiplier,
+    source_spell_resolution,
     spend_movement,
     stabilize_sheet,
     stand_up,
@@ -395,6 +398,7 @@ from sagasmith_dnd.spells import (
     consume_shield_reaction,
     consume_spell_cast,
     end_concentration_effects,
+    end_tether_concentrations,
     fly_target_limit,
     invisibility_target_limit,
     is_core_fly_spell,
@@ -9105,81 +9109,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             * int(cell_ft)
         )
 
-    def source_spell_resolution(sheet: dict[str, Any], spell_id: str) -> dict[str, Any]:
-        spell = next(
-            (
-                item
-                for item in sheet.get("content", {}).get("spells", [])
-                if str(item.get("id") or "") == str(spell_id)
-            ),
-            None,
-        )
-        if spell is None:
-            raise CombatEngineError("spell is not recorded on the caster card")
-        resolution = spell.get("resolution")
-        if not isinstance(resolution, dict):
-            raise CombatEngineError("spell does not have a reviewed structured resolution")
-        if SPELL_RESOLUTION_MECHANIC_ID not in {
-            str(item) for item in spell.get("mechanic_refs", [])
-        }:
-            raise CombatEngineError("spell resolution is not bound to the Core executor")
-        return resolution
-
-    def newly_ended_witch_bolt_tethers(
-        before: dict[str, Any],
-        after: dict[str, Any],
-        *,
-        source_actor_id: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """Find exact tether transitions that require concentration cleanup."""
-
-        active_before = {
-            str(item.get("id") or "")
-            for item in before.get("ongoing_effects", [])
-            if (
-                isinstance(item, dict)
-                and item.get("active", True)
-                and item.get("mechanic_id") == CORE_WITCH_BOLT_MECHANIC_ID
-            )
-        }
-        return [
-            deepcopy(item)
-            for item in after.get("ongoing_effects", [])
-            if (
-                isinstance(item, dict)
-                and str(item.get("id") or "") in active_before
-                and not item.get("active", True)
-                and item.get("mechanic_id") == CORE_WITCH_BOLT_MECHANIC_ID
-                and (
-                    source_actor_id is None
-                    or str(item.get("source_actor_id") or "") == source_actor_id
-                )
-            )
-        ]
-
-    def end_tether_concentrations(
-        sheet: dict[str, Any],
-        tethers: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        effect_ids = [
-            str(item.get("concentration_effect_id") or "")
-            for item in tethers
-            if str(item.get("concentration_effect_id") or "")
-        ]
-        reason = next(
-            (
-                str(item.get("ended_reason") or "")
-                for item in tethers
-                if str(item.get("ended_reason") or "")
-            ),
-            "witch_bolt_ended",
-        )
-        return end_concentration_effects(
-            sheet,
-            effect_ids=effect_ids,
-            ended_reason=reason,
-        )
-
     def reconcile_actor_witch_bolt_concentration(
         encounter: dict[str, Any],
         actor_id_value: str,
@@ -9734,47 +9663,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             {"type": "magic_missile", "result": deepcopy(result)},
         ][-100:]
         return value, sheets, result
-
-    def reconcile_readied_spells(
-        encounter: dict[str, Any], actor_id: str, sheet: dict[str, Any]
-    ) -> list[str]:
-        """Dissipate readied spells whose holding concentration is no longer active."""
-        active_effect_ids = {
-            str(effect.get("id"))
-            for effect in sheet.get("effects", [])
-            if effect.get("active") and effect.get("concentration")
-        }
-        expired = [
-            item
-            for item in encounter.get("readied", [])
-            if item.get("kind") == "spell"
-            and item.get("actor_id") == actor_id
-            and str(item.get("holding_effect_id")) not in active_effect_ids
-        ]
-        if not expired:
-            return []
-        expired_ids = {str(item.get("id")) for item in expired}
-        encounter["readied"] = [
-            item for item in encounter.get("readied", []) if str(item.get("id")) not in expired_ids
-        ]
-        encounter["pending"] = [
-            item
-            for item in encounter.get("pending", [])
-            if str(item.get("readied_id")) not in expired_ids
-        ]
-        encounter["log"] = [
-            *list(encounter.get("log") or []),
-            *[
-                {
-                    "type": "readied_spell_dissipated",
-                    "actor_id": actor_id,
-                    "readied_id": item.get("id"),
-                    "reason": "concentration_ended",
-                }
-                for item in expired
-            ],
-        ][-100:]
-        return sorted(expired_ids)
 
     def record_character_revision(before: Any, after: Any, operation: str) -> None:
         if before.campaign_id is None:
