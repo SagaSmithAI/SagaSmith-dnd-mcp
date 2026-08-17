@@ -16,11 +16,15 @@ from sagasmith_core import (
     RapidOcrProvider,
     VectorStore,
     create_embedder,
-    dumps_content_archive,
     file_sha256,
-    loads_content_archive,
 )
 from sagasmith_core.database import sqlite_database_url
+from sagasmith_core.managed_artifacts import (
+    read_content_archive as read_managed_content_archive,
+)
+from sagasmith_core.managed_artifacts import (
+    write_content_archive as write_managed_content_archive,
+)
 from sagasmith_dnd.system import DND5E
 
 from sagasmith_dnd_mcp.config import McpConfig
@@ -371,52 +375,26 @@ class SagaSmithStorage:
         self, package: dict[str, Any], blobs: dict[str, bytes]
     ) -> dict[str, Any]:
         """Persist any unified content package using the shared archive format."""
-
-        content = dumps_content_archive(package, blobs)
-        checksum = str(package["checksum"])
-        safe_id = re.sub(r"[^A-Za-z0-9._-]+", "-", str(package["id"])).strip("-.")
-        filename = f"{checksum[:12]}-{safe_id}.sagasmith-pack"
-        target = (self.config.content_packages_dir / filename).resolve()
-        if target.parent != self.config.content_packages_dir.resolve():
-            raise ValueError("invalid content package archive artifact name")
-        if not target.exists():
-            target.write_bytes(content)
-        elif hashlib.sha256(target.read_bytes()).hexdigest() != hashlib.sha256(content).hexdigest():
-            raise RuntimeError("managed content package archive mismatch")
-        return {
-            "artifact": filename,
-            "checksum": checksum,
-            "archive_checksum": hashlib.sha256(content).hexdigest(),
-            "size": len(content),
-            "kind": package["kind"],
-            "id": package["id"],
-            "version": package["version"],
-        }
+        return write_managed_content_archive(
+            self.config.content_packages_dir,
+            package,
+            blobs,
+        )
 
     def read_content_archive(
         self, *, artifact: str | None = None, source_path: str | Path | None = None
     ) -> tuple[dict[str, Any], dict[str, bytes]]:
         """Read one managed or allowlisted unified content package archive."""
 
-        if (artifact is None) == (source_path is None):
-            raise ValueError("provide exactly one of artifact or source_path")
-        if artifact is not None:
-            target = (self.config.content_packages_dir / artifact).resolve()
-            if target.parent != self.config.content_packages_dir.resolve():
-                raise ValueError("invalid managed content package artifact")
-        else:
-            target = Path(source_path or "").expanduser().resolve()
-            roots = {
-                *(root.resolve() for root in self.config.module_import_roots),
-                *(root.resolve() for root in self.config.rule_import_roots),
-            }
-            if not roots or not any(target.is_relative_to(root) for root in roots):
-                raise PermissionError("content package is outside configured import roots")
-        if not target.is_file() or not target.name.casefold().endswith(".sagasmith-pack"):
-            raise LookupError(str(target))
-        if target.stat().st_size > 4 * 1024 * 1024 * 1024:
-            raise ValueError("content package exceeds the 4 GiB safety limit")
-        return loads_content_archive(target.read_bytes())
+        return read_managed_content_archive(
+            self.config.content_packages_dir,
+            artifact=artifact,
+            source_path=source_path,
+            allowed_roots=[
+                *self.config.module_import_roots,
+                *self.config.rule_import_roots,
+            ],
+        )
 
     def store_actor_image(self, asset: dict[str, Any], content: bytes) -> dict[str, Any]:
         """Store one immutable content-pack actor image by its verified checksum."""
