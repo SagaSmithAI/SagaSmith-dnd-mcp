@@ -1,5 +1,7 @@
 # SagaSmith D&D MCP
 
+[官网](https://sagasmithai.github.io) · [平台总览](https://github.com/SagaSmithAI/.github/blob/main/profile/README.md) · [托管服务](https://github.com/SagaSmithAI/SagaSmith-service) · [内容目录](https://github.com/SagaSmithAI/SagaSmith-dnd-content-library)
+
 ## Content Pack gateway
 
 The HTTP gateway connects to the one authoritative streamable-HTTP MCP process and projects its
