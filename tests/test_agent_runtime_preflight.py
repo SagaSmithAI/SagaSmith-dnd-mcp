@@ -15,6 +15,7 @@ def _local_config(skills: Path) -> dict:
                     "url": "http://127.0.0.1:8767/mcp",
                     "enabledTools": ["*"],
                     "injectPrincipal": True,
+                    "sessionScoped": True,
                     "toolTimeout": 900,
                 }
             },
@@ -84,6 +85,17 @@ def test_preflight_enforces_principal_and_pdf_timeout(tmp_path: Path) -> None:
 
     assert any("injectPrincipal" in error for error in errors)
     assert any("at least 900" in error for error in errors)
+
+
+def test_preflight_requires_session_scoped_dynamic_mcp(tmp_path: Path) -> None:
+    agent_root, skills, config_path = _workspace(tmp_path)
+    config = _local_config(skills)
+    config["tools"]["mcpServers"]["sagasmith_dnd"].pop("sessionScoped")
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    errors = validate_runtime(config_path, agent_root)
+
+    assert any("sessionScoped" in error for error in errors)
 
 
 def test_preflight_requires_local_module_source_root(tmp_path: Path) -> None:

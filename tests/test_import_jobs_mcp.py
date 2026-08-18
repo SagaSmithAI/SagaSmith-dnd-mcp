@@ -14,6 +14,9 @@ from sagasmith_core import (
     RapidOcrProvider,
 )
 from sagasmith_core.rules import RuleService
+from sagasmith_dnd.statblock_ocr import (
+    matching_statblock_recovery_pair as _matching_statblock_recovery_pair,
+)
 from sagasmith_dnd.statblocks import parse_2014_statblock
 
 import sagasmith_dnd_mcp.server as server_module
@@ -28,7 +31,6 @@ from sagasmith_dnd_mcp.server import (
     _catalog_statblock_text_superseding_source_review,
     _claim_catalog_artifact_for_source_review,
     _compact_transcription_key,
-    _matching_statblock_recovery_pair,
     _merge_statblock_discoveries,
     _noisy_ocr_heading_equivalent,
     _ocr_fact_key,

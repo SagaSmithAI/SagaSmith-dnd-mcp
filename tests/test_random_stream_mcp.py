@@ -104,6 +104,27 @@ def test_public_rolls_replay_after_restore_and_do_not_pollute_the_parent_branch(
         )
         assert first["random_stream_receipt"]["position_before"] == 0
         assert first["random_stream_receipt"]["position_after"] == 2
+        assert first["resolution_id"].startswith("resolution-")
+        assert first["thread_id"] == first["resolution_id"]
+        assert first["event_sequence"] == 1
+        presentation = await _call(
+            server,
+            "resolution_presentation",
+            {
+                "campaign_id": campaign_id,
+                "resolution_id": first["resolution_id"],
+            },
+        )
+        assert presentation["schema"] == "sagasmith.resolution-presentation/v1"
+        assert presentation["system_id"] == "dnd5e"
+        assert presentation["status"] == "settled"
+        assert presentation["audience"] == {
+            "scope": "dm",
+            "actor_refs": [],
+            "disclosure": "hidden",
+        }
+        assert presentation["rolls"][0]["dice"] == first["rolls"]
+        assert presentation["rolls"][0]["total"] == first["total"]
 
         replay = await _call(
             server,

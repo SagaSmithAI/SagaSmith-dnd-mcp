@@ -42,10 +42,9 @@ server-emitted `tools/list_changed` rather than using a fixed tool superset.
 - **跨 Host 一致** — NanoBot、Codex 或任何兼容 MCP client 使用同一套目录、权限与阶段规则。
 - **会话隔离** — exposure 绑定 MCP session、认证 principal 和 campaign；同一服务上的两个会话可以加载不同工具组。
 - **阶段安全** — 权威阶段来自 campaign state。开战后 lobby/play 写工具不会继续残留，结束战斗后 combat 工具被收回。
-- **最小暴露** — 首次 `tools/list` 只有 13 个核心发现/诊断工具，而不是整个领域 schema；其中 `skill_query` 允许零预设 Host 做有界工作流读取。
-- **预算锁定** — 完整公开目录固定为 89 个工具；Lobby/Play/Combat 目录分别为
-  60/58/49。预算测试同时保证聚合输入 schema 不超过合并前 92 个工具的
-  56,611 字节基线。
+- **最小暴露** — 首次 `tools/list` 只有 7 个核心发现、诊断与展示工具，而不是整个领域 schema；其中 `skill_query` 允许零预设 Host 做有界工作流读取。
+- **预算锁定** — 当前完整公开目录为 77 个工具；Lobby/Play/Combat 暴露上限分别为
+  55/46/46。预算测试以代码中的 profile 为唯一真源，文档不再维护另一套兼容目录。
 - **服务端执行门禁** — 未暴露工具不能直接调用；权限不是提示词约定。
 - **规则与自设内容分界** — 已注册的标准规则 mechanic 由版本锁定的引擎实现执行；标准卡缺少结果实现时会在付款前要求补引擎，不能降级成自设解释。未注册的模组或自设角色卡必须在导入、构建或写卡事务内依据精确来源写入直接 Agent ruling 或受校验的通用计划；正式使用只执行已经保存的边界，不再临时补内容方案。
 
@@ -53,7 +52,7 @@ server-emitted `tools/list_changed` rather than using a fixed tool superset.
 
 ```mermaid
 flowchart TB
-    H[MCP Host / Agent] --> C[6 core tools]
+    H[MCP Host / Agent] --> C[7 core tools]
     C --> O[exposure]
     O --> S[search → inspect → load]
     S --> L[lobby tools]
@@ -118,6 +117,7 @@ NanoBot 本地 HTTP 示例：
         "url": "http://127.0.0.1:8767/mcp",
         "toolTimeout": 900,
         "injectPrincipal": true,
+        "sessionScoped": true,
         "enabledTools": ["*"]
       }
     },
@@ -126,7 +126,10 @@ NanoBot 本地 HTTP 示例：
 }
 ```
 
-`injectPrincipal` 应在多人渠道中开启。Host 注入的 principal 是认证身份，模型不能自行声明；grant 工具中的目标 principal 与调用者身份是两个字段。
+`injectPrincipal` 与 `sessionScoped` 在多人渠道中都必须开启。Host 注入的 principal 是认证身份，模型不能自行声明；每个逻辑 Agent 会话必须拥有独立 MCP session 与可变原生工具表。grant 工具中的目标 principal 与调用者身份是两个字段。
+
+Nanobot 应把 `SagaSmith-dnd-skills/full/skills` 加入 `externalSkillsDirs`，不要把
+`full/` 包装目录当成两个运行 Skill 的根目录。
 
 不具备可信逐请求身份注入的单用户 stdio Host 应设置
 `SAGASMITH_DND_MCP_BOUND_PRINCIPAL_ID=<stable-user-id>`。服务端会覆盖模型提供的

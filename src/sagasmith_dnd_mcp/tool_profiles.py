@@ -41,6 +41,7 @@ CORE_TOOLS = frozenset(
         "storage_status",
         "campaign_query",
         "game_phase",
+        "resolution_presentation",
         "skill_query",
     }
 )
@@ -70,7 +71,8 @@ PHASE_TOOLS = {
     ),
     PROFILE_PLAY: _names(
         """
-        actor_knowledge_change actor_knowledge_query addon_actor_instantiate bounded_evaluation
+        access_grant access_revoke actor_knowledge_change actor_knowledge_query
+        addon_actor_instantiate bounded_evaluation
         branch_query campaign_change campaign_event campaign_rules character_action
         character_check character_content_apply character_metadata_update
         character_query character_state_change chase combat_start content_solution
@@ -82,7 +84,8 @@ PHASE_TOOLS = {
     ),
     PROFILE_COMBAT: _names(
         """
-        actor_knowledge_query addon_actor_instantiate bounded_evaluation branch_change branch_query
+        access_grant access_revoke actor_knowledge_query addon_actor_instantiate bounded_evaluation
+        branch_change branch_query
         campaign_rules character_query combat_cast_spell combat_check combat_choice
         combat_common_action combat_concentration_check combat_end combat_end_turn combat_hp_change
         combat_join combat_map_patch combat_movement combat_preflight_attack combat_query
@@ -107,7 +110,8 @@ PHASE_DM_TOOLS = {
     ),
     PROFILE_PLAY: _names(
         """
-        actor_knowledge_change addon_actor_instantiate campaign_change campaign_event
+        access_grant access_revoke actor_knowledge_change addon_actor_instantiate
+        campaign_change campaign_event
         campaign_rules character_content_apply chase
         combat_start content_solution memory_change memory_query module_set_progress
         npc_conversation playthrough_manifest snapshot_create snapshot_query state_revision
@@ -115,7 +119,8 @@ PHASE_DM_TOOLS = {
     ),
     PROFILE_COMBAT: _names(
         """
-        addon_actor_instantiate branch_change campaign_rules combat_end combat_join combat_map_patch
+        access_grant access_revoke addon_actor_instantiate branch_change campaign_rules combat_end
+        combat_join combat_map_patch
         content_solution playthrough_manifest snapshot_create snapshot_query snapshot_restore
         state_revision
         """

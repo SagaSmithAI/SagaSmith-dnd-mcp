@@ -288,6 +288,19 @@ def test_public_attack_pauses_for_parry_before_damage(tmp_path: Path, monkeypatc
         assert rolled["status"] == "pending_reaction"
         assert rolled["result"]["hit"] is True
         assert rolled["result"]["damage"] is None
+        pending_presentation = await call(
+            server,
+            "resolution_presentation",
+            {
+                "campaign_id": campaign["id"],
+                "resolution_id": rolled["resolution_id"],
+            },
+        )
+        assert pending_presentation["status"] == "pending"
+        assert pending_presentation["event_sequence"] == 1
+        assert "source-bound-parry" in pending_presentation["pending_choice"][
+            "available_actions"
+        ]
         reactions = await call(
             server,
             "combat_query",
@@ -317,6 +330,17 @@ def test_public_attack_pauses_for_parry_before_damage(tmp_path: Path, monkeypatc
         assert resolved["result"]["hit"] is False
         assert resolved["result"]["damage"] is None
         assert resolved["result"]["reaction_defense"]["used"] is True
+        settled_presentation = await call(
+            server,
+            "resolution_presentation",
+            {
+                "campaign_id": campaign["id"],
+                "resolution_id": resolved["resolution_id"],
+            },
+        )
+        assert settled_presentation["thread_id"] == pending_presentation["thread_id"]
+        assert settled_presentation["event_sequence"] == 2
+        assert settled_presentation["status"] == "settled"
         semantic = resolved["result"]["reaction_defense"]["semantic_solution"]
         assert semantic["plan_id"] == "addon.test.parry-defense"
         assert semantic["plan_fingerprint"] == compiled["solution"]["plan_fingerprint"]

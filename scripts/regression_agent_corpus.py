@@ -30,6 +30,7 @@ CORE_TOOLS = frozenset(
         "campaign_query",
         "exposure",
         "game_phase",
+        "resolution_presentation",
         "server_capabilities",
         "storage_status",
     }

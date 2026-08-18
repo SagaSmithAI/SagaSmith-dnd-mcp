@@ -88,6 +88,11 @@ def validate_runtime(config_path: Path, agent_root: Path) -> list[str]:
         )
     if dnd.get("injectPrincipal") is not True:
         errors.append("sagasmith_dnd.injectPrincipal must be true for actor authorization.")
+    if dnd.get("sessionScoped") is not True:
+        errors.append(
+            "sagasmith_dnd.sessionScoped must be true so principal, campaign, phase, "
+            "and mutable native tools cannot leak between Agent sessions."
+        )
     timeout = dnd.get("toolTimeout")
     if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout < 900:
         errors.append("sagasmith_dnd.toolTimeout must be at least 900 seconds for PDF imports.")

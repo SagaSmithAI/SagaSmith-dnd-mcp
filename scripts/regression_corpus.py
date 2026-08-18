@@ -28,6 +28,7 @@ CORE_TOOLS = {
     "campaign_query",
     "exposure",
     "game_phase",
+    "resolution_presentation",
     "server_capabilities",
     "skill_query",
     "storage_status",
@@ -633,7 +634,7 @@ async def _installed_records(
             session_audit["initial_core_exact"] = initial == CORE_TOOLS
             if initial != CORE_TOOLS:
                 raise RuntimeError(
-                    f"cold start tools differ from native core six: {sorted(initial)}"
+                    f"cold start tools differ from native core set: {sorted(initial)}"
                 )
             listed = decode_mcp_result(
                 await session.call_tool(

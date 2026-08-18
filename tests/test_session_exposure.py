@@ -71,6 +71,15 @@ def test_character_creation_is_lobby_only_and_recovery_survives_combat() -> None
     )
 
 
+def test_campaign_admission_is_independent_of_game_phase() -> None:
+    for tool_id in ("access_grant", "access_revoke"):
+        policy = policy_for_tool(tool_id)
+        assert policy is not None
+        assert policy.phases == frozenset({"lobby", "play", "combat"})
+        for phase in policy.phases:
+            assert policy.roles(phase) == frozenset(CAMPAIGN_DM_ROLES)
+
+
 def test_role_demotion_refreshes_only_the_affected_native_session(tmp_path: Path) -> None:
     async def exercise() -> None:
         server = create_server(

@@ -75,11 +75,12 @@ def _complete_route(line_id: str, source_sha256: str) -> dict[str, object]:
     }
 
 
-def test_native_cold_start_contract_is_exactly_six_tools() -> None:
+def test_native_cold_start_contract_matches_current_core_tools() -> None:
     assert CORE_TOOLS == {
         "campaign_query",
         "exposure",
         "game_phase",
+        "resolution_presentation",
         "server_capabilities",
         "skill_query",
         "storage_status",

@@ -380,9 +380,7 @@ from sagasmith_dnd.spell_resolution import (
     SPELL_RESOLUTION_MECHANIC_ID,
     audit_spell_resolution_paths,
     effective_spell_resolution,
-    overlay_spell_attack_card,
     scaled_roll_expression,
-    spell_attack_action_resolution,
     spell_attack_count,
 )
 from sagasmith_dnd.spells import (
@@ -432,6 +430,10 @@ from sagasmith_dnd.standard_spell_ids import (
     CORE_WITCH_BOLT_MECHANIC_ID,
     STANDARD_2014_CONTENT_PACK_ID,
     STANDARD_2014_CONTENT_PACK_VERSION,
+)
+from sagasmith_dnd.statblock_ocr import recover_2014_pdf_statblock_layout
+from sagasmith_dnd.statblock_spells import (
+    hydrate_statblock_spellcasting as hydrate_dnd_statblock_spellcasting,
 )
 from sagasmith_dnd.statblocks import (
     OCR_STATBLOCK_RECOVERY_VERSION,
@@ -1607,29 +1609,6 @@ def _ocr_fact_key(value: Any) -> str:
     return compact_ascii_key(unicodedata.normalize("NFKD", str(value or "")))
 
 
-def _statblock_critical_fingerprint(value: Any) -> Any:
-    """Normalize nested critical facts without discarding optional fields."""
-
-    if isinstance(value, dict):
-        return {str(key): _statblock_critical_fingerprint(item) for key, item in value.items()}
-    return _ocr_fact_key(value)
-
-
-def _matching_statblock_recovery_pair(
-    recoveries: list[tuple[float, dict[str, Any]]],
-) -> tuple[tuple[float, dict[str, Any]], tuple[float, dict[str, Any]]] | None:
-    """Find the earliest two OCR scales agreeing on every critical fact."""
-
-    for index, left in enumerate(recoveries):
-        left_fingerprint = _statblock_critical_fingerprint(dict(left[1]["critical_facts"]))
-        for right in recoveries[index + 1 :]:
-            if left_fingerprint == _statblock_critical_fingerprint(
-                dict(right[1]["critical_facts"])
-            ):
-                return left, right
-    return None
-
-
 def _merge_statblock_discoveries(
     primary: list[dict[str, Any]],
     *,
@@ -2714,6 +2693,13 @@ class SessionExposureFastMCP(FastMCP):
         result: Any,
         arguments: dict[str, Any] | None = None,
     ) -> str | None:
+        argument_values = dict(arguments or {})
+        campaign_id = argument_values.get("campaign_id")
+        nested_arguments = argument_values.get("payload")
+        if not campaign_id and isinstance(nested_arguments, dict):
+            campaign_id = nested_arguments.get("campaign_id")
+        if campaign_id:
+            return str(campaign_id).strip() or None
         if not (isinstance(result, tuple) and len(result) == 2):
             return None
         structured = result[1]
@@ -2723,7 +2709,7 @@ class SessionExposureFastMCP(FastMCP):
         if not isinstance(payload, dict):
             return None
         campaign_id = payload.get("campaign_id")
-        if not campaign_id and name == "campaign_create":
+        if not campaign_id and name in {"campaign_create", "campaign_query"}:
             campaign_id = payload.get("id")
         value = str(campaign_id or "").strip()
         return value or None
@@ -7091,6 +7077,159 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             value["result"] = {key: item for key, item in result.items() if key in allowed}
         value.pop("revisions", None)
         return value
+
+    def resolution_rolls(resolution_id: str, result: dict[str, Any]) -> list[dict[str, Any]]:
+        """Normalize trusted engine output without exposing arbitrary result fields."""
+
+        normalized: list[dict[str, Any]] = []
+        seen: set[int] = set()
+
+        def visit(value: Any) -> None:
+            if len(normalized) >= 32:
+                return
+            if isinstance(value, dict):
+                dice = value.get("rolls")
+                if not isinstance(dice, list) or not dice or not all(
+                    isinstance(item, int) and not isinstance(item, bool) for item in dice
+                ):
+                    dice = value.get("dice")
+                total = value.get("total")
+                if (
+                    isinstance(dice, list)
+                    and dice
+                    and all(isinstance(item, int) and not isinstance(item, bool) for item in dice)
+                    and isinstance(total, int)
+                    and not isinstance(total, bool)
+                ):
+                    identity = id(value)
+                    if identity not in seen:
+                        seen.add(identity)
+                        natural = value.get("natural")
+                        kept = [natural] if isinstance(natural, int) else list(dice)
+                        modifier = value.get("modifier")
+                        if not isinstance(modifier, int) or isinstance(modifier, bool):
+                            modifier = int(total) - int(kept[0]) if len(kept) == 1 else 0
+                        normalized.append(
+                            {
+                                "roll_id": f"{resolution_id}:roll:{len(normalized) + 1}",
+                                "expression": str(value.get("expression") or "d20"),
+                                "dice": list(dice),
+                                "kept": kept,
+                                "modifier": int(modifier),
+                                "total": int(total),
+                            }
+                        )
+                for child in value.values():
+                    visit(child)
+            elif isinstance(value, list):
+                for child in value:
+                    visit(child)
+
+        visit(result)
+        return normalized
+
+    def resolution_outcome(result: dict[str, Any]) -> dict[str, Any]:
+        allowed = {
+            "kind",
+            "success",
+            "critical",
+            "fumble",
+            "hit",
+            "successes",
+            "failures",
+            "outcome",
+            "damage",
+            "applied_amount",
+            "hp_damage",
+            "healed",
+            "after_hp",
+            "dc",
+            "difficulty",
+        }
+        return {
+            key: deepcopy(value)
+            for key, value in result.items()
+            if key in allowed and isinstance(value, (str, int, float, bool, type(None)))
+        }
+
+    def resolution_presentation_view(
+        campaign_id: str,
+        resolution_id: str,
+        principal_id: str,
+    ) -> dict[str, Any]:
+        membership = access.require_campaign(campaign_id, principal_id)
+        campaign = campaigns.get(campaign_id)
+        events = [
+            item
+            for key in ("resolution_presentation_log", "resolution_log")
+            for item in list(dict(campaign.state or {}).get(key) or [])
+            if isinstance(item, dict) and str(item.get("id") or "") == resolution_id
+        ]
+        if len(events) != 1:
+            raise LookupError("resolution presentation not found")
+        event = deepcopy(events[0])
+        audience = dict(event.get("audience") or {})
+        actor_refs = [str(item) for item in audience.get("actor_refs") or []]
+        scope = str(audience.get("scope") or ("actors" if actor_refs else "dm"))
+        if scope == "dm" and membership.role not in CAMPAIGN_DM_ROLES:
+            raise LookupError("resolution presentation not found")
+        if scope == "principal" and (
+            membership.role not in CAMPAIGN_DM_ROLES
+            and str(event.get("principal_id") or "") != principal_id
+        ):
+            raise LookupError("resolution presentation not found")
+        if scope == "actors" and membership.role not in CAMPAIGN_DM_ROLES:
+            authorized = False
+            for actor_ref in actor_refs:
+                try:
+                    access.require_actor(campaign_id, actor_ref, principal_id, private=True)
+                except (LookupError, PermissionError):
+                    continue
+                authorized = True
+                break
+            if not authorized:
+                raise LookupError("resolution presentation not found")
+        result = deepcopy(dict(event.get("result") or {}))
+        event_sequence = int(event.get("event_sequence") or 1)
+        return {
+            "schema": "sagasmith.resolution-presentation/v1",
+            "resolution_id": resolution_id,
+            "thread_id": str(event.get("thread_id") or resolution_id),
+            "event_sequence": event_sequence,
+            "system_id": DND5E.id,
+            "campaign_id": campaign_id,
+            "branch_id": event.get("branch_id"),
+            "operation": str(event.get("operation") or event.get("type") or "resolution"),
+            "status": str(event.get("status") or "settled"),
+            "audience": {
+                "scope": scope,
+                "actor_refs": actor_refs if scope == "actors" else [],
+                "disclosure": str(
+                    audience.get("disclosure") or ("private" if scope == "actors" else "hidden")
+                ),
+            },
+            "actor_refs": actor_refs,
+            "rolls": resolution_rolls(resolution_id, result),
+            "outcome": resolution_outcome(result),
+            "pending_choice": deepcopy(event.get("pending_choice")),
+            "campaign_revision": int(
+                event.get("campaign_revision") or campaign.revision
+            ),
+            "random_stream_receipt": {
+                key: deepcopy(value)
+                for key, value in dict(event.get("random_stream_receipt") or {}).items()
+                if key
+                in {
+                    "operation",
+                    "cursor_before",
+                    "cursor_after",
+                    "position_before",
+                    "position_after",
+                    "draw_count",
+                    "receipt_digest",
+                }
+            },
+        }
 
     def current_branch_id(campaign_id: str) -> str | None:
         current = branches.current(campaign_id)
@@ -14318,6 +14457,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return combat_response(campaign_id, principal_id, replay)
+        resolution_id = "resolution-" + hashlib.sha256(
+            (
+                f"{campaign_id}:{resolved_branch_id}:combat.attack:"
+                f"{idempotency_key}:{actor_id}:{target_id}"
+            ).encode("utf-8")
+        ).hexdigest()[:32]
         if expected_revision is not None and campaign.revision != expected_revision:
             raise ValueError(
                 "campaign revision conflict: "
@@ -14541,6 +14686,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             window = next_encounter["pending"][-1]
             window.update(
                 trigger="attack_hit_defense",
+                resolution_id=resolution_id,
+                thread_id=resolution_id,
+                event_sequence=1,
                 attacker_id=actor_id,
                 target_id=target_id,
                 plan=deepcopy(plan),
@@ -14559,6 +14707,35 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 },
             ][-100:]
             next_state = {**dict(campaign.state or {}), "combat": next_encounter}
+            next_state["resolution_log"] = [
+                *list(next_state.get("resolution_log") or []),
+                {
+                    "id": resolution_id,
+                    "thread_id": resolution_id,
+                    "event_sequence": 1,
+                    "type": "combat_attack",
+                    "operation": "combat.attack",
+                    "status": "pending",
+                    "actor_id": actor_id,
+                    "audience": {
+                        "scope": "actors",
+                        "actor_refs": [actor_id, target_id],
+                        "disclosure": "private",
+                    },
+                    "branch_id": resolved_branch_id,
+                    "campaign_revision": campaign.revision + 1,
+                    "result": deepcopy(result),
+                    "pending_choice": {
+                        "id": str(window["id"]),
+                        "kind": "attack_hit_defense",
+                        "available_actions": [
+                            str(item.get("id") or "")
+                            for item in window.get("candidates", [])
+                            if str(item.get("id") or "")
+                        ],
+                    },
+                },
+            ][-200:]
             updates = []
             if updated_attacker["sheet"] != attacker["sheet"]:
                 updates.append(
@@ -14573,6 +14750,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             def pending_attack_response(revisions: list[Any]) -> dict[str, Any]:
                 response = {
                     "status": "pending_reaction",
+                    "resolution_id": resolution_id,
+                    "thread_id": resolution_id,
+                    "event_sequence": 1,
                     "result": result,
                     "choice": window,
                     "combat": next_encounter,
@@ -14859,6 +15039,39 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         ][-100:]
         next_state = dict(campaign.state or {})
         next_state["combat"] = next_encounter
+        next_state["resolution_log"] = [
+            *list(next_state.get("resolution_log") or []),
+            {
+                "id": resolution_id,
+                "thread_id": resolution_id,
+                "event_sequence": 1,
+                "type": "combat_attack",
+                "operation": "combat.attack",
+                "status": "pending" if pending_on_hit_ruling else "settled",
+                "actor_id": actor_id,
+                "audience": {
+                    "scope": "actors",
+                    "actor_refs": [actor_id, target_id],
+                    "disclosure": "private",
+                },
+                "branch_id": resolved_branch_id,
+                "campaign_revision": campaign.revision + 1,
+                "result": deepcopy(result),
+                "pending_choice": (
+                    {
+                        "id": str(pending_on_hit_ruling["id"]),
+                        "kind": str(pending_on_hit_ruling.get("trigger") or "on_hit_ruling"),
+                        "available_actions": [
+                            str(item.get("id") or "")
+                            for item in pending_on_hit_ruling.get("candidates", [])
+                            if str(item.get("id") or "")
+                        ],
+                    }
+                    if pending_on_hit_ruling
+                    else None
+                ),
+            },
+        ][-200:]
         updates = []
         for record, updated in (
             (attacker_record, updated_attacker),
@@ -14887,6 +15100,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         else "source_or_scene_fact"
                     ),
                 ),
+                "resolution_id": resolution_id,
+                "thread_id": resolution_id,
+                "event_sequence": 1,
                 "result": result,
                 "combat": next_encounter,
                 "campaign_revision": campaign.revision + 1,
@@ -16018,6 +16234,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             or window.get("target_id") != actor_id
         ):
             raise CombatEngineError("choice_id is not this actor's attack-defense window")
+        resolution_id = str(window.get("resolution_id") or "") or (
+            "resolution-"
+            + hashlib.sha256(
+                f"{campaign_id}:{resolved_branch_id}:combat.attack:{choice_id}".encode("utf-8")
+            ).hexdigest()[:32]
+        )
         selection_id = str(selection.get("id") or "")
         candidate = next(
             (
@@ -16243,6 +16465,42 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             },
         ][-100:]
         next_state = {**dict(campaign.state or {}), "combat": next_encounter}
+        next_resolution = {
+            "id": resolution_id,
+            "thread_id": str(window.get("thread_id") or resolution_id),
+            "event_sequence": int(window.get("event_sequence") or 1) + 1,
+            "type": "combat_attack",
+            "operation": "combat.attack",
+            "status": "pending" if on_hit_window is not None else "settled",
+            "actor_id": attacker_id,
+            "audience": {
+                "scope": "actors",
+                "actor_refs": [attacker_id, actor_id],
+                "disclosure": "private",
+            },
+            "branch_id": resolved_branch_id,
+            "campaign_revision": campaign.revision + 1,
+            "result": deepcopy(result),
+            "pending_choice": (
+                {
+                    "id": str(on_hit_window["id"]),
+                    "kind": str(on_hit_window.get("trigger") or "on_hit_ruling"),
+                    "available_actions": [
+                        str(item.get("id") or "")
+                        for item in on_hit_window.get("candidates", [])
+                        if str(item.get("id") or "")
+                    ],
+                }
+                if on_hit_window is not None
+                else None
+            ),
+        }
+        resolution_log = [
+            deepcopy(item)
+            for item in list(next_state.get("resolution_log") or [])
+            if not isinstance(item, dict) or str(item.get("id") or "") != resolution_id
+        ]
+        next_state["resolution_log"] = [*resolution_log, next_resolution][-200:]
         response = commit_campaign_state(
             campaign,
             next_state,
@@ -16257,6 +16515,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     ("pending_ruling" if on_hit_window is not None else "committed"),
                     "source_or_scene_fact",
                 ),
+                "resolution_id": resolution_id,
+                "thread_id": next_resolution["thread_id"],
+                "event_sequence": next_resolution["event_sequence"],
                 "result": result,
                 "combat": next_encounter,
             },
@@ -20325,8 +20586,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             *list(next_state.get("resolution_log") or []),
             {
                 "id": resolution_id,
+                "thread_id": resolution_id,
+                "event_sequence": 1,
                 "type": kind,
+                "operation": f"character.{kind}",
                 "actor_id": actor_id,
+                "audience": {
+                    "scope": "actors",
+                    "actor_refs": [actor_id],
+                    "disclosure": "private",
+                },
+                "branch_id": resolved_branch_id,
+                "campaign_revision": campaign.revision + 1,
                 "result": result,
             },
         ][-100:]
@@ -20335,6 +20606,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             response = {
                 "status": "committed",
                 "resolution_id": resolution_id,
+                "thread_id": resolution_id,
+                "event_sequence": 1,
                 "result": result,
                 "campaign_revision": campaign.revision + 1,
                 "revisions": [asdict(item) for item in revisions],
@@ -20439,6 +20712,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         rerolled_result = dict(rerolled["result"])
         event["result"] = rerolled_result
         event["heroic_inspiration_reroll"] = dict(rerolled["heroic_inspiration_reroll"])
+        event["event_sequence"] = int(event.get("event_sequence") or 1) + 1
+        event["campaign_revision"] = campaign.revision + 1
         rules = effective_rule_context(
             campaign_id,
             facts={
@@ -20459,6 +20734,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             response = {
                 "status": "committed",
                 "resolution_id": normalized_resolution_id,
+                "thread_id": str(event.get("thread_id") or normalized_resolution_id),
+                "event_sequence": int(event["event_sequence"]),
                 "result": rerolled_result,
                 "heroic_inspiration_reroll": event["heroic_inspiration_reroll"],
                 "campaign_revision": campaign.revision + 1,
@@ -27512,14 +27789,47 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             result = resolver()
             if stream.draw_count == 0:
                 raise ValueError("random resolution must consume at least one random draw")
+            resolution_id = "resolution-" + hashlib.sha256(
+                (
+                    f"{campaign_id}:{resolved_branch_id}:{operation}:"
+                    f"{idempotency_key}"
+                ).encode("utf-8")
+            ).hexdigest()[:32]
+            membership = access.require_campaign(campaign_id, principal_id)
+            audience = (
+                {"scope": "dm", "actor_refs": [], "disclosure": "hidden"}
+                if membership.role in CAMPAIGN_DM_ROLES
+                else {"scope": "principal", "actor_refs": [], "disclosure": "private"}
+            )
+            receipt = stream.receipt()
             response = {
                 **dict(result),
+                "resolution_id": resolution_id,
+                "thread_id": resolution_id,
+                "event_sequence": 1,
                 "campaign_revision": campaign.revision + 1,
-                "random_stream_receipt": stream.receipt(),
+                "random_stream_receipt": receipt,
             }
+            next_state = deepcopy(dict(campaign.state or {}))
+            next_state["resolution_presentation_log"] = [
+                *list(next_state.get("resolution_presentation_log") or []),
+                {
+                    "id": resolution_id,
+                    "thread_id": resolution_id,
+                    "event_sequence": 1,
+                    "operation": operation,
+                    "status": "settled",
+                    "audience": audience,
+                    "principal_id": principal_id if audience["scope"] == "principal" else None,
+                    "branch_id": resolved_branch_id,
+                    "campaign_revision": campaign.revision + 1,
+                    "result": deepcopy(dict(result)),
+                    "random_stream_receipt": receipt,
+                },
+            ][-200:]
             StateMutationService(storage.database).replace(
                 campaign_id,
-                campaign_state=validate_party_state(campaign.state),
+                campaign_state=validate_party_state(next_state),
                 expected_campaign_revision=expected_campaign_revision,
                 operation=operation,
                 actor=principal_id,
@@ -32136,249 +32446,38 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         statblock_slot: int | None = None,
         ocr_corrections: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Recover and independently corroborate one printed 2014 statblock."""
+        """Supply authorized OCR I/O to deterministic D&D recovery."""
 
-        selected_layout = None
-        selected_scale = None
-        selected_model = None
-        recovered = None
-        attempted_pages: list[int] = []
         primary_scale = float(getattr(provider, "scale", 2.0))
         preferred_model = str(getattr(provider, "model_type", "small"))
-        recovery_models = [
-            preferred_model,
-            "medium" if preferred_model == "small" else "small",
-        ]
-        recovery_scales = list(dict.fromkeys((primary_scale, 2.5, 3.0, 1.5, 3.5, 4.0, 2.0)))
-        for recovery_model in recovery_models:
-            for candidate in candidate_pages:
-                if candidate not in attempted_pages:
-                    attempted_pages.append(candidate)
-                for scale in recovery_scales:
-                    layout = cached_rapidocr_layout(
-                        source_path,
-                        candidate,
-                        scale=scale,
-                        preferred_provider=(
-                            provider
-                            if recovery_model == preferred_model
-                            and abs(scale - primary_scale) < 0.001
-                            else None
-                        ),
-                        model_type=recovery_model,
-                    )
-                    try:
-                        candidate_recovery = recover_2014_statblock_from_ocr(
-                            layout.as_dict(),
-                            name=target_name,
-                            minimum_confidence=0.5,
-                            statblock_slot=statblock_slot,
-                            reviewed_ability_scores=dict(ocr_corrections or {}).get("abilities"),
-                            reviewed_text_replacements=dict(ocr_corrections or {}).get(
-                                "text_replacements"
-                            ),
-                        )
-                    except StatblockImportError:
-                        continue
-                    selected_layout = layout
-                    selected_scale = scale
-                    selected_model = recovery_model
-                    recovered = candidate_recovery
-                    break
-                if selected_layout is not None:
-                    break
-            if selected_layout is not None:
-                break
-        if selected_layout is None:
-            raise RuntimeError(
-                "layout OCR did not find one structurally unambiguous target statblock "
-                "on candidate pages " + ", ".join(str(value) for value in attempted_pages)
-            )
-        assert recovered is not None
-        assert selected_model is not None
-        evidence = dict(recovered["evidence"])
-        recovered_page = int(evidence["page_number"])
-        page_text = extract_pdf_page_text(source_path, recovered_page)
-        critical_facts = dict(recovered["critical_facts"])
-        identity_key = _ocr_fact_key(critical_facts["identity"])
-        page_lines = [
-            line.strip(" \t#>*_-") for line in page_text.splitlines() if line.strip(" \t#>*_-")
-        ]
-        identity_indexes = [
-            index for index, line in enumerate(page_lines) if _ocr_fact_key(line) == identity_key
-        ]
-        corroboration_pairs = [
-            ("Identity", str(critical_facts["identity"])),
-            ("Armor Class", f"Armor Class {critical_facts['armor_class']}"),
-            ("Hit Points", f"Hit Points {critical_facts['hit_points']}"),
-            ("Speed", f"Speed {critical_facts['speed']}"),
-            ("Challenge", f"Challenge {critical_facts['challenge']}"),
-            *[
-                (label, f"{label} {value}")
-                for label, value in dict(critical_facts["fields"]).items()
-            ],
-            *[
-                (
-                    ability.upper(),
-                    f"{ability.upper()} {score}",
-                )
-                for ability, score in dict(critical_facts["abilities"]).items()
-            ],
-        ]
-        corroboration_mode = "dual_layout_ocr"
-        assert selected_scale is not None
-        corroboration_scales = [float(selected_scale)]
-        corroboration_models = [selected_model]
-        corroborated = [{"field": label, "value": fact} for label, fact in corroboration_pairs]
-        if len(identity_indexes) == 1:
-            segment_start = identity_indexes[0]
-            segment_end = len(page_lines)
-            identity_pattern = re.compile(
-                r"(?i)^(Tiny|Small|Medium|Large|Huge|Gargantuan)\s+[^,]+,\s*.+$"
-            )
-            for index in range(segment_start + 1, len(page_lines)):
-                if identity_pattern.fullmatch(page_lines[index]):
-                    segment_end = index
-                    break
-            normalized_segment = _ocr_fact_key("\n".join(page_lines[segment_start:segment_end]))
-            ability_order = ("str", "dex", "con", "int", "wis", "cha")
-            ability_scores = dict(critical_facts["abilities"])
-            ordered_ability_table = (
-                _ocr_fact_key(" ".join(ability.upper() for ability in ability_order))
-                in normalized_segment
-                and _ocr_fact_key(
-                    " ".join(str(ability_scores[ability]) for ability in ability_order)
-                )
-                in normalized_segment
-            )
-            embedded_mismatches = [
-                label
-                for label, fact in corroboration_pairs
-                if _ocr_fact_key(fact) not in normalized_segment
-                and not (label.casefold() in ability_order and ordered_ability_table)
-            ]
-            if not embedded_mismatches:
-                corroboration_mode = "embedded_text"
-        if corroboration_mode != "embedded_text":
-            primary_scale = float(selected_scale)
 
-            primary_fingerprint = _statblock_critical_fingerprint(critical_facts)
-            secondary_scale = None
-            secondary_model = None
-            secondary_failures: list[str] = []
-            secondary_recoveries: list[tuple[str, float, dict[str, Any]]] = []
-            for recovery_model in recovery_models:
-                for candidate_scale in (3.0, 2.5, 1.5, 3.5, 4.0, 2.0):
-                    if (
-                        recovery_model == selected_model
-                        and abs(float(selected_scale) - candidate_scale) < 0.01
-                    ):
-                        continue
-                    label = f"{recovery_model}@{candidate_scale:.1f}"
-                    try:
-                        secondary_layout = cached_rapidocr_layout(
-                            source_path,
-                            recovered_page,
-                            scale=candidate_scale,
-                            preferred_provider=(
-                                provider
-                                if recovery_model == preferred_model
-                                and abs(candidate_scale - float(provider.scale)) < 0.001
-                                else None
-                            ),
-                            model_type=recovery_model,
-                        )
-                        secondary = recover_2014_statblock_from_ocr(
-                            secondary_layout.as_dict(),
-                            name=target_name,
-                            minimum_confidence=0.5,
-                            statblock_slot=statblock_slot,
-                            reviewed_ability_scores=dict(ocr_corrections or {}).get("abilities"),
-                            reviewed_text_replacements=dict(ocr_corrections or {}).get(
-                                "text_replacements"
-                            ),
-                        )
-                    except StatblockImportError as exc:
-                        secondary_failures.append(f"{label}: {exc}")
-                        continue
-                    secondary_recoveries.append((recovery_model, candidate_scale, secondary))
-                    if primary_fingerprint == _statblock_critical_fingerprint(
-                        dict(secondary["critical_facts"])
-                    ):
-                        secondary_model = recovery_model
-                        secondary_scale = candidate_scale
-                        break
-                    secondary_failures.append(f"{label}: critical facts disagree")
-                if secondary_scale is not None:
-                    break
-            if secondary_scale is None:
-                matching_pair = next(
-                    (
-                        (left, right)
-                        for index, left in enumerate(secondary_recoveries)
-                        for right in secondary_recoveries[index + 1 :]
-                        if _statblock_critical_fingerprint(dict(left[2]["critical_facts"]))
-                        == _statblock_critical_fingerprint(dict(right[2]["critical_facts"]))
-                    ),
-                    None,
-                )
-                if matching_pair is None:
-                    raise RuntimeError(
-                        "no independent layout OCR model/scale corroborated all critical "
-                        "statblock facts; " + "; ".join(secondary_failures)
-                    )
-                (
-                    (selected_model, selected_scale, recovered),
-                    (secondary_model, secondary_scale, _corroboration),
-                ) = matching_pair
-                evidence = dict(recovered["evidence"])
-                critical_facts = dict(recovered["critical_facts"])
-                corroboration_pairs = [
-                    ("Identity", str(critical_facts["identity"])),
-                    ("Armor Class", f"Armor Class {critical_facts['armor_class']}"),
-                    ("Hit Points", f"Hit Points {critical_facts['hit_points']}"),
-                    ("Speed", f"Speed {critical_facts['speed']}"),
-                    ("Challenge", f"Challenge {critical_facts['challenge']}"),
-                    *[
-                        (label, f"{label} {value}")
-                        for label, value in dict(critical_facts["fields"]).items()
-                    ],
-                    *[
-                        (ability.upper(), f"{ability.upper()} {score}")
-                        for ability, score in dict(critical_facts["abilities"]).items()
-                    ],
-                ]
-                corroborated = [
-                    {"field": label, "value": fact} for label, fact in corroboration_pairs
-                ]
-                corroboration_scales = [float(selected_scale)]
-                corroboration_models = [selected_model]
-            corroboration_scales.append(secondary_scale)
-            assert secondary_model is not None
-            corroboration_models.append(secondary_model)
-        observation = (
-            f"Text-only layout OCR v{int(evidence['recovery_version'])} recovered "
-            f"{target_name} from PDF page "
-            f"{recovered_page}; heading confidence "
-            f"{float(evidence['heading_confidence']):.5f}, minimum core confidence "
-            f"{float(evidence['minimum_core_confidence']):.5f}. Independent "
-            f"{corroboration_mode.replace('_', ' ')} corroborated identity, Armor Class, "
-            "Hit Points, Speed, all six ability scores, and Challenge."
+        def load_layout(
+            page_number: int,
+            scale: float,
+            model_type: str,
+            use_preferred_provider: bool,
+        ) -> dict[str, Any]:
+            return cached_rapidocr_layout(
+                source_path,
+                page_number,
+                scale=scale,
+                preferred_provider=provider if use_preferred_provider else None,
+                model_type=model_type,
+            ).as_dict()
+
+        return recover_2014_pdf_statblock_layout(
+            target_name=target_name,
+            candidate_pages=candidate_pages,
+            provider_name=provider.name,
+            primary_scale=primary_scale,
+            preferred_model=preferred_model,
+            load_layout=load_layout,
+            extract_page_text=lambda page_number: extract_pdf_page_text(
+                source_path, page_number
+            ),
+            statblock_slot=statblock_slot,
+            ocr_corrections=ocr_corrections,
         )
-        return {
-            "name": target_name,
-            "attempted_pages": attempted_pages,
-            "page_number": recovered_page,
-            "provider": provider.name,
-            "ocr_model": selected_model,
-            "recovery_scale": selected_scale,
-            "corroboration_mode": corroboration_mode,
-            "corroboration_scales": corroboration_scales,
-            "corroboration_models": corroboration_models,
-            "corroborated_facts": corroborated,
-            "observation": observation,
-            "recovery": recovered,
-        }
 
     def rule_statblock_ocr_recover(
         campaign_id: str,
@@ -34972,226 +35071,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         source_key: str,
         rule_refs: list[str],
     ) -> tuple[dict[str, Any], list[str]]:
-        """Bind a parsed statblock spell list to exact active content artifacts."""
-        sheet = deepcopy(parsed.sheet)
-        spellcasting = deepcopy(parsed.spellcasting)
-        if not isinstance(spellcasting, dict):
-            return sheet, []
-
-        sheet["spellcasting"]["ability"] = spellcasting["ability"]
-        sheet["spellcasting"]["attack_bonus_override"] = spellcasting.get("attack_bonus")
-        sheet["spellcasting"]["save_dc_override"] = spellcasting.get("save_dc")
-        sheet["spellcasting"]["spell_slots"] = {
-            str(level): {
-                "label": f"Level {level} spell slots",
-                "value": int(count),
-                "max": int(count),
-                "recovers_on": "long_rest",
-                "source_key": source_key,
-                "slot_level": int(level),
-            }
-            for level, count in dict(spellcasting.get("slots") or {}).items()
-        }
-
-        candidates = available_content_artifacts(campaign_id, kind="spell")
-        prepared_ids: list[str] = []
-        warnings: list[str] = []
-        innate = bool(spellcasting.get("innate"))
-        for specification in spellcasting.get("spells", []):
-            name = str(specification.get("name") or "").strip()
-            raw_level = specification.get("level")
-            level = int(raw_level) if raw_level is not None else None
-            exact = [
-                item
-                for item in candidates
-                if str(dict(item[2].get("card") or {}).get("name") or "").casefold()
-                == name.casefold()
-                and (
-                    level is None
-                    or int(dict(item[2].get("card") or {}).get("level", 0) or 0) == level
-                )
-            ]
-            if len(exact) == 1:
-                pack_id, version, artifact = exact[0]
-                card = deepcopy(dict(artifact.get("card") or {}))
-                card.pop("classes", None)
-                card.update(
-                    {
-                        "id": str(artifact["id"]),
-                        "pack_id": pack_id,
-                        "pack_version": version,
-                        "rule_refs": list(artifact.get("rule_refs") or []),
-                        "mechanic_refs": list(artifact.get("mechanic_refs") or []),
-                    }
-                )
-                action_description = str(specification.get("action_description") or "").strip()
-                if action_description and isinstance(card.get("resolution"), dict):
-                    card = overlay_spell_attack_card(card, action_description)
-            elif len(exact) > 1:
-                warnings.append(
-                    f"{name}: multiple active spell artifacts match the statblock entry"
-                )
-                continue
-            else:
-                action_description = str(specification.get("action_description") or "").strip()
-                if not action_description:
-                    warnings.append(
-                        f"{name}: no active spell artifact or complete statblock action exists"
-                    )
-                    continue
-                display_name = re.sub(
-                    r"\s*\([^)]*\)\s*$",
-                    "",
-                    str(specification.get("action_name") or name),
-                ).strip()
-                slug = ascii_slug(name)
-                range_match = re.search(
-                    r"(?i)range\s+(\d+)(?:\s*/\s*(\d+))?\s*ft",
-                    action_description,
-                )
-                normal_range = int(range_match.group(1)) if range_match else 0
-                long_range = int(range_match.group(2) or 0) if range_match else 0
-                card = {
-                    "id": f"{source_key}.spell.{slug}",
-                    "source_key": source_key,
-                    "name": display_name,
-                    "level": int(level or 0),
-                    "definition": {
-                        "casting_time": "1 action",
-                        "range": {
-                            "kind": "distance" if range_match else "special",
-                            "normal_ft": normal_range,
-                            "long_ft": long_range,
-                        },
-                        "duration": {"kind": "instantaneous"},
-                        "components": {},
-                        "effect": action_description,
-                    },
-                    "custom_definition": {
-                        "source": source_key,
-                        "component_details": "not_repeated_in_statblock",
-                    },
-                    "ruling_requirements": [
-                        _ruling_requirement(
-                            "Confirm the statblock spell's omitted component details "
-                            "from available source and scene facts.",
-                            "source_or_scene_fact",
-                        ),
-                        _ruling_requirement(
-                            "Adjudicate the source-described spell effect.",
-                            "generic_spell_effect",
-                        ),
-                    ],
-                    "notes": (
-                        "Source-bound statblock spell action. Component legality and "
-                        "effect settlement return to Agent-as-DM adjudication."
-                    ),
-                    "pack_id": "",
-                    "pack_version": "",
-                    "rule_refs": list(rule_refs),
-                    "mechanic_refs": [],
-                }
-                resolution = spell_attack_action_resolution(action_description)
-                if resolution is not None:
-                    card["resolution"] = resolution
-                    card["mechanic_refs"] = [SPELL_RESOLUTION_MECHANIC_ID]
-                    card["notes"] = (
-                        "Source-bound statblock spell attack. Component legality still "
-                        "returns to Agent-as-DM adjudication."
-                    )
-                    card["ruling_requirements"] = card["ruling_requirements"][:1]
-                    warnings.append(
-                        f"{display_name}: source-bound statblock spell requires component ruling"
-                    )
-                else:
-                    warnings.append(
-                        f"{display_name}: source-bound statblock spell requires component "
-                        "and effect ruling"
-                    )
-
-            card["grant"] = {
-                "source_type": "statblock",
-                "source_key": source_key,
-                "method": "innate" if innate else "known",
-            }
-            card["access"] = {
-                "known": True,
-                "prepared": True,
-                "always_prepared": True,
-                "in_spellbook": False,
-                "ritual_available": False,
-                "at_will": bool(specification.get("at_will", False)),
-            }
-            if innate:
-                custom_definition = dict(card.get("custom_definition") or {})
-                source_name = str(specification.get("source_name") or name).strip()
-                source_qualifier = str(specification.get("source_qualifier") or "").strip()
-                custom_definition.update(
-                    {
-                        "statblock_source_name": source_name,
-                        "innate_spellcasting": True,
-                    }
-                )
-                if source_qualifier:
-                    custom_definition["statblock_source_qualifier"] = source_qualifier
-                    requirements = list(card.get("ruling_requirements") or [])
-                    requirements.append(
-                        _ruling_requirement(
-                            f"Apply the statblock spell qualifier exactly: {source_qualifier}.",
-                            "source_or_scene_fact",
-                        )
-                    )
-                    card["ruling_requirements"] = requirements
-                if spellcasting.get("no_material_components"):
-                    components = dict(dict(card.get("definition") or {}).get("components") or {})
-                    components.update(
-                        {
-                            "material": False,
-                            "material_description": "",
-                            "material_cost_cp": 0,
-                            "consumed": False,
-                        }
-                    )
-                    card.setdefault("definition", {})["components"] = components
-                    custom_definition["statblock_omits_material_components"] = True
-                uses_per_day = specification.get("uses_per_day")
-                if uses_per_day is not None:
-                    independent = bool(specification.get("uses_are_independent"))
-                    usage_group = str(specification.get("usage_group") or "daily").strip()
-                    resource_key = (
-                        f"innate_spell:{card['id']}"
-                        if independent
-                        else f"innate_spell_group:{source_key}:{usage_group}"
-                    )
-                    custom_definition["innate_resource_key"] = resource_key
-                    existing_resource = dict(
-                        sheet.setdefault("resources", {}).get(resource_key) or {}
-                    )
-                    resource = {
-                        "label": (
-                            f"{card['name']} ({int(uses_per_day)}/day)"
-                            if independent
-                            else f"Innate spell group ({int(uses_per_day)}/day)"
-                        ),
-                        "value": int(uses_per_day),
-                        "max": int(uses_per_day),
-                        "recovers_on": "long_rest",
-                        "source_key": source_key,
-                    }
-                    if existing_resource and existing_resource != resource:
-                        raise ValueError("innate spell usage group has conflicting resource limits")
-                    sheet["resources"][resource_key] = resource
-                card["custom_definition"] = custom_definition
-            sheet["content"]["spells"].append(card)
-            prepared_ids.append(str(card["id"]))
-
-        sheet["spellcasting"]["preparation"] = {
-            "mode": "known",
-            "max_prepared": len(prepared_ids),
-            "changes_on": "manual",
-            "selected_spell_ids": prepared_ids,
-        }
-        return validate_character_sheet(sheet), warnings
+        """Authorize catalog access, then delegate D&D normalization to the system package."""
+        return hydrate_dnd_statblock_spellcasting(
+            parsed,
+            available_content_artifacts(campaign_id, kind="spell"),
+            source_key=source_key,
+            rule_refs=rule_refs,
+        )
 
     def hydrate_statblock_variant_spells(
         campaign_id: str,
@@ -45125,6 +45011,19 @@ boundary.
                 idempotency_key,
             )
         return facade_result(mode, result)
+
+    @public_tool()
+    def resolution_presentation(
+        campaign_id: str,
+        resolution_id: str,
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+    ) -> dict[str, Any]:
+        """Return one audience-safe, authoritative resolution bubble projection."""
+
+        return facade_result(
+            "get",
+            resolution_presentation_view(campaign_id, resolution_id, principal_id),
+        )
 
     @public_tool()
     def campaign_query(
