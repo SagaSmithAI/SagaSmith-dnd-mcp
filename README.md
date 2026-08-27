@@ -1,5 +1,10 @@
 # SagaSmith D&D MCP
 
+> [!IMPORTANT]
+> **本仓库已归档。** 它不再是发布输入、兼容回退或新 issue 的接收位置。当前权威 MCP 位于 [Sagasmith-dnd/packages/mcp](https://github.com/SagaSmithAI/Sagasmith-dnd/tree/main/packages/mcp)。
+>
+> **This repository is archived.** It is no longer a release input, compatibility fallback, or destination for new issues. The authoritative MCP now lives in [Sagasmith-dnd/packages/mcp](https://github.com/SagaSmithAI/Sagasmith-dnd/tree/main/packages/mcp).
+
 [官网](https://sagasmithai.github.io) · [平台总览](https://github.com/SagaSmithAI/.github/blob/main/profile/README.md) · [托管服务](https://github.com/SagaSmithAI/SagaSmith-service) · [内容目录](https://github.com/SagaSmithAI/SagaSmith-dnd-content-library)
 
 ## Content Pack gateway
